@@ -198,7 +198,7 @@ try {
   assert.equal(result.findings.findings[0].locations[0].role, " ");
   assert.equal(result.coverage.surfaces[0].notes, " ");
   assert.equal(result.coverage.surfaces[0].riskArea, " ");
-  assert.equal(result.coverage.completeness, "partial");
+  assert.equal(result.coverage.completeness, undefined);
   // Main normalizes absent receipt references without changing review disposition.
   assert.equal(result.coverage.surfaces[1].disposition, "reported");
   assert.deepEqual(result.coverage.surfaces[1].receiptRefs, []);

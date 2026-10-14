@@ -1696,26 +1696,43 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test("keeps verified scan results when pull request creation fails", async () => {
-    const outcome = await runWorkflow(
-      ["scan", "--patch", "--create-pr", "--json"],
-      {
-        result: resultWithFindings(["high"]),
-        onRepositoryCommand: (command, args) => {
-          if (command === "gh")
-            throw new Error("GitHub authentication failed.");
-          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+  test.each([false, true])(
+    "keeps verified scan results when pull request creation fails (full-output: %p)",
+    async (fullOutput) => {
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--create-pr",
+          "--json",
+          ...(fullOutput ? ["--full-output"] : []),
+        ],
+        {
+          result: resultWithFindings(["high"]),
+          onRepositoryCommand: (command, args) => {
+            if (command === "gh")
+              throw new Error("GitHub authentication failed.");
+            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+          },
         },
-      },
-    );
-
-    expect(outcome.exitCode).toBe(2);
-    expect(outcome.stderr).toContain("GitHub authentication failed.");
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      patchSeverity: "low",
-      patches: [{ occurrenceId: "occ_1", status: "verified" }],
-    });
-  });
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("GitHub authentication failed.");
+      const value = JSON.parse(outcome.stdout);
+      expect(fullOutput ? value.data : value).toMatchObject({
+        patchSeverity: "low",
+        patches: [{ occurrenceId: "occ_1", status: "verified" }],
+      });
+      if (fullOutput)
+        expect(value).toMatchObject({
+          ok: false,
+          error: {
+            code: "SCAN_FAILED",
+            message: "GitHub authentication failed.",
+          },
+        });
+    },
+  );
 
   test.each([
     ["blocked", undefined],
@@ -1775,13 +1792,13 @@ describe("scan and patch workflow", () => {
 
   test("does not patch failed scans or allow patching during a dry run", async () => {
     const onCodex = mock<() => number>().mockReturnValue(0);
-    const incomplete = resultWithFindings(["high"]);
-    incomplete.manifest.scan.status = "failed";
-    const partial = await runWorkflow(["scan", "--patch", "--json"], {
-      result: incomplete,
+    const failedScan = resultWithFindings(["high"]);
+    failedScan.manifest.scan.status = "failed";
+    const outcome = await runWorkflow(["scan", "--patch", "--json"], {
+      result: failedScan,
       onCodex,
     });
-    expect(partial.exitCode).toBe(2);
+    expect(outcome.exitCode).toBe(2);
     expect(onCodex).not.toHaveBeenCalled();
 
     const dryRun = await runWorkflow(["scan", "--patch", "--dry-run"]);

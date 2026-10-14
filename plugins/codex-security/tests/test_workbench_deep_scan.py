@@ -2859,7 +2859,6 @@ def prepare_failure_capped_deep_scan(
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage.pop("completeness", None)
     coverage["deferred"].append(
         {"reason": "Deep Scan stopped before completion: reducer retries were exhausted"}
     )
@@ -3031,7 +3030,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
+
     coverage["surfaces"] = []
     coverage_path.write_text(json.dumps(coverage))
 
@@ -3045,7 +3044,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
     )
-    checkpoint = saved_draft(scan_id, completeness="partial", findings=[provisional])
+    checkpoint = saved_draft(scan_id, findings=[provisional])
     encoded = json.dumps(checkpoint).encode()
     checkpoint_dir = artifact_dir / "checkpoints"
     checkpoint_dir.mkdir()

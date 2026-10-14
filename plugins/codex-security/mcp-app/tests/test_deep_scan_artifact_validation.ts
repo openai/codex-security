@@ -142,7 +142,7 @@ async function testDiscoveryValidation(root: string) {
     worker.resultPath,
     scanId,
   );
-  assert.equal(withDeferred.coverage.completeness, undefined);
+
   assert.deepEqual(withDeferred.coverage.deferred, [
     { reason: "Needs follow-up." },
   ]);
@@ -161,7 +161,7 @@ async function testDiscoveryValidation(root: string) {
     worker.resultPath,
     scanId,
   );
-  assert.equal(withFollowUp.coverage.completeness, undefined);
+
   assert.deepEqual(withFollowUp.coverage.surfaces, [
     { label: "Unfinished Standard review", disposition: "needs_follow_up" },
   ]);

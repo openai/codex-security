@@ -99113,7 +99113,7 @@ function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
 }
 function resultTitle(result, inputs) {
-  if (result.scanStatus !== "completed") return "Scan could not complete. Available findings are provisional.";
+  if (result.scanStatus !== "completed") return "Scan could not complete.";
   if (result.reportStatus === "failed") return "Scan completed, but required reporting failed.";
   if (result.policyStatus === "failed") return "Scan completed. Findings meet the configured failure threshold.";
   if (inputs.failOnSeverity === "none") return "Scan completed. Findings are reported without failing the job.";
@@ -99133,7 +99133,7 @@ function resultSummary(result, inputs, target) {
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus !== "completed") parts.push("**Findings below are provisional. This is not a completed scan.**");
+  if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
@@ -99148,7 +99148,7 @@ function resultSummary(result, inputs, target) {
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {
-    const message = plain(`${result.scanStatus === "completed" ? "" : "Provisional finding: "}${finding.summary}`, 4e3);
+    const message = plain(finding.summary, 4e3);
     const props = {
       title: plain(`${finding.severity.toUpperCase()}: ${finding.title}`, 200),
       file: finding.path,
@@ -99317,12 +99317,12 @@ async function runAction(actionRoot, overrides = {}) {
           scannedSha: target.scannedSha,
           exitCode: execution.exitCode,
           executionFailed: interrupted || !!checkoutError,
-          publishable: target.publishable && !interrupted && !checkoutError
+          publishable: target.publishable
         });
         if (result.paths.jsonPath && !result.paths.sarifPath)
           warning("SARIF report is unavailable; scan results and other reports are still available.");
         if (checkoutError) result.errors.unshift(checkoutError);
-        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit. Available findings are provisional.");
+        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit.");
         let reportsValidated = false;
         try {
           const reports = await collectReports(result);
@@ -99339,7 +99339,7 @@ async function runAction(actionRoot, overrides = {}) {
         }
         outputs(result, target, execution.exitCode);
         info(`Scan: ${result.scanStatus}; findings policy: ${result.policyStatus}; report: ${result.reportStatus}; SARIF upload ready: ${result.sarifUploadReady}.`);
-        info(`${result.scanStatus === "completed" ? "Findings" : "Provisional findings"}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
+        info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
         finalSummary = resultSummary(result, inputs, target);

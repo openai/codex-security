@@ -690,7 +690,7 @@ async function testSaturationIgnoresWorkerFailureSettledAfterStop() {
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(terminal?.terminalReason, "saturated");
   assert.equal(completedDrafts.length, 1);
-  assert.equal(completedDrafts[0].coverage.completeness, undefined);
+
   assert.deepEqual(completedDrafts[0].findings, []);
   const failedWorker = [...store.workers.values()].find(
     (worker) =>
@@ -3233,7 +3233,6 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
         "result.json",
       );
       const result = await readJson(resultPath);
-      result.coverage.completeness = "partial";
       result.coverage.deferred = [
         { id: "remaining-review", reason: "Source review remains pending." },
       ];
@@ -3268,7 +3267,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
       void completedDrafts.push(structuredClone(draft)),
   });
   assert.equal(resumed?.status, "succeeded", resumed?.error);
-  assert.equal(completedDrafts[0].coverage.completeness, undefined);
+
   assert.equal(
     (completedDrafts[0].coverage.deferred as unknown[]).length,
     5,
@@ -3599,7 +3598,7 @@ async function testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence
 
   const manifest = await readJson(terminal.manifestPath);
   assert.deepEqual(manifest.findings, []);
-  assert.equal(manifest.coverage.completeness, undefined);
+
   assert.deepEqual(completedDrafts[0].coverage.deferred, [
     {
       reason:
@@ -3634,7 +3633,7 @@ async function testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence()
 
   const manifest = await readJson(terminal.manifestPath);
   assert.deepEqual(manifest.findings, []);
-  assert.equal(manifest.coverage.completeness, undefined);
+
   assert.deepEqual(store.finishCalls[0].omittedWorkerIds, []);
   assert.equal(store.workers.size, 0);
 }
@@ -3694,7 +3693,7 @@ async function testSaturationOmitsWorkerAcceptedDuringCancellation() {
     acceptedLateWorker!.id,
   ]);
   assert.equal(completed.length, 1);
-  assert.equal(completed[0].coverage.completeness, undefined);
+
   assert.deepEqual(
     completed[0].findings,
     [],
@@ -3723,11 +3722,6 @@ async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus() 
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = await readJson(resultPath);
     draft.coverage = {
-      completeness:
-        request.kind === "discovery" &&
-        request.promptPath.includes("discovery-0002")
-          ? "unknown"
-          : "partial",
       surfaces: [workerReviewed, followUp],
       explicitExclusions: [
         { pattern: "vendor/**", reason: "Third-party code." },
@@ -3760,13 +3754,12 @@ async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus() 
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
   const coverage = completed[0].coverage as unknown as {
-    completeness?: string;
     surfaces: { id: string; workerId: string; receiptRefs?: string[] }[];
     explicitExclusions: { workerId: string; pattern: string }[];
     deferred: { id: string; surfaceIds: string[]; workerId: string }[];
     openQuestions: { question: string; workerId: string }[];
   };
-  assert.equal(coverage.completeness, undefined);
+
   assert.equal(coverage.surfaces.length, 4);
   assert.equal(new Set(coverage.surfaces.map((row) => row.id)).size, 4);
   assert.equal(new Set(coverage.deferred.map((row) => row.id)).size, 2);
@@ -3787,7 +3780,6 @@ async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus() 
   for (const worker of store.workers.values()) {
     if (worker.kind !== "discovery") continue;
     const draft = await readJson(worker.resultManifestPath!);
-    assert.notEqual(draft.coverage.completeness, "complete");
     assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
     assert.equal(draft.coverage.deferred.length, 1);
   }
@@ -3895,7 +3887,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   );
   assert.equal(executor.runningDiscovery, 0);
   assert.equal(completed.length, 1);
-  assert.equal(completed[0].coverage.completeness, undefined);
+
   const acceptedReducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup" && worker.status === "succeeded",
   );
@@ -3957,7 +3949,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
     completed[0].findings[0].provenance.candidateId,
     "accepted-finding",
   );
-  assert.equal(completed[0].coverage.completeness, undefined);
+
   assert.deepEqual(
     completed[0].coverage.deferred,
     [],

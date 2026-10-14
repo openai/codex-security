@@ -396,6 +396,19 @@ The extraction root is not enforced.
         self.assertEqual(path.read_bytes(), compact)
 
     @pytest.mark.cross_platform
+    def test_sealed_legacy_coverage_remains_readable_and_unchanged(self) -> None:
+        _, _, coverage = self.write_sealed_scan()
+        coverage["completeness"] = "partial"
+        self.rewrite_sealed_artifact("coverage.json", coverage)
+        names = ("scan-manifest.json", "findings.json", "coverage.json")
+        original = {name: (self.scan_dir / name).read_bytes() for name in names}
+
+        _, _, retained = FINALIZER.finalize_scan(self.scan_dir)
+
+        self.assertEqual(retained["completeness"], "partial")
+        self.assertEqual({name: (self.scan_dir / name).read_bytes() for name in names}, original)
+
+    @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -1946,7 +1959,7 @@ The extraction root is not enforced.
                         "import": {"format": format, "sourceRef": source_ref}
                     }
                     self.findings["findings"] = []
-                    self.coverage["completeness"] = "unknown"
+
                     self.coverage["surfaces"] = (
                         [
                             {
@@ -2002,7 +2015,7 @@ The extraction root is not enforced.
 
     def test_rejects_missing_or_unsafe_import_source(self) -> None:
         self.findings["findings"] = []
-        self.coverage["completeness"] = "unknown"
+
         self.coverage["surfaces"] = []
         for source_ref in ("artifacts/import/missing.json", "../source.json", "findings.json"):
             with self.subTest(source_ref=source_ref):
@@ -2016,7 +2029,7 @@ The extraction root is not enforced.
         source_ref = "artifacts/import/source.json"
         self.manifest["scan"]["extensions"] = {"import": {"sourceRef": source_ref}}
         self.findings["findings"] = []
-        self.coverage["completeness"] = "unknown"
+
         self.coverage["surfaces"] = []
         self.write_scan()
         source_path = self.scan_dir / source_ref
@@ -2171,7 +2184,6 @@ The extraction root is not enforced.
             "Lower if the input is constrained before parsing.",
         )
         self.assertEqual(warnings, ["Recovered finding 1: normalized severity change conditions."])
-        self.assertNotIn("completeness", prepared[4])
 
     @pytest.mark.cross_platform
     def test_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
@@ -2292,7 +2304,7 @@ The extraction root is not enforced.
 
                 self.assertEqual(len(findings["findings"]), 1)
                 self.assertNotIn(field, findings["findings"][0])
-                self.assertNotIn("completeness", coverage)
+
                 self.assertTrue(
                     any(warning.startswith(f"Skipped malformed {field}") for warning in warnings)
                 )
@@ -2336,7 +2348,7 @@ The extraction root is not enforced.
                 self.assertEqual(len(findings["findings"]), 1)
                 self.assertEqual(findings["findings"][0]["title"], self.finding["title"])
                 self.assertEqual(coverage["deferred"], [valid])
-                self.assertNotIn("completeness", coverage)
+
                 self.assertTrue(
                     any(
                         "Skipped malformed deferred coverage item 1" in warning
@@ -2439,22 +2451,23 @@ The extraction root is not enforced.
             with self.assertRaisesRegex(FINALIZER.ContractError, "inside the scan directory"):
                 FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_finalizes_follow_up_notes_without_completeness(self) -> None:
+    def test_finalizes_review_notes_and_discards_old_outcome_labels(self) -> None:
+        self.coverage["completeness"] = "partial"
         self.coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
-        self.assertNotIn("completeness", json.loads((self.scan_dir / "coverage.json").read_text()))
-
-    def test_finalizes_deferred_work_without_completeness(self) -> None:
         self.coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
+                "reason": "Runtime verification remains unavailable.",
             }
         ]
         self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
-        self.assertNotIn("completeness", json.loads((self.scan_dir / "coverage.json").read_text()))
+
+        manifest, _, coverage = FINALIZER.finalize_scan(self.scan_dir)
+
+        self.assertEqual(manifest["scan"]["status"], "completed")
+        self.assertNotIn("completeness", coverage)
+        self.assertEqual(coverage["deferred"], self.coverage["deferred"])
+        self.assertEqual(coverage["surfaces"][0]["disposition"], "needs_follow_up")
 
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
@@ -2477,7 +2490,7 @@ The extraction root is not enforced.
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_unsafe_deferred_paths(self) -> None:
-        self.coverage["completeness"] = "partial"
+
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
@@ -2501,7 +2514,7 @@ The extraction root is not enforced.
                 "explanation": "Repository-relative evidence.",
             }
         ]
-        self.coverage["completeness"] = "partial"
+
         for path in (".", "src", "src/extract.py", "src/a:b.py"):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [

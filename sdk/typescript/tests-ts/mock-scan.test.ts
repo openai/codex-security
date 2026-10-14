@@ -286,7 +286,6 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.refs({ base: "HEAD~1" }),
     });
     expect(diff.manifest.scan.target.kind).toBe("git_diff");
-    expect(diff.coverage).not.toHaveProperty("completeness");
     expect(diff.coverage.mode).toBe("branch_diff");
     await writeFile(
       join(repository, "example.ts"),
@@ -297,7 +296,6 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.workingTree({}),
     });
     expect(workingTree.manifest.scan.target.kind).toBe("git_diff");
-    expect(workingTree.coverage).not.toHaveProperty("completeness");
     expect(workingTree.coverage.mode).toBe("working_tree");
   } finally {
     await client.close();

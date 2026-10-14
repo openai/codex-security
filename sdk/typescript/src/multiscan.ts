@@ -64,13 +64,12 @@ const WINDOWS_DEVICE_PATH_NAME =
 type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
 interface MultiscanReceipt extends MultiscanTask {
-  status: "completed" | "completed_with_incomplete_coverage" | "failed";
+  status: "completed" | "failed";
   attempt: number;
   outputDir: string;
   threatModelPath?: string;
   cost?: ScanCost;
   error?: string;
-  warning?: string;
   warnings?: string[];
   policyFailed?: boolean;
   knowledgeBaseFailure?: true;
@@ -102,9 +101,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
     prompts: ScanPromptSettings & {
       knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
     },
-  ): Promise<
-    Pick<ScanResult, "manifest" | "coverage" | "cost" | "findings"> | undefined
-  >;
+  ): Promise<Pick<ScanResult, "manifest" | "cost" | "findings"> | undefined>;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
@@ -127,8 +124,6 @@ export interface MultiscanOptions extends ScanPromptSettings {
 export interface MultiscanResult {
   total: number;
   completed: number;
-  /** @deprecated Completed reports no longer have an incomplete-coverage outcome. Always zero. */
-  incomplete: number;
   failed: number;
   skipped: number;
   resultsPath: string;
@@ -317,8 +312,7 @@ async function runCampaign(
       }
       if (
         receipt.status === "completed" ||
-        receipt.status === "completed_with_incomplete_coverage" ||
-        (await legacyCoverageCompletion({
+        (await legacyCompletedReceipt({
           ...receipt,
           outputDir: artifactOutput,
         }))
@@ -335,7 +329,6 @@ async function runCampaign(
   const summarize = (): MultiscanResult => ({
     total: tasks.length,
     completed,
-    incomplete: 0,
     failed,
     skipped,
     resultsPath: ledger,
@@ -387,7 +380,7 @@ async function runCampaign(
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            | (Pick<ScanResult, "manifest" | "coverage" | "cost" | "findings"> &
+            | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
                 Partial<Pick<ScanResult, "threatModelPath">>)
             | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
@@ -981,7 +974,10 @@ async function readReceipts(
   }
   const receipts = new Map<string, MultiscanHistory>();
   for (const line of lines.filter(Boolean)) {
-    const receipt = JSON.parse(line) as MultiscanReceipt;
+    const saved = JSON.parse(line);
+    if (saved.status === "completed_with_incomplete_coverage")
+      saved.status = "completed";
+    const receipt = saved as MultiscanReceipt;
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
     receipts.set(id, {
@@ -1005,7 +1001,7 @@ async function hasArtifacts(path: string): Promise<boolean> {
   }
 }
 
-async function legacyCoverageCompletion(
+async function legacyCompletedReceipt(
   receipt: MultiscanReceipt,
 ): Promise<boolean> {
   if (
@@ -1015,12 +1011,10 @@ async function legacyCoverageCompletion(
     return false;
   }
   try {
-    const coverage = JSON.parse(
-      await readFile(join(receipt.outputDir, "coverage.json"), "utf8"),
-    ) as { completeness?: unknown };
-    return (
-      coverage.completeness === "partial" || coverage.completeness === "unknown"
+    const manifest = JSON.parse(
+      await readFile(join(receipt.outputDir, "scan-manifest.json"), "utf8"),
     );
+    return manifest.scan?.status === "completed";
   } catch {
     return false;
   }

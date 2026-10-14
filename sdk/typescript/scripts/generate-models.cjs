@@ -75,7 +75,6 @@ async function generate() {
       'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
-      'export type CoverageCompleteness = CoverageDocument["completeness"];',
       'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',

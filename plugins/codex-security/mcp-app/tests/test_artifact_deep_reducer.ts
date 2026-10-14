@@ -106,7 +106,6 @@ try {
     id: "worker-002",
     result: workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." },
-      coverage: { ...workerDraft([]).coverage },
     }),
   });
   const originalWorkerArtifacts = await Promise.all(
@@ -357,7 +356,6 @@ try {
   for (const legacyCoverage of [
     rejectedCoverage,
     {
-      completeness: "outdated",
       surfaces: [null],
       explicitExclusions: false,
       deferred: 42,
@@ -450,7 +448,7 @@ try {
     });
     await assert.rejects(
       getCodexSecurityDeepReducerInputs(context),
-      /coverage|completeness/,
+      /coverage/,
       "Standard worker coverage remains required and validated before projection",
     );
   }

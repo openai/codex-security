@@ -300,11 +300,6 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
-  /**
-   * @deprecated
-   * Legacy coverage label retained only for reading existing scan artifacts. New producers omit this field.
-   */
-  completeness?: "complete" | "partial" | "unknown";
   inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
@@ -409,8 +404,6 @@ export type AttackPathReachability = Extract<
 export type FindingProvenance = Finding["provenance"];
 
 export type CoverageMode = CoverageDocument["mode"];
-
-export type CoverageCompleteness = CoverageDocument["completeness"];
 
 export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
 

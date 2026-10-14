@@ -51,71 +51,36 @@ interface DraftFixture {
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
 type Mutation =
-  | "missing-findings"
-  | "contradictory-coverage"
-  | "inverted-lines"
-  | "wrong-scan"
-  | "legacy-details";
+  "missing-findings" | "inverted-lines" | "wrong-scan" | "legacy-details";
 const cases: {
   name: string;
-  coverage?: "complete" | "partial" | "unknown";
+  legacyCompleteness?: string;
   complete?: boolean;
   mutation?: Mutation;
   accepted: boolean;
 }[] = [
-  { name: "scope notes without completeness", complete: true, accepted: true },
+  { name: "scope notes", complete: true, accepted: true },
   {
-    name: "complete coverage",
-    coverage: "complete",
+    name: "legacy completeness metadata",
+    legacyCompleteness: "partial",
     complete: true,
     accepted: true,
   },
-  {
-    name: "partial coverage",
-    coverage: "partial",
-    complete: true,
-    accepted: true,
-  },
-  {
-    name: "unknown coverage",
-    coverage: "unknown",
-    complete: true,
-    accepted: true,
-  },
-  { name: "omitted completion marker", coverage: "partial", accepted: true },
+  { name: "omitted completion marker", accepted: true },
   {
     name: "persisted legacy details",
-    coverage: "partial",
     mutation: "legacy-details",
     accepted: true,
   },
-  {
-    name: "unfinished checkpoint",
-    coverage: "partial",
-    complete: false,
-    accepted: false,
-  },
-  {
-    name: "missing findings",
-    coverage: "partial",
-    mutation: "missing-findings",
-    accepted: false,
-  },
-  {
-    name: "legacy complete coverage with deferred work",
-    coverage: "partial",
-    mutation: "contradictory-coverage",
-    accepted: true,
-  },
+  { name: "unfinished checkpoint", complete: false, accepted: false },
+  { name: "missing findings", mutation: "missing-findings", accepted: false },
   {
     name: "inverted finding lines",
-    coverage: "partial",
     mutation: "inverted-lines",
     accepted: false,
   },
   {
     name: "mismatched canonical scan ID",
-    coverage: "partial",
     mutation: "wrong-scan",
     accepted: false,
   },
@@ -153,9 +118,9 @@ for (const scenario of cases) {
         },
       ],
       coverage: {
-        ...(scenario.coverage === undefined
+        ...(scenario.legacyCompleteness === undefined
           ? {}
-          : { completeness: scenario.coverage }),
+          : { completeness: scenario.legacyCompleteness }),
         surfaces: [
           {
             label: "Archive extraction",
@@ -163,14 +128,7 @@ for (const scenario of cases) {
           },
         ],
         explicitExclusions: [],
-        deferred:
-          scenario.coverage === "complete"
-            ? []
-            : [
-                {
-                  reason: "Deployment controls remain unverified.",
-                },
-              ],
+        deferred: [{ reason: "Deployment controls remain unverified." }],
       },
     };
     await recordCodexSecurityScanDraftViaWorkbench(
@@ -636,8 +594,6 @@ function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
     return { ...draft, findings: undefined } as unknown as DraftFixture;
   if (mutation === "wrong-scan")
     draft.scanId = "553a0c18-dcdf-4a3b-8e39-2751a8187bce";
-  if (mutation === "contradictory-coverage")
-    draft.coverage["completeness"] = "complete";
   if (mutation === "inverted-lines") {
     const locations = draft.findings[0]!["locations"] as Record<
       string,

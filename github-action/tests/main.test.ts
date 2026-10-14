@@ -84,7 +84,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   let setups = 0;
   let processes = 0;
   let cleanups = 0;
-  const configuration: { exitCode?: number; legacyCoverage?: boolean; missingSarif?: boolean; mutateCheckout?: boolean; cleanupFails?: boolean; cliFailure?: boolean; scanProcess?: Partial<ProcessResult>; scanResult?: (value: any) => void; missingReport?: string; prepare?: () => void | Promise<void> } = {};
+  const configuration: { exitCode?: number; missingSarif?: boolean; mutateCheckout?: boolean; cleanupFails?: boolean; cliFailure?: boolean; scanProcess?: Partial<ProcessResult>; scanResult?: (value: any) => void; missingReport?: string; prepare?: () => void | Promise<void> } = {};
   let scanOutput = '';
   let summary = '';
   t.mock.method(core.summary, 'write', async () => {
@@ -111,18 +111,14 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
       sarif.runs[0].properties.codexSecurityTargetKind = 'git_diff';
     }
     if (process.env.INPUT_MODE === 'deep') coverage.mode = 'deep_repository';
-    if (configuration.legacyCoverage) {
-      coverage.completeness = 'partial';
-      coverage.deferred = [{id: 'unreviewed-route', reason: 'Dependency <example> unavailable; validation deferred.'}];
-    }
     sarif.runs[0].versionControlProvenance[0].revisionId = scanSha;
-    await writeFile(coveragePath, JSON.stringify(coverage));
-    await writeFile(manifestPath, JSON.stringify(manifest));
     await writeFile(sarifPath, JSON.stringify(sarif));
     if (configuration.missingSarif) await rm(sarifPath);
     const value = {manifest, coverage, findings: JSON.parse(await readFile(join(runtime.resultsDirectory, 'findings.json'), 'utf8')),
       scanDir: runtime.resultsDirectory, sarifPath: configuration.missingSarif ? null : sarifPath, cost: {estimatedUsd: 0.125}};
     configuration.scanResult?.(value);
+    await writeFile(coveragePath, JSON.stringify(coverage));
+    await writeFile(manifestPath, JSON.stringify(manifest));
     scanOutput = JSON.stringify(value);
     if (configuration.missingReport) await rm(join(runtime.resultsDirectory, configuration.missingReport));
   }
@@ -162,8 +158,10 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   };
 }
 
-test('PR severity failure retains complete SARIF outputs for always upload steps', async (t) => {
-  const app = await harness(t, 'pr'); app.setInput('fail-on-severity', 'high'); app.configure({ exitCode: 1 });
+test('PR severity failure retains SARIF outputs despite unrelated scope notes', async (t) => {
+  const app = await harness(t, 'pr'); app.setInput('fail-on-severity', 'high'); app.configure({ exitCode: 1, scanResult: value => {
+    value.coverage.deferred = [{reason: 'Dependency validation remains unavailable.'}];
+  }});
   app.setInput('model', 'gpt-5.6-luna'); app.setInput('effort', 'medium');
   app.setInput('annotations', ''); // Use the default, as in the README's PR workflow.
   const result = await app.run();
@@ -308,8 +306,9 @@ test('configuration diagnostics preserve values and cannot inject runner command
 
 test('scope exclusions and deferred notes do not fail completed scans or make findings provisional', async (t) => {
   const app = await harness(t);
-  app.configure({legacyCoverage: true, scanResult: value => {
-    value.coverage.explicitExclusions = [{path: 'assets/', reason: 'Static assets outside review scope.'}];
+  app.configure({scanResult: value => {
+    value.coverage.explicitExclusions = [{pattern: 'assets/', reason: 'Static assets outside review scope.'}];
+    value.coverage.deferred = [{id: 'unreviewed-route', reason: 'Dependency <example> unavailable; validation deferred.'}];
   }});
   app.setInput('verbose', 'false');
   const result = await app.run();
@@ -336,30 +335,16 @@ test('execution failure diagnostics cannot emit legacy runner commands', async (
   assert.match(result.summary, /Synthetic diagnostic: ##&#91;stop-commands&#93;token/);
 });
 
-test('known findings fail severity policy and retain upload eligibility despite coverage notes', async (t) => {
-  const app = await harness(t);
-  app.configure({exitCode: 1, legacyCoverage: true}); app.setInput('fail-on-severity', 'high'); app.setInput('upload-artifacts', 'true');
-  let uploadedFiles: string[] = [];
-  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
-    uploadedFiles = files.map(file => basename(file));
-    return {id: 1, size: 1};
-  });
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'completed');
-  assert.equal(result.outputs['policy-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
-  assert.equal(result.outputs['high-count'], '1');
-  assert.ok(uploadedFiles.includes('findings.json')); assert.ok(uploadedFiles.includes('coverage.json'));
-  assert.match(result.logs, /Findings meet the configured failure threshold/);
-  assert.doesNotMatch(result.logs, /Provisional|Scan coverage is partial/);
-});
-
 test('exit 2 fails the step even when finalized reports were retained', async (t) => {
-  const app = await harness(t); app.configure({exitCode: 2, legacyCoverage: true});
+  const app = await harness(t); app.configure({exitCode: 2});
+  app.setInput('annotations', 'true');
   const result = await app.run();
   assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
   assert.equal(result.outputs['exit-code'], '2');
   assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.equal(result.outputs['high-count'], '1'); assert.ok(result.outputs['json-path']);
+  assert.match(result.summary, /absence of findings is inconclusive/);
+  assert.doesNotMatch(result.logs, /Provisional/);
 });
 
 for (const [name, scanProcess] of [
@@ -368,11 +353,10 @@ for (const [name, scanProcess] of [
   ['malformed output', {stdout: 'not JSON'}],
 ] as const) {
   test(`retained reports cannot hide scan ${name}`, async (t) => {
-    const app = await harness(t); app.configure({exitCode: 2, legacyCoverage: true, scanProcess});
+    const app = await harness(t); app.configure({scanProcess});
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
     assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-    assert.doesNotMatch(result.logs, /::warning::Scan coverage is partial/);
   });
 }
 
@@ -381,47 +365,23 @@ for (const [name, scanResult] of [
   ['target-change warning', (value: any) => { value.warnings = ['Synthetic target changed during scanning.']; }],
 ] as const) {
   test(`${name} cannot become a successful scan`, async (t) => {
-    const app = await harness(t); app.configure({legacyCoverage: true, scanResult});
+    const app = await harness(t); app.configure({scanResult});
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
     assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   });
 }
 
-test('CLI failure remains fatal even with retained reports on disk', async (t) => {
-  const app = await harness(t); app.configure({exitCode: 2, legacyCoverage: true, cliFailure: true});
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
-  assert.equal(result.outputs['json-path'], '');
-  assert.match(result.summary, /Synthetic API authentication failure/);
-});
-
 for (const missingReport of ['scan-manifest.json', 'findings.json', 'coverage.json']) {
   test(`completed scan fails when required ${missingReport} is missing without artifact upload`, async (t) => {
-    const app = await harness(t); app.configure({legacyCoverage: true, missingReport});
+    const app = await harness(t); app.configure({missingReport});
     app.setInput('upload-artifacts', 'false');
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
     assert.equal(result.outputs['json-path'], ''); assert.equal(result.outputs['sarif-upload-ready'], 'false');
     assert.match(result.logs, /required reporting failed/);
-    assert.doesNotMatch(result.logs, /::warning::Scan coverage is partial/);
   });
 }
-
-test('coverage notes do not hide requested artifact upload failure', async (t) => {
-  const app = await harness(t); app.configure({legacyCoverage: true}); app.setInput('upload-artifacts', 'true');
-  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async () => { throw new Error('Synthetic upload failure'); });
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
-  assert.match(result.summary, /Synthetic upload failure/);
-});
-
-test('coverage notes do not hide runtime cleanup failure', async (t) => {
-  const app = await harness(t); app.configure({legacyCoverage: true, cleanupFails: true});
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
-  assert.match(result.summary, /Runtime cleanup failed/);
-});
 
 test('wrong checkout fails before setup or scanner execution', async (t) => {
   const app = await harness(t); process.env.GITHUB_SHA = '0'.repeat(40); const result = await app.run();
@@ -544,7 +504,7 @@ test('CLI authentication failure leaves findings unavailable instead of reportin
   assert.doesNotMatch(result.logs, /Findings meet the configured failure threshold/);
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '');
   assert.match(result.summary, /\*\*Findings:\*\* unavailable/);
-  assert.match(result.logs, /Provisional findings: unavailable/);
+  assert.match(result.logs, /Findings: unavailable/);
 });
 
 test('malformed findings keep count outputs empty', async (t) => {
@@ -561,14 +521,12 @@ test('valid empty findings publish zero counts', async (t) => {
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '0');
 });
 
-for (const legacyCoverage of [false, true]) {
-  test(`changed checkout during a committed diff scan fails with ${legacyCoverage ? 'legacy' : 'current'} coverage`, async (t) => {
-    const app = await harness(t, 'pr');
-    app.configure({mutateCheckout: true, legacyCoverage});
-    const result = await app.run();
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.outputs['scan-status'], 'failed');
-    assert.equal(result.outputs['sarif-upload-ready'], 'false');
-    assert.match(result.summary, /source checkout changed/);
-  });
-}
+test('changed checkout during a committed diff scan fails', async (t) => {
+  const app = await harness(t, 'pr');
+  app.configure({mutateCheckout: true});
+  const result = await app.run();
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.outputs['scan-status'], 'failed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'false');
+  assert.match(result.summary, /source checkout changed/);
+});

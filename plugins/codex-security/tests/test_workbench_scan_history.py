@@ -189,7 +189,7 @@ def create_cli_scan(
     repository: Path,
     *,
     complete: bool = True,
-    completeness: str = "complete",
+    follow_up: bool = False,
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
@@ -259,10 +259,9 @@ def create_cli_scan(
                 additional["title"] += f" ({index})"
                 findings["findings"].append(additional)
         findings_path.write_text(json.dumps(findings))
-    if completeness != "complete":
+    if follow_up:
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
-        coverage["completeness"] = completeness
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
@@ -830,7 +829,6 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         after,
         confirmed_match(inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]),
     )
-    assert persisted["comparable"] is True
     assert persisted["summary"]["persisting"] == 1
     occurrence = persisted["findings"][0]["beforeOccurrenceId"]
     set_triage(state_dir, occurrence, "closed", "--close-reason", "already_fixed")
@@ -1386,7 +1384,7 @@ def test_cli_scan_comparison_distinguishes_absence_from_out_of_scope(tmp_path: P
     root = tmp_path / "results"
     original = create_cli_scan(state_dir, root, repository, paths=["src"])
     partial = create_cli_scan(
-        state_dir, root, repository, finding=False, completeness="partial", paths=["src"]
+        state_dir, root, repository, finding=False, follow_up=True, paths=["src"]
     )
     other_scope = create_cli_scan(state_dir, root, repository, finding=False, paths=["tests"])
     deep = create_cli_scan(state_dir, root, repository, mode="deep")

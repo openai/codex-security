@@ -208,7 +208,6 @@ try {
       findings: [interruptedFinding],
       coverage: {
         ...coverage,
-
         deferred: [
           {
             candidateId: "interrupted-review",
@@ -367,7 +366,6 @@ try {
     complete: false,
     coverage: {
       ...coverage,
-
       surfaces: [
         {
           id: "surface-archive",
@@ -400,7 +398,6 @@ try {
     { id: "surface-archive", disposition: "reported" },
   ]);
   assert.deepEqual(progressedCoverage.openQuestions ?? [], []);
-  assert.equal(progressedCoverage.completeness, undefined);
 
   const renamedProgressContext = await createWorkerContext(
     "renamed-coverage-progress-worker",
@@ -451,7 +448,6 @@ try {
     resolvedProgress.coverage.surfaces,
     resolvedCoverage.surfaces,
   );
-  assert.equal(resolvedProgress.coverage.completeness, undefined);
 
   await saveScanDraftCheckpoint(
     renamedProgressContext,
@@ -460,7 +456,6 @@ try {
       complete: false,
       coverage: {
         ...resolvedCoverage,
-
         surfaces: [...resolvedCoverage.surfaces, ...staleSurfaces],
       },
     },
@@ -473,7 +468,6 @@ try {
   });
   const finalProgress = await readJson(renamedProgressRoot, "result.json");
   assert.deepEqual(finalProgress.coverage.surfaces, resolvedCoverage.surfaces);
-  assert.equal(finalProgress.coverage.completeness, undefined);
 
   const anchorContext = await createWorkerContext(
     "anchor-is-not-candidate-worker",
@@ -563,7 +557,6 @@ try {
   ];
   const pendingCoverage = {
     ...coverage,
-
     deferred: [closeout, unresolved, ...pendingCandidates],
   };
   await recordCodexSecurityScanDraft(unresolvedContext, {
@@ -585,7 +578,7 @@ try {
   };
   await recordCodexSecurityScanDraft(unresolvedContext, closingDraft);
   const retained = await readJson(unresolvedRoot, "coverage.json");
-  assert.equal(retained.completeness, undefined);
+
   assert.deepEqual(
     retained.deferred
       .map(
@@ -674,7 +667,6 @@ try {
       findings: [interruptedFinding],
       coverage: {
         ...coverage,
-
         deferred: [
           {
             candidateId: "interrupted-parent-review",
@@ -745,7 +737,6 @@ try {
     findings: [obsoleteFinding],
     coverage: {
       ...coverage,
-
       surfaces: [
         {
           label: "Old upload handler",
@@ -781,10 +772,7 @@ try {
     (await readJson(deepParentRoot, "scan-manifest.json")).scan.complete,
     false,
   );
-  assert.equal(
-    (await readJson(deepParentRoot, "coverage.json")).completeness,
-    undefined,
-  );
+
   const savedDeepCheckpoints = await Promise.all(
     (await readdir(path.join(deepParentRoot, "checkpoints"))).map(
       async (name) => [
@@ -810,7 +798,7 @@ try {
     acceptedDeepFindings.findings[0].provenance,
     finding.provenance,
   );
-  assert.equal(acceptedDeepCoverage.completeness, undefined);
+
   assert.deepEqual(acceptedDeepCoverage.deferred, []);
   assert.deepEqual(
     acceptedDeepCoverage.surfaces,
@@ -891,7 +879,7 @@ try {
   await recordCodexSecurityWorkerScanDraft(pendingContext, workerInput);
   const resolved = await readJson(pendingRoot, "result.json");
   assert.deepEqual(resolved.coverage.deferred, []);
-  assert.equal(resolved.coverage.completeness, undefined);
+
   assert.deepEqual(resolved.findings[0].provenance.originalCandidates, [
     candidate,
   ]);
@@ -991,7 +979,6 @@ try {
       ...workerInput,
       coverage: {
         ...coverage,
-        completeness: "partial",
         explicitExclusions: [
           { pattern: "vendor/**", reason: "Third-party source." },
         ],
@@ -1001,7 +988,7 @@ try {
       },
     },
   );
-  assert.equal(limitedWorker.coverage.completeness, undefined);
+
   assert.equal((limitedWorker.coverage.deferred as unknown[]).length, 1);
   assert.equal(
     (limitedWorker.coverage.explicitExclusions as unknown[]).length,
@@ -1130,7 +1117,6 @@ try {
   };
   const semanticCoverage = {
     ...coverage,
-
     deferred: [
       {
         candidateId: "candidate-deferred-archive",
@@ -1555,7 +1541,7 @@ try {
           finding.taxonomy,
         );
         assert.deepEqual(staged.manifest.scan.threatModel, input.threatModel);
-        assert.equal(staged.coverage.completeness, undefined);
+
         throw new Error(
           "The scan stopped before the staged draft was published.",
         );
@@ -1617,7 +1603,6 @@ try {
     complete: false,
     coverage: {
       ...coverage,
-
       surfaces: [
         {
           id: "surface-archive",
@@ -1795,7 +1780,6 @@ try {
     findings: [],
     coverage: {
       ...coverage,
-
       surfaces: [],
       deferred: [demotedCandidate],
     },
@@ -1983,7 +1967,7 @@ try {
 
   await recordCodexSecurityScanDraft(context, semanticInput);
   const normalizedSemanticCoverage = await readJson(root, "coverage.json");
-  assert.equal(normalizedSemanticCoverage.completeness, undefined);
+
   assert.deepEqual(normalizedSemanticCoverage.deferred, [
     {
       ...semanticCoverage.deferred[0],
@@ -2815,7 +2799,6 @@ try {
 
   const duplicateSurfaceCoverage = {
     ...coverage,
-
     surfaces: [
       {
         id: "surface-web-ui",
@@ -2915,7 +2898,7 @@ try {
     status: "draft_written",
   });
   const repairedCoverage = await readJson(root, "coverage.json");
-  assert.equal(repairedCoverage.completeness, undefined);
+
   assert.deepEqual(repairedCoverage.deferred, partialCoverage.deferred);
   assert.equal(repairedCoverage.surfaces[0].disposition, "needs_follow_up");
   assert.deepEqual(

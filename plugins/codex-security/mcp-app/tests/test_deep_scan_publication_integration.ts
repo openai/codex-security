@@ -569,10 +569,7 @@ for (const claimed of [false, true]) {
     );
     await rm(report, { recursive: true });
     const interrupted = await snapshot(run);
-    assert.equal(
-      JSON.parse(interrupted.files["coverage.json"]).completeness,
-      undefined,
-    );
+
     assertToolError(
       await call(
         "record_codex_security_scan_draft",
@@ -658,7 +655,6 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
     findings: [],
     coverage: {
       ...coverage,
-
       deferred: [
         {
           id: "interleaved-progress",
@@ -853,7 +849,6 @@ function partial(run: DeepScanRunState, candidateId: string): ScanDraftInput {
     findings: [],
     coverage: {
       ...coverage,
-
       deferred: [
         {
           candidateId,

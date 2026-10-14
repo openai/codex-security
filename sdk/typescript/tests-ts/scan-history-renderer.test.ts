@@ -9,7 +9,6 @@ describe("scan history renderer", () => {
         repository: "/synthetic/repository",
         beforeScanId: "before-scan",
         afterScanId: "after-scan",
-        coverage: { afterCompleteness: "complete" },
         summary: { persisting: 2 },
         findings: [
           {
@@ -43,7 +42,6 @@ describe("scan history renderer", () => {
         repository: "/synthetic/repository",
         beforeScanId: "before-scan",
         afterScanId: "after-scan",
-        coverage: { afterCompleteness: "complete" },
         summary: { resolved: 2, new: 2 },
         findings: [
           {
@@ -168,8 +166,6 @@ describe("scan history renderer", () => {
           repository: "/demo/juice-shop",
           beforeScanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          comparable: true,
-          coverage: { afterCompleteness: "complete" },
           summary: {
             new: 1,
             persisting: 2,
@@ -290,20 +286,6 @@ describe("scan history renderer", () => {
         ([, value]) => value,
       ),
     ).toEqual(["/demo/threat-model.md", "routes/login.ts"]);
-    for (const coverage of ["partial", "unknown", "complete"]) {
-      const comparison = renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: coverage },
-          summary: {},
-          findings: [],
-        },
-        "compare",
-        { color: false },
-      );
-      expect(comparison).not.toContain("Follow-up coverage");
-    }
   });
 
   test("shows absent findings without claiming they were fixed", () => {
@@ -328,7 +310,6 @@ describe("scan history renderer", () => {
     );
     expect(output).toContain("Not observed");
     expect(output).not.toContain("Resolved");
-    expect(output).not.toContain("Follow-up coverage");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {
@@ -512,7 +493,6 @@ describe("scan history renderer", () => {
       {
         beforeScanId: "before",
         afterScanId: "after",
-        coverage: { afterCompleteness: "complete" },
         summary: {},
         findings: [],
         related: [relation],

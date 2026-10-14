@@ -708,7 +708,6 @@ test.each([
     if (bulk) {
       expect(result, stderr.text()).toMatchObject({
         completed: 1,
-        incomplete: 0,
         failed: 0,
       });
       const receipts = await readJsonLines(result.resultsPath);
@@ -737,7 +736,6 @@ test.each([
       ).toBe(0);
       expect(JSON.parse(reconciledOutput.text())).toMatchObject({
         completed: 1,
-        incomplete: 0,
         failed: 0,
       });
       const reconciled = await readJsonLines(result.resultsPath);
@@ -758,7 +756,6 @@ test.each([
       expect(JSON.parse(nextOutput.text())).toMatchObject({
         skipped: 1,
         completed: 1,
-        incomplete: 0,
         failed: 0,
       });
     } else {
@@ -874,7 +871,6 @@ test.each([
       if (scenario === "bulk") {
         expect(JSON.parse(stdout.text())).toMatchObject({
           completed: 1,
-          incomplete: 0,
           failed: 0,
         });
         const receipts = await readJsonLines(join(f.root, "results.jsonl"));
@@ -1277,7 +1273,6 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
   expect(code, stderr.text()).toBe(0);
   expect(JSON.parse(stdout.text())).toMatchObject({
     completed: 1,
-    incomplete: 0,
     failed: 0,
   });
   expect(

@@ -37,15 +37,6 @@
         "deep_repository"
       ]
     },
-    "completeness": {
-      "enum": [
-        "complete",
-        "partial",
-        "unknown"
-      ],
-      "deprecated": true,
-      "description": "Legacy coverage label retained only for reading existing scan artifacts. New producers omit this field."
-    },
     "inventoryStrategy": {
       "enum": [
         "repository",

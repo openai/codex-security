@@ -67,15 +67,11 @@ export function aggregateDiscoveryCoverage(
         (coverage[field] as JsonObject[]).push(retained);
       }
     }
-    if (Array.isArray(source.openQuestions)) {
-      const questions = source.openQuestions.map((question) => ({
+    for (const question of source.openQuestions ?? []) {
+      (coverage.openQuestions ??= []).push({
         ...(typeof question === "string" ? { question } : question),
         workerId: worker.id,
-      }));
-      coverage.openQuestions = [
-        ...(coverage.openQuestions ?? []),
-        ...questions,
-      ];
+      });
     }
   }
   return coverage;

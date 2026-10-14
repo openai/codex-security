@@ -339,7 +339,7 @@ export async function runPreparedEval(
       ? "explicit"
       : "Codex default; SDK does not expose resolved model",
     promptSha256: prepared.promptSha256,
-    ...gradeResult(semanticResult, prepared.fixture, prepared.repo),
+    ...gradeResult(semanticResult, prepared.fixture),
     usage,
   };
   return { report, semanticResult };

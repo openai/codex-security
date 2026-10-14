@@ -650,7 +650,6 @@ def compare_scans(
     result = {
         "afterScanId": after["id"],
         "beforeScanId": before["id"],
-        "comparable": True,
         "findings": findings,
         "repository": before["target_path"],
         "summary": summary,

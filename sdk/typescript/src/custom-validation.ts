@@ -443,7 +443,7 @@ export async function runCustomValidation(options: {
   firstSurface.receiptRefs = [
     ...new Set([...firstSurface.receiptRefs, CANDIDATES, RESULTS]),
   ];
-  delete coverage.completeness;
+  delete coverage["completeness"];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.

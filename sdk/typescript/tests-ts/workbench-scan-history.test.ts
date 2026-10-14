@@ -116,7 +116,7 @@ connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)',
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-    read_coverage=lambda _: {'completeness': 'complete'}, include_matching_inputs=True)
+    read_coverage=lambda _: {}, include_matching_inputs=True)
 print(json.dumps(comparison['matchingInputs']))
 `,
     join(tmpdir(), "codex-security-legacy-repositories"),
@@ -170,7 +170,7 @@ def save(value):
         connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
         now=lambda: '2026-01-01T00:00:00Z',
         require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+        read_coverage=lambda _: {'includePaths': ['src'],
                                  'excludePaths': [], 'explicitExclusions': []})
 def snapshot():
     return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
@@ -472,7 +472,7 @@ payload = {
 }
 def cache():
     connection.execute('INSERT OR REPLACE INTO scan_comparisons VALUES (?, ?, ?)', ('before', 'after', json.dumps(payload)))
-coverage = {'completeness': 'complete', 'includePaths': ['src'],
+coverage = {'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
     return history.compare_scans(

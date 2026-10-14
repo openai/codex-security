@@ -1340,7 +1340,7 @@ def budget_exhausted_draft(
         manifest = {
             "scan": {
                 "target": target,
-                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+                "scope": {"limitations": [warning]},
             }
         }
         findings = {"findings": []}

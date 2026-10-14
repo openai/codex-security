@@ -744,7 +744,6 @@ def test_completion_keeps_empty_coverage_defaults(tmp_path: Path) -> None:
     assert completed["findingCount"] == 1
     coverage = json.loads(coverage_path.read_text())
     assert coverage["inventoryStrategy"] == "repository"
-    assert "completeness" not in coverage
 
 
 @pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
@@ -761,7 +760,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     manifest = json.loads(manifest_path.read_text())
     findings = json.loads(findings_path.read_text())
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
+
     coverage["deferred"] = [{"id": "review", "reason": "Review remains."}]
     independent = write_checkpoint(
         scan_dir / "checkpoints",
@@ -770,7 +769,6 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
             "complete": False,
             "findings": [],
             "coverage": {
-                "completeness": "partial",
                 "deferred": [{"id": "other-review", "reason": "Independent earlier review."}],
             },
         },
@@ -832,7 +830,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
         os.utime(manifest_path, ns=(300, 300))
     coverage["deferred"] = []
     coverage["resolvedDeferred"] = [{"id": "review", "reason": "Review completed."}]
-    coverage["completeness"] = "complete"
+
     coverage_path.write_text(json.dumps(coverage))
     os.utime(coverage_path, ns=(300, 300))
     assert findings_path.stat().st_mtime_ns == 200
@@ -868,7 +866,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
         sealed_coverage = json.loads(coverage_path.read_text())
         assert sealed_coverage["mode"] == "deep_repository"
         assert sealed_coverage["inventoryStrategy"] == "repository"
-        assert "completeness" not in sealed_coverage
+
         assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
         assert (scan_dir / "report.md").is_file()
 
@@ -900,7 +898,7 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert recovered["resultsRecoveryNeeded"] is False
     preserved_coverage = json.loads(coverage_path.read_text())
     assert preserved_coverage["inventoryStrategy"] == "repository"
-    assert "completeness" not in preserved_coverage
+
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
 
 
@@ -1027,7 +1025,7 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert len(retained) == 1
     assert retained[0]["summary"] == valid["summary"]
-    assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
+
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
     assert (scan_dir / "report.md").is_file()
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
@@ -1136,8 +1134,6 @@ def test_completion_retains_strongest_duplicate_finding_regardless_of_order(
             == weaker
             for original in recovered["provenance"].get("previousFindings", [])
         ), case
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
-        assert "completeness" not in coverage, case
         assert "### No findings" not in (scan_dir / "report.md").read_text(), case
         sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
         assert sarif["runs"][0]["results"][0]["properties"]["severity"] == "critical", case
@@ -1322,7 +1318,7 @@ def test_completion_keeps_verified_receipts_and_downgrades_invalid_coverage(
     assert any("non-symlink" in warning for warning in warnings)
     assert "../outside.json" not in " ".join(warnings)
     sealed_coverage = json.loads(coverage_path.read_text())
-    assert "completeness" not in sealed_coverage
+
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert sealed_coverage["surfaces"][0]["receiptRefs"] == [receipt_ref]
     sealed_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
@@ -1376,7 +1372,7 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
     assert any("coverage exclusion" in warning for warning in warnings)
     assert any("deferred coverage item" in warning for warning in warnings)
     sealed_coverage = json.loads(coverage_path.read_text())
-    assert "completeness" not in sealed_coverage
+
     assert len(sealed_coverage["surfaces"]) == 1
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert sealed_coverage["explicitExclusions"] == [
@@ -1395,7 +1391,6 @@ def test_completion_recovers_malformed_coverage_collections(tmp_path: Path) -> N
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "finished"
     coverage["surfaces"] = {"id": "not-an-array"}
     coverage["explicitExclusions"] = None
     coverage["deferred"] = "later"
@@ -1407,7 +1402,7 @@ def test_completion_recovers_malformed_coverage_collections(tmp_path: Path) -> N
     assert completed["scan"]["findingCount"] == 1
     assert len(completed["scan"]["warnings"]) == 3
     sealed_coverage = json.loads(coverage_path.read_text())
-    assert "completeness" not in sealed_coverage
+
     assert sealed_coverage["surfaces"] == []
     assert sealed_coverage["explicitExclusions"] == []
     assert sealed_coverage["deferred"] == []

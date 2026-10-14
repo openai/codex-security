@@ -368,6 +368,8 @@ and required-output failures exit with `2`.
 New reports omit `coverage.completeness`. Existing sealed reports remain readable;
 use `manifest.scan.status` and the command exit code to distinguish execution
 failures from findings-policy violations. Legacy completeness values affect neither.
+Bulk and component summaries report completed and failed scans without an
+`incomplete` count. Component matching errors have status `failed`.
 
 `scan`, `scans rerun`, and `scans resume` execution failures with `--json`, JSON,
 or JSONL output produce:

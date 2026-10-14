@@ -2278,7 +2278,7 @@ function deepScanFailureMessage(run: DeepScanRunState): string {
       run.manifestPath ? ` Failure manifest: ${run.manifestPath}.` : ""
     }`,
     "This is a terminal failure of this logical Deep Scan; no successful discovery manifest was returned.",
-    "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with incomplete coverage.",
+    "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with the reason execution stopped.",
     "Do not call start_codex_security_deep_scan again in this response.",
     "Do not call complete_codex_security_scan in this response.",
     "Do not start a replacement Deep Scan, call cancel for this terminal scan, claim a successful or no-findings scan, satisfy a successful-scan output schema, or emit benchmark JSON.",

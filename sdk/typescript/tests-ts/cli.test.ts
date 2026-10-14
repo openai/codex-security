@@ -5086,85 +5086,44 @@ describe("CLI", () => {
   );
 
   test.each(["rerun", "resume"] as const)(
-    "%s keeps scope notes without turning completed results into errors",
+    "%s retains findings and scope notes in a successful full-output result",
     async (command) => {
-      for (const completeness of [undefined, "partial", "unknown"] as const) {
-        const result = fakeResult(["high"], completeness);
-        const { stdout, runCli } = createCliTest(main);
-        const recipe = {
-          repository: "/original/repository",
-          target: { kind: "repository", paths: [] },
-          mode: command === "resume" ? "deep" : "standard",
-          config: {},
-        };
-        expect(
-          await runCli(
-            ["scans", command, "scan-original", "--json", "--full-output"],
-            dependencies({
-              result,
-              onWorkbench: (args): JsonObject =>
-                args[0] === "get-cli-scan-resume"
-                  ? {
-                      scanId: "scan-original",
-                      scanDir: "/tmp/saved-scan",
-                      recipe,
-                    }
-                  : args[0] === "get-scan-recipe"
-                    ? { recipe }
-                    : {},
-            }),
-          ),
-        ).toBe(0);
-        expect(JSON.parse(stdout.text())).toMatchObject({
-          ok: true,
-          data: { findings: result.findings },
-        });
-      }
+      const result = fakeResult(["high"]);
+      result.coverage.deferred.push({
+        id: "runtime-note",
+        reason: "Optional runtime reproduction was unavailable.",
+      });
+      const { stdout, runCli } = createCliTest(main);
+      const recipe = {
+        repository: "/original/repository",
+        target: { kind: "repository", paths: [] },
+        mode: command === "resume" ? "deep" : "standard",
+        config: {},
+      };
+      expect(
+        await runCli(
+          ["scans", command, "scan-original", "--json", "--full-output"],
+          dependencies({
+            result,
+            onWorkbench: (args): JsonObject =>
+              args[0] === "get-cli-scan-resume"
+                ? {
+                    scanId: "scan-original",
+                    scanDir: "/tmp/saved-scan",
+                    recipe,
+                  }
+                : args[0] === "get-scan-recipe"
+                  ? { recipe }
+                  : {},
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        ok: true,
+        data: { findings: result.findings, coverage: result.coverage },
+      });
     },
   );
-
-  test("preserves full-output token controls and the completed findings-policy envelope", async () => {
-    const partial = fakeResult(["high"], "partial");
-    const page = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--token-limit", "1"],
-        page.stream,
-        capture().stream,
-        dependencies({ result: partial }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(page.text())).toMatchObject({
-      ok: true,
-      data: expect.any(String),
-      meta: { nextOffset: 1 },
-    });
-    const count = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--token-count"],
-        count.stream,
-        capture().stream,
-        dependencies({ result: partial }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(count.text())).toBeNumber();
-    const complete = fakeResult(["high"]);
-    const blocked = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
-        blocked.stream,
-        capture().stream,
-        dependencies({ result: complete }),
-      ),
-    ).toBe(1);
-    expect(JSON.parse(blocked.text())).toMatchObject({
-      ok: true,
-      data: JSON.parse(JSON.stringify(complete.toJSON())),
-    });
-    expect(JSON.parse(blocked.text())).not.toHaveProperty("error");
-  });
 
   test("reports SDK errors without a stack trace", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);

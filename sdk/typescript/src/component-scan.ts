@@ -70,7 +70,7 @@ export interface ComponentReceipt {
   id: string;
   name: string;
   paths: string[];
-  status: "pending" | "started" | "completed" | "incomplete" | "failed";
+  status: "pending" | "started" | "completed" | "failed";
   outputDir: string;
   scanId?: string;
   threatModelPath?: string;
@@ -103,7 +103,7 @@ interface CombinedFinding {
 }
 
 export interface ComponentDeduplicationSummary {
-  status: "completed" | "incomplete";
+  status: "completed" | "failed";
   confirmedGroups: number;
   uncertainPairs: number;
   error?: string;
@@ -112,7 +112,6 @@ export interface ComponentDeduplicationSummary {
 export interface ComponentScanResult {
   total: number;
   completed: number;
-  incomplete: number;
   failed: number;
   planPath: string;
   summaryPath?: string;
@@ -173,7 +172,6 @@ export async function runComponentScans(
   const base = {
     total: plan.components.length,
     completed: 0,
-    incomplete: 0,
     failed: 0,
     planPath,
   };
@@ -271,13 +269,13 @@ export async function runComponentScans(
   const { findings, matches, uncertain, related, error } =
     await deduplicateFindings(receipts, results, { ...options, environment });
   const deduplication: ComponentDeduplicationSummary = {
-    status: error === undefined ? "completed" : "incomplete",
+    status: error === undefined ? "completed" : "failed",
     confirmedGroups: matches.length,
     uncertainPairs: uncertain.length,
     ...(error === undefined ? {} : { error }),
   };
   const retryComponents = receipts
-    .filter(({ status }) => status === "failed" || status === "incomplete")
+    .filter(({ status }) => status === "failed")
     .map(({ name, paths }) => ({ name, paths }));
   const retryPlanPath =
     retryComponents.length === 0
@@ -289,7 +287,6 @@ export async function runComponentScans(
   const summary = {
     ...base,
     completed: receipts.filter(({ status }) => status === "completed").length,
-    incomplete: receipts.filter(({ status }) => status === "incomplete").length,
     failed: receipts.filter(({ status }) => status === "failed").length,
     summaryPath: join(output, "summary.json"),
     findingsPath: join(output, "findings.json"),
@@ -457,12 +454,9 @@ function renderReport(
   return [
     "# Component scan report",
     "",
-    `${summary.completed} complete, ${summary.incomplete} incomplete, ${summary.failed} failed. ${findings.length} finding groups.`,
-    ...(summary.deduplication?.status === "incomplete"
-      ? [
-          "",
-          `Cross-component matching is incomplete: ${summary.deduplication.error}`,
-        ]
+    `${summary.completed} complete, ${summary.failed} failed. ${findings.length} finding groups.`,
+    ...(summary.deduplication?.status === "failed"
+      ? ["", `Cross-component matching failed: ${summary.deduplication.error}`]
       : []),
     ...(summary.deduplication?.uncertainPairs
       ? [
@@ -474,10 +468,7 @@ function renderReport(
     "Coverage applies only to the selected components. See each scan for exclusions and deferred work.",
     ...(summary.retryPlanPath === undefined
       ? []
-      : [
-          "",
-          "[Retry plan for failed or incomplete components](./retry-components.json)",
-        ]),
+      : ["", "[Retry plan for failed components](./retry-components.json)"]),
     "",
     "## Components",
     "",

@@ -22,7 +22,7 @@ async function summary(
 ) {
   const { stdout, stderr, runCli } = createCliTest(main);
 
-  const result = options?.result ?? fakeResult(["high"], "partial");
+  const result = options?.result ?? fakeResult(["high"]);
   expect(
     await runCli(
       ["scan", ...args, "--json"],

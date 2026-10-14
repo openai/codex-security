@@ -722,7 +722,6 @@ export class DeepScanCoordinator {
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
     const recovered = await this.recoverAcceptedDiscoveries();
-    let acceptedCount = recovered.length;
     const accepted = new Map(recovered.map((worker) => [worker.id, worker]));
     let reducerInputs: AcceptedDiscovery[] = [];
     const mergedIds = new Set(
@@ -892,7 +891,7 @@ export class DeepScanCoordinator {
       phase: "discovery",
       handoffClaimToken: this.options.handoffClaimToken,
     });
-    this.logProgress(acceptedCount);
+    this.logProgress(accepted.size);
 
     while (!stopReason) {
       if (this.abortController.signal.aborted) {
@@ -1008,11 +1007,10 @@ export class DeepScanCoordinator {
           }
           continue;
         }
-        acceptedCount += 1;
         accepted.set(outcome.worker.id, outcome.worker);
         this.state = { ...this.state, consecutiveErrors: 0 };
         buffer.push(outcome.worker);
-        this.logProgress(acceptedCount);
+        this.logProgress(accepted.size);
         continue;
       }
 
@@ -1060,7 +1058,7 @@ export class DeepScanCoordinator {
 
     if (
       !previousReducerResultPath &&
-      !(this.discoveryDeadlineReached && acceptedCount === 0)
+      !(this.discoveryDeadlineReached && accepted.size === 0)
     ) {
       throw new Error(
         "Deep Scan ended without a successfully reduced Standard scan.",

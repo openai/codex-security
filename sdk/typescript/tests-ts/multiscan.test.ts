@@ -100,7 +100,7 @@ async function repositoryFixture(name: string, id = name) {
 
 async function completedScan(
   outputDir: string,
-  completeness: "complete" | "partial" | "unknown" = "complete",
+  completeness?: "complete" | "partial" | "unknown",
 ): Promise<ScanResult> {
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await Promise.all(
@@ -108,10 +108,12 @@ async function completedScan(
       (name) => writeFile(join(outputDir, name), "{}\n"),
     ),
   );
-  return {
-    manifest: { scan: { status: "completed" } },
-    coverage: { completeness },
-  } as ScanResult;
+  const result = fakeResult([], completeness);
+  await writeFile(
+    join(outputDir, "scan-manifest.json"),
+    JSON.stringify(result.manifest),
+  );
+  return { manifest: result.manifest, coverage: result.coverage } as ScanResult;
 }
 
 const completeRun: SecurityClient["run"] = async (
@@ -557,7 +559,6 @@ describe("multiscan", () => {
     );
     expect(result).toMatchObject({
       completed: 2,
-      incomplete: 0,
       failed: 0,
       skipped: 1,
     });
@@ -912,7 +913,7 @@ describe("multiscan", () => {
       ),
     );
 
-    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "priced", status: "completed", cost },
     ]);
@@ -1003,7 +1004,6 @@ describe("multiscan", () => {
 
     expect(summary).toMatchObject({
       completed: 1,
-      incomplete: 0,
       failed: 0,
       warnings: [
         {
@@ -1071,7 +1071,7 @@ describe("multiscan", () => {
         }),
       );
 
-      expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
       expect(attempts.mock.calls.length).toBe(1);
       expect(progress).toEqual([
         "started",
@@ -1123,7 +1123,6 @@ describe("multiscan", () => {
       expect(summary).toMatchObject({
         total: 1,
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 0,
       });
@@ -1171,7 +1170,6 @@ describe("multiscan", () => {
       );
       expect(resumed).toMatchObject({
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 1,
       });
@@ -1180,11 +1178,11 @@ describe("multiscan", () => {
       await rm(document);
       expect(
         await runMultiscan(options(paths, security, { knowledgeBasePaths })),
-      ).toMatchObject({ completed: 0, incomplete: 0, failed: 1 });
+      ).toMatchObject({ completed: 0, failed: 1 });
       await writeFile(document, "Original context.");
       expect(
         await runMultiscan(options(paths, security, { knowledgeBasePaths })),
-      ).toMatchObject({ completed: 1, incomplete: 0, failed: 0, skipped: 1 });
+      ).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
       expect(attempts).toBe(1);
       const afterRepair = await results(resumed.resultsPath);
       expect(afterRepair).toHaveLength(3);
@@ -1201,8 +1199,6 @@ describe("multiscan", () => {
 
   test.each([
     ["partial", "failed"],
-    ["unknown", "failed"],
-    ["partial", "completed_with_incomplete_coverage"],
     ["unknown", "completed_with_incomplete_coverage"],
   ] as const)(
     "resumes legacy sealed %s coverage (%s receipt) without rerunning or duplicating cost",
@@ -1255,7 +1251,6 @@ describe("multiscan", () => {
       expect(summary).toMatchObject({
         total: 1,
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 1,
       });
@@ -1270,28 +1265,28 @@ describe("multiscan", () => {
   );
 
   test.each([
-    ["operational failures", "partial", "Worker exited unexpectedly.", false],
+    ["operational failures", "completed", "Worker exited unexpectedly.", false],
     [
-      "complete coverage",
-      "complete",
+      "failed manifest",
+      "failed",
       "Multiscan repository coverage is incomplete.",
       false,
     ],
     [
-      "malformed coverage",
+      "malformed manifest",
       "malformed",
       "Multiscan repository coverage is incomplete.",
       false,
     ],
     [
       "missing artifacts",
-      "partial",
+      "completed",
       "Multiscan repository coverage is incomplete.",
       true,
     ],
   ] as const)(
     "continues retrying legacy %s",
-    async (_scenario, completeness, error, missingArtifact) => {
+    async (_scenario, status, error, missingArtifact) => {
       const { paths, source } = await repositoryFixture(
         "legacy-retry",
         "legacy",
@@ -1299,10 +1294,8 @@ describe("multiscan", () => {
       const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
       await completedScan(outputDir);
       await writeFile(
-        join(outputDir, "coverage.json"),
-        completeness === "malformed"
-          ? "{\n"
-          : `${JSON.stringify({ completeness })}\n`,
+        join(outputDir, "scan-manifest.json"),
+        status === "malformed" ? "{\n" : JSON.stringify({ scan: { status } }),
       );
       if (missingArtifact) await rm(join(outputDir, "report.md"));
       await writeFile(
@@ -1324,7 +1317,6 @@ describe("multiscan", () => {
 
       expect(summary).toMatchObject({
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 0,
       });
@@ -1375,7 +1367,6 @@ describe("multiscan", () => {
       expect(JSON.parse(stdout.text())).toMatchObject({
         total: 1,
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 0,
       });
@@ -1400,7 +1391,6 @@ describe("multiscan", () => {
       ).toBe(0);
       expect(JSON.parse(resumedOutput.text())).toMatchObject({
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 1,
       });
@@ -1426,7 +1416,7 @@ describe("multiscan", () => {
     const summary = await runMultiscan(options(paths, client(attempts)));
 
     expect(attempts.mock.calls.length).toBe(2);
-    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
       {
         id: "missing",
@@ -3450,7 +3440,6 @@ describe("multiscan", () => {
     expect(summary).toMatchObject({
       total: 2,
       completed: 2,
-      incomplete: 0,
       failed: 0,
     });
     expect(await results(summary.resultsPath)).toMatchObject([

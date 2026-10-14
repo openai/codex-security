@@ -160,7 +160,6 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
     workbench_api, workbench_db, publication_scan, monkeypatch
 ):
     scan = publication_scan()
-    scan.coverage["completeness"] = "partial"
     scan.coverage["deferred"] = [
         {"id": "remaining-review", "reason": "The bounded scan retained unfinished review."}
     ]

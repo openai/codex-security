@@ -42,7 +42,6 @@ type CoverageSurface = Record<string, unknown> & {
 
 type CoverageDocument = Record<string, unknown> & {
   scanId: string;
-  completeness?: string;
   inventoryStrategy: string;
   surfaces: CoverageSurface[] | Record<string, unknown>;
   explicitExclusions: unknown;
@@ -57,7 +56,6 @@ type ScanSummary = {
 
 type SarifDocument = {
   runs: Array<{
-    properties: { codexSecurityCoverageCompleteness?: string };
     results: Array<{ properties: { severity: string } }>;
     invocations?: Array<{
       executionSuccessful: boolean;
@@ -703,7 +701,7 @@ describe("malformed scan artifact recovery", () => {
       const coverage = await readJson<CoverageDocument>(
         join(fixture.scanDir, "coverage.json"),
       );
-      expect(coverage.completeness).toBeUndefined();
+      expect(coverage).not.toHaveProperty("completeness");
     },
   );
 
@@ -765,7 +763,7 @@ describe("malformed scan artifact recovery", () => {
     const coverage = await readJson<CoverageDocument>(
       join(fixture.scanDir, "coverage.json"),
     );
-    expect(coverage.completeness).toBeUndefined();
+    expect(coverage).not.toHaveProperty("completeness");
   });
 
   test("rejects severity change-condition lists with malformed entries", async () => {
@@ -939,7 +937,7 @@ describe("malformed scan artifact recovery", () => {
       const coverage = await readJson<CoverageDocument>(
         join(fixture.scanDir, "coverage.json"),
       );
-      expect(coverage.completeness, name).toBeUndefined();
+      expect(coverage, name).not.toHaveProperty("completeness");
       expect(
         await readFile(join(fixture.scanDir, "report.md"), "utf8"),
         name,
@@ -1125,7 +1123,7 @@ describe("malformed scan artifact recovery", () => {
     ).toBe(true);
     expect(completed.warnings.join("\n")).not.toContain("../outside.json");
     const recovered = await readJson<CoverageDocument>(path);
-    expect(recovered.completeness).toBeUndefined();
+    expect(recovered).not.toHaveProperty("completeness");
     expect((recovered.surfaces as CoverageSurface[])[0]).toMatchObject({
       disposition: "needs_follow_up",
       receiptRefs: [receipt],
@@ -1142,7 +1140,6 @@ describe("malformed scan artifact recovery", () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
-    document.completeness = "finished";
     document.surfaces = { id: "not-an-array" };
     document.explicitExclusions = null;
     document.deferred = "later";
@@ -1153,7 +1150,7 @@ describe("malformed scan artifact recovery", () => {
     expect(completed.progress.status).toBe("complete");
     expect(completed.warnings).toHaveLength(3);
     const recovered = await readJson<CoverageDocument>(path);
-    expect(recovered.completeness).toBeUndefined();
+    expect(recovered).not.toHaveProperty("completeness");
     expect(recovered).toMatchObject({
       surfaces: [],
       explicitExclusions: [],

@@ -123,7 +123,7 @@ export const savedRecipe = (
 
 export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
-  completeness: CoverageDocument["completeness"] = undefined,
+  completeness?: "complete" | "partial" | "unknown",
   usage: unknown = null,
 ): ScanResult {
   const manifest = {

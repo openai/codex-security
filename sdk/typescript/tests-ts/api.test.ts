@@ -4929,11 +4929,11 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["partial coverage", "partial", false, false],
-    ["unknown coverage", "unknown", false, false],
+    ["a completed scan with scope notes", "completed", false, false],
+    ["legacy coverage metadata", "legacy", false, false],
     ["a failed scan", "failed", false, false],
     ["a failed scan and follow-up", "failed", true, false],
-    ["an interrupted follow-up", "partial", false, true],
+    ["an interrupted follow-up", "completed", false, true],
   ] as const)(
     "runs post-scan instructions after %s",
     async (_scenario, outcome, followUpFails, cancelFollowUp) => {
@@ -4962,7 +4962,13 @@ describe("CodexSecurity orchestration", () => {
             const original = await readFile(coveragePath, "utf8");
             const coverage = JSON.stringify({
               ...JSON.parse(original),
-              completeness: outcome,
+              ...(outcome === "legacy" ? { completeness: "partial" } : {}),
+              deferred: [
+                {
+                  id: "runtime-note",
+                  reason: "Optional runtime reproduction was unavailable.",
+                },
+              ],
             });
             const manifestPath = join(scanDir, "scan-manifest.json");
             await writeFile(coveragePath, coverage);
@@ -5010,7 +5016,12 @@ describe("CodexSecurity orchestration", () => {
       } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
-        expect((await result).coverage.completeness).toBe(outcome);
+        expect((await result).coverage.deferred).toEqual([
+          {
+            id: "runtime-note",
+            reason: "Optional runtime reproduction was unavailable.",
+          },
+        ]);
       }
       expect(prompts.at(-1)).toBe("Record the scan cost.");
       expect(prompts).toHaveLength(2);

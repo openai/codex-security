@@ -221,7 +221,8 @@ the step. Empty diffs and dry runs use `scan-status: skipped`.
 
 SARIF is optional. If it cannot be produced, the Action warns and sets
 `report-status: partial` and `sarif-upload-ready: false`. Summaries, annotations,
-and JSON reports remain available, and the scan outcome is preserved. A requested
+and JSON reports remain available, and the scan outcome is preserved. This report
+availability status does not describe scan coverage. A requested
 artifact upload that fails still fails the job.
 
 ### GitHub code scanning

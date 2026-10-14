@@ -126,7 +126,7 @@ function finding(
 async function completed(
   options: ScanOptions,
   findings = [finding(String(options.target))],
-  coverage: "complete" | "partial" = "complete",
+  coverage?: "complete" | "partial",
   threatModelPath: string | null = null,
 ) {
   const original = fakeResult([], coverage);
@@ -417,7 +417,6 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   expect(summary).toMatchObject({
     total: 3,
     completed: 2,
-    incomplete: 0,
     failed: 1,
   });
   const saved = await json(summary.findingsPath!);
@@ -692,7 +691,7 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
   expect(await json(join(paths.outputDir, "retry-components.json"))).toEqual({
     components: [{ name: "apps/web", paths: ["apps/web"] }],
   });
-  expect(stderr.text()).toContain("1 complete, 0 incomplete, 1 failed");
+  expect(stderr.text()).toContain("1 complete, 1 failed");
   expect(stderr.text()).toContain("Retry with --components-file");
   expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
     stderr.text().indexOf("Component scans:"),
@@ -840,7 +839,7 @@ test("retains earlier confirmed matches if later matching fails", async () => {
   expect(summary).toMatchObject({
     completed: 3,
     failed: 0,
-    deduplication: { status: "incomplete", confirmedGroups: 1 },
+    deduplication: { status: "failed", confirmedGroups: 1 },
   });
   expect(
     (await json(summary.findingsPath!)).findings.map(
@@ -901,7 +900,7 @@ test.each(["scan", "matching"])(
     expect(await json(join(paths.outputDir, "summary.json"))).toMatchObject({
       completed: finished,
       failed: 3 - finished,
-      deduplication: { status: "incomplete" },
+      deduplication: { status: "failed" },
     });
     expect(
       (await json(join(paths.outputDir, "findings.json"))).findings,
@@ -1730,7 +1729,6 @@ test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   });
   expect(JSON.parse(result.stdout)).toMatchObject({
     completed: 1,
-    incomplete: 0,
   });
   expect(
     [...signals.listeners.values()].every((listeners) => listeners.size === 0),
@@ -1782,7 +1780,7 @@ test.each([false, true])(
     expect(JSON.parse(result.stdout)).toMatchObject({
       completed: 2,
       failed: 0,
-      deduplication: { status: failMatching ? "incomplete" : "completed" },
+      deduplication: { status: failMatching ? "failed" : "completed" },
     });
     expect(JSON.parse(saved).deduplication.error).toBe(
       failMatching ? failure : undefined,

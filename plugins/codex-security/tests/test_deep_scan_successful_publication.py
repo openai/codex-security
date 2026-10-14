@@ -107,7 +107,6 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
         manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
         findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
         coverage = json.loads((scan_dir / "coverage.json").read_text())
-        coverage.pop("completeness", None)
         if mode == "deep":
             coverage.update(surfaces=[], explicitExclusions=[], deferred=[])
         else:
@@ -275,7 +274,6 @@ def test_deep_publication_keeps_configured_scope_without_worker_observations(
     scan = publication_scan(scope=scope)
     result = add_worker(workbench_db, scan)
     worker_coverage = {
-        "completeness": "partial",
         "surfaces": [
             {
                 "id": "worker-surface",
@@ -323,7 +321,7 @@ def test_deep_publication_ignores_empty_canceled_checkpoint(
     result = add_worker(workbench_db, scan, status="canceled")
     checkpoint = write_checkpoint(
         result.parent / "checkpoints",
-        saved_draft(scan.scan_id, completeness="partial"),
+        saved_draft(scan.scan_id),
     )
     source_bytes = checkpoint.read_bytes()
 
@@ -420,7 +418,7 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         "findings": [later_finding],
     }
     if source == "standard-worker-checkpoint":
-        saved["coverage"] = saved_coverage(completeness="partial")
+        saved["coverage"] = saved_coverage()
     if source == "deep-reducer-result":
         checkpoint = None
         result.write_text(json.dumps(saved))
@@ -444,9 +442,8 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
 
     assert stopped["progress"]["status"] == "failed"
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert manifest["scan"]["status"] == "failed"
-    assert "completeness" not in coverage
+
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     expected_summaries = {later_finding["summary"]}
     if has_parent:

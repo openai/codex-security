@@ -99,17 +99,9 @@ test('report collection preserves credential-shaped diagnostic content', async (
   assert.deepEqual(reports.get('findings.json'), bytes);
 });
 
-test('exit 1 preserves completed reports and records the CLI severity-policy failure', async (t) => {
-  const opts = await fixture(t); opts.exitCode = 1;
-  const result = await analyzeResults(opts);
-  assert.equal(result.scanStatus, 'completed');
-  assert.equal(result.policyStatus, 'failed');
-  assert.equal(result.sarifUploadReady, true);
-});
-
 test('operational exits and signal termination cannot turn complete output into success', async (t) => {
   const opts = await fixture(t);
-  for (const exitCode of [2, 143, null]) {
+  for (const exitCode of [2, 130, 143, null]) {
     const result = await analyzeResults({ ...opts, exitCode });
     assert.equal(result.scanStatus, 'failed');
     assert.equal(result.policyStatus, 'not-evaluated');
@@ -118,21 +110,12 @@ test('operational exits and signal termination cannot turn complete output into 
   }
 });
 
-test('a failed manifest cannot become successful from exit 0', async (t) => {
-  const opts = await fixture(t);
-  change(opts, (value) => { value.manifest.scan.status = 'failed'; });
-  const result = await analyzeResults(opts);
-  assert.equal(result.scanStatus, 'failed');
-  assert.equal(result.policyStatus, 'not-evaluated');
-  assert.equal(result.sarifUploadReady, false);
-});
-
 for (const completeness of [undefined, 'complete', 'partial', 'unknown']) {
   test(`coverage notes and legacy completeness ${completeness} do not change successful execution or findings policy`, async (t) => {
     const opts = await fixture(t);
     change(opts, (value) => {
       value.coverage.completeness = completeness;
-      value.coverage.explicitExclusions = [{ path: 'assets/', reason: 'Static assets outside review scope.' }];
+      value.coverage.explicitExclusions = [{ pattern: 'assets/', reason: 'Static assets outside review scope.' }];
       value.coverage.deferred = [{ id: 'unreviewed-route', reason: 'Dependency implementation unavailable.' }];
       value.coverage.surfaces[0].disposition = 'needs_follow_up';
     });
@@ -145,21 +128,13 @@ for (const completeness of [undefined, 'complete', 'partial', 'unknown']) {
       assert.equal(result.paths.jsonPath, join(opts.resultsDirectory, 'findings.json'));
       assert.deepEqual(result.errors, []);
     }
-    for (const exitCode of [2, 130, 143, null]) {
-      const result = await analyzeResults({ ...opts, exitCode });
-      assert.equal(result.scanStatus, 'failed', `exit ${exitCode}`);
-      assert.equal(result.policyStatus, 'not-evaluated');
-      assert.equal(result.sarifUploadReady, false);
-      assert.equal(result.findings.length, 1);
-    }
   });
 }
 
-test('legacy coverage notes do not override failed or interrupted scan manifests', async (t) => {
+test('failed or interrupted manifests cannot become successful from exit 0', async (t) => {
   const opts = await fixture(t);
   for (const status of ['failed', 'interrupted', 'canceled']) {
     change(opts, (value) => {
-      value.coverage.completeness = 'partial';
       value.manifest.scan.status = status;
     });
     const result = await analyzeResults({ ...opts, exitCode: 0 });
@@ -170,9 +145,8 @@ test('legacy coverage notes do not override failed or interrupted scan manifests
   }
 });
 
-test('legacy coverage notes cannot hide execution failure or a CLI target-change warning', async (t) => {
+test('execution failure and target-change warnings override completed output', async (t) => {
   const opts = await fixture(t);
-  change(opts, (value) => { value.coverage.completeness = 'partial'; });
   const executionFailure = await analyzeResults({ ...opts, executionFailed: true });
   assert.equal(executionFailure.scanStatus, 'failed');
   assert.equal(executionFailure.policyStatus, 'not-evaluated');
@@ -190,7 +164,6 @@ test('legacy coverage notes cannot hide execution failure or a CLI target-change
 test('a CLI failure envelope takes precedence over retained result fields', async (t) => {
   const opts = await fixture(t);
   change(opts, (value) => {
-    value.coverage.completeness = 'partial';
     Object.assign(value, { status: 'failed', code: 'SCAN_FAILED', message: 'Synthetic runtime failure.' });
   });
   const result = await analyzeResults({ ...opts, exitCode: 2 });
@@ -199,18 +172,6 @@ test('a CLI failure envelope takes precedence over retained result fields', asyn
   assert.equal(result.sarifUploadReady, false);
   assert.equal(result.paths.jsonPath, '');
   assert.deepEqual(result.errors, ['Synthetic runtime failure.']);
-});
-
-test('missing optional SARIF preserves completed execution despite legacy coverage notes', async (t) => {
-  const opts = await fixture(t);
-  change(opts, (value) => { value.coverage.completeness = 'partial'; });
-  await rm(join(opts.resultsDirectory, 'exports/results.sarif'));
-  const result = await analyzeResults(opts);
-  assert.equal(result.scanStatus, 'completed');
-  assert.equal(result.policyStatus, 'passed');
-  assert.equal(result.reportStatus, 'partial');
-  assert.equal(result.sarifUploadReady, false);
-  assert.equal(result.findings.length, 1);
 });
 
 test('missing SARIF leaves a completed scan with partial reports', async (t) => {

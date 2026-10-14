@@ -973,28 +973,12 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
-  resultError?: string;
 }
-
-const failedResultEnvelopeSchema = z
-  .looseObject({
-    ok: z.literal(false),
-    error: z.object({
-      code: z.literal("SCAN_FAILED"),
-      message: z.string(),
-    }),
-    data: z.unknown().optional(),
-    meta: z.record(z.string(), z.unknown()),
-  })
-  .describe(
-    "Incomplete full-output JSON or JSONL with available scan results.",
-  );
 
 function scanOutputSchema(...codes: [string, ...string[]]) {
   return z
     .union([
       z.record(z.string(), z.unknown()),
-      failedResultEnvelopeSchema,
       z.object({
         status: z.literal("failed"),
         code: z.literal(codes),
@@ -1756,15 +1740,6 @@ export async function main(
   let structuredError = false;
   let failedResultOutput:
     { format: "json" | "jsonl"; message: string } | undefined;
-  const recordFailedResultOutput = (outcome: ScanOutcome, format: string) => {
-    if (
-      outcome.resultError !== undefined &&
-      (format === "json" || format === "jsonl") &&
-      argv.includes("--full-output")
-    ) {
-      failedResultOutput = { format, message: outcome.resultError };
-    }
-  };
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   const finishScan = (
@@ -1778,8 +1753,14 @@ export async function main(
     code = "SCAN_FAILED",
   ): Record<string, unknown> | undefined => {
     exitCode = outcome.exitCode;
-    if (outcome.error === undefined) {
-      recordFailedResultOutput(outcome, format);
+    if (outcome.error === undefined || outcome.data !== undefined) {
+      if (
+        outcome.error !== undefined &&
+        (format === "json" || format === "jsonl") &&
+        argv.includes("--full-output")
+      ) {
+        failedResultOutput = { format, message: outcome.error };
+      }
       return outcome.data;
     }
     if (format === "json" || format === "jsonl") {
@@ -4386,7 +4367,7 @@ export async function main(
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.incomplete} incomplete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "incomplete" ? " (matching incomplete)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -4396,9 +4377,7 @@ export async function main(
           });
           exitCode =
             interruptedExitCode(controller.signal) ??
-            (result.failed ||
-            result.incomplete ||
-            result.deduplication?.status === "incomplete"
+            (result.failed || result.deduplication?.status === "failed"
               ? 2
               : result.policyFailed
                 ? 1
@@ -4624,7 +4603,6 @@ export async function main(
                       });
                       return {
                         manifest: contract.manifest,
-                        coverage: contract.coverage,
                         findings: contract.findings,
                         cost:
                           (scan["cost"] as unknown as ScanCost | undefined) ??
@@ -8923,14 +8901,7 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  const resultError =
-    result.manifest.scan.status !== "completed"
-      ? `Scan ${result.manifest.scan.status}; available results were retained.`
-      : undefined;
-  const completedScan = (
-    exitCode: number,
-    error = resultError,
-  ): ScanOutcome => {
+  const finishResult = (exitCode: number, error?: string): ScanOutcome => {
     diagnostic(
       result.manifest.scan.status === "completed"
         ? "scan.completed"
@@ -8950,18 +8921,19 @@ async function executeScan(
     return {
       exitCode,
       data: scanData,
-      ...(error === undefined ? {} : { resultError: error }),
+      ...(error === undefined ? {} : { error }),
     };
   };
   if (targetWarnings.length > 0) {
     const message =
       "Scan target changed during execution; results do not represent the current checkout.";
     errorOutput.write(`codex-security: ${message}\n`);
-    return completedScan(2, message);
+    return finishResult(2, message);
   }
-  if (resultError !== undefined) {
-    errorOutput.write(`codex-security: ${resultError}\n`);
-    return completedScan(2);
+  if (result.manifest.scan.status !== "completed") {
+    const message = `Scan ${result.manifest.scan.status}; available results were retained.`;
+    errorOutput.write(`codex-security: ${message}\n`);
+    return finishResult(2, message);
   }
 
   let patchThreshold = arguments_.patch
@@ -9052,7 +9024,7 @@ async function executeScan(
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
       scanData = { ...scanData, patches };
-      return completedScan(2);
+      return finishResult(2, errorMessage(error));
     }
   }
 
@@ -9070,7 +9042,7 @@ async function executeScan(
             !resolved.has(finding.occurrenceId),
         ).length;
   const exitCode = Math.max(blockingCount > 0 ? 1 : 0, patchExitCode(patches));
-  return completedScan(exitCode);
+  return finishResult(exitCode);
 }
 
 // Filesystem and OS syscall failures cannot originate from the model transport,
