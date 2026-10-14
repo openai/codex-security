@@ -1252,3 +1252,23 @@ test.each([
     );
   },
 );
+
+test.each(["yaml", "toon", "json"])(
+  "a long framework error keeps its whole message with --format %s",
+  async (format) => {
+    const root = await temporaryDirectory();
+    const missing = join(
+      root,
+      "a-directory-name-long-enough-to-make-yaml-fold-the-line",
+      "scan.yaml",
+    );
+    const { stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["info", "-c", missing, "--format", format],
+        dependencies({ currentDirectory: root }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(missing);
+  },
+);
