@@ -95,6 +95,10 @@ class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
 
 
+class MissingScanLocalFileError(ContractError):
+    """Raised when a scan-local file or its containing directory is absent."""
+
+
 class RecoverableContractError(ContractError):
     """Raised when scan completion can safely be retried before publication."""
 
@@ -587,6 +591,9 @@ def _open_scan_local_file_with_path(
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
+            # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
+            if exc.errno in {2, 3}:
+                raise MissingScanLocalFileError(str(exc)) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -602,6 +609,10 @@ def _open_scan_local_file_with_path(
                 dir_fd=parent_fd,
             )
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             if exc.errno == errno.ELOOP:
                 try:
                     link_target = Path(os.readlink(parts[-1], dir_fd=parent_fd))
@@ -647,7 +658,12 @@ def _require_scan_local_file(scan_dir: Path, relative_path: str, context: str) -
     os.close(descriptor)
 
 
-def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> None:
+def _require_derived_writeup_files(
+    scan_dir: Path,
+    findings: dict[str, Any],
+    *,
+    missing_writeup_warnings: list[str] | None = None,
+) -> None:
     for index, finding in enumerate(findings.get("findings", [])):
         if not isinstance(finding, dict):
             continue
@@ -656,11 +672,19 @@ def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> 
             continue
         report_path = writeup.get("reportPath")
         if isinstance(report_path, str):
-            _require_scan_local_file(
-                scan_dir,
-                report_path,
-                f"findings[{index}].writeup.reportPath",
-            )
+            try:
+                _require_scan_local_file(
+                    scan_dir,
+                    report_path,
+                    f"findings[{index}].writeup.reportPath",
+                )
+            except MissingScanLocalFileError as exc:
+                if missing_writeup_warnings is None:
+                    raise
+                finding.pop("writeup")
+                missing_writeup_warnings.append(
+                    f"Skipped missing writeup for finding {index + 1}: {exc}."
+                )
 
 
 def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> None:
@@ -2929,6 +2953,7 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
+    missing_writeup_warnings: list[str] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
@@ -3010,7 +3035,11 @@ def _prepare_scan_finalization(
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )
-    _require_derived_writeup_files(scan_dir, findings)
+    _require_derived_writeup_files(
+        scan_dir,
+        findings,
+        missing_writeup_warnings=missing_writeup_warnings if not was_sealed else None,
+    )
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent

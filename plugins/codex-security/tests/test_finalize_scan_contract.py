@@ -684,6 +684,14 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
+        sealed_files = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        warnings = []
+        with self.assertRaises(FINALIZER.ContractError):
+            FINALIZER._prepare_scan_finalization(self.scan_dir, missing_writeup_warnings=warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}, sealed_files
+        )
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -3141,6 +3149,71 @@ def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
     FINALIZER._validate_schema_node(value, schema, "value")
     with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
         FINALIZER._validate_schema_node(True, schema, "value")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
+@pytest.mark.parametrize(
+    "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
+)
+def test_missing_writeup_recovery_rejects_other_file_errors(tmp_path, kind):
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    report = scan_dir / "findings" / "report.md"
+    report.parent.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside the scan\n")
+    report_path = "findings/report.md"
+    if kind == "unsafe":
+        report_path = "../outside.md"
+    elif kind == "symlink":
+        report.symlink_to(outside)
+    elif kind == "dangling-symlink":
+        report.symlink_to(report.parent / "missing.md")
+    elif kind == "parent-symlink":
+        report.parent.rmdir()
+        report.parent.symlink_to(tmp_path, target_is_directory=True)
+    elif kind == "directory":
+        report.mkdir()
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root can read files without permission bits")
+        report.write_text("# Unreadable writeup\n")
+        report.chmod(0)
+    findings = {"findings": [{"writeup": {"reportPath": report_path}}]}
+    original = copy.deepcopy(findings)
+    warnings = []
+    with pytest.raises(FINALIZER.ContractError):
+        FINALIZER._require_derived_writeup_files(
+            scan_dir, findings, missing_writeup_warnings=warnings
+        )
+    assert findings == original
+    assert warnings == []
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("error_code", [2, 3, 5, 22, 32, 33])
+def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch, error_code):
+    backend = windows_file_backend()
+    windows_error = load_script("windows_scan_local_files").WindowsScanLocalFileError
+    backend.open_read_fd.side_effect = windows_error(error_code, "Synthetic Windows file error")
+    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
+    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
+    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
+    findings = {"findings": [{"writeup": {"reportPath": "findings/report.md"}}]}
+    warnings = []
+    if error_code in {2, 3}:
+        FINALIZER._require_derived_writeup_files(
+            tmp_path, findings, missing_writeup_warnings=warnings
+        )
+        assert findings == {"findings": [{}]}
+        assert len(warnings) == 1
+    else:
+        with pytest.raises(FINALIZER.ContractError):
+            FINALIZER._require_derived_writeup_files(
+                tmp_path, findings, missing_writeup_warnings=warnings
+            )
+        assert "writeup" in findings["findings"][0]
+        assert warnings == []
 
 
 def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:

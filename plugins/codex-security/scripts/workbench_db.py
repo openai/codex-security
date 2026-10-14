@@ -1516,6 +1516,7 @@ def complete_scan_locked(
     merge_parent_draft = (
         scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
     )
+    missing_writeup_warnings: list[str] | None = [] if scan["mode"] == "deep" else None
     wrote = False
     try:
         with (
@@ -1553,10 +1554,22 @@ def complete_scan_locked(
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
                 completion_warnings=warnings if scan["mode"] != "deep" else None,
+                missing_writeup_warnings=missing_writeup_warnings,
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
         add_warning()
+        if missing_writeup_warnings:
+            warnings.extend(
+                warning for warning in missing_writeup_warnings if warning not in warnings
+            )
+            # Save the explanation before publication removes the broken reference,
+            # so a retry after an output-write failure retains it.
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                    (json.dumps(warnings), scan_id),
+                )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
