@@ -1147,6 +1147,25 @@ name/email, with a reason and checked citations.
 Git identities do not establish current employment or tracker accounts; match
 accounts before assigning. Use a checkout matching the findings.
 
+Owner reports now use `schemaVersion: 2`: consumers must handle Git name/email,
+GitHub user/team handles, email-only owners, and `null`. This is a breaking change
+under the pre-1.0 release policy. Example JSON excerpt:
+
+```json
+{
+  "schemaVersion": 2,
+  "results": [
+    {
+      "owner": {
+        "kind": "group",
+        "provider": "github",
+        "handle": "example/maintainers"
+      }
+    }
+  ]
+}
+```
+
 The command uses scan-default model/effort; override with `--model` and `--effort`.
 The model receives collected evidence with tools/network disabled. Exit `0`
 includes abstentions; `2` means invalid input or a failed recommendation, while
@@ -1158,6 +1177,10 @@ import { suggestOwners } from "@openai/codex-security";
 const owners = await suggestOwners("/path/to/repo", result.findings.findings, {
   reasoningEffort: "high",
 });
+for (const { owner } of owners.results) {
+  if (owner === null) continue;
+  console.log("handle" in owner ? owner.handle : owner.email);
+}
 ```
 
 SDK inputs can include `sourceRevision`. If it differs from `HEAD`, the collector

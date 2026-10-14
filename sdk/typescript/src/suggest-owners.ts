@@ -60,7 +60,7 @@ export interface OwnerSuggestion {
 }
 
 export interface OwnerSuggestions extends ScanModelConfiguration {
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: string;
   results: OwnerSuggestion[];
 }
@@ -100,7 +100,7 @@ export async function suggestOwnersInternal(
   const model = options.model ?? configured.model;
   const reasoningEffort = options.reasoningEffort ?? configured.reasoningEffort;
   const report: OwnerSuggestions = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: git.revision,
     model,
     reasoningEffort,

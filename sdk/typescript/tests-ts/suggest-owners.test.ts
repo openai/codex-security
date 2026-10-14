@@ -134,6 +134,7 @@ test.each(["ISO-8859-1", "UTF-16LE"])(
         };
       });
       const report = await suggestOwners(repo.path, [finding], { codex });
+      expect(report.schemaVersion).toBe(2);
       expect(report.results[0]).toMatchObject({
         status: "identified",
         owner: { name, email },
@@ -638,6 +639,7 @@ test("prioritizes the first committed declared owner without a model call", asyn
   const report = await suggestOwners(repo.path, [finding], { codex });
   expect(calls).toHaveLength(0);
   expect(report.revision).toBe(revision);
+  expect(report.schemaVersion).toBe(2);
   expect(report.results[0]).toMatchObject({
     findingId: finding.findingId,
     status: "identified",

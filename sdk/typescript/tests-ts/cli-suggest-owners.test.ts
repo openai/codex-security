@@ -35,7 +35,7 @@ async function input() {
 }
 
 const report: OwnerSuggestions = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   revision: "a".repeat(40),
   model: "synthetic-model",
   reasoningEffort: "high",

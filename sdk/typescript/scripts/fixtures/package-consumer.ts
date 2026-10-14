@@ -18,6 +18,9 @@ import {
   publishScan,
   runComponentScans,
   resolveProjectConfig,
+  suggestOwners,
+  type OwnerFinding,
+  type OwnerSuggestion,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
@@ -240,4 +243,29 @@ export async function dedupeRecords(
     },
   };
   return await deduplicateRecords(input, { reviewRunner, signal });
+}
+
+export const ownerVariants: OwnerSuggestion["owner"][] = [
+  { name: "Alex Example", email: "alex@example.test" },
+  { kind: "person", provider: "github", handle: "example-user" },
+  { kind: "group", provider: "github", handle: "example/maintainers" },
+  { kind: "person", email: "alex@example.test" },
+  null,
+];
+
+export function ownerIdentifier(owner: OwnerSuggestion["owner"]) {
+  if (owner === null) return null;
+  return "handle" in owner ? owner.handle : owner.email;
+}
+
+export async function suggestFindingOwners(
+  repository: string,
+  findings: OwnerFinding[],
+) {
+  const report = await suggestOwners(repository, findings);
+  const schemaVersion: 2 = report.schemaVersion;
+  return {
+    schemaVersion,
+    identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
+  };
 }
