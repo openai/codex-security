@@ -749,6 +749,9 @@ report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report does not fail the command; available findings
 still determine the severity-policy exit code.
 
+When Codex reports an exhausted usage limit, Deep Scan cancels active workers
+and stops retrying or launching replacements. Completed worker artifacts are retained.
+
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
 Work continues while you decide; the old limit remains active until saved.
