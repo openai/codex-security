@@ -4141,6 +4141,67 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
   assert.equal(store.dedupCommits.length, 0);
 }
 
+async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
+  kind: "discovery" | "dedup",
+) {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    stopAfterNoNew: 10,
+    stopAfterConsecutiveErrors: 4,
+    maxDiscoveryRuns: 10,
+  });
+  const normal = new FakeExecutor({
+    blockDiscoveryAfterCalls: kind === "discovery" ? 0 : 2,
+  });
+  const notified = Promise.withResolvers<void>();
+  const shutdown = Promise.withResolvers<void>();
+  const signals: AbortSignal[] = [];
+  const sleeps: number[] = [];
+  let discoveryCalls = 0;
+  let settled = false;
+  const terminal = runCoordinator(
+    fixture,
+    store,
+    {
+      async run(request) {
+        signals.push(request.signal);
+        if (request.kind === "discovery") discoveryCalls++;
+        if (
+          request.kind === kind &&
+          (kind === "dedup" || discoveryCalls === 2)
+        ) {
+          const error = new DeepScanNonRetryableError(
+            "Synthetic usage limit reached",
+          );
+          request.onNonRetryableError?.(error);
+          notified.resolve();
+          await shutdown.promise;
+          throw error;
+        }
+        return normal.run(request);
+      },
+    },
+    { clock: recordingClock(sleeps) },
+  ).finally(() => {
+    settled = true;
+  });
+  try {
+    await notified.promise;
+    assert.ok(signals.every((signal) => signal.aborted));
+    assert.equal(settled, false);
+    const callsAtFailure = signals.length;
+    shutdown.resolve();
+    const result = await terminal;
+    assert.equal(result?.status, "failed");
+    assert.equal(result?.error, "Synthetic usage limit reached");
+    assert.equal(signals.length, callsAtFailure);
+    assert.deepEqual(sleeps, []);
+  } finally {
+    shutdown.resolve();
+    await terminal;
+  }
+}
+
 try {
   await testDeepScanLifecycle({
     fixtureRun,
@@ -4150,6 +4211,8 @@ try {
     DeepScanCoordinatorRegistry,
     immediateClock,
   });
+  await testQuotaFailureStopsDispatchBeforeWorkerShutdown("discovery");
+  await testQuotaFailureStopsDispatchBeforeWorkerShutdown("dedup");
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();

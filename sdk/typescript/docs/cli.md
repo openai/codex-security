@@ -723,6 +723,9 @@ work is needed, the scan is preserved and you can run `scans match --all`.
 When Deep discovery has finished at a cost stop, the scan returns a sealed
 partial report and lists unvalidated candidates as follow-up work.
 
+When Codex reports an exhausted usage limit, Deep Scan cancels active workers
+and stops retrying or launching replacements. Completed worker artifacts are retained.
+
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
 Work continues while you decide; the old limit remains active until saved.

@@ -32,6 +32,7 @@ import {
   abortError,
   errorMessage,
   boundedDeepScanErrorMessage,
+  DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
   CodexWorkerExecutor,
@@ -139,6 +140,7 @@ export class DeepScanCoordinator {
       random: options.random ?? Math.random,
       log: this.log,
       retryDelaysMs: options.retryDelaysMs ?? RETRY_DELAYS_MS,
+      onNonRetryableError: (error: Error) => this.abortController.abort(error),
     } satisfies Omit<
       ConstructorParameters<typeof DeepScanWorkerRunner>[0],
       "signal"
@@ -422,6 +424,11 @@ export class DeepScanCoordinator {
       }
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
+      }
+      if (
+        this.abortController.signal.reason instanceof DeepScanNonRetryableError
+      ) {
+        error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
       const persistedMessage = boundedDeepScanErrorMessage(error);
