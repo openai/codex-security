@@ -22,6 +22,8 @@ import {
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type PatchOptions,
+  type PatchResult,
   type ProjectConfigInput,
   type SeverityClassification,
   type ScanSeverityClassification,
@@ -179,6 +181,36 @@ export async function validate(
     finding,
   };
   return await client.validate(options);
+}
+
+export async function patch(
+  repositoryPath: string,
+  finding: Finding | ImportedFinding,
+): Promise<PatchResult> {
+  await using client = new CodexSecurity();
+  const options: PatchOptions = {
+    repositoryPath,
+    finding,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+  };
+  const result = await client.patch(options);
+  result.changedFiles satisfies readonly string[];
+  // @ts-expect-error Patch results expose changed files as immutable metadata.
+  result.changedFiles.push("unexpected.ts");
+  switch (result.status) {
+    case "verified":
+    case "no_change":
+      result.verificationReport satisfies string;
+      break;
+    case "blocked":
+    case "failed":
+      result.reason satisfies string;
+      break;
+    default:
+      result satisfies never;
+  }
+  return result;
 }
 
 // @ts-expect-error The dependency-injection constructor is internal.

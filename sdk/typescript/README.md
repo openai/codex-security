@@ -392,6 +392,71 @@ To validate GitHub code scanning alerts, first import them with
 `importGitHubCodeScanningAlerts()`. See the
 [import guide](docs/cli.md#import-alerts-from-the-cli) for CLI and SDK examples.
 
+### Generate and verify a patch
+
+`patch()` runs the bundled remediation workflow non-interactively against a
+workspace that the caller has intentionally made writable:
+
+```ts
+const security = new CodexSecurity();
+try {
+  const result = await security.patch({
+    repositoryPath: "/path/to/disposable/workspace",
+    finding: {
+      title: "Possible SQL injection",
+      summary: "User input reaches a raw SQL query.",
+      locations: [{ path: "src/query.ts", startLine: 42 }],
+    },
+    signal,
+    onActivity(activity) {
+      console.log(activity.description);
+    },
+    onCost(cost) {
+      console.log(cost.estimatedUsd);
+    },
+  });
+
+  switch (result.status) {
+    case "verified":
+    case "no_change":
+      console.log(result.verificationReport);
+      break;
+    case "blocked":
+    case "failed":
+      console.error(result.reason);
+      break;
+  }
+} finally {
+  await security.close();
+}
+```
+
+Pass literal finding text or a JSON-serializable object; strings are never read
+as file paths. Sandboxed patch commands may edit only `repositoryPath` and run
+without network access or web search. Patch workspaces are always treated as
+untrusted Codex projects, so repository-local Codex configuration and MCP
+servers are not loaded. Host-configured tools retain their host permissions.
+The method does not create a commit, push, open a pull request, publish findings,
+change remote finding state, or add a scan to history.
+Callers remain responsible for reviewing and deriving the authoritative diff,
+approval, commit creation, and delivery.
+
+The discriminated result reports `verified`, `no_change`, `blocked`, or
+`failed`, plus repository-relative `changedFiles`, `threadId`, and estimated
+`cost` when model pricing and usage are available. Verified and no-change
+results include `verificationReport`; blocked and failed results include
+`reason`. Transport, authentication, cancellation, incomplete turns, and
+malformed results reject the promise. Failed, blocked, or interrupted operations
+can leave partial workspace changes for the caller to inspect or discard.
+
+`changedFiles` is model-reported metadata, not the authoritative diff.
+Patch-risk assessment is not included in this API.
+
+Patch operations reuse constructor configuration and credentials. Pass `auth`,
+`safetyIdentifier`, `model`, or `reasoningEffort` for per-call selection.
+`onActivity`, `onSessionEvent`, `onCost`, `onReconnect`, `onAuthentication`,
+`onWarning`, and `onObserverError` use the same observer contracts as scans.
+
 ## CLI
 
 After [installing the CLI](#install-the-cli), sign in if needed:
