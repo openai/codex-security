@@ -137,7 +137,7 @@ describe("scan navigation", () => {
     result.manifest.scan.id = completedId;
     const cli = createCliTest(main);
     expect(await cli.runCli(["scan", "--json"], dependencies({ result }))).toBe(
-      2,
+      0,
     );
     expect(JSON.parse(cli.stdout.text())).toEqual(result.toJSON());
     expect(cli.stderr.text()).toContain(`Scan ${completedId} · complete`);

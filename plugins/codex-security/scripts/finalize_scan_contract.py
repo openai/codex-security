@@ -1195,19 +1195,12 @@ def _recover_unsealed_coverage(
 ) -> None:
     schema = _read_json(schema_dir / "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
-    completeness = coverage.get("completeness")
-    partial = completeness not in ("complete", "partial", "unknown")
-    if partial:
-        warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
     if (
         coverage.get("mode") == "deep_repository"
         and coverage.get("inventoryStrategy") != "repository"
     ):
         coverage["inventoryStrategy"] = "repository"
-        warnings.append(
-            "Recovered malformed Deep Scan inventory strategy; marked coverage as partial."
-        )
-        partial = True
+        warnings.append("Recovered malformed Deep Scan inventory strategy.")
 
     surface_ids: set[str] = set()
     for field, label in (
@@ -1221,7 +1214,6 @@ def _recover_unsealed_coverage(
         if not isinstance(items, list):
             warnings.append(f"Skipped malformed {label} records: expected an array.")
             coverage[field] = []
-            partial = True
             continue
 
         recovered: list[dict[str, Any]] = []
@@ -1275,21 +1267,14 @@ def _recover_unsealed_coverage(
                         recovered_receipts.append(normalized_ref)
 
                     item["receiptRefs"] = recovered_receipts
-                    if surface_recovered or item["disposition"] == "needs_follow_up":
-                        if not surface_recovered and completeness != "partial":
-                            warnings.append(
-                                f"Coverage surface {index + 1} requires follow-up; "
-                                "marked coverage as partial."
-                            )
+                    if surface_recovered:
                         item["disposition"] = "needs_follow_up"
-                        partial = True
 
                 if field == "deferred":
                     _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
-                partial = True
                 continue
 
             if field == "surfaces":
@@ -1305,7 +1290,6 @@ def _recover_unsealed_coverage(
             {"id": f"discarded-finding-{index}", "reason": warning}
             for index, warning in enumerate(discarded_findings, 1)
         )
-        partial = True
 
     if "resolvedDeferred" in coverage:
         try:
@@ -1318,14 +1302,6 @@ def _recover_unsealed_coverage(
         except ContractError as exc:
             coverage.pop("resolvedDeferred")
             warnings.append(f"Skipped malformed resolved deferred work: {exc}.")
-            partial = True
-
-    if coverage["deferred"] and completeness != "partial":
-        if not discarded_findings:
-            warnings.append("Coverage has deferred review work; marked coverage as partial.")
-        partial = True
-    if partial:
-        coverage["completeness"] = "partial"
 
 
 def _recover_unsealed_hardening(
@@ -1671,7 +1647,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     if coverage.get("scanId") != scan_id:
         raise ContractError("coverage.scanId: must match manifest scan id")
     _require_str(coverage, "mode", "coverage")
-    completeness = _require_str(coverage, "completeness", "coverage")
     _require_str(coverage, "inventoryStrategy", "coverage")
     scope = _require_dict(scan, "scope", "manifest.scan")
     if coverage.get("includePaths") != scope.get("includePaths"):
@@ -1679,7 +1654,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     if coverage.get("excludePaths") != scope.get("excludePaths"):
         raise ContractError("coverage.excludePaths: must match manifest scope")
     surface_ids: set[str] = set()
-    has_needs_follow_up = False
     for index, surface in enumerate(_require_list(coverage, "surfaces", "coverage")):
         context = f"coverage.surfaces[{index}]"
         if not isinstance(surface, dict):
@@ -1692,7 +1666,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         disposition = _require_str(surface, "disposition", context)
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
-        has_needs_follow_up = has_needs_follow_up or disposition == "needs_follow_up"
         receipt_refs = surface.get("receiptRefs", [])
         if not isinstance(receipt_refs, list):
             raise ContractError(f"{context}.receiptRefs: expected an array")
@@ -1717,8 +1690,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         if isinstance(deferred, dict):
             _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
     _validate_resolved_deferred(coverage)
-    if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
-        raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
     _require_safe_json_value(coverage, "coverage.json")
 
 
@@ -2700,9 +2671,8 @@ def build_sarif_projection(
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
     execution_successful = manifest["scan"]["status"] == "completed"
-    if not execution_successful or coverage["completeness"] != "complete":
+    if not execution_successful or coverage["deferred"]:
         run = sarif["runs"][0]
-        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
         run["invocations"] = [
             {
                 "executionSuccessful": execution_successful,
@@ -2959,6 +2929,8 @@ def _prepare_scan_finalization(
         findings, coverage = copy.deepcopy(draft_documents[1:])
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
+        # Preserve legacy sealed bundles, but do not publish a completeness claim.
+        coverage.pop("completeness", None)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)
         # Label whole-repository Deep scans as using the repository inventory.
         if expected_coverage_mode == "deep_repository":
@@ -2997,6 +2969,11 @@ def _prepare_scan_finalization(
         discarded_findings = _recover_unsealed_findings(
             manifest, findings, schema_dir, scan_dir, completion_warnings
         )
+        if scan["status"] == "completed" and discarded_findings:
+            raise RecoverableContractError(
+                "Scan result contains invalid findings; repair the required finding records "
+                "before completion. " + " ".join(discarded_findings)
+            )
         _recover_unsealed_coverage(
             coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
         )

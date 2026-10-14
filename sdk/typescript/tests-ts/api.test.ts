@@ -4960,10 +4960,10 @@ describe("CodexSecurity orchestration", () => {
             await copyCompletedScan(root);
             const coveragePath = join(scanDir, "coverage.json");
             const original = await readFile(coveragePath, "utf8");
-            const coverage = original.replace(
-              '"completeness": "complete"',
-              `"completeness": "${outcome}"`,
-            );
+            const coverage = JSON.stringify({
+              ...JSON.parse(original),
+              completeness: outcome,
+            });
             const manifestPath = join(scanDir, "scan-manifest.json");
             await writeFile(coveragePath, coverage);
             await writeFile(
@@ -5384,7 +5384,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["partial", "invalid", "unavailable"] as const)(
+  test.each(["completed", "failed", "unavailable"] as const)(
     "recovers exhausted deep-scan budget when completion is %s",
     async (completion) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
@@ -5425,9 +5425,8 @@ describe("CodexSecurity orchestration", () => {
           const coveragePath = join(scanDir, "coverage.json");
           const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
           coverage.mode = "deep_repository";
-          coverage.completeness =
-            completion === "invalid" ? "complete" : "partial";
-          if (completion === "partial") {
+          delete coverage.completeness;
+          if (completion === "completed") {
             coverage.deferred.push({
               id: "budget-exhausted",
               reason: "The scan reached its configured cost limit.",
@@ -5437,6 +5436,7 @@ describe("CodexSecurity orchestration", () => {
           await writeFile(coveragePath, coverageBytes);
           const manifestPath = join(scanDir, "scan-manifest.json");
           const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          if (completion === "failed") manifest.scan.status = "failed";
           const artifact = manifest.scan.artifacts.find(
             (item: { path: string }) => item.path === "coverage.json",
           );
@@ -5463,7 +5463,7 @@ describe("CodexSecurity orchestration", () => {
           onWarning: (warning) => warnings.push(warning),
           signal: AbortSignal.timeout(5_000),
         });
-        if (completion === "unavailable" || completion === "invalid") {
+        if (completion === "unavailable" || completion === "failed") {
           await expect(result).rejects.toBeInstanceOf(
             ScanCostLimitExceededError,
           );
@@ -5476,7 +5476,7 @@ describe("CodexSecurity orchestration", () => {
           }
         } else {
           const recovered = await result;
-          expect(recovered.coverage.completeness).toBe(completion);
+          expect(recovered.coverage).not.toHaveProperty("completeness");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);

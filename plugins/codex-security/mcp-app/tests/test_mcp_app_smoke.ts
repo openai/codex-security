@@ -1013,7 +1013,7 @@ async function writeCompletedContract(
     schemaVersion: "1.0",
     scanId,
     mode: "repository",
-    completeness: "complete",
+
     inventoryStrategy: "repository",
     includePaths: ["."],
     excludePaths: [],

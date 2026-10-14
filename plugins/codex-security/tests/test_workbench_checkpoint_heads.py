@@ -175,7 +175,7 @@ def test_file_authored_resolution_can_leave_manifest_unchanged(
         tmp_path, scan_id, binding, [], warnings, stopped=False, reason=""
     )
     # Headless file-authored documents replace their older checkpoint coverage.
-    assert result[2]["completeness"] == ("partial" if retain_pending else "complete")
+    assert "completeness" not in result[2]
     assert result[2]["deferred"] == ([independent] if retain_pending else [])
     assert warnings == []
 
@@ -301,7 +301,7 @@ def test_malformed_parent_deferred_id_reaches_existing_recovery_diagnostics(
         )
         assert warnings
         assert all(isinstance(row["id"], str) for row in coverage["deferred"])
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])

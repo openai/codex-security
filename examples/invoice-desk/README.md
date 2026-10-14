@@ -128,7 +128,7 @@ scan step, and no GitHub token is passed to the scanner.
 
 Results appear under **Actions → Invoice Desk OpenAI scan**. This separate
 workflow does not create a PR status check or merge gate. Its summary identifies
-the PR and source commit, completion, finding and severity counts, coverage,
+the PR and source commit, completion, finding and severity counts, requested scope,
 elapsed time, and package-cache reuse. Passing behavior tests alone does not
 mean a source scan completed.
 

@@ -22,10 +22,10 @@ do not count.
 
 Every location must cite a fixture file and an in-bounds line range. Each
 non-supporting location must match an exposure classified by that finding's
-taxonomy. The grader rejects unrelated locations and incomplete coverage.
-Deferred work, surfaces needing follow-up, or exclusions that match fixture
-files make coverage incomplete. Exclusions outside the generated repository
-are allowed. Supporting locations, including the production `expected_control`
+taxonomy. The grader rejects unrelated locations and explicit exclusions that
+match fixture files. Exclusions outside the generated repository are allowed.
+Scope notes, deferred work, and surfaces needing follow-up do not change the
+grade: final findings must independently satisfy every positive case. Supporting locations, including the production `expected_control`
 role, may cite benign context but cannot satisfy recall. Known credential-use
 sites may be cited as sinks; they cannot replace the exposed source location.
 

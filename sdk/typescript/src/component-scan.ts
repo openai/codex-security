@@ -25,7 +25,7 @@ import type { ScanCost, ScanSessionEvent } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import { errorMessage } from "./errors.js";
-import type { CoverageCompleteness, Finding } from "./models.js";
+import type { Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanSettings } from "./scan-settings.js";
@@ -74,7 +74,6 @@ export interface ComponentReceipt {
   outputDir: string;
   scanId?: string;
   threatModelPath?: string;
-  coverage?: CoverageCompleteness;
   findingCount?: number;
   cost?: Readonly<ScanCost>;
   error?: string;
@@ -231,13 +230,13 @@ export async function runComponentScans(
               outputDir: receipt.outputDir,
               signal: options.signal,
             });
+            if (result.manifest.scan.status !== "completed")
+              throw new Error(`Component scan ${result.manifest.scan.status}.`);
             results.set(receipt.id, result);
             receipt.scanId = result.manifest.scan.id;
-            receipt.coverage = result.coverage.completeness;
             receipt.findingCount = result.findings.findings.length;
             if (result.cost !== null) receipt.cost = result.cost;
-            receipt.status =
-              receipt.coverage === "complete" ? "completed" : "incomplete";
+            receipt.status = "completed";
             if (result.threatModelPath !== null)
               receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
@@ -320,12 +319,6 @@ export async function runComponentScans(
     ...summary,
     repository,
     components: receipts,
-    completeness:
-      summary.failed ||
-      summary.incomplete ||
-      deduplication.status === "incomplete"
-        ? "partial"
-        : "complete",
   });
   await writeFile(
     summary.reportPath,

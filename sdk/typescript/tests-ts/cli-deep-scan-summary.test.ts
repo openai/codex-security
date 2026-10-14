@@ -28,7 +28,7 @@ async function summary(
       ["scan", ...args, "--json"],
       dependencies({ ...options, result }),
     ),
-  ).toBe(result.coverage.completeness === "complete" ? 0 : 2);
+  ).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   return stderr.text();
 }

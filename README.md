@@ -201,9 +201,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
 
-Findings are report-only by default. Partial scans with valid results produce a
-warning; scanner and required reporting errors fail the job. Severity thresholds
-apply to complete scans.
+Findings are report-only by default. Set a severity threshold to fail on reported
+findings at or above it. Scanner and required reporting errors fail the job;
+intentional file exclusions and investigation notes do not.
 See the [Action setup and input reference](github-action/README.md) for PR scans,
 severity thresholds, and report uploads.
 

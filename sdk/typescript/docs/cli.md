@@ -361,21 +361,27 @@ Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`)
 SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
 
 Scans are report-only by default. `--fail-on-severity high` exits with `1` for
-high or critical findings. Incomplete scans exit with `2`, returning available
-results and a coverage warning. `scan`, `scans rerun`, and `scans resume`
-execution failures with `--json`, JSON, or JSONL output produce:
+high or critical findings. Scope exclusions, skipped files, and follow-up notes
+do not fail a scan or bypass the findings threshold. Execution, target-integrity,
+and required-output failures exit with `2`.
+
+New reports omit `coverage.completeness`. Existing sealed reports remain readable;
+use `manifest.scan.status` and the command exit code to distinguish execution
+failures from findings-policy violations. Legacy completeness values affect neither.
+
+`scan`, `scans rerun`, and `scans resume` execution failures with `--json`, JSON,
+or JSONL output produce:
 
 ```json
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
-A scan that returns partial or unknown coverage uses that failure envelope and
-keeps its available results under `data`. This also applies to `scans rerun` and
-`scans resume`. If the scan target also changed, the error explains that the
-results no longer represent the current checkout. For incomplete `scans rerun` and
-`scans resume` envelopes, `--filter-output` applies to `data`; selecting an
-unavailable field can return `null` or omit `data`.
+If the scan target changed, the error explains that the results no longer
+represent the current checkout. Retained results remain available under `data`
+when a result was produced. This also applies to `scans rerun` and `scans resume`.
+`--filter-output` applies to retained `data`; selecting an unavailable field can
+return `null` or omit `data`.
 
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
@@ -514,11 +520,11 @@ calls and may produce more components. Planning leaves source unchanged.
 
 Each component saves artifacts under `component-N/`. Combined `findings.json`
 groups high-confidence root-cause matches, keeping original IDs and the highest
-severity. Uncertain matches stay separate. `summary.json` records coverage and
+severity. Uncertain matches stay separate. `summary.json` records component execution and
 matching status; `report.md` links to component reports. Export or publish each
 individual scan folder.
 
-Failures do not stop other components. Failed scans, incomplete coverage, or
+Failures do not stop other components. Failed scans or
 failed matching return `2`; severity-policy violations return `1`. Retry with
 `--components-file retry-components.json` and a new empty output directory.
 The retry report covers only those components.
@@ -721,7 +727,9 @@ Automatic history matching gets at most one extra call with a limit; if more
 work is needed, the scan is preserved and you can run `scans match --all`.
 
 When Deep discovery has finished at a cost stop, the scan returns a sealed
-partial report and lists unvalidated candidates as follow-up work.
+report and lists unvalidated candidates as follow-up work. Reaching a configured
+limit with a valid finalized report does not fail the command; available findings
+still determine the severity-policy exit code.
 
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
@@ -822,8 +830,8 @@ overrides them with a path scope. `--output-dir` requires CSV input.
 
 Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--scan-prompt-file` adds shared instructions before each row's prompt.
-`--post-scan-prompt-file` runs a follow-up even after failure or incomplete
-coverage, but not after cancellation or a cost stop.
+`--post-scan-prompt-file` runs a follow-up even after failure, but not after
+cancellation or a cost stop.
 
 Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
@@ -845,7 +853,7 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Recovery requires a matching campaign manifest. It skips completed results
-(including partial coverage) and repositories never started. For each latest
+(including saved results with legacy coverage notes) and repositories never started. For each latest
 failed or interrupted attempt:
 
 - A sealed scan is recorded in `results.jsonl` without scanning again.
@@ -861,7 +869,7 @@ fresh completed checkouts are removed after recording their result.
 
 Same-scan resume needs the original checkout, session logs, and state directory.
 Recovery cannot reconstruct deleted checkpoints or fix execution failures.
-New attempts incur new costs. Remaining failures or partial coverage return `2`;
+New attempts incur new costs. Remaining execution failures return `2`;
 completed severity-policy violations return `1` without retrying the scan.
 
 ## Custom validation
@@ -916,9 +924,9 @@ Set severity/impact to `{ "level": "medium", "rationale": "..." }` to revise
 them, or null to retain them. Identity and source locations stay unchanged.
 
 Candidates and results remain under `artifacts/custom-validation/`. Setup
-failure, incomplete/invalid output, or any deferred candidate means incomplete
-coverage. An incompatible plugin stops the scan. Supply the validation prompt
-again when rerunning.
+failure or incomplete/invalid output fails the scan. Deferred candidates remain
+follow-up notes and do not fail the scan. An incompatible plugin stops the scan.
+Supply the validation prompt again when rerunning.
 
 ## Publish findings to Cloud
 
@@ -1275,9 +1283,11 @@ to update campaign receipts. Individual resume does not update `results.jsonl`.
 ### Matching saved scans
 
 Matching uses sealed artifacts and cached decisions unless `--force` is supplied.
-Comparisons classify findings as new, persisting, reopened, resolved, or unknown.
-An absent finding is not resolved when the later scan is incomplete or excludes
-its scope. One comparison ID is compared with the latest completed scan.
+Comparisons classify findings as new, persisting, reopened, not observed, resolved,
+or unknown. An absent finding in the later scope is not observed; absence alone
+does not verify remediation. A finding is resolved only after it was explicitly
+closed as already fixed. Excluded paths and uncertain matches remain unknown.
+One comparison ID is compared with the latest completed scan.
 
 ```bash
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
@@ -1371,12 +1381,12 @@ codex-security scan . --diff origin/main \
   > "$SCAN_ROOT/findings.json"
 ```
 
-| Exit code     | Meaning                                                               |
-| ------------- | --------------------------------------------------------------------- |
-| `0`           | Complete report-only scan or passing severity policy.                 |
-| `1`           | Severity policy violation.                                            |
-| `2`           | Invalid input, incomplete coverage, runtime error, or export failure. |
-| `130` / `143` | Interrupt / termination.                                              |
+| Exit code     | Meaning                                                                  |
+| ------------- | ------------------------------------------------------------------------ |
+| `0`           | Complete report-only scan or passing severity policy.                    |
+| `1`           | Severity policy violation.                                               |
+| `2`           | Invalid input, runtime error, target change, or required-output failure. |
+| `130` / `143` | Interrupt / termination.                                                 |
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
 `--json`. For GitHub Actions setup, see the

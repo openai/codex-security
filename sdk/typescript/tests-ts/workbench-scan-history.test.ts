@@ -205,7 +205,14 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: {
+      new: 1,
+      persisting: 2,
+      reopened: 0,
+      resolved: 0,
+      not_observed: 1,
+      unknown: 0,
+    },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -513,7 +520,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    resolved: { summary: { new: 1, resolved: 0, not_observed: 1, unknown: 0 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [

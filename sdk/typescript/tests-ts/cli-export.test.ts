@@ -775,10 +775,10 @@ describe("CLI", () => {
           const sarif = JSON.parse(contents);
           expect(sarif.version).toBe("2.1.0");
           const run = sarif.runs[0];
-          expect(run.properties.codexSecurityCoverageCompleteness).toBe(
-            completeness === "complete" ? undefined : completeness,
+          expect(run.properties).not.toHaveProperty(
+            "codexSecurityCoverageCompleteness",
           );
-          if (completeness === "complete") {
+          if (!hasDeferred) {
             expect(run.invocations).toBeUndefined();
           } else {
             expect(run.invocations).toHaveLength(1);

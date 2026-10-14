@@ -282,12 +282,12 @@ describe("bundled plugin build", () => {
             manifest: { scan: {} },
             findings: { findings: [] },
             coverage: {
-              completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
+              surfaces: [], explicitExclusions: [], deferred: [],
             },
           };
           assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
           assert.throws(() => helpers.parseCanonicalScanDraft({
-            ...input, coverage: { ...input.coverage, completeness: "invalid" },
+            ...input, coverage: { ...input.coverage, surfaces: "invalid" },
           }));
           assert.equal(process.exitCode, undefined);
         `,

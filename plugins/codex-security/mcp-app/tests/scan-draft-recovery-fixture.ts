@@ -133,8 +133,6 @@ export function draftFixture(root: string, layout: Layout) {
     complete,
     findings: [],
     coverage: {
-      completeness:
-        complete && !coverage.deferred?.length ? "complete" : "partial",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],

@@ -66,7 +66,6 @@ try {
   const shared = finding("shared", "src/shared.ts");
   const independent = finding("independent", "src/independent.ts");
   const rejectedCoverage = {
-    completeness: "partial",
     surfaces: [
       {
         label: "SQL route",
@@ -107,7 +106,7 @@ try {
     id: "worker-002",
     result: workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." },
-      coverage: { ...workerDraft([]).coverage, completeness: "unknown" },
+      coverage: { ...workerDraft([]).coverage },
     }),
   });
   const originalWorkerArtifacts = await Promise.all(
@@ -443,7 +442,7 @@ try {
 
   for (const invalidCoverage of [
     undefined,
-    { ...workerDraft([]).coverage, completeness: "outdated" },
+    { ...workerDraft([]).coverage, deferred: "invalid" },
   ]) {
     await writeJson(first.resultPath, {
       ...first.result,

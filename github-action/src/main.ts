@@ -158,11 +158,8 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
         finalSummary = resultSummary(result, inputs, target);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== 'failed' && (result.scanStatus === 'incomplete' ||
-          (result.scanStatus === 'completed' && result.policyStatus === 'passed'));
+        success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === 'incomplete')
-          core.warning('Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.');
       }
     }
   } catch (error) {

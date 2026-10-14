@@ -300,7 +300,11 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
-  completeness: "complete" | "partial" | "unknown";
+  /**
+   * @deprecated
+   * Legacy coverage label retained only for reading existing scan artifacts. New producers omit this field.
+   */
+  completeness?: "complete" | "partial" | "unknown";
   inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];

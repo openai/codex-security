@@ -63,7 +63,7 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"]
         == expected_status
     )
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
+    assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
     for export_format in ("json", "csv", "sarif"):
         exported = scan_command(state_dir, "export-findings", scan_id, "--format", export_format)
         assert Path(str(exported["export"]["path"])).is_file()
@@ -414,7 +414,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"
-    assert final_coverage["completeness"] == "complete"
+    assert "completeness" not in final_coverage
     assert not any(item.get("candidateId") == "candidate-x" for item in final_coverage["deferred"])
     assert any(
         item.get("candidateId") == "candidate-x" and item["disposition"] == disposition

@@ -302,14 +302,33 @@ describe("scan history renderer", () => {
         "compare",
         { color: false },
       );
-      if (coverage === "complete") {
-        expect(comparison).not.toContain("Follow-up coverage");
-      } else {
-        expect(comparison).toContain(
-          `⚠ Follow-up coverage is ${coverage}; resolved findings cannot be confirmed.`,
-        );
-      }
+      expect(comparison).not.toContain("Follow-up coverage");
     }
+  });
+
+  test("shows absent findings without claiming they were fixed", () => {
+    const output = renderScanHistory(
+      {
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { not_observed: 1 },
+        findings: [
+          {
+            status: "not_observed",
+            severity: "high",
+            title: "Missing authorization",
+            path: "src/handler.ts",
+            reason:
+              "Not observed in the later scan; remediation has not been verified.",
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(output).toContain("Not observed");
+    expect(output).not.toContain("Resolved");
+    expect(output).not.toContain("Follow-up coverage");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {

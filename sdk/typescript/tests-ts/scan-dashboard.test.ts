@@ -1344,7 +1344,7 @@ describe("live scan dashboard", () => {
       },
     });
     expect(frame()).toContain("3 findings → 2 groups · matching incomplete");
-    expect(frame()).toContain("partial results");
+    expect(frame()).toContain("Finished with errors");
     expect(timers).toBe(1);
     dashboard.stop();
     expect(timers).toBe(0);

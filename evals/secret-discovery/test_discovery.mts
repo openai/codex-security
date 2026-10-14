@@ -67,7 +67,6 @@ function retainedResult(fixture: ReturnType<typeof createFixture>): TestResult {
       ],
     })),
     coverage: {
-      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -789,11 +788,15 @@ test("accepts public-key context alongside credential evidence", () => {
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
-test("incomplete coverage cannot pass even with all positive findings", () => {
-  const { fixture, result } = retainedFixture();
-  result.coverage.completeness = "partial";
-  assert.equal(gradeResult(result, fixture).passed, false);
-});
+for (const completeness of ["complete", "partial", "unknown"]) {
+  test(`legacy ${completeness} coverage does not change finding-based grading`, () => {
+    const { fixture, result } = retainedFixture();
+    Object.assign(result.coverage, { completeness });
+    assert.equal(gradeResult(result, fixture).passed, true);
+    result.findings.pop();
+    assert.equal(gradeResult(result, fixture).passed, false);
+  });
+}
 
 for (const [name, mutate] of [
   [
@@ -816,17 +819,17 @@ for (const [name, mutate] of [
     },
   ],
 ] as const) {
-  test(`complete coverage cannot pass with ${name}`, () => {
+  test(`accepts ${name} when all positive findings are retained`, () => {
     const { fixture, result } = retainedFixture();
     mutate(result.coverage);
     const report = gradeResult(result, fixture);
     assert.equal(report.recall, 1);
-    assert.equal(report.passed, false);
-    assert.deepEqual(report.errors, ["incomplete coverage"]);
+    assert.equal(report.passed, true);
+    assert.deepEqual(report.errors, []);
   });
 }
 
-test("complete coverage permits reviewed surfaces and nonblocking questions", () => {
+test("scope notes retain reviewed surfaces and open questions", () => {
   const { fixture, result } = retainedFixture();
   result.coverage.surfaces.push({
     label: "configuration",
@@ -851,7 +854,7 @@ for (const pattern of [
   "/tmp/generated-repo/config/",
   "/",
 ]) {
-  test(`complete coverage cannot exclude fixture path ${pattern}`, () => {
+  test(`review cannot exclude fixture path ${pattern}`, () => {
     const { fixture, result } = retainedFixture();
     result.coverage.explicitExclusions.push({
       pattern,
@@ -860,11 +863,11 @@ for (const pattern of [
     const report = gradeResult(result, fixture, "/tmp/generated-repo");
     assert.equal(report.recall, 1);
     assert.equal(report.passed, false);
-    assert.deepEqual(report.errors, ["incomplete coverage"]);
+    assert.deepEqual(report.errors, ["fixture paths excluded from review"]);
   });
 }
 
-test("complete coverage permits exclusions outside the generated fixture", () => {
+test("review permits exclusions outside the generated fixture", () => {
   const { fixture, result } = retainedFixture();
   result.coverage.explicitExclusions.push(
     { pattern: "node_modules/**", reason: "No dependencies in fixture" },
@@ -907,7 +910,7 @@ for (const repo of [
       const report = gradeResult(result, fixture, repo);
       assert.equal(report.recall, 1);
       assert.equal(report.passed, false, pattern);
-      assert.deepEqual(report.errors, ["incomplete coverage"]);
+      assert.deepEqual(report.errors, ["fixture paths excluded from review"]);
     }
     const external = retainedResult(fixture);
     external.coverage.explicitExclusions.push(
@@ -941,7 +944,7 @@ test("Windows drive casing does not hide an in-scope exclusion", () => {
   });
   const report = gradeResult(result, fixture, String.raw`C:\Temp\repository`);
   assert.equal(report.passed, false);
-  assert.deepEqual(report.errors, ["incomplete coverage"]);
+  assert.deepEqual(report.errors, ["fixture paths excluded from review"]);
 });
 
 for (const [repo, prefix, ancestor] of [
@@ -988,7 +991,7 @@ for (const [repo, prefix, ancestor] of [
       });
       const report = gradeResult(result, fixture, repo);
       assert.equal(report.passed, false, pattern);
-      assert.deepEqual(report.errors, ["incomplete coverage"]);
+      assert.deepEqual(report.errors, ["fixture paths excluded from review"]);
     }
     for (const pattern of [
       `${prefix}-external/src/client.py`,
@@ -1061,7 +1064,7 @@ test("stages production prompt unchanged and no labels; grades only the final SD
                   type: "agent_message",
                   text: JSON.stringify({
                     findings: [],
-                    coverage: { completeness: "complete" },
+                    coverage: {},
                   }),
                 },
               };

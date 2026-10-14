@@ -531,7 +531,7 @@ export class ScanDashboard {
       result.failed ||
         result.incomplete ||
         result.deduplication?.status === "incomplete"
-        ? "Finished with partial results"
+        ? "Finished with errors"
         : "Complete",
     );
   }

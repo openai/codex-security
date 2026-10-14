@@ -239,7 +239,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert manifest["scan"]["sealedAt"]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["mode"] == "deep_repository"
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["deferred"][0]["id"] == "candidate-1"
     assert coverage["deferred"][0]["paths"] == ["app.py"]
     assert "cost limit" in coverage["deferred"][0]["reason"]
@@ -266,7 +266,7 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["deferred"][0]["id"] == "candidate-1"
 
 
@@ -306,7 +306,7 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["surfaces"][0]["disposition"] == surface_disposition
     assert any(row["id"] == "candidate-1" for row in coverage["deferred"]) is deferred
     if not deferred:
@@ -411,7 +411,7 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["deferred"] == [
         {
             "id": "scan-cost-limit",
@@ -2356,7 +2356,7 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     assert "sourceExcerpt" not in finding
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
+    assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
 
 
 def test_workbench_warns_after_working_tree_head_changes(

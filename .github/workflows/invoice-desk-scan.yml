@@ -207,7 +207,7 @@ jobs:
 
           root = Path(os.environ["RUNNER_TEMP"])
           completed = os.environ["SCAN_EXIT_CODE"] == "0"
-          counts, coverage, total, usage, cost_range = {}, None, None, None, None
+          counts, total, usage, cost_range = {}, None, None, None
           result = {}
           result_path = root / "invoice-desk-result.json"
           if result_path.is_file() and result_path.stat().st_size:
@@ -223,14 +223,14 @@ jobs:
                   "cache_write_input_tokens_reported", "output_tokens"
               )}
           cost_range = (result.get("cost") or {}).get("estimatedUsdRange")
-          coverage = (result.get("coverage") or {}).get("completeness")
+          coverage = result.get("coverage") or {}
           if completed:
               findings = json.loads((root / "invoice-desk-scan/findings.json").read_text())["findings"]
-              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())["completeness"]
+              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())
               counts = Counter(finding["severity"]["level"] for finding in findings)
               total = len(findings)
           metrics = {
-              "schemaVersion": 1,
+              "schemaVersion": 2,
               "sourceSha": os.environ["SOURCE_SHA"],
               "workflowSha": os.environ["GITHUB_SHA"],
               "pullRequest": int(os.environ["PR_NUMBER"]) or None,
@@ -242,7 +242,8 @@ jobs:
               "packageCacheReusedFromPreviousRun": os.environ["PREVIOUS_CACHE_HIT"] == "true",
               "packageCacheRestoredForScan": os.environ["SCAN_CACHE_HIT"] == "true",
               "findings": total, "findingsBySeverity": dict(counts),
-              "coverage": coverage, "tokenUsage": usage, "estimatedUsdRange": cost_range,
+              "scope": {key: coverage.get(key, []) for key in ("includePaths", "excludePaths")},
+              "tokenUsage": usage, "estimatedUsdRange": cost_range,
               "seedRecall": None,
           }
           (root / "invoice-desk-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
@@ -255,7 +256,8 @@ jobs:
               if not completed:
                   summary.write("The scan did not complete. Check the scan step and any saved reports; this is not a clean security result.\n")
               else:
-                  summary.write(f"Reported findings: **{total}**. Coverage: **{coverage}**.\n\n")
+                  summary.write(f"Scan completed. Reported findings: **{total}**.\n\n")
+                  summary.write("Scope:\n\n```json\n" + json.dumps(metrics["scope"], indent=2) + "\n```\n\n")
                   summary.write("| Severity | Count |\n| --- | --- |\n")
                   for severity in ("critical", "high", "medium", "low", "informational"):
                       summary.write(f"| {severity} | {counts[severity]} |\n")

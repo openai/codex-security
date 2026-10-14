@@ -2511,11 +2511,6 @@ export class CodexSecurity {
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
           );
-          if (result.coverage.completeness !== "partial") {
-            throw new IncompleteScanError(
-              "Budget-exhausted scan recovery did not report partial coverage.",
-            );
-          }
           const completedScan = completion["scan"];
           const targetWarnings = new Set(
             Array.isArray(completion["targetWarnings"])
@@ -4188,7 +4183,7 @@ function scanPrompt(
     ...(skillName === "security-scan"
       ? [
           "This Standard scan authorizes its independent baseline auditor and focused investigators; use available subagent tools and continue with parent-agent fallback if capacity changes.",
-          "After architecture mapping yields a usable threatModel, call record_codex_security_scan_draft for this already registered scan with complete:false, findings:[], and truthful partial coverage, before continuing discovery. Preserve the model in later checkpoints as it changes. This checkpoint does not start or complete a scan; write final canonical files as instructed below.",
+          "After architecture mapping yields a usable threatModel, call record_codex_security_scan_draft for this already registered scan with complete:false, findings:[], and scope notes, before continuing discovery. Preserve the model in later checkpoints as it changes. This checkpoint does not start or complete a scan; write final canonical files as instructed below.",
         ]
       : skillName === "deep-security-scan"
         ? []
@@ -4426,6 +4421,11 @@ async function collectResult(
     workbenchValidated,
     signal,
   });
+  if (contract.manifest.scan.status !== "completed") {
+    throw new IncompleteScanError(
+      `Codex Security scan ${contract.manifest.scan.status}; available results remain at ${scanDir}.`,
+    );
+  }
   let sarifPath: string | null = null;
   try {
     sarifPath = await requireScanFile(

@@ -427,7 +427,8 @@ cs scan . --dry-run
 
 Use `--help` to find commands and `<command> --help` for options. Scans are
 report-only by default. Add `--fail-on-severity high` to return exit code `1`
-for high or critical findings; incomplete scans and execution failures return `2`.
+for high or critical findings; execution and required-output failures return `2`.
+Scope exclusions and follow-up notes do not change a completed scan's exit code.
 
 The [CLI reference](docs/cli.md) covers scan history, reruns, bulk and component
 scans, custom validation, imports, patching, and integrations.

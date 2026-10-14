@@ -1345,7 +1345,6 @@ def budget_exhausted_draft(
         }
         findings = {"findings": []}
         coverage = {
-            "completeness": "partial",
             "inventoryStrategy": (
                 "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
             ),
@@ -1431,7 +1430,7 @@ def budget_exhausted_draft(
                 "reason": "Validation was deferred because the scan reached its cost limit.",
             }
         )
-    coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     for name, payload in (
         ("findings.json", findings),
         ("coverage.json", coverage),

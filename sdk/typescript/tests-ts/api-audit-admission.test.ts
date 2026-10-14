@@ -58,11 +58,12 @@ type Mutation =
   | "legacy-details";
 const cases: {
   name: string;
-  coverage: "complete" | "partial" | "unknown";
+  coverage?: "complete" | "partial" | "unknown";
   complete?: boolean;
   mutation?: Mutation;
   accepted: boolean;
 }[] = [
+  { name: "scope notes without completeness", complete: true, accepted: true },
   {
     name: "complete coverage",
     coverage: "complete",
@@ -101,10 +102,10 @@ const cases: {
     accepted: false,
   },
   {
-    name: "complete coverage with deferred work",
+    name: "legacy complete coverage with deferred work",
     coverage: "partial",
     mutation: "contradictory-coverage",
-    accepted: false,
+    accepted: true,
   },
   {
     name: "inverted finding lines",
@@ -152,7 +153,9 @@ for (const scenario of cases) {
         },
       ],
       coverage: {
-        completeness: scenario.coverage,
+        ...(scenario.coverage === undefined
+          ? {}
+          : { completeness: scenario.coverage }),
         surfaces: [
           {
             label: "Archive extraction",

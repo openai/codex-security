@@ -107,6 +107,7 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
         manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
         findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
         coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage.pop("completeness", None)
         if mode == "deep":
             coverage.update(surfaces=[], explicitExclusions=[], deferred=[])
         else:
@@ -445,7 +446,7 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert manifest["scan"]["status"] == "failed"
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     expected_summaries = {later_finding["summary"]}
     if has_parent:
@@ -530,11 +531,10 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     assert source_path.read_bytes() == source_bytes
 
 
-def test_standard_publication_preserves_deliberately_partial_coverage(
+def test_standard_publication_preserves_deferred_work(
     workbench_api, workbench_db, publication_scan
 ):
     scan = publication_scan(mode="standard")
-    scan.coverage["completeness"] = "partial"
     scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
@@ -763,3 +763,21 @@ def test_stopped_deep_projection_filters_the_canonical_parent(
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 0
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
+
+
+def test_already_sealed_legacy_capped_scan_remains_immutable(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    complete(workbench_api, workbench_db, scan)
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    sealed = {name: (scan.scan_dir / name).read_bytes() for name in names}
+    add_worker(workbench_db, scan, status="failed")
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET terminal_reason = 'capped' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    repeated = complete(workbench_api, workbench_db, scan)
+    assert repeated["progress"]["status"] == "complete"
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == sealed

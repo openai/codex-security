@@ -2171,7 +2171,7 @@ The extraction root is not enforced.
             "Lower if the input is constrained before parsing.",
         )
         self.assertEqual(warnings, ["Recovered finding 1: normalized severity change conditions."])
-        self.assertEqual(prepared[4]["completeness"], "complete")
+        self.assertNotIn("completeness", prepared[4])
 
     @pytest.mark.cross_platform
     def test_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
@@ -2252,14 +2252,18 @@ The extraction root is not enforced.
             with self.subTest(change_conditions=repr(change_conditions)):
                 self.findings["findings"][0]["severity"]["changeConditions"] = change_conditions
                 self.write_scan()
+                before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
                 warnings: list[str] = []
 
-                prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
-                )
+                with self.assertRaisesRegex(
+                    FINALIZER.RecoverableContractError,
+                    "Scan result contains invalid findings.*severity.changeConditions",
+                ):
+                    FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, completion_warnings=warnings
+                    )
 
-                self.assertEqual(prepared[3]["findings"], [])
-                self.assertEqual(prepared[4]["completeness"], "partial")
+                self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES, "report.md"), before)
                 self.assertEqual(len(warnings), 1)
                 self.assertIn("severity.changeConditions", warnings[0])
 
@@ -2288,7 +2292,7 @@ The extraction root is not enforced.
 
                 self.assertEqual(len(findings["findings"]), 1)
                 self.assertNotIn(field, findings["findings"][0])
-                self.assertEqual(coverage["completeness"], "complete")
+                self.assertNotIn("completeness", coverage)
                 self.assertTrue(
                     any(warning.startswith(f"Skipped malformed {field}") for warning in warnings)
                 )
@@ -2332,7 +2336,7 @@ The extraction root is not enforced.
                 self.assertEqual(len(findings["findings"]), 1)
                 self.assertEqual(findings["findings"][0]["title"], self.finding["title"])
                 self.assertEqual(coverage["deferred"], [valid])
-                self.assertEqual(coverage["completeness"], "partial")
+                self.assertNotIn("completeness", coverage)
                 self.assertTrue(
                     any(
                         "Skipped malformed deferred coverage item 1" in warning
@@ -2435,13 +2439,13 @@ The extraction root is not enforced.
             with self.assertRaisesRegex(FINALIZER.ContractError, "inside the scan directory"):
                 FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_complete_coverage_with_needs_follow_up_surface(self) -> None:
+    def test_finalizes_follow_up_notes_without_completeness(self) -> None:
         self.coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "cannot have deferred work"):
-            FINALIZER.finalize_scan(self.scan_dir)
+        FINALIZER.finalize_scan(self.scan_dir)
+        self.assertNotIn("completeness", json.loads((self.scan_dir / "coverage.json").read_text()))
 
-    def test_rejects_complete_coverage_with_deferred_work(self) -> None:
+    def test_finalizes_deferred_work_without_completeness(self) -> None:
         self.coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
@@ -2449,8 +2453,8 @@ The extraction root is not enforced.
             }
         ]
         self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "cannot have deferred work"):
-            FINALIZER.finalize_scan(self.scan_dir)
+        FINALIZER.finalize_scan(self.scan_dir)
+        self.assertNotIn("completeness", json.loads((self.scan_dir / "coverage.json").read_text()))
 
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):

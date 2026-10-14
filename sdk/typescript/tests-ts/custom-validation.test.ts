@@ -109,7 +109,6 @@ async function publishDraft(
       ),
     },
     coverage: {
-      completeness: coverage.completeness,
       inventoryStrategy: coverage.inventoryStrategy,
       surfaces: coverage.surfaces,
       explicitExclusions: coverage.explicitExclusions,
@@ -275,7 +274,7 @@ describe("custom validation", () => {
       "not_applicable",
       "needs_follow_up",
     ]);
-    expect(coverage.completeness).toBe("partial");
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage.surfaces[0]!.receiptRefs).toContain(
       "artifacts/custom-validation/proof.txt",
     );
@@ -612,18 +611,12 @@ describe("custom validation", () => {
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
                       await draft(scanDir, scanId, 0, diff);
-                      const earlyCoverage = await json<CoverageDocument>(
-                        join(scanDir, "coverage.json"),
-                      );
-                      earlyCoverage.completeness = "partial";
-                      await save(join(scanDir, "coverage.json"), earlyCoverage);
                       await publishDraft(scanDir, scanId, workbench, false);
                       await draft(scanDir, scanId, count, diff);
                       if (scenario === "unfinished-source") {
                         const coverage = await json<CoverageDocument>(
                           join(scanDir, "coverage.json"),
                         );
-                        coverage.completeness = "partial";
                         coverage.deferred = [
                           {
                             id: "unfinished-source",
@@ -773,9 +766,12 @@ describe("custom validation", () => {
             status: "complete",
           });
           expect(
-            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
-              .completeness,
-          ).toBe("partial");
+            await json<CoverageDocument>(join(scanDir, "coverage.json")),
+          ).toMatchObject({
+            deferred: expect.arrayContaining([
+              expect.objectContaining({ id: "unfinished-source" }),
+            ]),
+          });
           return;
         }
         if (scenario === "incomplete") {
@@ -877,7 +873,7 @@ describe("custom validation", () => {
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("security_scan` capability preflight");
     expect(standard).toContain("use it for the same early model checkpoint");
-    expect(standard).toContain("retain the model in an early partial");
+    expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");

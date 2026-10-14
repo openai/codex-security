@@ -1709,7 +1709,6 @@ function preserveScanCoverage(
     )
       Object.assign(result, { [field]: values });
   }
-  if (coverageHasOutstandingWork(result)) result.completeness = "partial";
   return result;
 }
 
@@ -1920,7 +1919,7 @@ function parseSemanticScanDraft(
     parsed.findings,
     schema !== canonicalScanDraftInputSchema,
   );
-  validateCoverageSemantics(parsed.coverage);
+  delete parsed.coverage.completeness;
   return parsed;
 }
 
@@ -2434,24 +2433,6 @@ function validateFindingSemantics(
         }
       }
     }
-  }
-}
-
-function validateCoverageSemantics(coverage: JsonObject): void {
-  if (coverage.completeness !== "complete") return;
-  if ((coverage.deferred as unknown[]).length > 0) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain deferred work.",
-    );
-  }
-  if (
-    (coverage.surfaces as JsonObject[]).some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  ) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain needs_follow_up surfaces.",
-    );
   }
 }
 

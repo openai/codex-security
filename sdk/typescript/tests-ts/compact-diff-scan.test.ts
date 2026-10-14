@@ -591,7 +591,6 @@ describe("compact diff scan", () => {
             },
           ],
           coverage: {
-            completeness: "complete",
             surfaces: [{ label: "Changed files", disposition: "rejected" }],
             explicitExclusions: [],
             deferred: [],
@@ -623,7 +622,6 @@ describe("compact diff scan", () => {
           },
         ],
         coverage: {
-          completeness: "complete",
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -708,7 +706,6 @@ describe("compact diff scan", () => {
         ],
         threatModel,
         coverage: {
-          completeness: "complete",
           surfaces: [
             {
               label: "Changed files",

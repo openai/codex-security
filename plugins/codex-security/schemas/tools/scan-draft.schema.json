@@ -684,10 +684,6 @@
         "includePaths": false,
         "excludePaths": false,
         "receiptRefs": false,
-        "completeness": {
-          "enum": ["complete", "partial", "unknown"],
-          "description": "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains."
-        },
         "inventoryStrategy": false,
         "surfaces": {
           "type": "array",
@@ -778,12 +774,7 @@
           }
         }
       },
-      "required": [
-        "completeness",
-        "surfaces",
-        "explicitExclusions",
-        "deferred"
-      ],
+      "required": ["surfaces", "explicitExclusions", "deferred"],
       "additionalProperties": true
     },
     "scanDraftInput": {

@@ -132,15 +132,10 @@ class ScanContractExamplesTest(unittest.TestCase):
                 }
                 standard_validator.validate(standard_coverage_request)
                 self.assertFalse(validator.is_valid(standard_coverage_request))
-        self.assertFalse(
-            standard_validator.is_valid(
-                {
-                    **standard_request,
-                    "coverage": {**standard_request["coverage"], "completeness": "invalid"},
-                }
-            )
-        )
-        for missing_field in ("completeness", "surfaces", "explicitExclusions", "deferred"):
+        without_completeness = copy.deepcopy(standard_request)
+        without_completeness["coverage"].pop("completeness", None)
+        standard_validator.validate(without_completeness)
+        for missing_field in ("surfaces", "explicitExclusions", "deferred"):
             with self.subTest(standard_missing_coverage_field=missing_field):
                 self.assertFalse(
                     standard_validator.is_valid(
@@ -384,14 +379,13 @@ class ScanContractExamplesTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "does not match"):
                     validate_schema_node(coverage, schema, "coverage")
 
-    def test_coverage_rejects_complete_with_needs_follow_up_surface(self) -> None:
+    def test_coverage_accepts_follow_up_notes(self) -> None:
         schema = read_json(SCHEMA_DIR / "coverage.schema.json")
         coverage = copy.deepcopy(self.coverage)
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
+        validate_schema_node(coverage, schema, "coverage")
 
-    def test_coverage_rejects_complete_with_deferred_work(self) -> None:
+    def test_coverage_accepts_deferred_work(self) -> None:
         schema = read_json(SCHEMA_DIR / "coverage.schema.json")
         coverage = copy.deepcopy(self.coverage)
         coverage["deferred"] = [
@@ -400,8 +394,7 @@ class ScanContractExamplesTest(unittest.TestCase):
                 "reason": "Archive extraction review was not completed.",
             }
         ]
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
+        validate_schema_node(coverage, schema, "coverage")
 
     def test_coverage_allows_partial_with_deferred_work(self) -> None:
         schema = read_json(SCHEMA_DIR / "coverage.schema.json")

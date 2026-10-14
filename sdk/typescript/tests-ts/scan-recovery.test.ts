@@ -42,7 +42,7 @@ type CoverageSurface = Record<string, unknown> & {
 
 type CoverageDocument = Record<string, unknown> & {
   scanId: string;
-  completeness: string;
+  completeness?: string;
   inventoryStrategy: string;
   surfaces: CoverageSurface[] | Record<string, unknown>;
   explicitExclusions: unknown;
@@ -703,7 +703,7 @@ describe("malformed scan artifact recovery", () => {
       const coverage = await readJson<CoverageDocument>(
         join(fixture.scanDir, "coverage.json"),
       );
-      expect(coverage.completeness).toBe("complete");
+      expect(coverage.completeness).toBeUndefined();
     },
   );
 
@@ -765,7 +765,7 @@ describe("malformed scan artifact recovery", () => {
     const coverage = await readJson<CoverageDocument>(
       join(fixture.scanDir, "coverage.json"),
     );
-    expect(coverage.completeness).toBe("complete");
+    expect(coverage.completeness).toBeUndefined();
   });
 
   test("rejects severity change-condition lists with malformed entries", async () => {
@@ -787,18 +787,14 @@ describe("malformed scan artifact recovery", () => {
     }
     await writeJson(path, document);
 
-    const completed = await completeScan(fixture);
-
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(4);
-    expect(
-      completed.warnings.every((warning) =>
-        warning.includes("severity.changeConditions"),
-      ),
-    ).toBe(true);
+    const original = await readFile(path, "utf8");
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "severity.changeConditions",
+    );
+    expect(await readFile(path, "utf8")).toBe(original);
   });
 
-  test("keeps valid findings and skips malformed or duplicate findings", async () => {
+  test("retains the draft when required finding records are malformed", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
@@ -837,37 +833,18 @@ describe("malformed scan artifact recovery", () => {
     );
     await writeJson(path, document);
 
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(6);
-    expect(
-      completed.warnings.every((warning) =>
-        warning.startsWith("Skipped malformed finding"),
-      ),
-    ).toBe(true);
-    for (const reason of [
-      "summary",
-      "safe repository-relative",
-      "identity",
-      "codeEvidence[0].id",
-      "duplicate logical finding",
-      "expected an object",
-    ]) {
-      expect(
-        completed.warnings.some((warning) => warning.includes(reason)),
-      ).toBe(true);
-    }
-    expect((await readJson<FindingsDocument>(path)).findings).toHaveLength(1);
-    const coverage = await readJson<CoverageDocument>(
-      join(fixture.scanDir, "coverage.json"),
-    );
-    expect(coverage.completeness).toBe("partial");
-    expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
-      "needs_follow_up",
-    );
-    expect(coverage.deferred).toHaveLength(5);
+    const original = await readFile(path, "utf8");
+    await expect(completeScan(fixture)).rejects.toThrow("invalid findings");
+    expect(await readFile(path, "utf8")).toBe(original);
+    const pending = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((pending["scan"] as ScanSummary).progress.status).toBe("running");
+    document.findings = [valid];
+    await writeJson(path, document);
+    expect((await completeScan(fixture)).findingCount).toBe(1);
   });
 
   test.each([
@@ -962,7 +939,7 @@ describe("malformed scan artifact recovery", () => {
       const coverage = await readJson<CoverageDocument>(
         join(fixture.scanDir, "coverage.json"),
       );
-      expect(coverage.completeness, name).toBe("complete");
+      expect(coverage.completeness, name).toBeUndefined();
       expect(
         await readFile(join(fixture.scanDir, "report.md"), "utf8"),
         name,
@@ -976,47 +953,25 @@ describe("malformed scan artifact recovery", () => {
     },
   );
 
-  test("completes scans when every draft finding is malformed", async () => {
+  test("does not convert malformed findings into a successful empty report", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
     document.findings[0]!.summary = "";
     await writeJson(path, document);
 
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(0);
-    expect(completed.warnings).toHaveLength(1);
-    expect(completed.warnings[0]).toContain("summary");
-    expect((await readJson<FindingsDocument>(path)).findings).toEqual([]);
-    const coverage = await readJson<CoverageDocument>(
-      join(fixture.scanDir, "coverage.json"),
+    const original = await readFile(path, "utf8");
+    await expect(completeScan(fixture)).rejects.toThrow("summary");
+    expect(await readFile(path, "utf8")).toBe(original);
+    expect(await readFile(join(fixture.scanDir, "report.md"), "utf8")).toBe(
+      "# Draft report\n",
     );
-    expect(coverage.completeness).toBe("partial");
-    expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
-      "needs_follow_up",
-    );
-    expect(coverage.deferred).toEqual([
-      { id: "discarded-finding-1", reason: completed.warnings[0] },
+    const pending = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
     ]);
-    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-    expect(report).toContain("| Coverage | partial |");
-    expect(report).toContain("Skipped malformed finding 1");
-    const sarif = await readJson<SarifDocument>(
-      join(fixture.scanDir, "exports", "results.sarif"),
-    );
-    expect(sarif.runs[0]?.properties.codexSecurityCoverageCompleteness).toBe(
-      "partial",
-    );
-    expect(sarif.runs[0]?.invocations).toEqual([
-      {
-        executionSuccessful: true,
-        toolExecutionNotifications: [
-          { level: "warning", message: { text: completed.warnings[0]! } },
-        ],
-      },
-    ]);
+    expect((pending["scan"] as ScanSummary).progress.status).toBe("running");
   });
 
   test("keeps findings while removing invalid or duplicate writeups", async () => {
@@ -1170,7 +1125,7 @@ describe("malformed scan artifact recovery", () => {
     ).toBe(true);
     expect(completed.warnings.join("\n")).not.toContain("../outside.json");
     const recovered = await readJson<CoverageDocument>(path);
-    expect(recovered.completeness).toBe("partial");
+    expect(recovered.completeness).toBeUndefined();
     expect((recovered.surfaces as CoverageSurface[])[0]).toMatchObject({
       disposition: "needs_follow_up",
       receiptRefs: [receipt],
@@ -1183,7 +1138,7 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
-  test("downgrades malformed coverage collections without claiming completeness", async () => {
+  test("recovers malformed coverage collections without assigning completeness", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
@@ -1196,10 +1151,10 @@ describe("malformed scan artifact recovery", () => {
     const completed = await completeScan(fixture);
 
     expect(completed.progress.status).toBe("complete");
-    expect(completed.warnings).toHaveLength(4);
+    expect(completed.warnings).toHaveLength(3);
     const recovered = await readJson<CoverageDocument>(path);
+    expect(recovered.completeness).toBeUndefined();
     expect(recovered).toMatchObject({
-      completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],

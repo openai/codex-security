@@ -973,10 +973,10 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
-  coverageError?: string;
+  resultError?: string;
 }
 
-const incompleteScanEnvelopeSchema = z
+const failedResultEnvelopeSchema = z
   .looseObject({
     ok: z.literal(false),
     error: z.object({
@@ -994,7 +994,7 @@ function scanOutputSchema(...codes: [string, ...string[]]) {
   return z
     .union([
       z.record(z.string(), z.unknown()),
-      incompleteScanEnvelopeSchema,
+      failedResultEnvelopeSchema,
       z.object({
         status: z.literal("failed"),
         code: z.literal(codes),
@@ -1754,15 +1754,15 @@ export async function main(
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
-  let incompleteScanOutput:
+  let failedResultOutput:
     { format: "json" | "jsonl"; message: string } | undefined;
-  const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
+  const recordFailedResultOutput = (outcome: ScanOutcome, format: string) => {
     if (
-      outcome.coverageError !== undefined &&
+      outcome.resultError !== undefined &&
       (format === "json" || format === "jsonl") &&
       argv.includes("--full-output")
     ) {
-      incompleteScanOutput = { format, message: outcome.coverageError };
+      failedResultOutput = { format, message: outcome.resultError };
     }
   };
   let filteredScanFailure:
@@ -1779,7 +1779,7 @@ export async function main(
   ): Record<string, unknown> | undefined => {
     exitCode = outcome.exitCode;
     if (outcome.error === undefined) {
-      recordIncompleteScanOutput(outcome, format);
+      recordFailedResultOutput(outcome, format);
       return outcome.data;
     }
     if (format === "json" || format === "jsonl") {
@@ -4623,6 +4623,7 @@ export async function main(
                         signal: controller.signal,
                       });
                       return {
+                        manifest: contract.manifest,
                         coverage: contract.coverage,
                         findings: contract.findings,
                         cost:
@@ -4704,11 +4705,7 @@ export async function main(
           });
           exitCode =
             interruptedExitCode(controller.signal) ??
-            (result.failed > 0 || result.incomplete > 0
-              ? 2
-              : result.policyFailed
-                ? 1
-                : 0);
+            (result.failed > 0 ? 2 : result.policyFailed ? 1 : 0);
           return { ...result };
         } catch (error) {
           exitCode =
@@ -6184,7 +6181,7 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
-    if (incompleteScanOutput !== undefined) {
+    if (failedResultOutput !== undefined) {
       const envelope: JsonValue = JSON.parse(frameworkOutput);
       // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
@@ -6194,11 +6191,11 @@ export async function main(
             ok: false,
             error: {
               code: "SCAN_FAILED",
-              message: incompleteScanOutput.message,
+              message: failedResultOutput.message,
             },
           },
           null,
-          incompleteScanOutput.format === "json" ? 2 : undefined,
+          failedResultOutput.format === "json" ? 2 : undefined,
         )}\n`;
       }
     }
@@ -8903,7 +8900,6 @@ async function executeScan(
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
-  const incomplete = result.coverage.completeness !== "complete";
   let deepScanStop: DeepScanStop | undefined;
   if (arguments_.mode === "deep") {
     deepScanStop = (await readDeepScanStop(
@@ -8914,7 +8910,9 @@ async function executeScan(
       reason: "Stop reason unavailable. See the report for details.",
     };
   }
-  progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
+  progress?.stage(
+    `Scan ${result.manifest.scan.status === "completed" ? "complete" : result.manifest.scan.status} · ${result.manifest.scan.id.slice(0, 8)}`,
+  );
   printScanSummary(
     result,
     progress,
@@ -8925,41 +8923,44 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  const coverageError = incomplete
-    ? threshold === undefined
-      ? `Scan coverage is ${result.coverage.completeness}; results may be incomplete.`
-      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.`
-    : undefined;
+  const resultError =
+    result.manifest.scan.status !== "completed"
+      ? `Scan ${result.manifest.scan.status}; available results were retained.`
+      : undefined;
   const completedScan = (
     exitCode: number,
-    error = coverageError,
+    error = resultError,
   ): ScanOutcome => {
-    diagnostic("scan.completed", {
-      coverage: result.coverage.completeness,
-      findings: findings.length,
-      scan_id: result.manifest.scan.id,
-      estimated_usd: showCost ? result.cost?.estimatedUsd : undefined,
-      cost_estimate:
-        showCost && result.cost !== null
-          ? formatScanCost(result.cost)
-          : undefined,
-      exit_code: exitCode,
-    });
+    diagnostic(
+      result.manifest.scan.status === "completed"
+        ? "scan.completed"
+        : "scan.failed",
+      {
+        findings: findings.length,
+        scan_id: result.manifest.scan.id,
+        estimated_usd: showCost ? result.cost?.estimatedUsd : undefined,
+        cost_estimate:
+          showCost && result.cost !== null
+            ? formatScanCost(result.cost)
+            : undefined,
+        exit_code: exitCode,
+      },
+    );
     progress?.stopTimer();
     return {
       exitCode,
       data: scanData,
-      ...(error === undefined ? {} : { coverageError: error }),
+      ...(error === undefined ? {} : { resultError: error }),
     };
   };
   if (targetWarnings.length > 0) {
     const message =
       "Scan target changed during execution; results do not represent the current checkout.";
     errorOutput.write(`codex-security: ${message}\n`);
-    return completedScan(2, incomplete ? message : undefined);
+    return completedScan(2, message);
   }
-  if (coverageError !== undefined) {
-    errorOutput.write(`codex-security: ${coverageError}\n`);
+  if (resultError !== undefined) {
+    errorOutput.write(`codex-security: ${resultError}\n`);
     return completedScan(2);
   }
 
@@ -9459,7 +9460,6 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

@@ -105,7 +105,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert "Model origin: recovered" in model_document
     assert stopped["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
     assert (
@@ -1722,7 +1722,7 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
         baseline["identity"]["anchor"],
         later["identity"]["anchor"],
     }
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == ("partial")
+    assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
 
 
 def test_recovery_does_not_promote_already_retained_historical_finding(
@@ -2079,7 +2079,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     assert completed["warnings"] == [warning]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["deferred"] == [
         {
             "id": "scan-cost-limit",
@@ -2284,7 +2284,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
         candidate["candidateId"],
         "scan-stopped",
     } | ({closure["id"]} if reopened else set())
-    assert recovered["completeness"] == "partial"
+    assert "completeness" not in recovered
     assert original.read_bytes() == original_bytes
     if canonical_state == "checkpoint_reopened":
         assert existing_checkpoint.stat().st_mtime_ns == 300
@@ -2363,7 +2363,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
     assert {
         row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
     } == expected
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert not coverage.get("resolvedDeferred")
 
 
@@ -2472,7 +2472,7 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
     recovered = json.loads((scan_dir / "coverage.json").read_text())
     assert pending in recovered["deferred"]
     assert not recovered.get("resolvedDeferred")
-    assert recovered["completeness"] == "partial"
+    assert "completeness" not in recovered
     assert original.read_bytes() == original_bytes
 
 
@@ -3234,7 +3234,8 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     assert pending["coverage"]["deferred"][0] in replay[2]["deferred"]
     assert old.stat().st_mtime_ns == 100
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
-    assert first[2]["completeness"] == replay[2]["completeness"] == "partial"
+    assert "completeness" not in first[2]
+    assert "completeness" not in replay[2]
     assert not replay[2].get("resolvedDeferred")
 
 

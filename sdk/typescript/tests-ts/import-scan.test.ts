@@ -242,7 +242,7 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.sealedAt).toBeTruthy();
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
-    expect(result.coverage.completeness).toBe("unknown");
+    expect(result.coverage).not.toHaveProperty("completeness");
     expect(result.coverage.surfaces).toMatchObject([
       { disposition: "reported" },
     ]);
@@ -311,7 +311,6 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.status).toBe("completed");
     expect(result.findings.findings).toEqual([]);
     expect(result.coverage).toMatchObject({
-      completeness: "unknown",
       surfaces: [],
     });
     const sourceRef = `artifacts/import/source.${format}`;

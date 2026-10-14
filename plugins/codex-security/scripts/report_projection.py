@@ -825,7 +825,6 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
-            f"| Coverage | {coverage['completeness']} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
             "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
@@ -908,31 +907,22 @@ def build_report_markdown(
                 lines.extend(["", *_finding_section(number, finding)])
     else:
         deferred = coverage.get("deferred", [])
-        no_source_review = (
-            coverage.get("completeness") == "partial"
-            and isinstance(deferred, list)
-            and any(
-                isinstance(item, dict)
-                and item.get("reason")
-                == "The configured discovery time limit elapsed before any source review completed."
-                for item in deferred
-            )
+        no_source_review = isinstance(deferred, list) and any(
+            isinstance(item, dict)
+            and item.get("reason")
+            == "The configured discovery time limit elapsed before any source review completed."
+            for item in deferred
         )
-        budget_exhausted = (
-            coverage.get("completeness") == "partial"
-            and isinstance(deferred, list)
-            and any(
-                isinstance(item, dict)
-                and isinstance(item.get("reason"), str)
-                and (
-                    item["reason"]
-                    == "Validation was deferred because the scan reached its cost limit."
-                    or item["reason"].startswith(
-                        "Validation was deferred because the scan reached its cost limit: "
-                    )
+        budget_exhausted = isinstance(deferred, list) and any(
+            isinstance(item, dict)
+            and isinstance(item.get("reason"), str)
+            and (
+                item["reason"] == "Validation was deferred because the scan reached its cost limit."
+                or item["reason"].startswith(
+                    "Validation was deferred because the scan reached its cost limit: "
                 )
-                for item in deferred
             )
+            for item in deferred
         )
         stopped = manifest.get("scan", {}).get("status") in {
             "failed",

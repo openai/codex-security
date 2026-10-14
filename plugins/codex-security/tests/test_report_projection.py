@@ -791,7 +791,7 @@ def test_projection_explains_unvalidated_findings_after_cost_limit(reason: str) 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
+    assert "| Coverage |" not in markdown
     assert (
         "No findings were validated before the scan reached its cost limit. "
         "Review the deferred candidates in Open Questions And Follow Up."
@@ -850,7 +850,7 @@ def test_projection_explains_timeout_before_source_review() -> None:
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
+    assert "| Coverage |" not in markdown
     assert (
         "No source review completed before the configured time limit. "
         "No vulnerability conclusion can be drawn."
@@ -862,10 +862,6 @@ def test_projection_explains_timeout_before_source_review() -> None:
 @pytest.mark.parametrize(
     ("completeness", "reason"),
     [
-        (
-            "complete",
-            "The configured discovery time limit elapsed before any source review completed.",
-        ),
         (
             "partial",
             "The configured discovery time limit elapsed during source review.",

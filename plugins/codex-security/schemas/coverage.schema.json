@@ -8,7 +8,6 @@
     "schemaVersion",
     "scanId",
     "mode",
-    "completeness",
     "inventoryStrategy",
     "includePaths",
     "excludePaths",
@@ -43,7 +42,9 @@
         "complete",
         "partial",
         "unknown"
-      ]
+      ],
+      "deprecated": true,
+      "description": "Legacy coverage label retained only for reading existing scan artifacts. New producers omit this field."
     },
     "inventoryStrategy": {
       "enum": [
@@ -208,43 +209,5 @@
         }
       }
     }
-  },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "completeness": {
-            "const": "complete"
-          }
-        },
-        "required": [
-          "completeness"
-        ]
-      },
-      "then": {
-        "properties": {
-          "deferred": {
-            "contains": {},
-            "minContains": 0,
-            "maxContains": 0
-          },
-          "surfaces": {
-            "contains": {
-              "type": "object",
-              "required": [
-                "disposition"
-              ],
-              "properties": {
-                "disposition": {
-                  "const": "needs_follow_up"
-                }
-              }
-            },
-            "minContains": 0,
-            "maxContains": 0
-          }
-        }
-      }
-    }
-  ]
+  }
 }

@@ -340,11 +340,6 @@ const draft_coverage = z.looseObject({
   includePaths: z.never().optional(),
   excludePaths: z.never().optional(),
   receiptRefs: z.never().optional(),
-  completeness: z
-    .enum(["complete", "partial", "unknown"])
-    .describe(
-      "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains.",
-    ),
   inventoryStrategy: z.never().optional(),
   surfaces: z.array(draft_surface),
   explicitExclusions: z.array(

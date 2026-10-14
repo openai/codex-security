@@ -1773,10 +1773,10 @@ describe("scan and patch workflow", () => {
     },
   );
 
-  test("does not patch incomplete scans or allow patching during a dry run", async () => {
+  test("does not patch failed scans or allow patching during a dry run", async () => {
     const onCodex = mock<() => number>().mockReturnValue(0);
     const incomplete = resultWithFindings(["high"]);
-    incomplete.coverage.completeness = "partial";
+    incomplete.manifest.scan.status = "failed";
     const partial = await runWorkflow(["scan", "--patch", "--json"], {
       result: incomplete,
       onCodex,

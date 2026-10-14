@@ -744,7 +744,7 @@ def test_completion_keeps_empty_coverage_defaults(tmp_path: Path) -> None:
     assert completed["findingCount"] == 1
     coverage = json.loads(coverage_path.read_text())
     assert coverage["inventoryStrategy"] == "repository"
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
 
 
 @pytest.mark.parametrize("command", ["complete-scan", "prepare-scan-completion"])
@@ -868,7 +868,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
         sealed_coverage = json.loads(coverage_path.read_text())
         assert sealed_coverage["mode"] == "deep_repository"
         assert sealed_coverage["inventoryStrategy"] == "repository"
-        assert sealed_coverage["completeness"] == "complete"
+        assert "completeness" not in sealed_coverage
         assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
         assert (scan_dir / "report.md").is_file()
 
@@ -900,7 +900,7 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     assert recovered["resultsRecoveryNeeded"] is False
     preserved_coverage = json.loads(coverage_path.read_text())
     assert preserved_coverage["inventoryStrategy"] == "repository"
-    assert preserved_coverage["completeness"] == "partial"
+    assert "completeness" not in preserved_coverage
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
 
 
@@ -972,7 +972,9 @@ def test_completion_recovers_malformed_finding_identity(tmp_path: Path) -> None:
     assert get_scan(state_dir, scan_id)["scan"]["warnings"] == (completed["scan"]["warnings"])
 
 
-def test_completion_keeps_valid_findings_and_warns_about_bad_ones(tmp_path: Path) -> None:
+def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
+    tmp_path: Path,
+) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings = json.loads((scan_dir / "findings.json").read_text())
     valid = findings["findings"][0]
@@ -1003,25 +1005,33 @@ def test_completion_keeps_valid_findings_and_warns_about_bad_ones(tmp_path: Path
     )
     (scan_dir / "findings.json").write_text(json.dumps(findings))
 
-    completed = scan_command(state_dir, "complete-scan", scan_id)
+    original = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
 
-    assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 1
-    warnings = completed["scan"]["warnings"]
-    assert len(warnings) == 6
-    assert all(warning.startswith("Skipped malformed finding") for warning in warnings)
-    assert any("summary" in warning for warning in warnings)
-    assert any("safe repository-relative" in warning for warning in warnings)
-    assert any("identity" in warning for warning in warnings)
-    assert any("codeEvidence[0].id" in warning for warning in warnings)
-    assert any("duplicate logical finding" in warning for warning in warnings)
-    assert any("expected an object" in warning for warning in warnings)
-    assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
-    assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
-    assert len(coverage["deferred"]) == 5
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "Scan result contains invalid findings" in rejected["stderr"]
+    for reason in ("summary", "safe repository-relative", "identity", "codeEvidence[0].id"):
+        assert reason in rejected["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    assert {name: (scan_dir / name).read_bytes() for name in original} == original
+
+    fail_scan(state_dir, scan_id, "Required finding records could not be repaired.")
+
+    stopped = get_scan(state_dir, scan_id)["scan"]
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == 1
+    retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 1
+    assert retained[0]["summary"] == valid["summary"]
+    assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
     assert (scan_dir / "report.md").is_file()
+    sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
+    assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is False
 
 
 def test_completion_recovers_unknown_optional_root_cause_evidence_reference(
@@ -1127,7 +1137,7 @@ def test_completion_retains_strongest_duplicate_finding_regardless_of_order(
             for original in recovered["provenance"].get("previousFindings", [])
         ), case
         coverage = json.loads((scan_dir / "coverage.json").read_text())
-        assert coverage["completeness"] == "complete", case
+        assert "completeness" not in coverage, case
         assert "### No findings" not in (scan_dir / "report.md").read_text(), case
         sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
         assert sarif["runs"][0]["results"][0]["properties"]["severity"] == "critical", case
@@ -1192,7 +1202,7 @@ def test_completion_preserves_findings_with_invalid_or_duplicate_writeups(
     assert (scan_dir / "report.md").is_file()
 
 
-def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path) -> None:
+def test_valid_checkpoint_survives_rejected_malformed_replacement_finding(tmp_path: Path) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings = json.loads((scan_dir / "findings.json").read_text())
     checkpoint = {
@@ -1204,9 +1214,24 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
     (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
     findings["findings"][0]["summary"] = ""
     (scan_dir / "findings.json").write_text(json.dumps(findings))
-    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
-    assert completed["findingCount"] == 1
-    assert completed["findings"][0]["summary"] == checkpoint["findings"][0]["summary"]
+    original = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "Scan result contains invalid findings" in rejected["stderr"]
+    assert {name: (scan_dir / name).read_bytes() for name in original} == original
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+
+    fail_scan(state_dir, scan_id, "Replacement finding could not be repaired.")
+
+    stopped = get_scan(state_dir, scan_id)["scan"]
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == 1
+    assert stopped["findings"][0]["summary"] == checkpoint["findings"][0]["summary"]
 
 
 def test_duplicate_finding_with_malformed_history_does_not_block_valid_results(
@@ -1232,55 +1257,33 @@ def test_duplicate_finding_with_malformed_history_does_not_block_valid_results(
     )
 
 
-def test_completion_succeeds_when_all_findings_are_malformed(tmp_path: Path) -> None:
-    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
-    findings = json.loads((scan_dir / "findings.json").read_text())
-    findings["findings"][0]["summary"] = ""
-    (scan_dir / "findings.json").write_text(json.dumps(findings))
-
-    completed = scan_command(state_dir, "complete-scan", scan_id)
-
-    assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 0
-    assert len(completed["scan"]["warnings"]) == 1
-    assert "summary" in completed["scan"]["warnings"][0]
-    assert json.loads((scan_dir / "findings.json").read_text())["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
-    assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
-    assert coverage["deferred"] == [
-        {
-            "id": "discarded-finding-1",
-            "reason": completed["scan"]["warnings"][0],
-        }
-    ]
-    report = (scan_dir / "report.md").read_text()
-    assert "| Coverage | partial |" in report
-    assert "Skipped malformed finding 1" in report
-    sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
-    run = sarif["runs"][0]
-    assert run["properties"]["codexSecurityCoverageCompleteness"] == "partial"
-    assert run["invocations"][0]["executionSuccessful"] is True
-    assert run["invocations"][0]["toolExecutionNotifications"] == [
-        {
-            "level": "warning",
-            "message": {"text": completed["scan"]["warnings"][0]},
-        }
-    ]
-
-
-def test_completion_recovers_lone_surrogate_in_malformed_finding(tmp_path: Path) -> None:
+@pytest.mark.parametrize("malformation", ["empty-summary", "surrogate"])
+def test_completion_rejects_all_malformed_findings_without_replacing_the_draft(
+    tmp_path: Path, malformation: str
+) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings_path = scan_dir / "findings.json"
     findings = json.loads(findings_path.read_text())
-    findings["findings"][0]["severity"]["changeConditions"] = ["\ud800"]
+    if malformation == "empty-summary":
+        findings["findings"][0]["summary"] = ""
+        diagnostic = "summary"
+    else:
+        findings["findings"][0]["severity"]["changeConditions"] = ["\ud800"]
+        diagnostic = "severity.changeConditions"
     findings_path.write_text(json.dumps(findings))
+    original = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
 
-    completed = scan_command(state_dir, "complete-scan", scan_id)
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
 
-    assert completed["scan"]["progress"]["status"] == "complete"
-    assert completed["scan"]["findingCount"] == 0
-    assert "severity.changeConditions" in completed["scan"]["warnings"][0]
+    assert rejected["returncode"] != 0
+    assert "Scan result contains invalid findings" in rejected["stderr"]
+    assert diagnostic in rejected["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    assert {name: (scan_dir / name).read_bytes() for name in original} == original
+    assert not (scan_dir / "exports/results.sarif").exists()
 
 
 def test_completion_keeps_verified_receipts_and_downgrades_invalid_coverage(
@@ -1319,7 +1322,7 @@ def test_completion_keeps_verified_receipts_and_downgrades_invalid_coverage(
     assert any("non-symlink" in warning for warning in warnings)
     assert "../outside.json" not in " ".join(warnings)
     sealed_coverage = json.loads(coverage_path.read_text())
-    assert sealed_coverage["completeness"] == "partial"
+    assert "completeness" not in sealed_coverage
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert sealed_coverage["surfaces"][0]["receiptRefs"] == [receipt_ref]
     sealed_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
@@ -1372,9 +1375,8 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
     assert any("riskArea" in warning for warning in warnings)
     assert any("coverage exclusion" in warning for warning in warnings)
     assert any("deferred coverage item" in warning for warning in warnings)
-    assert any("deferred review work" in warning for warning in warnings)
     sealed_coverage = json.loads(coverage_path.read_text())
-    assert sealed_coverage["completeness"] == "partial"
+    assert "completeness" not in sealed_coverage
     assert len(sealed_coverage["surfaces"]) == 1
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert sealed_coverage["explicitExclusions"] == [
@@ -1403,9 +1405,9 @@ def test_completion_recovers_malformed_coverage_collections(tmp_path: Path) -> N
 
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["findingCount"] == 1
-    assert len(completed["scan"]["warnings"]) == 4
+    assert len(completed["scan"]["warnings"]) == 3
     sealed_coverage = json.loads(coverage_path.read_text())
-    assert sealed_coverage["completeness"] == "partial"
+    assert "completeness" not in sealed_coverage
     assert sealed_coverage["surfaces"] == []
     assert sealed_coverage["explicitExclusions"] == []
     assert sealed_coverage["deferred"] == []

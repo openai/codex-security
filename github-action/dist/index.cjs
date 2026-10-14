@@ -56163,18 +56163,11 @@ async function analyzeResults(options) {
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
-  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0) {
+  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0 || options.exitCode !== 0 && options.exitCode !== 1) {
     result.errors.push("CLI did not complete successfully. See the CLI diagnostics.");
-  } else if (value.coverage.completeness === "partial" && (options.exitCode === 0 || options.exitCode === 2)) {
-    result.scanStatus = "incomplete";
-  } else if (value.coverage.completeness === "complete" && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else {
     result.scanStatus = "completed";
     result.policyStatus = options.exitCode === 1 ? "failed" : "passed";
-  } else result.errors.push(value.coverage.completeness === "unknown" ? "CLI could not determine scan coverage. See the CLI diagnostics." : "CLI did not complete successfully. See the CLI diagnostics.");
-  if (value.coverage.completeness !== "complete") {
-    for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === "string") result.errors.push(`Deferred work: ${item.reason}`);
-    for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === "needs_follow_up" && typeof item.label === "string")
-      result.errors.push(`Needs follow-up: ${item.label}`);
   }
   result.errors.push(...warnings);
   const sarifPath = (0, import_node_path5.join)(options.resultsDirectory, "exports/results.sarif");
@@ -99120,7 +99113,6 @@ function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
 }
 function resultTitle(result, inputs) {
-  if (result.scanStatus === "incomplete") return result.reportStatus === "failed" ? "Scan coverage is partial, and required reporting failed." : "Scan coverage is partial. Available findings are provisional.";
   if (result.scanStatus !== "completed") return "Scan could not complete. Available findings are provisional.";
   if (result.reportStatus === "failed") return "Scan completed, but required reporting failed.";
   if (result.policyStatus === "failed") return "Scan completed. Findings meet the configured failure threshold.";
@@ -99136,12 +99128,11 @@ function resultSummary(result, inputs, target) {
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
     `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
-    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Valid partial scans warn without evaluating this policy. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
+    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus === "incomplete") parts.push("Partial coverage alone does not fail the job. The findings policy was not evaluated; review the deferred work before treating the security review as complete.");
   if (result.scanStatus !== "completed") parts.push("**Findings below are provisional. This is not a completed scan.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
@@ -99353,10 +99344,8 @@ async function runAction(actionRoot, overrides = {}) {
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
         finalSummary = resultSummary(result, inputs, target);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== "failed" && (result.scanStatus === "incomplete" || result.scanStatus === "completed" && result.policyStatus === "passed");
+        success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === "incomplete")
-          warning("Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.");
       }
     }
   } catch (error2) {

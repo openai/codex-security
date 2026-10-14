@@ -416,8 +416,8 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   );
   expect(summary).toMatchObject({
     total: 3,
-    completed: 1,
-    incomplete: 1,
+    completed: 2,
+    incomplete: 0,
     failed: 1,
   });
   const saved = await json(summary.findingsPath!);
@@ -429,7 +429,6 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     ),
   ).toEqual(["apps/web", "shared"]);
   expect(await json(summary.summaryPath!)).toMatchObject({
-    completeness: "partial",
     findingCount: 2,
     components: expect.arrayContaining([
       expect.objectContaining({
@@ -439,7 +438,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     ]),
   });
   expect(await json(summary.retryPlanPath!)).toEqual({
-    components: components.slice(0, 2),
+    components: [components[0]],
   });
   expect(
     await readFile(join(paths.outputDir, "component-2", "report.md"), "utf8"),
@@ -902,7 +901,6 @@ test.each(["scan", "matching"])(
     expect(await json(join(paths.outputDir, "summary.json"))).toMatchObject({
       completed: finished,
       failed: 3 - finished,
-      completeness: "partial",
       deduplication: { status: "incomplete" },
     });
     expect(
@@ -1693,7 +1691,7 @@ test("CLI requires an explicitly selected API key before automatic planning", as
   expect(planComponentsMock).not.toHaveBeenCalled();
 });
 
-test("CLI forwards scan settings and returns incomplete coverage", async () => {
+test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const paths = await fixture();
   const planFile = join(paths.root, "plan.json");
   await writeFile(planFile, JSON.stringify({ components: [components[0]] }));
@@ -1721,7 +1719,7 @@ test("CLI forwards scan settings and returns incomplete coverage", async () => {
       createSecurity,
     },
   );
-  expect(result.code).toBe(2);
+  expect(result.code).toBe(0);
   expect(createSecurity.mock.lastCall?.[0]).toMatchObject({
     codexOverrides: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
   });
@@ -1730,7 +1728,10 @@ test("CLI forwards scan settings and returns incomplete coverage", async () => {
     mode: "standard",
     maxCostUsd: 2,
   });
-  expect(JSON.parse(result.stdout).incomplete).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    completed: 1,
+    incomplete: 0,
+  });
   expect(
     [...signals.listeners.values()].every((listeners) => listeners.size === 0),
   ).toBe(true);

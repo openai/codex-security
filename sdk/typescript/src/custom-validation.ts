@@ -380,7 +380,6 @@ export async function runCustomValidation(options: {
       decisions.set(id, values);
     }
     if (validation.disposition === "deferred") {
-      coverage.completeness = "partial";
       coverage.deferred.push({
         id: `custom-validation-${candidate.candidateId}`,
         reason:
@@ -444,6 +443,7 @@ export async function runCustomValidation(options: {
   firstSurface.receiptRefs = [
     ...new Set([...firstSurface.receiptRefs, CANDIDATES, RESULTS]),
   ];
+  delete coverage.completeness;
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.

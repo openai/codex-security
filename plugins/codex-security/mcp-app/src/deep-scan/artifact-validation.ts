@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { dirname, relative, sep } from "node:path";
+import type { JsonObject } from "../types.js";
 import {
   parsePersistedScanDraft,
   parseScanDraft,
@@ -26,6 +28,59 @@ export interface ReducerArtifactValidation {
   result: DeepReductionInput;
 }
 
+/** Reduction combines findings; it does not complete the source workers' review. */
+export function aggregateDiscoveryCoverage(
+  artifacts: DeepScanArtifacts,
+  discoveries: { id: string; resultPath: string; result: ScanDraftInput }[],
+): ScanDraftInput["coverage"] {
+  const coverage: ScanDraftInput["coverage"] = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
+  };
+  for (const worker of discoveries) {
+    const source = structuredClone(worker.result.coverage);
+    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
+      .split(sep)
+      .join("/");
+    const scopedId = (id: string) => `${worker.id}/${id}`;
+    for (const field of [
+      "surfaces",
+      "explicitExclusions",
+      "deferred",
+    ] as const) {
+      for (const [index, row] of (source[field] as JsonObject[]).entries()) {
+        const retained: JsonObject = { ...row, workerId: worker.id };
+        // Independent reviews reuse local IDs. Preserve their links without
+        // allowing one worker's disposition to stand in for another's work.
+        retained.id = scopedId(
+          typeof row.id === "string" ? row.id : String(index),
+        );
+        if (Array.isArray(row.surfaceIds)) {
+          retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
+        }
+        if (Array.isArray(row.receiptRefs)) {
+          retained.receiptRefs = (row.receiptRefs as string[]).map(
+            (ref) => `${prefix}/${ref}`,
+          );
+        }
+        (coverage[field] as JsonObject[]).push(retained);
+      }
+    }
+    if (Array.isArray(source.openQuestions)) {
+      const questions = source.openQuestions.map((question) => ({
+        ...(typeof question === "string" ? { question } : question),
+        workerId: worker.id,
+      }));
+      coverage.openQuestions = [
+        ...(coverage.openQuestions ?? []),
+        ...questions,
+      ];
+    }
+  }
+  return coverage;
+}
+
 /**
  * Check reducer findings with the Standard scan validator.
  * It requires coverage, so add an empty value and remove it after validation.
@@ -37,7 +92,6 @@ export function parseDeepReduction(
   const standard = {
     ...input,
     coverage: {
-      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],

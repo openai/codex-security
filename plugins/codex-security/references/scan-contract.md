@@ -108,7 +108,7 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and retains coverage from each accepted worker included in the reduction. Independent workers' surface and deferred IDs are scoped to their worker IDs, and receipt references resolve to the original worker artifacts. Surfaces, explicit exclusions, deferred work, and open questions remain visible; findings reduction does not resolve unfinished source review. If the configured discovery time limit expires before any review completes, the host recovers valid saved checkpoint findings and pending work using the stopped-result validation rules and retains the deadline explanation in `deferred`. This recovery does not mark any worker accepted or claim a completed reduction. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
 
 Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
 
@@ -120,7 +120,6 @@ For Standard and diff scans, record:
 - detailed receipt references
 - explicit exclusions
 - deferred work
-- completeness
 
 `mode` records the requested scan workflow:
 
@@ -148,7 +147,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory`        | Deterministic non-Git directory inventory                 |
 | `custom`           | Producer-defined inventory described by detailed receipts |
 
-For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
+Coverage describes reviewed surfaces, exclusions, and concrete follow-up work without certifying exhaustive review. New producers omit `completeness`. Existing sealed artifacts may retain the legacy `complete`, `partial`, or `unknown` field; readers accept it without treating it as execution status. A finished review can contain exclusions and unresolved candidates. The manifest status records whether execution completed or stopped.
 
 Map detailed ledger closure into completed surface summaries in this order:
 

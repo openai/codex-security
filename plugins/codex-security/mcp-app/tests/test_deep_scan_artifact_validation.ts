@@ -137,10 +137,15 @@ async function testDiscoveryValidation(root: string) {
       deferred: [{ reason: "Needs follow-up." }],
     },
   });
-  await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /complete coverage cannot contain deferred/,
+  const withDeferred = await validateDiscoveryArtifacts(
+    artifacts,
+    worker.resultPath,
+    scanId,
   );
+  assert.equal(withDeferred.coverage.completeness, undefined);
+  assert.deepEqual(withDeferred.coverage.deferred, [
+    { reason: "Needs follow-up." },
+  ]);
 
   await writeResult(worker.resultPath, {
     ...result,
@@ -151,11 +156,15 @@ async function testDiscoveryValidation(root: string) {
       ],
     },
   });
-  await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /complete coverage cannot contain needs_follow_up/,
-    "reducer coverage normalization must not relax Standard discovery semantics",
+  const withFollowUp = await validateDiscoveryArtifacts(
+    artifacts,
+    worker.resultPath,
+    scanId,
   );
+  assert.equal(withFollowUp.coverage.completeness, undefined);
+  assert.deepEqual(withFollowUp.coverage.surfaces, [
+    { label: "Unfinished Standard review", disposition: "needs_follow_up" },
+  ]);
 
   await writeResult(worker.resultPath, {
     ...result,
@@ -485,7 +494,6 @@ async function testReducerValidation(root: string) {
 
   const legacyPartial = draft([firstFinding], {
     coverage: {
-      completeness: "partial",
       surfaces: [
         {
           ...resolvedCoverageSurface,
@@ -504,10 +512,7 @@ async function testReducerValidation(root: string) {
   });
   for (const [label, legacyCoverage] of [
     ["partial", legacyPartial.coverage],
-    [
-      "complete with pending work",
-      { ...legacyPartial.coverage, completeness: "complete" },
-    ],
+    ["complete with pending work", { ...legacyPartial.coverage }],
     ["malformed", null],
   ] as const) {
     const legacyReducer = {

@@ -264,7 +264,6 @@ export async function importScan(
       },
       "findings.json": { findings: bound },
       "coverage.json": {
-        completeness: "unknown",
         inventoryStrategy: "custom",
         surfaces: findings.length
           ? [

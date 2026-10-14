@@ -21,7 +21,6 @@ export interface Finding {
   [key: string]: unknown;
 }
 export interface Coverage {
-  completeness?: string;
   deferred?: unknown[];
   surfaces?: { disposition?: string; [key: string]: unknown }[];
   explicitExclusions?: { pattern: string; reason?: string }[];
@@ -258,18 +257,13 @@ export function gradeResult(
   if (findings.some((finding) => !validEvidence(finding, fixture)))
     errors.push("missing or invalid code evidence");
   if (
-    result?.coverage?.completeness !== "complete" ||
-    result.coverage.deferred?.length ||
-    result.coverage.surfaces?.some(
-      (surface) => surface.disposition === "needs_follow_up",
-    ) ||
-    result.coverage.explicitExclusions?.some(({ pattern }) =>
+    result?.coverage?.explicitExclusions?.some(({ pattern }) =>
       Object.keys(fixture.files).some((path) =>
         matchesExclusion(path, pattern, repo),
       ),
     )
   )
-    errors.push("incomplete coverage");
+    errors.push("fixture paths excluded from review");
   return {
     passed: errors.length === 0,
     cases,

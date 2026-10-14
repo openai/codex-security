@@ -469,7 +469,7 @@ describe("deep scan workbench ownership", () => {
     ["scoped_path", false],
     ["repository", true],
   ] as const)(
-    "returns an honest partial %s report with existing deferred work %p when saturated discovery exceeds its cost limit",
+    "returns a bounded %s report with existing deferred work %p when saturated discovery exceeds its cost limit",
     async (inventoryStrategy, existingDeferred) => {
       const root = await temporaryDirectories.create(
         "codex-security-deep-budget-recovery-",
@@ -622,7 +622,7 @@ describe("deep scan workbench ownership", () => {
         0,
       );
       if (existingDeferred) {
-        await writePartialScanArtifacts(scanDir, targetId, inventoryStrategy, [
+        await writeBoundedScanArtifacts(scanDir, targetId, inventoryStrategy, [
           {
             id: "candidate-001",
             candidateId: "candidate-001",
@@ -668,7 +668,7 @@ describe("deep scan workbench ownership", () => {
       const coverage = JSON.parse(
         await readFile(join(scanDir, "coverage.json"), "utf8"),
       ) as {
-        completeness: string;
+        completeness?: string;
         inventoryStrategy: string;
         includePaths: string[];
         deferred: Array<{
@@ -679,8 +679,8 @@ describe("deep scan workbench ownership", () => {
         }>;
         surfaces: Array<{ id: string; disposition: string }>;
       };
+      expect(coverage).not.toHaveProperty("completeness");
       expect(coverage).toMatchObject({
-        completeness: "partial",
         inventoryStrategy,
         includePaths: scoped ? ["src"] : ["."],
       });
@@ -825,7 +825,7 @@ describe("deep scan workbench ownership", () => {
         "documents = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
         "manifest, findings, coverage = documents",
         "findings['findings'] = []",
-        "coverage['completeness'] = 'partial'",
+        "coverage.pop('completeness', None)",
         "coverage['deferred'] = [{'id': 'candidate-example', 'reason': sys.argv[2]}]",
         "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
         "print(projection['build_report_markdown'](manifest, findings, coverage))",
@@ -1092,7 +1092,7 @@ describe("deep scan workbench ownership", () => {
     expect(staleProgress["stderr"]).toContain("newer generation");
   });
 
-  test("completes an expired discovery deadline with no workers as honest partial coverage", async () => {
+  test("completes an expired discovery deadline with no workers with retained limitations", async () => {
     const root = await temporaryDirectories.create(
       "codex-security-deep-empty-deadline-",
     );
@@ -1199,7 +1199,7 @@ describe("deep scan workbench ownership", () => {
 
     const reason =
       "The configured discovery time limit elapsed before any source review completed.";
-    await writePartialScanArtifacts(scanDir, targetId, "repository", [
+    await writeBoundedScanArtifacts(scanDir, targetId, "repository", [
       { id: "source-review", reason },
     ]);
     const completed = command(["complete-scan", "--scan-id", scanId])[
@@ -1213,8 +1213,8 @@ describe("deep scan workbench ownership", () => {
     const coverage = JSON.parse(
       await readFile(join(scanDir, "coverage.json"), "utf8"),
     );
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage).toMatchObject({
-      completeness: "partial",
       mode: "deep_repository",
       deferred: [{ id: "source-review", reason }],
     });
@@ -1516,7 +1516,7 @@ describe("deep scan workbench ownership", () => {
   });
 });
 
-function writePartialScanArtifacts(
+function writeBoundedScanArtifacts(
   scanDir: string,
   targetId: string,
   inventoryStrategy: CoverageDocument["inventoryStrategy"],
@@ -1540,7 +1540,6 @@ function writePartialScanArtifacts(
     writeFile(
       join(scanDir, "coverage.json"),
       JSON.stringify({
-        completeness: "partial",
         inventoryStrategy,
         surfaces: [],
         explicitExclusions: [],
