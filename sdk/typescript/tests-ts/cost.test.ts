@@ -2,6 +2,7 @@ import { jsonLines } from "./support/json.js";
 import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -110,6 +111,30 @@ function progressMessage(
   };
 }
 
+function nativeUsageRecord(
+  threadId: string,
+  responseId: string,
+  usage: Record<string, number>,
+  total: Record<string, number> = usage,
+): Record<string, unknown> {
+  return {
+    type: "token_usage_record",
+    payload: {
+      thread_id: threadId,
+      response_id: responseId,
+      usage: tokenUsage(usage),
+      thread_token_usage: tokenUsage(total),
+    },
+  };
+}
+
+function legacyUsageRecord(usage: Record<string, number>) {
+  return {
+    type: "event_msg",
+    payload: { type: "token_count", info: { total_token_usage: usage } },
+  };
+}
+
 test.each([
   [
     "prefers the spawned parent over legacy parent fields",
@@ -152,6 +177,107 @@ test.each([
 });
 
 describe("scan cost", () => {
+  test("ignores token-count events without a usage snapshot in both readers", async () => {
+    const home = await codexHome();
+    const path = await writeSession(
+      home,
+      childUuid7Thread,
+      {},
+      { parent: scanThreadId },
+    );
+    await writeFile(
+      path,
+      jsonLines([
+        ...ownershipRollout([]),
+        {
+          type: "event_msg",
+          timestamp: "2026-07-26T12:03:00Z",
+          payload: {
+            type: "token_count",
+            info: null,
+            rate_limits: { primary: { used_percent: 5 } },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start(scanThreadId);
+    expect((await tracker.stop()).usage).toEqual(ownedSdkUsage);
+    expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, path)).toEqual({
+      usage: ownedPythonUsage,
+      warnings: [],
+    });
+  });
+
+  test("does not reopen unchanged rollouts and reads appended worker usage", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    await writeSession(home, "unrelated-thread", {
+      input_tokens: 900,
+      output_tokens: 90,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const opened = spyOn(fs, "open");
+    try {
+      await tracker.refresh();
+      expect(opened).not.toHaveBeenCalled();
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: { input_tokens: 200, output_tokens: 20 },
+              },
+            },
+          },
+        ]) + "\n",
+      );
+      const snapshot = await tracker.refresh();
+      expect(opened.mock.calls.map(([path]) => path)).toEqual([worker]);
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 300,
+        output_tokens: 30,
+      });
+      expect(opened.mock.calls.map(([path]) => path)).not.toContain(parent);
+    } finally {
+      opened.mockRestore();
+      await tracker.stop();
+    }
+  });
+
+  test("reports known usage even when model pricing is unavailable", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const usages: unknown[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "synthetic-unpriced-model",
+      onUsage: (usage) => usages.push(usage),
+    });
+    tracker.start("scan-thread");
+    const snapshot = await tracker.stop();
+    expect(snapshot.cost).toBeNull();
+    expect(snapshot.usage).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toEqual(snapshot.usage);
+  });
+
   test("shows distinct token categories without adding cached input twice", () => {
     expect(
       formatTokenUsage({
@@ -218,6 +344,45 @@ describe("scan cost", () => {
       },
     });
   });
+  test.each(["gpt-6-sol", "openai.gpt-6-sol"])(
+    "prices every token category and both context ranges for %s",
+    (model) => {
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          cached_input_tokens: 200_000,
+          cache_write_input_tokens: 300_000,
+          output_tokens: 100_000,
+        }),
+      ).toEqual({
+        model,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 200_000,
+        cacheWriteInputTokens: 300_000,
+        outputTokens: 100_000,
+        estimatedUsd: 2.79,
+        estimatedUsdRange: { min: 2.79, max: 5.08, context: "unknown" },
+        pricing: {
+          source: "https://developers.openai.com/api/docs/models/gpt-6-sol",
+          asOf: "2026-10-10",
+          serviceTier: "standard",
+          context: "short",
+          usdPerMillionTokens: {
+            input: 2,
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            output: 10,
+          },
+          longContextUsdPerMillionTokens: {
+            input: 4,
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            output: 15,
+          },
+        },
+      });
+    },
+  );
   test.each([
     [{ cache_write_tokens: 15 }, 15],
     [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
@@ -349,6 +514,205 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test("keeps receipt cache-write detail when an equal legacy counter omits it", async () => {
+    const home = await codexHome();
+    const usage = {
+      ...ownedSdkUsage,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 12,
+    };
+    const path = await writeSession(home, scanThreadId, ownedSdkUsage);
+    await appendFile(
+      path,
+      jsonLines([
+        nativeUsageRecord(scanThreadId, "response-1", usage),
+        legacyUsageRecord(ownedSdkUsage),
+      ]) + "\n",
+    );
+    const tracker = costTracker(home);
+    tracker.start(scanThreadId);
+    expect((await tracker.stop(ownedSdkUsage)).cost).toMatchObject({
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 12,
+      outputTokens: 10,
+    });
+  });
+
+  test("counts compaction receipts before stale counters and deduplicates responses", async () => {
+    const home = await codexHome();
+    const original = { ...ownedSdkUsage };
+    const compact = { ...ownedSdkUsage, input_tokens: 40, output_tokens: 3 };
+    const compactTotal = {
+      ...ownedSdkUsage,
+      input_tokens: 140,
+      output_tokens: 13,
+    };
+    const path = await writeSession(home, scanThreadId, original);
+    await appendFile(
+      path,
+      jsonLines([nativeUsageRecord(scanThreadId, "response-1", original)]) +
+        "\n",
+    );
+    const budget = new AbortController();
+    const maxCostUsd = 0.000355;
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6.1-sol",
+      maxCostUsd,
+      onCost: ({ estimatedUsd }) => {
+        if (estimatedUsd > maxCostUsd) budget.abort();
+      },
+    });
+    tracker.start(scanThreadId);
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.0003);
+    expect(budget.signal.aborted).toBe(false);
+
+    const compaction = nativeUsageRecord(
+      scanThreadId,
+      "response-compaction",
+      compact,
+      compactTotal,
+    );
+    await appendFile(
+      path,
+      jsonLines([
+        compaction,
+        { type: "compacted", payload: { message: "Compacted context." } },
+        legacyUsageRecord(original),
+      ]) + "\n",
+    );
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00041);
+    expect(budget.signal.aborted).toBe(true);
+
+    const final = { ...ownedSdkUsage, input_tokens: 170, output_tokens: 15 };
+    const stale = { ...ownedSdkUsage, input_tokens: 130, output_tokens: 12 };
+    await appendFile(
+      path,
+      jsonLines([
+        compaction,
+        nativeUsageRecord(
+          scanThreadId,
+          "response-2",
+          { ...ownedSdkUsage, input_tokens: 30, output_tokens: 2 },
+          final,
+        ),
+        legacyUsageRecord(stale),
+      ]) + "\n",
+    );
+    expect((await tracker.stop(stale)).usage).toMatchObject({
+      input_tokens: 170,
+      output_tokens: 15,
+      total_tokens: 185,
+    });
+  });
+
+  test("keeps native receipts scoped to the owned fork across resumed turns", async () => {
+    const home = await codexHome();
+    const inherited = {
+      ...ownedSdkUsage,
+      input_tokens: 1_000,
+      output_tokens: 100,
+    };
+    const parent = await writeSession(home, scanThreadId, inherited);
+    await appendFile(
+      parent,
+      jsonLines([
+        nativeUsageRecord(scanThreadId, "parent-response", inherited),
+      ]) + "\n",
+    );
+    const child = await writeSession(home, childUuid7Thread, ownedSdkUsage, {
+      parent: scanThreadId,
+    });
+    const rollout = ownershipRollout([lowerUuid7Turn]);
+    rollout.splice(
+      3,
+      0,
+      nativeUsageRecord(scanThreadId, "parent-response", inherited),
+    );
+    rollout.push(
+      nativeUsageRecord(childUuid7Thread, "child-response", ownedSdkUsage),
+      nativeUsageRecord(scanThreadId, "foreign-response", inherited),
+    );
+    await writeFile(child, jsonLines(rollout) + "\n");
+    const tracker = costTracker(home, { onSessionEvent: () => {} });
+    tracker.start(scanThreadId);
+    expect((await tracker.refresh()).usage).toMatchObject({
+      input_tokens: 1_100,
+      output_tokens: 110,
+    });
+    const compact = { ...ownedSdkUsage, input_tokens: 40, output_tokens: 3 };
+    const compactTotal = {
+      ...ownedSdkUsage,
+      input_tokens: 140,
+      output_tokens: 13,
+    };
+    const compaction = nativeUsageRecord(
+      childUuid7Thread,
+      "child-compact",
+      compact,
+      compactTotal,
+    );
+    await appendFile(child, jsonLines([compaction, compaction]) + "\n");
+    expect((await tracker.stop(inherited)).usage).toMatchObject({
+      input_tokens: 1_140,
+      output_tokens: 113,
+    });
+
+    await appendFile(
+      child,
+      jsonLines([
+        {
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "019f9e4d-b3bb-7000-8000-000000000004",
+          },
+        },
+        nativeUsageRecord(
+          childUuid7Thread,
+          "resumed-response",
+          { ...ownedSdkUsage, input_tokens: 60, output_tokens: 6 },
+          { ...ownedSdkUsage, input_tokens: 200, output_tokens: 19 },
+        ),
+      ]) + "\n",
+    );
+    const resumed = costTracker(home);
+    resumed.start(scanThreadId);
+    expect((await resumed.stop(inherited)).usage).toMatchObject({
+      input_tokens: 1_200,
+      output_tokens: 119,
+    });
+  });
+
+  test.each([1_000, 1_100])(
+    "reconciles a native resumed total with a final SDK receipt of %p input tokens",
+    async (finalInput) => {
+      const home = await codexHome();
+      const path = await writeSession(home, scanThreadId, {
+        ...ownedSdkUsage,
+        input_tokens: 1_000,
+      });
+      await appendFile(
+        path,
+        jsonLines([
+          nativeUsageRecord(
+            scanThreadId,
+            "resumed-response",
+            { ...ownedSdkUsage, input_tokens: 20, output_tokens: 2 },
+            { ...ownedSdkUsage, input_tokens: 1_020, output_tokens: 12 },
+          ),
+        ]) + "\n",
+      );
+      const tracker = costTracker(home);
+      tracker.start(scanThreadId);
+      expect(
+        (await tracker.stop({ ...ownedSdkUsage, input_tokens: finalInput }))
+          .cost?.inputTokens,
+      ).toBe(Math.max(1_020, finalInput));
+    },
+  );
+
   test.each([
     [undefined, undefined],
     [0, 0],
@@ -869,6 +1233,7 @@ describe("live scan cost tracking", () => {
         await writeSession(home, "middle", usage(20), {
           parent: "scan-thread",
         });
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
         denied = false;
         const snapshot = await tracker.stop();

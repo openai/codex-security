@@ -1,18 +1,11 @@
 import { join } from "node:path";
-import type { ZodType } from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
-import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
-import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
@@ -28,23 +21,11 @@ import {
   type DeepReductionSources,
 } from "./deep-scan/artifact-validation.js";
 
-const schemaDocuments = [
-  commonSchema,
-  scanDraftSchema,
-  reducerSchema,
-] as SchemaDocument[];
-
-export const deepReducerInputsInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  reducerSchema.$id,
-  "reducerInputs",
-) as ZodType<DeepReducerPageInput>;
-
-export const deepReductionInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  reducerSchema.$id,
-  "reductionInput",
-) as ZodType<DeepReductionInput>;
+const reducerDefinitions = artifactSchemaDocuments["tools/deep-reducer"].$defs;
+export const deepReducerInputsInputSchema = reducerDefinitions.reducerInputs;
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  reducerDefinitions.reductionInput,
+);
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(

@@ -114,15 +114,11 @@ export async function* failedEvents(): AsyncGenerator<ThreadEvent> {
 }
 
 export function completedCodex(root: string, threadId: string | null = null) {
-  return (_options: CodexOptions) => ({
-    startThread: () => ({
-      id: threadId,
-      async runStreamed() {
-        await copyCompletedScan(root);
-        return { events: completedEvents() };
-      },
-    }),
-  });
+  return (_options: CodexOptions) =>
+    codexFactory(async () => {
+      await copyCompletedScan(root);
+      return { events: completedEvents() };
+    }, threadId)();
 }
 
 export function collectObserverErrors(errors: [ScanObserverName, string][]) {

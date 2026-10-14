@@ -138,7 +138,7 @@ async function testCompactDiffScanCompletion(
       mode: "diff",
       diffTarget: { kind: "range", baseRevision, headRevision },
     };
-    const { scanId, handoffClaimToken } = await startScan(
+    const { scanId, scanDir, handoffClaimToken } = await startScan(
       call,
       ownerThread,
       selection,
@@ -157,6 +157,24 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: authenticate compact diff owner`,
     );
+
+    for (const name of [
+      "list_codex_security_review_items",
+      "list_codex_security_candidates",
+    ]) {
+      for (const page of [
+        { cursor: "-1" },
+        { cursor: "01" },
+        { limit: 0 },
+        { limit: 1001 },
+      ]) {
+        requireToolError(
+          await call(name, { scanId, ...page }),
+          /Input validation error/,
+          `${runtimeLabel}: reject invalid ${name} paging`,
+        );
+      }
+    }
 
     for (const reserved of [
       "artifacts/02_discovery/candidate_ledger.jsonl",
@@ -197,22 +215,35 @@ async function testCompactDiffScanCompletion(
       { path: "src/handler.py" },
     ]);
 
+    const candidateInput = {
+      cwe_ids: [],
+      locations: [
+        { path: "src/handler.py", start_line: 1, role: "root_control" },
+      ],
+      summary: "The changed handler may rely on the removed guard.",
+      evidence: "The selected change removes a neighboring guard.",
+    };
     requireSuccessfulTool(
       await call("record_codex_security_discovery_candidates", {
         scanId,
-        candidates: [
-          {
-            cwe_ids: [],
-            locations: [
-              { path: "src/handler.py", start_line: 1, role: "root_control" },
-            ],
-            summary: "The changed handler may rely on the removed guard.",
-            evidence: "The selected change removes a neighboring guard.",
-          },
-        ],
+        candidates: [candidateInput],
       }),
       `${runtimeLabel}: record a diff candidate alongside a deleted file`,
     );
+    const ledger = path.join(
+      scanDir,
+      "artifacts/02_discovery/candidate_ledger.jsonl",
+    );
+    const before = await readFile(ledger, "utf8");
+    requireToolError(
+      await call("record_codex_security_discovery_candidates", {
+        scanId,
+        candidates: [candidateInput, { ...candidateInput, evidence: "  " }],
+      }),
+      /Input validation error/,
+      `${runtimeLabel}: reject a malformed mixed discovery batch`,
+    );
+    assert.equal(await readFile(ledger, "utf8"), before);
     const candidates = requireSuccessfulTool<{
       rows: { candidate_id: string }[];
     }>(
@@ -1033,6 +1064,43 @@ async function testClaimedParentArtifactOperations(
     });
 
     const originalLedger = await readFile(ledgerPath, "utf8");
+    const { validation, attack_path: attackPath } = JSON.parse(originalLedger);
+    const validationLedger = `${originalLedger}${JSON.stringify({
+      ...seededCandidate,
+      candidate_id: "candidate-valid",
+    })}\n`;
+    await writeFile(ledgerPath, validationLedger);
+    requireToolError(
+      await call("record_codex_security_candidate_validations", {
+        scanId,
+        validations: [
+          { candidateId, validation: { ...validation, confidence: "certain" } },
+          { candidateId: "candidate-valid", validation },
+        ],
+      }),
+      /confidence/,
+      `${runtimeLabel}: reject invalid validation confidence`,
+    );
+    assert.equal(await readFile(ledgerPath, "utf8"), validationLedger);
+    await writeFile(ledgerPath, originalLedger);
+    for (const invalid of [
+      { severity: "moderate" },
+      { decision: "ignore" },
+      { decision: "deferred" },
+      { severity_rationale: "  " },
+    ]) {
+      requireToolError(
+        await call("record_candidate_attack_paths", {
+          scanId,
+          attackPaths: [
+            { candidateId, attackPath: { ...attackPath, ...invalid } },
+          ],
+        }),
+        /Input validation error/,
+        `${runtimeLabel}: reject invalid attack-path judgment`,
+      );
+      assert.equal(await readFile(ledgerPath, "utf8"), originalLedger);
+    }
     for (const [name, arguments_] of phaseCalls) {
       requireToolError(
         await call(name, arguments_, otherThread),
@@ -1179,6 +1247,8 @@ async function testParentToolList(bundle: string) {
           `${tool.name} must not accept a model-selected artifact destination.`,
         );
       }
+      if (tool.name === "record_codex_security_scan_draft")
+        assertSemanticInputProperties(tool.inputSchema);
     }
 
     const deepScanTool = tools.find(
@@ -1270,6 +1340,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     );
 
     const [tool] = tools;
+    assertSemanticInputProperties(tool.inputSchema);
     assert.deepEqual(tool.inputSchema.required, [
       "scanId",
       "findings",
@@ -1295,6 +1366,24 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       findings: [],
       coverage: workerDraft([]).coverage,
     };
+
+    for (const forbiddenInput of [
+      { ...input, scope: { includePaths: ["src"] } },
+      { ...input, coverage: { ...input.coverage, mode: "repository" } },
+      {
+        ...input,
+        findings: [
+          { ...finding("fixture", "src/fixture.py"), findingId: "host-owned" },
+        ],
+      },
+    ]) {
+      requireToolError(
+        await client.callTool({ name: tool.name, arguments: forbiddenInput }),
+        /Input validation error/,
+        "Omitting forbidden properties from the advertised shape must preserve validation.",
+      );
+    }
+    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
     requireToolError(
       await client.callTool({
@@ -1457,6 +1546,7 @@ async function testReducerWorkerToolList(bundle: string) {
         `${tool.name} must expose scanId only when submitting its complete reduction.`,
       );
       if (tool.name === "record_codex_security_deep_reduction") {
+        assertSemanticInputProperties(tool.inputSchema);
         assert.deepEqual(tool.inputSchema.required, ["scanId", "findings"]);
         assert.equal(tool.inputSchema.additionalProperties, false);
         assert.equal(
@@ -1583,6 +1673,46 @@ async function testReducerWorkerToolList(bundle: string) {
     );
   } finally {
     await client.close();
+  }
+}
+
+function assertSemanticInputProperties(schema: Record<string, unknown>) {
+  const properties = schema.properties as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const findingSchema = properties.findings.items as Record<string, unknown>;
+  const groups: [Record<string, unknown>, string[]][] = [
+    [properties.scope, ["includePaths", "excludePaths"]],
+    [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],
+  ];
+  if (properties.coverage)
+    groups.push([
+      properties.coverage,
+      [
+        "documentType",
+        "schemaVersion",
+        "scanId",
+        "mode",
+        "inventoryStrategy",
+        "includePaths",
+        "excludePaths",
+        "receiptRefs",
+      ],
+    ]);
+  for (const [object, forbidden] of groups) {
+    const names = object.propertyNames as { not: { enum: string[] } };
+    for (const key of forbidden) {
+      assert.equal(
+        Object.hasOwn(object.properties as object, key),
+        false,
+        `${key} must not be advertised as an optional unknown input`,
+      );
+      assert.ok(
+        names.not.enum.includes(key),
+        `${key} remains forbidden in tools/list`,
+      );
+    }
   }
 }
 

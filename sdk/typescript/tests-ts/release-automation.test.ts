@@ -782,48 +782,39 @@ describe("protected Git release refs", () => {
     ).toBe("0.1.2");
   });
 
-  test("rejects a release-shaped branch", () => {
-    expect(() =>
-      releaseTagVersion(
-        "branch",
-        "refs/heads/npm-v0.1.2",
-        "npm-v0.1.2",
-        packageJson,
-      ),
-    ).toThrow("npm releases must be dispatched from a real Git tag.");
-  });
-
-  test("rejects a mismatched full Git ref", () => {
-    expect(() =>
-      releaseTagVersion(
-        "tag",
-        "refs/tags/npm-v0.1.3",
-        "npm-v0.1.2",
-        packageJson,
-      ),
-    ).toThrow("npm releases must be dispatched from a real Git tag.");
-  });
-
-  test("rejects an unstable release tag", () => {
-    expect(() =>
-      releaseTagVersion(
-        "tag",
-        "refs/tags/npm-v0.1.2-beta.1",
-        "npm-v0.1.2-beta.1",
-        packageJson,
-      ),
-    ).toThrow("Release tags must identify a stable npm-vX.Y.Z version.");
-  });
-
-  test("rejects a Git tag for a different package version", () => {
-    expect(() =>
-      releaseTagVersion(
-        "tag",
-        "refs/tags/npm-v0.1.3",
-        "npm-v0.1.3",
-        packageJson,
-      ),
-    ).toThrow("npm release tag must match the stable package version.");
+  test.each([
+    [
+      "rejects a release-shaped branch",
+      "branch",
+      "refs/heads/npm-v0.1.2",
+      "npm-v0.1.2",
+      "npm releases must be dispatched from a real Git tag.",
+    ],
+    [
+      "rejects a mismatched full Git ref",
+      "tag",
+      "refs/tags/npm-v0.1.3",
+      "npm-v0.1.2",
+      "npm releases must be dispatched from a real Git tag.",
+    ],
+    [
+      "rejects an unstable release tag",
+      "tag",
+      "refs/tags/npm-v0.1.2-beta.1",
+      "npm-v0.1.2-beta.1",
+      "Release tags must identify a stable npm-vX.Y.Z version.",
+    ],
+    [
+      "rejects a Git tag for a different package version",
+      "tag",
+      "refs/tags/npm-v0.1.3",
+      "npm-v0.1.3",
+      "npm release tag must match the stable package version.",
+    ],
+  ] as const)("%s", (_name, refType, ref, refName, message) => {
+    expect(() => releaseTagVersion(refType, ref, refName, packageJson)).toThrow(
+      message,
+    );
   });
 });
 

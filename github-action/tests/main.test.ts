@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -11,6 +11,7 @@ import { INPUT_NAMES } from '../src/inputs.js';
 import { gitEnvironment } from '../src/targets.js';
 import type { Runtime } from '../src/runtime.js';
 import type { ProcessResult } from '../src/process.js';
+import { copyCompletedScan } from './fixtures.js';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
@@ -95,7 +96,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   let capturedArgs: readonly string[] = [];
   let capturedEnvironment: NodeJS.ProcessEnv = {};
   async function reports(): Promise<void> {
-    await cp(new URL('./fixtures/completed-scan/', import.meta.url), runtime.resultsDirectory, { recursive: true });
+    await copyCompletedScan(runtime.resultsDirectory);
     const manifestPath = join(runtime.resultsDirectory, 'scan-manifest.json');
     const coveragePath = join(runtime.resultsDirectory, 'coverage.json');
     const sarifPath = join(runtime.resultsDirectory, 'exports/results.sarif');

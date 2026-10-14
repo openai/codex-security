@@ -14,7 +14,7 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
-[findings service guide](docs/findings-service.md), or
+[findings guide](docs/findings-service.md), or
 [online documentation](https://learn.chatgpt.com/docs/security) for setup and examples.
 
 Before version `1.0.0`, minor releases may change the public API.
@@ -240,6 +240,11 @@ stops before model work with the plugin upgrade message.
 When no provider is selected, discovery, reducer, and resumed workers inherit the
 same native configuration as the parent.
 
+Custom plugins must support the current workbench protocol for scan comparison
+and archival. Update an older custom plugin or omit `pluginPath` to use the
+bundled version. The SDK no longer adapts payloads or archives scan directories
+on behalf of older workbench implementations.
+
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
 for supported overrides and defaults.
@@ -395,17 +400,16 @@ After [installing the CLI](#install-the-cli), sign in if needed:
 cs login
 ```
 
-From your repository directory, optionally draft security guidance before scanning:
+From your repository, optionally [draft a `SECURITY.md`](#generate-a-security-policy)
+that explains what counts as a security issue in your project:
 
 ```bash
 cs policy .
 ```
 
-The command saves a draft outside the checkout. Review the proposed diff and
-notes, edit the draft as needed, then copy it to the displayed `Policy target`
-so future scans use it. Generating the draft alone does not install it.
-Skip this step to keep an existing policy or scan without one. See
-[Generate a security policy](#generate-a-security-policy) for details.
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
 Then scan the repository:
 
@@ -430,16 +434,20 @@ scans, custom validation, imports, patching, and integrations.
 
 ### Generate a security policy
 
-To draft guidance for a selected path:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. To select a
+component:
 
 ```bash
 cs policy . --path services/api
 ```
 
-The SDK provides `generatePolicy()`,
-`preflightPolicy()`, and `previewPolicy()`. See
+Existing files stay unchanged until you review and copy the draft to the
+**Policy target** shown. Scans already use root and component policies; you can
+keep them without generating new ones.
+
+The SDK provides `generatePolicy()`, `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
-headless use, artifacts, and review requirements.
+policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
@@ -480,33 +488,20 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-The findings service stores findings and duplicate groups in SQLite and provides
-a read-only dashboard. It has no built-in authentication; keep it on loopback or
-behind an authenticated TLS proxy. Imports send complete finding JSON to the
-configured embeddings endpoint.
-
-See the [findings service guide](docs/findings-service.md) for its HTTP API,
-Docker setup, publishing, and deduplication. For records stored in your own
-system, see [SDK records deduplication](docs/dedupe-records.md).
-
-### Running without Docker
+Saved-scan deduplication uses local SQLite directly:
 
 ```bash
-cs serve --port 3000
+cs dedupe --scan SCAN_ID --json
 ```
 
-Open `http://127.0.0.1:3000/dashboard`. Startup and listing need no API key;
-imports that generate embeddings need `OPENAI_API_KEY` or `CODEX_API_KEY`.
-A ChatGPT login is not an embedding API credential. See
-[local service setup](docs/findings-service.md#run-without-docker) for storage settings.
-
-### Upgrades and backups
-
-Stop the service and back up its entire state directory before upgrading.
-Keep the state volume when replacing a container. See
-[backup and restore instructions](docs/findings-service.md#storage-upgrades-and-backups).
+The [findings guide](docs/findings-service.md) covers local storage, embedding
+credentials, deduplication, backups, and independently operated HTTP endpoints.
+The local `serve` command and browser dashboard have been removed. Existing
+scans, findings, and duplicate groups remain in the workbench database.
+For records stored in your own system, see
+[SDK records deduplication](docs/dedupe-records.md).
 
 ## Containerized bulk scans
 
@@ -536,6 +531,6 @@ paths. Keep state and scan artifacts private and outside the repository.
 
 - [Online SDK guide](https://learn.chatgpt.com/docs/security/sdk)
 - [CLI reference](docs/cli.md)
-- [Findings service guide](docs/findings-service.md)
+- [Findings guide](docs/findings-service.md)
 - [GitHub issues](https://github.com/openai/codex-security/issues) for bugs and feature requests
 - [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md) for private vulnerability reporting

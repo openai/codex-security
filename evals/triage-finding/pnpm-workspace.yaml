@@ -26,3 +26,6 @@ allowBuilds:
   onnxruntime-node: false
   protobufjs: false
   sharp: false
+
+patchedDependencies:
+  promptfoo@0.123.1: patches/promptfoo@0.123.1.patch

@@ -63,7 +63,8 @@ SARIF_SECURITY_SCORES = {
 }
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.(?P<fraction>\d+))?(?:[Zz]|[+-]\d{2}:\d{2})$",
+    re.ASCII,
 )
 REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 GITHUB_HASH_BLOCK_SIZE = 100
@@ -878,16 +879,19 @@ def _validate_remote(remote: str, context: str) -> None:
         )
 
 
+def parse_timestamp(value: str) -> datetime:
+    match = RFC3339_RE.fullmatch(value)
+    if match and (fraction := match.group("fraction")):
+        start, end = match.span("fraction")
+        value = value[:start] + fraction[:6].ljust(6, "0") + value[end:]
+    return datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
+
+
 def _validate_date_time(value: str, context: str) -> None:
     if not RFC3339_RE.fullmatch(value):
         raise ContractError(f"{context}: expected an RFC 3339 timestamp")
-    # Python 3.10 only parses 3 or 6 fractional digits. Validate the calendar and
-    # offset without a complete ASCII fraction, leaving the original text intact.
-    parser_value = re.sub(r"\.[0-9]+(?=[Zz+-])", "", value)
     try:
-        parsed = datetime.fromisoformat(
-            parser_value[:-1] + "+00:00" if parser_value[-1] in "Zz" else parser_value
-        )
+        parsed = parse_timestamp(value)
     except ValueError as exc:
         raise ContractError(f"{context}: expected an RFC 3339 timestamp") from exc
     if parsed.tzinfo is None:
@@ -1520,6 +1524,14 @@ def _validate_completion_binding(
     for key, expected in completion_binding["scope"].items():
         if coverage.get(key) != expected:
             raise ContractError(f"coverage.{key}: must match the workbench scan")
+
+
+def path_within_scope(path: str, scope: str) -> bool:
+    candidate = PurePosixPath(path)
+    requested = PurePosixPath(scope)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    return candidate.is_relative_to(requested)
 
 
 def _validate_finding(finding: dict[str, Any], context: str) -> None:
@@ -2565,9 +2577,23 @@ def _artifact_record(
     }
 
 
-def _coverage_receipt_refs(coverage: dict[str, Any]) -> list[str]:
-    refs = {ref for surface in coverage["surfaces"] for ref in surface.get("receiptRefs", [])}
-    return sorted(refs)
+def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
+    refs = {
+        ref: "coverage receipt"
+        for surface in coverage["surfaces"]
+        for ref in surface.get("receiptRefs", [])
+    }
+    extensions = scan.get("extensions")
+    imported = extensions.get("import") if isinstance(extensions, dict) else None
+    if isinstance(imported, dict) and "sourceRef" in imported:
+        context = "manifest.scan.extensions.import"
+        ref = _require_portable_relative_path(
+            _require_str(imported, "sourceRef", context), f"{context}.sourceRef"
+        )
+        if not ref.startswith("artifacts/"):
+            raise ContractError(f"{context}.sourceRef: expected a file under artifacts/")
+        refs.setdefault(ref, "import source")
+    return {ref: refs[ref] for ref in sorted(refs)}
 
 
 def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
@@ -2575,9 +2601,9 @@ def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str,
         _require_portable_relative_path(artifact["path"], "sealed artifact path")
         for artifact in scan["artifacts"]
     }
-    for ref in _coverage_receipt_refs(coverage):
+    for ref, context in _supplementary_artifact_refs(scan, coverage).items():
         if ref not in artifact_paths:
-            raise ContractError(f"coverage receipt is missing from sealed artifacts: {ref}")
+            raise ContractError(f"{context} is missing from sealed artifacts: {ref}")
 
 
 def _validate_existing_seal(
@@ -2904,6 +2930,7 @@ def _prepare_scan_finalization(
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
@@ -2985,6 +3012,27 @@ def _prepare_scan_finalization(
     )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
+    if finding_scope is not None:
+        # Accepted worker/reducer files remain immutable; only the new parent
+        # projection is scoped, after the existing validation of every finding.
+        scoped_findings = [
+            finding
+            for finding in findings["findings"]
+            if any(
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for location in finding["locations"]
+                for path, is_file in finding_scope
+            )
+        ]
+        if was_sealed and len(scoped_findings) != len(findings["findings"]):
+            raise ContractError(
+                "The sealed Deep scan contains findings outside its requested paths; "
+                "start a new scan to produce scoped results."
+            )
+        if not was_sealed:
+            findings["findings"] = scoped_findings
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
@@ -3001,7 +3049,7 @@ def _prepare_scan_finalization(
             _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
             *[
                 _artifact_record(scan_dir, ref, "application/octet-stream")
-                for ref in _coverage_receipt_refs(coverage)
+                for ref in _supplementary_artifact_refs(scan, coverage)
             ],
         ]
         _validate_manifest(manifest)

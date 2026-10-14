@@ -2054,34 +2054,67 @@ describe("scan and patch workflow", () => {
       "https://github.example.test/example/repository.git",
       { GITLAB_HOST: "gitlab.com" },
       "gh",
+      undefined,
     ],
-    ["https://gitlab.com/example/subgroup/repository.git", {}, "glab"],
-    ["git@gitlab.com:example/subgroup/repository.git", {}, "glab"],
-    ["ssh://git@gitlab.com:2222/example/subgroup/repository.git", {}, "glab"],
+    [
+      "https://gitlab.com/example/subgroup/repository.git",
+      {},
+      "glab",
+      undefined,
+    ],
+    [
+      "git@gitlab.com:example/subgroup/repository.git",
+      {},
+      "glab",
+      "ssh://git@gitlab.com/example/subgroup/repository.git",
+    ],
+    [
+      "gitlab.com:example/subgroup/repository.git",
+      {},
+      "glab",
+      "ssh://gitlab.com/example/subgroup/repository.git",
+    ],
+    [
+      "gitlab@gitlab.example.test:example/subgroup/repository.git",
+      { GITLAB_HOST: "gitlab.example.test" },
+      "glab",
+      "ssh://gitlab@gitlab.example.test/example/subgroup/repository.git",
+    ],
+    [
+      "ssh://git@gitlab.com:2222/example/subgroup/repository.git",
+      {},
+      "glab",
+      undefined,
+    ],
     [
       "git@gitlab.example.test:example/subgroup/repository.git",
       { GITLAB_HOST: "gitlab.example.test" },
       "glab",
+      "ssh://git@gitlab.example.test/example/subgroup/repository.git",
     ],
     [
       "https://gitlab.example.test/example/repository.git",
       { GITLAB_HOST: "https://gitlab.example.test" },
       "glab",
+      undefined,
     ],
     [
       "https://gitlab.example.test/example/repository.git",
       { GITLAB_URI: "https://gitlab.example.test" },
       "glab",
+      undefined,
     ],
     [
       "https://gitlab.example.test/example/repository.git",
       { GL_HOST: "gitlab.example.test" },
       "glab",
+      undefined,
     ],
-    ["https://gitlab.example.test/example/repository.git", {}, "gh"],
+    ["https://gitlab.example.test/example/repository.git", {}, "gh", undefined],
   ] as const)(
     "publishes saved-finding patches for origin %s with environment %j using %s",
-    async (origin, environment, client) => {
+    async (origin, environment, client, expectedSelector) => {
+      const selector = expectedSelector ?? origin;
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -2089,14 +2122,7 @@ describe("scan and patch workflow", () => {
           : "https://github.example.test/example/repository/pull/14";
       const publicationCommands: Array<readonly string[]> = [];
       const outcome = await runWorkflow(
-        [
-          "patch",
-          "--scan",
-          "scan-1",
-          "--assess-patch-risk",
-          "--create-pr",
-          "--json",
-        ],
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           environment,
           onWorkbench: () => savedScan(result),
@@ -2112,13 +2138,6 @@ describe("scan and patch workflow", () => {
             expect(command).toBe(client);
             publicationCommands.push(args);
             return args[1] === "create" ? url : "";
-          },
-        },
-        {
-          configure: (current) => {
-            Object.assign(current, {
-              assessPatchRisk: async () => patchRiskAssessment(),
-            });
           },
         },
       );
@@ -2139,25 +2158,25 @@ describe("scan and patch workflow", () => {
             "--output",
             "json",
             "--jq",
-            ".[0].web_url // empty",
+            "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
             "--repo",
-            origin,
+            selector,
           ],
           [
             "mr",
             "create",
             "--draft",
             "--head",
-            origin,
+            selector,
             "--source-branch",
             "codex-security/patch-scan-1",
             "--title",
             "fix: patch verified security findings",
             "--description",
-            expect.stringContaining(patchRiskSummary()),
+            ">>>\nApplies verified security fixes from a completed scan.",
             "--yes",
             "--repo",
-            origin,
+            selector,
           ],
         ]);
       }
@@ -2168,6 +2187,270 @@ describe("scan and patch workflow", () => {
         scanId: "scan-1",
         pullRequest: { branch: "codex-security/patch-scan-1", url },
       });
+    },
+  );
+
+  test.each(
+    (["github", "gitlab"] as const).flatMap((provider) =>
+      (["fresh", "resume", "resume CRLF", "resume embedded CR"] as const).map(
+        (mode) => [provider, mode] as const,
+      ),
+    ),
+  )(
+    "preserves Markdown and keeps %s quick actions advisory during %s publication",
+    async (provider, mode) => {
+      const gitlab = provider === "gitlab";
+      const resumed = mode !== "fresh";
+      const result = resultWithFindings(["high"]);
+      const summary = [
+        "### Regression examples",
+        "",
+        "/label ~example ``",
+        "Example `",
+        "/close",
+        "`",
+        "",
+        "/label ~reviewed",
+        "",
+        "```js",
+        "// Regression check",
+        "/^safe$/.test(value);",
+        "/close",
+        "```",
+        "",
+        "~~~~text",
+        "/srv/example",
+        "~~~",
+        "/close",
+        "~~~~~",
+        "",
+        "    /close",
+        "    /srv/example",
+        "",
+        "Inline `example",
+        "/close",
+        "` content.",
+        "",
+        "Example ``const path = `",
+        "/srv/example",
+        "`;``",
+        "/label ~after-inline",
+        "",
+        "Example ```literal `` and `",
+        "/close",
+        "` and `` end```.",
+        "",
+        "*Nested ``literal `",
+        "/close",
+        "` end`` emphasis.*",
+        "",
+        "Unmatched ` delimiter",
+        "/label ~after-unmatched",
+        "",
+        "> Quoted example",
+        "/close",
+        "",
+        "- List example",
+        "/close",
+        "",
+        "<div>",
+        "/close",
+        "</div>",
+        "",
+        "<img",
+        'src="/uploads/proof.png"',
+        "/>",
+        "",
+        'See <a href="',
+        '/docs">documentation</a>.',
+        "",
+        "$$",
+        "1",
+        "/2",
+        "$$",
+        "/label ~after-math",
+        "",
+        "Ratio $1+\\$",
+        "/2$ and $$1",
+        "/2$$.",
+        "",
+        "$$`",
+        "/2$$",
+        "/label ~after-math-backtick",
+        "`",
+        "",
+        "$ incomplete math",
+        "/label ~math-whitespace",
+        "$",
+        "",
+        "$1",
+        "/label ~math-digit$2",
+        "",
+        "$1",
+        "/label ~math-closing-space",
+        "$",
+        "",
+        "$``$",
+        "/label ~math-empty-code",
+        "`$",
+        "",
+        "$$$",
+        "/label ~math-triple",
+        "$$$",
+        "",
+        "$$",
+        "/label ~math-unclosed",
+        "",
+        "Text",
+        "<b>",
+        "/close",
+        "</b>",
+        "",
+        "<!--",
+        "/close",
+        "-->",
+        "",
+        ">>>",
+        "Multiline quote",
+        "/close",
+        ">>>>",
+        "",
+        ">>>>",
+        "Longer quote fence",
+        ">>>",
+        "/close",
+        ">>>>>",
+        "",
+        ">>>",
+        "```text",
+        ">>>>",
+        "/label ~after-quote",
+        "",
+        " /close",
+        "  /close",
+        "   /close",
+        "",
+        "Use /tmp/example.",
+        "",
+        "/assign @reviewer",
+        "",
+        "```text",
+        "/close",
+      ].join("\n");
+      let savedBody = `Synthetic saved report\n\n\t/close\n\n${summary}`;
+      if (mode === "resume CRLF")
+        savedBody = savedBody.replaceAll("\n", "\r\n");
+      if (mode === "resume embedded CR")
+        savedBody = "Synthetic saved report\n\n>\r>>\n/label ~example";
+      let publishedBody = "";
+      const outcome = await runWorkflow(
+        resumed
+          ? ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"]
+          : [
+              "patch",
+              "--scan",
+              "scan-1",
+              "--assess-patch-risk",
+              "--create-pr",
+              "--json",
+            ],
+        {
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: (command, args) => {
+            if (command === "git") {
+              if (args[0] === "config") {
+                if (args.at(-1)?.endsWith(".codexSecurityPatchCommit"))
+                  return "synthetic-commit";
+                if (
+                  args.includes("--get") &&
+                  args.at(-1)?.endsWith(".codexSecurityPatchPullRequestBody")
+                )
+                  return savedBody;
+                if (args[2]?.endsWith(".codexSecurityPatchPullRequestBody"))
+                  savedBody = args[3]!;
+              }
+              if (args[0] === "rev-parse" && args.includes("--verify"))
+                return "synthetic-commit";
+              return args[0] === "remote"
+                ? `https://${provider}.com/example/repository.git`
+                : args.includes("--name-only")
+                  ? "src/finding-1.ts\0"
+                  : "";
+            }
+            expect(command).toBe(gitlab ? "glab" : "gh");
+            if (args[1] === "list") return "";
+            publishedBody =
+              args[args.indexOf(gitlab ? "--description" : "--body") + 1]!;
+            return "https://example.test/review/1";
+          },
+        },
+        {
+          configure: (current) => {
+            Object.assign(current, {
+              assessPatchRisk: async () => ({
+                report: `<!-- codex-security:patch-risk-summary:start -->\n${summary}\n<!-- codex-security:patch-risk-summary:end -->`,
+              }),
+            });
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      const fence = mode === "resume embedded CR" ? ">>>>" : ">>>>>>";
+      expect(publishedBody).toBe(gitlab ? `${fence}\n${savedBody}` : savedBody);
+      if (!resumed)
+        expect(JSON.parse(outcome.stdout).patchRisk.report).toBe(summary);
+    },
+  );
+
+  test.each([false, true])(
+    "uses the GitLab project filter result before publishing (existing MR: %j)",
+    async (hasExisting) => {
+      const result = resultWithFindings(["high"]);
+      const origin = "ssh://git@gitlab.com/example/subgroup/repository.git";
+      const branch = "codex-security/patch-scan-1";
+      const url =
+        "https://gitlab.com/example/subgroup/repository/-/merge_requests/14";
+      const commands: string[] = [];
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: (command, args) => {
+            if (command === "git") {
+              if (args[0] === "remote") return origin;
+              if (args[0] === "push") {
+                expect(args).toEqual([
+                  "push",
+                  "--set-upstream",
+                  "origin",
+                  branch,
+                ]);
+                commands.push("push");
+              }
+              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            }
+            expect(command).toBe("glab");
+            commands.push(args[1]!);
+            expect(args[args.indexOf("--repo") + 1]).toBe(origin);
+            expect(args[args.indexOf("--source-branch") + 1]).toBe(branch);
+            if (args[1] === "list") {
+              // glab applies this filter to the branch-matched API response:
+              // fork merge requests must not count as this project's patch.
+              expect(args[args.indexOf("--jq") + 1]).toBe(
+                "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
+              );
+              return hasExisting ? url : "";
+            }
+            expect(args[args.indexOf("--head") + 1]).toBe(origin);
+            return url;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(0);
+      expect(commands).toEqual(
+        hasExisting ? ["list"] : ["list", "push", "create"],
+      );
+      expect(JSON.parse(outcome.stdout).pullRequest).toEqual({ branch, url });
     },
   );
 

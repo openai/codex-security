@@ -1,16 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, readFile, writeFile, rm, realpath, symlink, link } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, realpath, symlink, link } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { analyzeResults, readReportFile, type ResultOptions } from '../src/results.js';
 import { collectReports } from '../src/artifacts.js';
+import { copyCompletedScan } from './fixtures.js';
 
 async function fixture(t: { after(fn: () => Promise<void>): void }): Promise<ResultOptions> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'codex-results-test-')));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await cp(new URL('./fixtures/completed-scan/', import.meta.url), root, { recursive: true });
+  await copyCompletedScan(root);
   const document = async (name: string) => JSON.parse(await readFile(join(root, name), 'utf8'));
   return {
     resultsDirectory: root, scannedSha: 'a'.repeat(40), exitCode: 0, publishable: true,

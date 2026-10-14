@@ -312,7 +312,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       xml
         .replace(/<\/(?:\w+:)?p\s*>/gu, "\n")
         .replace(/<(?:\w+:)?(?:br|cr)\b[^>]*>/gu, "\n")
-        .replace(/<(?:\w+:)?tab\b[^>]*\/>/gu, "\t")
+        .replace(/<(?:\w+:)?tab\b[^>]*>/gu, "\t")
         .replace(/<[^>]+>/gu, ""),
     );
   } catch (error) {

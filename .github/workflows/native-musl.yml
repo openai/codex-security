@@ -17,14 +17,14 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x64
-            rust-image: rust@sha256:83b16fd204613a557527e81ef4f87fd513229187c49635e3c7f96b08dfa43c33
-            node22-image: node@sha256:133cdce957f50f47236d6d926592fb1db7a120ac3c33191e611b60dfab63e324
-            node20-image: node@sha256:2ffec31a58e85fbcd575c544a3584f6f4d128779e6b856153a04366b8dd01bb0
+            rust-image: public.ecr.aws/docker/library/rust@sha256:83b16fd204613a557527e81ef4f87fd513229187c49635e3c7f96b08dfa43c33
+            node22-image: public.ecr.aws/docker/library/node@sha256:133cdce957f50f47236d6d926592fb1db7a120ac3c33191e611b60dfab63e324
+            node20-image: public.ecr.aws/docker/library/node@sha256:2ffec31a58e85fbcd575c544a3584f6f4d128779e6b856153a04366b8dd01bb0
           - runner: ubuntu-24.04-arm
             arch: arm64
-            rust-image: rust@sha256:ec97f172f73f5ec381a238dad6ddd99e0e9c14fd3709a05beb41ccdf50eb666a
-            node22-image: node@sha256:9090fa64b73b14ab658d907e7916afcb1633e4bdd5134f9b1be4a21a6c56f0b8
-            node20-image: node@sha256:9a3cb11e78b5082ce7d22bb5113ed5bb7ac4c20195c05f3981e765e21e31c29c
+            rust-image: public.ecr.aws/docker/library/rust@sha256:ec97f172f73f5ec381a238dad6ddd99e0e9c14fd3709a05beb41ccdf50eb666a
+            node22-image: public.ecr.aws/docker/library/node@sha256:9090fa64b73b14ab658d907e7916afcb1633e4bdd5134f9b1be4a21a6c56f0b8
+            node20-image: public.ecr.aws/docker/library/node@sha256:9a3cb11e78b5082ce7d22bb5113ed5bb7ac4c20195c05f3981e765e21e31c29c
     defaults:
       run:
         shell: bash

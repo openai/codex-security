@@ -136,6 +136,15 @@ def verify_linear_publication_scan(
     return scan
 
 
+def _linear_publication_record(row: sqlite3.Row) -> dict[str, str]:
+    return {
+        "findingId": row["finding_id"],
+        "occurrenceId": row["occurrence_id"],
+        "issueIdentifier": row["external_id"],
+        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
+    }
+
+
 def inspect_linear_publication(
     db: Any,
     payload: dict[str, Any],
@@ -164,15 +173,7 @@ def inspect_linear_publication(
                     destination.get("projectId"),
                 ),
             ):
-                recorded.setdefault(
-                    row["occurrence_id"],
-                    {
-                        "findingId": row["finding_id"],
-                        "occurrenceId": row["occurrence_id"],
-                        "issueIdentifier": row["external_id"],
-                        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                    },
-                )
+                recorded.setdefault(row["occurrence_id"], _linear_publication_record(row))
         return {
             "scanId": scan["id"],
             "destination": destination,
@@ -194,12 +195,11 @@ def prepare_linear_publication(
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
-        result = {
+        return {
             "scanId": scan["id"],
             "destination": destination,
             "findingCount": len(findings),
         }
-    return result
 
 
 def record_linear_publications(
@@ -319,16 +319,8 @@ def record_linear_publications(
             ).fetchone()
             if row is None:
                 raise SystemExit("A created Linear issue could not be read from scan history.")
-            created.append(
-                {
-                    "findingId": row["finding_id"],
-                    "occurrenceId": row["occurrence_id"],
-                    "issueIdentifier": row["external_id"],
-                    **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                }
-            )
-        result = {"scanId": scan["id"], "destination": destination, "created": created}
-    return result
+            created.append(_linear_publication_record(row))
+        return {"scanId": scan["id"], "destination": destination, "created": created}
 
 
 def export_findings(

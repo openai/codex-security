@@ -133,7 +133,7 @@ assert.match(
   "Cross-thread artifact recovery must require an exact recovery-token schema match.",
 );
 assert.match(
-  serverSource,
+  await readFile(path.join(mcpAppRoot, "src", "workbench-client.ts"), "utf8"),
   /throw new Error\(error\.stderr\.trim\(\),\s*\{\s*cause:\s*error\s*\}\)/,
   "Workbench failures must preserve subprocess exit, signal, and stderr diagnostics.",
 );

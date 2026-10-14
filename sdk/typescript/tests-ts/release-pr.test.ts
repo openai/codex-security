@@ -24,9 +24,14 @@ type History = {
   baseCommit: string;
   mainSha: string;
   packageText: string;
+  actionPackageText?: string | null;
+  actionLockText?: string | null;
   changes: Change[];
 };
-type Plan = Omit<History, "packageText"> & {
+type Plan = Omit<
+  History,
+  "packageText" | "actionPackageText" | "actionLockText"
+> & {
   version: string;
   branch: string;
   title: string;
@@ -64,6 +69,8 @@ type Pull = {
 const script = new URL("../scripts/release-pr.mjs", import.meta.url);
 const {
   packagePath,
+  actionPackagePath,
+  actionLockPath,
   notesPath,
   statePath,
   isBreakingChange,
@@ -75,6 +82,8 @@ const {
   reconcileReleasePullRequest,
 } = (await import(script.href)) as {
   packagePath: string;
+  actionPackagePath: string;
+  actionLockPath: string;
   notesPath: string;
   statePath: string;
   isBreakingChange: (change: Change) => boolean;
@@ -129,6 +138,32 @@ afterEach(directories.cleanup);
 
 function packageText(version = "0.1.23", dependencies = {}) {
   return `${JSON.stringify({ name: "@openai/codex-security", version, dependencies }, null, 2)}\n`;
+}
+
+function actionFiles(dependencyVersion = "1.2.3") {
+  const manifest = {
+    name: "codex-security-action",
+    version: "0.1.23",
+    private: true,
+    dependencies: { example: dependencyVersion },
+  };
+  const lock = {
+    name: manifest.name,
+    version: manifest.version,
+    lockfileVersion: 3,
+    packages: {
+      "": manifest,
+      "node_modules/example": {
+        version: dependencyVersion,
+        resolved: `https://registry.npmjs.org/example/-/example-${dependencyVersion}.tgz`,
+        integrity: "sha512-c3ludGhldGlj",
+      },
+    },
+  };
+  return {
+    [actionPackagePath]: `${JSON.stringify(manifest, null, 2)}\n`,
+    [actionLockPath]: `${JSON.stringify(lock, null, 2)}\n`,
+  };
 }
 
 function change(
@@ -982,6 +1017,41 @@ describe("human note ownership", () => {
 });
 
 describe("rolling release reconciliation", () => {
+  test("aligns Action metadata when introduced and refreshed without advancing the published runtime pin", async () => {
+    const fixture = new Fixture();
+    fixture.merge("fix: initial fix");
+    const beforeAction = await fixture.run();
+    expect(beforeAction.plan.files[actionPackagePath]).toBeUndefined();
+    expect(beforeAction.plan.files[actionLockPath]).toBeUndefined();
+
+    const runtimePath = "github-action/runtime/package.json";
+    const runtime = JSON.stringify({
+      dependencies: { "@openai/codex-security": "0.1.23" },
+    });
+    for (const [title, files, version] of [
+      ["feat: add Action", actionFiles(), "0.1.24"],
+      ["feat!: change behavior", actionFiles("0.1.23"), "0.2.0"],
+    ] as const) {
+      fixture.merge(title, { ...files, [runtimePath]: runtime });
+      const result = await fixture.run();
+      expect(result.action).toBe("updated");
+      expect(result.pull).toBe(beforeAction.pull);
+      expect(JSON.parse(result.plan.files[packagePath]!).version).toBe(version);
+      for (const [path, text] of Object.entries(files)) {
+        const expected = JSON.parse(text);
+        expected.version = version;
+        if (path === actionLockPath) expected.packages[""].version = version;
+        expect(JSON.parse(result.plan.files[path]!)).toEqual(expected);
+        expect(fixture.repo.readFile(result.headSha!, path)).toBe(
+          result.plan.files[path]!,
+        );
+      }
+      expect(result.plan.files[runtimePath]).toBeUndefined();
+      expect(fixture.repo.readFile(result.headSha!, runtimePath)).toBe(runtime);
+    }
+    expect((await fixture.run()).action).toBe("unchanged");
+  });
+
   test.each([true, false])(
     "leaves an empty release cycle unchanged with dryRun=%p",
     async (dryRun) => {
@@ -1459,6 +1529,30 @@ describe("rolling release reconciliation", () => {
 });
 
 describe("release proposal pauses", () => {
+  test.each([
+    { path: actionPackagePath, change: "dependencies" },
+    { path: actionLockPath, change: "dependencies" },
+    { path: actionLockPath, change: "deletion" },
+  ])("preserves Action $change edits to $path", async ({ path, change }) => {
+    const fixture = new Fixture();
+    fixture.merge("feat: add Action", actionFiles());
+    const first = await fixture.run();
+    const edited = change === "deletion" ? null : actionFiles("2.0.0")[path]!;
+    const humanSha = fixture.commit(
+      first.plan.branch,
+      { [path]: edited },
+      "fix: adjust Action dependency",
+    );
+    fixture.merge("fix: another fix");
+    const writes = fixture.github.writes.length;
+    const result = await fixture.run();
+    expect(result.action).toBe("held");
+    expect(result.reason).toContain("package edits");
+    expect(fixture.head(first.plan.branch)).toBe(humanSha);
+    expect(fixture.repo.readFile(humanSha, path)).toBe(edited);
+    expect(fixture.github.writes).toHaveLength(writes);
+  });
+
   test.each(["open", "closed"] as const)(
     "keeps a retargeted %s proposal paused across workflow runs",
     async (state) => {

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
   copyFile,
@@ -10,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
@@ -286,6 +287,31 @@ test("native profile turns omit optional null fields and retain array errors", a
   await expect(invalid.startThread().run("synthetic prompt")).rejects.toThrow(
     "Codex config overrides must contain finite TOML values",
   );
+});
+
+test("API fixture cleanup retries a transient busy directory", async () => {
+  const root = await temporaryDirectory();
+  await writeFile(join(root, "child.txt"), "synthetic fixture");
+  const remove = fsPromises.rm;
+  let busy = true;
+  const removal = spyOn(fsPromises, "rm").mockImplementation(
+    async (path, options) => {
+      if (path === root && busy) {
+        busy = false;
+        throw Object.assign(new Error("Synthetic busy directory"), {
+          code: "EBUSY",
+        });
+      }
+      await remove(path, options);
+    },
+  );
+  try {
+    await cleanup();
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    removal.mockRestore();
+    await remove(root, { recursive: true, force: true });
+  }
 });
 
 test("native profile launches retain bundled tools through executable path aliases", async () => {

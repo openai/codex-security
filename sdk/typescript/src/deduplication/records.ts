@@ -1,5 +1,5 @@
 import { hash, randomUUID } from "node:crypto";
-import { z } from "incur";
+import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
@@ -52,26 +52,20 @@ const record = z.strictObject({
   finding: z.unknown().transform((value) => requireFinding(value)),
 });
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> =
-  z.strictObject({
-    version: z.literal(1),
-    observations: z.array(record),
-    candidateRelationships: z.array(
-      z.strictObject({
-        observationId: id,
-        candidateObservationIds: z.array(id),
-      }),
-    ),
-  });
+const deduplicateRecordsInputSchema = z.strictObject({
+  version: z.literal(1),
+  observations: z.array(record),
+  candidateRelationships: z.array(
+    z.strictObject({
+      observationId: id,
+      candidateObservationIds: z.array(id),
+    }),
+  ),
+});
 
-export interface DeduplicateRecordsInput {
-  version: 1;
-  observations: { id: string; finding: Finding }[];
-  candidateRelationships: {
-    observationId: string;
-    candidateObservationIds: string[];
-  }[];
-}
+export interface DeduplicateRecordsInput extends z.infer<
+  typeof deduplicateRecordsInputSchema
+> {}
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;

@@ -43,7 +43,6 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
-import workbench_severity as severity
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -115,6 +114,7 @@ from workbench_target import (
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
+    restore_directory_junctions,
     scan_target_warning,
     worktree_content_digest,
     worktree_content_digest_for_context,
@@ -225,16 +225,13 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
     )
     try:
         create_private_directory(path.parent)
-    except OSError as exc:
-        if exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
-            exc._codex_security_state_unavailable = True
+    except OSError:
+        print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
             connection = sqlite3.connect(path, timeout=5)
-        except sqlite3.OperationalError as exc:
-            if str(exc) == "unable to open database file":
-                exc._codex_security_state_unavailable = True
+        except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
         try:
@@ -332,7 +329,11 @@ def require_diff_target(
         if commit is None:
             raise SystemExit(f"Commit is not available in the local checkout: {head}")
         parent_line = next(
-            (line for line in commit.splitlines() if line.startswith(b"parent ")),
+            (
+                line
+                for line in commit.split(b"\n\n", 1)[0].splitlines()
+                if line.startswith(b"parent ")
+            ),
             None,
         )
         if parent_line is None:
@@ -440,6 +441,20 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
+    # Older scans did not record path kinds. Retain their lexical scope semantics
+    # rather than infer the original target from a possibly changed checkout.
+    if scan["recipe_json"] is None:
+        return []
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    return recipe.get("scopeFilePaths", [])
+
+
+def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
+    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     target_contract = {
@@ -461,6 +476,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         "scope": {
             "requiredExcludePaths": [],
             "requestedPath": scan["scope"],
+            "filePaths": requested_scan_file_paths(scan),
             **(
                 {"requiredIncludePaths": requested_scan_paths(scan)}
                 if scan["mode"] != "diff"
@@ -784,10 +800,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 scope,
                 args.mode,
                 user_context_argument(args),
-                diff_target["kind"] if diff_target else None,
-                diff_target["baseRevision"] if diff_target else None,
-                diff_target["headRevision"] if diff_target else None,
-                diff_target.get("contentDigest") if diff_target else None,
+                *scan_diff_identity(diff_target or None),
                 timestamp,
                 workspace["id"],
             ),
@@ -1541,6 +1554,7 @@ def complete_scan_locked(
                 completion_binding=completion_binding,
                 completion_warnings=warnings if scan["mode"] != "deep" else None,
                 draft_documents=draft_documents,
+                finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
         add_warning()
         wrote = True
@@ -1548,8 +1562,13 @@ def complete_scan_locked(
             prepared, projection_warnings=warnings
         )
     except ContractError as exc:
-        if wrote or (
+        # Only a coordinator-selected parent is fenced for output-write replay.
+        selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
+            connection, scan_id
+        )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
+        if (wrote and not selected_deep_parent) or (
             scan["mode"] == "deep"
+            and not wrote
             and not already_sealed
             and not isinstance(exc, RecoverableContractError)
         ):
@@ -1641,14 +1660,7 @@ def complete_scan_locked(
     return context
 
 
-def register_cli_scan(
-    connection: sqlite3.Connection,
-    args: argparse.Namespace,
-    *,
-    before_archive: Callable[[], None] | None = None,
-) -> dict[str, Any]:
-    repository = require_target(args.repository)
-    require_scannable_target(repository)
+def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Path:
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
     if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
         raise SystemExit(
@@ -1658,7 +1670,21 @@ def register_cli_scan(
         scan_dir.iterdir(), None
     ) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+    return scan_dir
 
+
+def register_cli_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    repository = require_target(args.repository)
+    require_scannable_target(repository)
+    scan_dir = None
+    if not args.archive_existing or args.archived_scan_dir is not None:
+        # Preserve early output rejection when this call will not move the directory.
+        scan_dir = require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
     if args.registration_json_stdin:
@@ -1671,6 +1697,10 @@ def register_cli_scan(
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
+    # Capture host-observed kinds once; resumes and publication use the saved recipe.
+    recipe.pop("scopeFilePaths", None)
+    if file_paths := [path for path in paths if (repository / path).is_file()]:
+        recipe["scopeFilePaths"] = file_paths
     scope = paths[0] if len(paths) == 1 else "."
     diff_target = None
     if requested_target["kind"] in {"refs", "working_tree"}:
@@ -1709,6 +1739,10 @@ def register_cli_scan(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if scan_dir is None:
+            # Host archiving temporarily removes the output directory. Wait for
+            # the existing writer before inspecting its replacement.
+            scan_dir = require_cli_scan_directory(repository, args)
         with archive_scan(
             connection,
             args,
@@ -2081,12 +2115,7 @@ def request_finding_remediation_action(
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["pending_action"] is not None:
             if (
                 current["pending_action"] == args.action
@@ -2154,12 +2183,7 @@ def claim_finding_remediation_resend(
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["pending_action"] is None:
             raise SystemExit("This remediation attempt does not have a pending host request.")
         if current["pending_action_claim_token"] == action_token:
@@ -2169,7 +2193,6 @@ def claim_finding_remediation_resend(
             return result
         delivered_at = current["pending_action_delivered_at"]
         if delivered_at is not None:
-            claimed_token = action_token
             updated = connection.execute(
                 """
                 UPDATE finding_remediation_attempts
@@ -2192,7 +2215,6 @@ def claim_finding_remediation_resend(
                 "This remediation worker is still within its execution lease. Retry later."
             )
         else:
-            claimed_token = action_token
             updated = connection.execute(
                 """
                 UPDATE finding_remediation_attempts
@@ -2218,7 +2240,7 @@ def claim_finding_remediation_resend(
         if updated.rowcount != 1:
             raise SystemExit(unavailable)
     result = scan_context(connection, occurrence["scan_id"])
-    result["actionToken"] = claimed_token
+    result["actionToken"] = action_token
     return result
 
 
@@ -2278,12 +2300,7 @@ def set_finding_remediation(
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["version"] != args.expected_version:
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
@@ -2405,11 +2422,10 @@ def require_reviewed_patch_applied(
         )
     unversioned = remediation["base_revision"] == "unversioned"
     excluded = (Path(scan["scan_dir"]),)
-    git_dir = None
-    pathspec = None
+    # Unborn repositories still need their config while metadata junctions are deferred.
+    git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
     if not unversioned:
-        _, pathspec = git_worktree_context(target)
-        git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
+        repository, pathspec = git_worktree_context(target)
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
         excluded += tuple(path for path, _ in git_submodule_entries(target))
@@ -2426,9 +2442,9 @@ def require_reviewed_patch_applied(
         checkout_root = Path(temporary) / "checkout"
         if unversioned:
             checkout = checkout_root
-            copy_directory_excluding(target, checkout, excluded)
+            junctions = copy_directory_excluding(target, checkout, excluded)
         else:
-            copy_git_worktree_files(target, checkout_root, excluded)
+            _, junctions = copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
@@ -2446,6 +2462,11 @@ def require_reviewed_patch_applied(
             raise SystemExit(
                 "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
             )
+        restore_directory_junctions(
+            target if unversioned else repository,
+            checkout if unversioned else checkout_root,
+            junctions,
+        )
         reverted_digest = (
             directory_content_digest(checkout)
             if unversioned
@@ -2458,11 +2479,16 @@ def require_reviewed_patch_applied(
         )
         if reverted_digest != remediation["base_content_digest"] and unversioned:
             checkout = Path(temporary) / "checkout-lf"
-            copy_directory_excluding(target, checkout, excluded)
+            junctions = copy_directory_excluding(target, checkout, excluded)
             applied_without_conversion = git_command(
-                checkout, "-c", "core.autocrlf=input", *arguments, text=True
+                checkout,
+                "-c",
+                "core.autocrlf=input",
+                *arguments,
+                text=True,
             )
             if applied_without_conversion.returncode == 0:
+                restore_directory_junctions(target, checkout, junctions)
                 reverted_digest = directory_content_digest(checkout)
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(
@@ -2768,13 +2794,10 @@ def scan_result(
         "status": "canceled" if scan["canceled_at"] else scan["status"],
         "updatedAt": progress["updated_at"],
     }
+    review_updated_at = ""
     if independent_reviews is not None:
-        progress_result["independentReviews"] = {
-            "active": independent_reviews["active"],
-            "completed": independent_reviews["completed"],
-            "maximum": independent_reviews["maximum"],
-            "consolidating": independent_reviews["consolidating"],
-        }
+        review_updated_at = str(independent_reviews.pop("updatedAt"))
+        progress_result["independentReviews"] = independent_reviews
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
@@ -2819,7 +2842,7 @@ def scan_result(
         "updatedAt": max(
             scan["updated_at"],
             progress["updated_at"],
-            str(independent_reviews["updatedAt"]) if independent_reviews is not None else "",
+            review_updated_at,
             finding_management_updated_at(connection, scan["id"]) or "",
         ),
         "userContext": scan["user_context"],
@@ -3123,8 +3146,7 @@ def finding_remediation_result(
     row = connection.execute(
         """
         SELECT remediation.request_id, remediation.state, remediation.version,
-            remediation.base_revision, remediation.base_content_digest,
-            remediation.applied_content_digest, remediation.pending_action,
+            remediation.base_revision, remediation.pending_action,
             remediation.pending_action_claimed_at, remediation.pending_action_claim_token,
             remediation.pending_action_delivered_at,
             remediation.patch_path, remediation.patch_digest, remediation.summary,
@@ -3328,10 +3350,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
-    if args.command == "read-severity-classification":
-        result = severity.read_classification(database_path(), args.scan_id)
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
-        return
     if args.command == "inspect-linear-publication":
         result = publication.inspect_linear_publication(
             _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
@@ -3472,8 +3490,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             )
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
-        elif args.command == "severity-classification":
-            result = severity.checkpoint(connection, json.load(sys.stdin), now())
         elif args.command == "local-dedupe":
             result = local_dedupe(connection, json.load(sys.stdin), now())
         elif args.command == "finding-workflow":

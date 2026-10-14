@@ -44,6 +44,18 @@ function exportCsv(findings: Finding[]): string {
 }
 
 describe("findings import formats", () => {
+  test("round-trips an empty exported CSV", async () => {
+    expect(
+      await parseImportedFindings(exportCsv([]), "csv", PLUGIN_ROOT),
+    ).toEqual([]);
+    await expect(
+      parseImportedFindings("", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+    await expect(
+      parseImportedFindings("title,summary\n", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+  });
+
   test("retains distinct occurrences of a shared finding in CSV and JSON", async () => {
     const {
       findings: [finding],

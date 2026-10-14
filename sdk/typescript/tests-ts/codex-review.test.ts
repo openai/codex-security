@@ -7,10 +7,7 @@ import { join, relative, resolve, win32 } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
-import {
-  CodexReviewRunner,
-  type CodexReview,
-} from "../src/deduplication/codex-review.js";
+import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { CheckpointedReviewRunner } from "../src/deduplication/checkpointed-review.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
@@ -25,107 +22,11 @@ import type { CodexSecuritySurface } from "../src/api.js";
 import { VERSION } from "../src/version.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 import { readCodexHomeConfig } from "../src/auth.js";
-import {
-  CodexDeduplicationReviewer,
-  CodexGroupingReviewer,
-} from "../src/deduplication/deduplication-reviewer.js";
+import { CodexDeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
-
-test("container review fixture accepts screening and pairs with repository context", async () => {
-  if (
-    runTestInSubprocess(
-      import.meta.path,
-      "container review fixture accepts screening and pairs with repository context",
-    )
-  )
-    return;
-  await using f = await workflowFixture();
-  process.env["CODEX_SECURITY_STATE_DIR"] = f.root;
-  await import(
-    new URL("../../../docker/fixtures/mock-reviews.mjs", import.meta.url).href
-  );
-  const modelHome = process.env["CODEX_HOME"]!;
-  try {
-    const config = parse(
-      await readFile(join(modelHome, "config.toml"), "utf8"),
-    ) as {
-      model_providers: { smoke: { base_url: string } };
-    };
-    const runner = {
-      async run<T>(review: CodexReview<T>): Promise<T> {
-        const response = await fetch(
-          `${config.model_providers.smoke.base_url}/responses`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: review.model,
-              reasoning: { effort: review.effort },
-              input: [
-                { content: [{ type: "input_text", text: review.prompt }] },
-                {
-                  type: "additional_tools",
-                  tools: [
-                    {
-                      type: "namespace",
-                      name: "review_validator",
-                      tools: [
-                        {
-                          type: "function",
-                          name: "submit_decisions",
-                          parameters: review.schema,
-                        },
-                      ],
-                    },
-                    {
-                      type: "namespace",
-                      name: "functions",
-                      tools: [
-                        { name: "exec", description: "### `exec_command`" },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            }),
-          },
-        );
-        expect(response.status).toBe(200);
-        const completed = (await response.text())
-          .split("\n")
-          .filter((line) => line.startsWith("data: "))
-          .map((line) => JSON.parse(line.slice(6)))
-          .find((event) => event.type === "response.completed");
-        return review.validate(
-          JSON.parse(completed.response.output[0].arguments),
-        );
-      },
-    };
-    const findings = [1, 2, 3].map((index) => ({
-      ...f.document.findings[0]!,
-      findingId: `csf_${String(index).repeat(24)}`,
-    }));
-    for (const context of ["Synthetic repository context.\n\n", ""]) {
-      for (const Reviewer of [
-        CodexGroupingReviewer,
-        CodexDeduplicationReviewer,
-      ]) {
-        const reviewer = new Reviewer(runner, {}, () => context);
-        expect(
-          Object.keys((await reviewer.screen(findings)).decisions),
-        ).toEqual(["pair-1", "pair-2"]);
-        expect((await reviewer.reviewPair(findings.slice(0, 2))).decision).toBe(
-          "SAME",
-        );
-      }
-    }
-  } finally {
-    await rm(modelHome, { recursive: true, force: true });
-  }
-});
 
 test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
   "dedupe respects %s configuration and keeps review policy attached to stage",

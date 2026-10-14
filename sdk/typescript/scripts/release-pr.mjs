@@ -8,8 +8,11 @@ import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
 import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
+export const actionPackagePath = "github-action/package.json";
+export const actionLockPath = "github-action/package-lock.json";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
+const packagePaths = [packagePath, actionPackagePath, actionLockPath];
 const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
@@ -175,6 +178,23 @@ function updatePackageVersion(packageText, version) {
   throw new Error("Unable to update only the top-level package version.");
 }
 
+function updateActionLockVersion(lockText, version) {
+  const lock = JSON.parse(lockText);
+  lock.version = version;
+  lock.packages[""].version = version;
+  return `${JSON.stringify(lock, null, 2)}\n`;
+}
+
+function packageWithoutVersion(text, path) {
+  if (text === null) return null;
+  const metadata = JSON.parse(text);
+  delete metadata.version;
+  if (path === actionLockPath && metadata.packages?.[""]) {
+    delete metadata.packages[""].version;
+  }
+  return metadata;
+}
+
 export function createReleasePlan(history, previous = null) {
   const { baseVersion, baseCommit, mainSha, packageText, changes } = history;
   if (
@@ -195,6 +215,23 @@ export function createReleasePlan(history, previous = null) {
     previous?.state.sections,
   );
   const state = { baseVersion, baseCommit, sections };
+  const files = {
+    [packagePath]: updatePackageVersion(packageText, version),
+    [notesPath]: notes,
+    [statePath]: `${JSON.stringify(state, null, 2)}\n`,
+  };
+  if (history.actionPackageText != null) {
+    files[actionPackagePath] = updatePackageVersion(
+      history.actionPackageText,
+      version,
+    );
+  }
+  if (history.actionLockText != null) {
+    files[actionLockPath] = updateActionLockVersion(
+      history.actionLockText,
+      version,
+    );
+  }
   return {
     baseVersion,
     baseCommit,
@@ -205,11 +242,7 @@ export function createReleasePlan(history, previous = null) {
     changes,
     generated,
     humanOwned: sectionIds.filter((id) => sections[id].humanOwned),
-    files: {
-      [packagePath]: updatePackageVersion(packageText, version),
-      [notesPath]: notes,
-      [statePath]: `${JSON.stringify(state, null, 2)}\n`,
-    },
+    files,
   };
 }
 
@@ -281,6 +314,8 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit,
     mainSha,
     packageText,
+    actionPackageText: repo.readFile(mainSha, actionPackagePath),
+    actionLockText: repo.readFile(mainSha, actionLockPath),
     changes: [...changes.values()],
   };
 }
@@ -293,22 +328,30 @@ function readReleaseBranch(repo, mainSha, headSha) {
     .split("\0")
     .filter(Boolean);
   if (
-    paths.some((path) => ![packagePath, notesPath, statePath].includes(path))
+    paths.some(
+      (path) => ![...packagePaths, notesPath, statePath].includes(path),
+    )
   ) {
     return {
       holdReason:
         "The release branch has other file edits. Preserve or merge them before running the updater.",
     };
   }
-  const originalPackage = JSON.parse(repo.readFile(mergeBase, packagePath));
-  const branchPackage = JSON.parse(repo.readFile(headSha, packagePath));
-  delete originalPackage.version;
-  delete branchPackage.version;
-  if (!isDeepStrictEqual(originalPackage, branchPackage)) {
-    return {
-      holdReason:
-        "The release branch has package edits beyond its version. Preserve them before running the updater.",
-    };
+  for (const path of packagePaths) {
+    const originalPackage = packageWithoutVersion(
+      repo.readFile(mergeBase, path),
+      path,
+    );
+    const branchPackage = packageWithoutVersion(
+      repo.readFile(headSha, path),
+      path,
+    );
+    if (!isDeepStrictEqual(originalPackage, branchPackage)) {
+      return {
+        holdReason:
+          "The release branch has package edits beyond its version. Preserve them before running the updater.",
+      };
+    }
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
   if (!state?.sections) {

@@ -83,6 +83,7 @@ async function publishDraft(
   scanDir: string,
   scanId: string,
   workbench: (args: readonly string[]) => Promise<Record<string, unknown>>,
+  complete?: boolean,
 ) {
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
@@ -94,6 +95,7 @@ async function publishDraft(
       scan: {
         target: manifest.scan.target,
         scope: manifest.scan.scope,
+        ...(complete === undefined ? {} : { complete }),
       },
     },
     findings: {
@@ -200,6 +202,12 @@ describe("custom validation", () => {
       "not_applicable",
       "deferred",
     );
+    const counterEvidence =
+      "The protected caller checks a separate precondition.";
+    const limitations = "The alternate configuration was not exercised.";
+    output.validations[0]!.validation.counterevidence_or_proof_gap =
+      counterEvidence;
+    output.validations[0]!.validation.remaining_uncertainty = limitations;
     output.validations[0]!.severity = {
       level: "medium",
       rationale: "Requires an uncommon configuration.",
@@ -252,7 +260,11 @@ describe("custom validation", () => {
       severity: output.validations[0]!.severity,
       confidence: { level: "medium" },
       attackPath: { impact: output.validations[0]!.impact },
-      validation: { disposition: "reportable" },
+      validation: {
+        disposition: "reportable",
+        counterEvidence: [counterEvidence],
+        limitations: [limitations],
+      },
     });
     const coverage = await json<CoverageDocument>(
       join(f.scanDir, "coverage.json"),
@@ -346,6 +358,10 @@ describe("custom validation", () => {
     );
     expect(saved.findings).toHaveLength(3);
     for (const [index, finding] of saved.findings.entries()) {
+      expect(finding.validation).toMatchObject({
+        counterEvidence: [],
+        limitations: [],
+      });
       expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
       expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
       expect(finding.attackPath).toEqual({
@@ -455,7 +471,15 @@ describe("custom validation", () => {
     await expect(readFile(join(outside, "candidates.json"))).rejects.toThrow();
   });
 
-  test.each(["standard", "diff", "empty", "incomplete", "dismissed"])(
+  const completionScenarios = [
+    "standard",
+    "diff",
+    "empty",
+    "incomplete",
+    "dismissed",
+    "unfinished-source",
+  ];
+  test.each(completionScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
@@ -587,8 +611,36 @@ describe("custom validation", () => {
                       );
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
+                      await draft(scanDir, scanId, 0, diff);
+                      const earlyCoverage = await json<CoverageDocument>(
+                        join(scanDir, "coverage.json"),
+                      );
+                      earlyCoverage.completeness = "partial";
+                      await save(join(scanDir, "coverage.json"), earlyCoverage);
+                      await publishDraft(scanDir, scanId, workbench, false);
                       await draft(scanDir, scanId, count, diff);
-                      await publishDraft(scanDir, scanId, workbench);
+                      if (scenario === "unfinished-source") {
+                        const coverage = await json<CoverageDocument>(
+                          join(scanDir, "coverage.json"),
+                        );
+                        coverage.completeness = "partial";
+                        coverage.deferred = [
+                          {
+                            id: "unfinished-source",
+                            reason:
+                              "Requested source review remains unfinished.",
+                          },
+                        ];
+                        await save(join(scanDir, "coverage.json"), coverage);
+                      }
+                      // Follow the adapter's terminal draft instruction at the real workbench boundary.
+                      await publishDraft(
+                        scanDir,
+                        scanId,
+                        workbench,
+                        scenario !== "unfinished-source" &&
+                          /\bcomplete:\s*true\b/u.test(prompt),
+                      );
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
                       return { events: completedEvents() };
@@ -621,6 +673,10 @@ describe("custom validation", () => {
                     const output = result(
                       scenario === "dismissed" ? "suppressed" : "reportable",
                     );
+                    output.validations[0]!.validation.counterevidence_or_proof_gap =
+                      "Synthetic counterevidence from validation.";
+                    output.validations[0]!.validation.remaining_uncertainty =
+                      "Synthetic limitation from validation.";
                     if (scenario === "incomplete") {
                       output.status = "incomplete";
                       output.reason =
@@ -706,6 +762,22 @@ describe("custom validation", () => {
           onActivity: (activity) => activities.push(activity),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
+        if (scenario === "unfinished-source") {
+          await expect(pending).rejects.toThrow(
+            "The latest saved scan draft is incomplete",
+          );
+          expect(turns).toBe(2);
+          expect(commands).not.toContain("complete-scan");
+          expect(commands).toContain("fail-scan");
+          expect(await json(join(scanDir, resultName))).toMatchObject({
+            status: "complete",
+          });
+          expect(
+            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
+              .completeness,
+          ).toBe("partial");
+          return;
+        }
         if (scenario === "incomplete") {
           await expect(pending).rejects.toThrow(
             "The validation environment did not start",
@@ -735,6 +807,11 @@ describe("custom validation", () => {
         }
         const completed = await pending;
         if (scenario === "standard") {
+          const report = await readFile(join(scanDir, "report.md"), "utf8");
+          expect(report).toContain(
+            "Synthetic counterevidence from validation.",
+          );
+          expect(report).toContain("Synthetic limitation from validation.");
           expect(
             activities.filter(
               ({ description }) => description === validationActivity,
@@ -801,6 +878,8 @@ describe("custom validation", () => {
     expect(standard).toContain("security_scan` capability preflight");
     expect(standard).toContain("use it for the same early model checkpoint");
     expect(standard).toContain("retain the model in an early partial");
+    expect(standard).toContain("`followup_task`");
+    expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",

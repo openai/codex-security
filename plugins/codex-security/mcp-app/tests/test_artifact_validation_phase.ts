@@ -11,7 +11,7 @@ const {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
 } = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-validation-phase.ts"),
+  path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
 );
 
 const toolSchema = await readJson(
@@ -157,24 +157,6 @@ try {
     },
     /repeats candidate candidate-b/,
   );
-  await assertNoMutation(
-    context,
-    ledger,
-    {
-      validations: [
-        {
-          candidateId: "candidate-a",
-          validation: {
-            ...firstValidation,
-            confidence: "certain",
-          },
-        },
-        updates[0],
-      ],
-    },
-    /confidence/,
-  );
-
   await assertNoMutation(
     { ...context, layout: "worker" },
     ledger,

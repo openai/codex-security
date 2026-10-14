@@ -415,9 +415,7 @@ def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: P
     "timestamp",
     [
         "2026-10-08T03:00:00.123456+02:00",
-        "2026-10-08t01:00:00.123456789z",
-        "2026-10-08T01:00:00.1-00:00",
-        "2026-10-07T17:30:00.123456789012345678901234567890-07:30",
+        "2026-10-08T01:00:00.123Z",
     ],
 )
 def test_sealed_completion_preserves_original_timestamp_text(

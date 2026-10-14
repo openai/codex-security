@@ -63,6 +63,7 @@ import {
 } from "./cli-fixtures.js";
 import { runCommand } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { fail, throwing } from "./support/errors.js";
 import {
   createCliTest,
@@ -389,7 +390,6 @@ describe("CLI", () => {
       ["info"],
       ["install-hook"],
       ["init"],
-      ["serve"],
       ["publish", "scan"],
       ["publish", "check"],
       ["import", "github"],
@@ -615,6 +615,19 @@ describe("CLI", () => {
       expect(normalize(migrated.hook)).toBe(hook);
       expect(migrated.failOnSeverity).toBe("medium");
       expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      for (const unset of [
+        "",
+        "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n",
+      ]) {
+        await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
+        expect(
+          await migratedHook.run(
+            ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
+            deps,
+          ),
+        ).toBe(0);
+        expect(await readFile(hook, "utf8")).toBe(trustedHook);
+      }
 
       const existingHook = captureCli(main, "stderr");
       expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
@@ -694,6 +707,7 @@ describe("CLI", () => {
         },
       );
       expect(commit.status, commit.stderr).toBeGreaterThan(0);
+      expect(commit.stderr).not.toContain("GIT_INDEX_FILE is not supported");
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -708,6 +722,112 @@ describe("CLI", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  (process.platform === "win32" ? test.skip : test)(
+    "installed hook clears Git repository overrides before scan execution",
+    async () => {
+      if (
+        runTestInSubprocess(
+          "./tests-ts/cli.test.ts",
+          "installed hook clears Git repository overrides before scan execution",
+        )
+      )
+        return;
+      const root = await temporaryDirectory("codex-security-hook-handoff-");
+      const repository = join(root, "repository");
+      const executable = join(root, "fixture-runtime.mjs");
+      const record = join(root, "scan-arguments.json");
+      const originalExecPath = Object.getOwnPropertyDescriptor(
+        process,
+        "execPath",
+      )!;
+      try {
+        await mkdir(repository);
+        await writeFile(
+          executable,
+          [
+            `#!${process.execPath}`,
+            `import { validatedGitEnvironment } from ${JSON.stringify(new URL("../src/targets.ts", import.meta.url).href)};`,
+            'import { writeFileSync } from "node:fs";',
+            "validatedGitEnvironment();",
+            `writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(3)));`,
+            'if (process.env.FIXTURE_POLICY_FAILURE) { console.error("Synthetic severity threshold exceeded"); process.exit(1); }',
+          ].join("\n"),
+          { mode: 0o700 },
+        );
+        expect(
+          (
+            await runCommand("git", ["-C", repository, "init", "-q"], {
+              timeout: 10000,
+            })
+          ).status,
+        ).toBe(0);
+        Object.defineProperty(process, "execPath", {
+          ...originalExecPath,
+          value: executable,
+        });
+        try {
+          expect(
+            await captureCli(main, "stdout").run(
+              ["install-hook", "."],
+              dependencies({ currentDirectory: repository }),
+            ),
+          ).toBe(0);
+        } finally {
+          Object.defineProperty(process, "execPath", originalExecPath);
+        }
+        const args = [
+          "-C",
+          repository,
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.test",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "fixture",
+        ];
+        const gitDirectory = join(repository, ".git");
+        const environment = {
+          ...process.env,
+          GIT_DIR: gitDirectory,
+          GIT_WORK_TREE: repository,
+          GIT_INDEX_FILE: join(gitDirectory, "index"),
+          GIT_OBJECT_DIRECTORY: join(gitDirectory, "objects"),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(gitDirectory, "objects"),
+          GIT_COMMON_DIR: gitDirectory,
+          GIT_REPLACE_REF_BASE: "refs/replace/",
+        };
+        const clean = await runCommand("git", args, {
+          env: environment,
+          timeout: 10000,
+        });
+        expect(clean.status, clean.stderr).toBe(0);
+        expect(JSON.parse(await readFile(record, "utf8"))).toEqual([
+          "scan",
+          ".",
+          "--working-tree",
+          "--fail-on-severity",
+          "high",
+        ]);
+        const rejected = await runCommand("git", args, {
+          env: { ...environment, FIXTURE_POLICY_FAILURE: "1" },
+          timeout: 10_000,
+        });
+        expect(rejected.status).not.toBe(0);
+        expect(rejected.stderr).toContain(
+          "Synthetic severity threshold exceeded",
+        );
+        expect(rejected.stderr).not.toContain("is not supported");
+      } finally {
+        Object.defineProperty(process, "execPath", originalExecPath);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await temporaryDirectory("codex-security-cli-multiscan-");
@@ -1887,6 +2007,7 @@ describe("CLI", () => {
         environment,
         result,
         costUpdates: [result.cost!],
+        onTurn: (_repository, scan) => expect(scan?.onActivity).toBeUndefined(),
         scanProgress: [
           { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
         ],
@@ -2099,8 +2220,47 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test("shows known dashboard tokens when the model has no price entry", async () => {
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    const deps = dependencies({ environment: { NO_COLOR: "1" } });
+    const createSecurity = deps.createSecurity;
+    deps.createSecurity = (config) => {
+      const client = createSecurity(config);
+      const run = client.run.bind(client);
+      client.run = async (repository, options) => {
+        options?.onUsage?.({
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+          total_tokens: 110,
+        });
+        return run(repository, options);
+      };
+      return client;
+    };
+    expect(
+      await runCli(
+        [
+          "scan",
+          "/synthetic/repository",
+          "--model",
+          "synthetic-unpriced-model",
+          "--show-cost",
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const text = stripVTControlCharacters(stderr.text()).replace(/\s+/gu, " ");
+    expect(text).toContain(
+      "100 uncached input, 0 cache reads, 0 cache writes, 10 output, 110 total",
+    );
+    expect(text).toContain("unavailable (model pricing or usage missing)");
+  });
+
   test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%j)",
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%p)",
     async (interactive) => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,
@@ -4033,7 +4193,8 @@ describe("CLI", () => {
     expect(await runCli(["scan"], dependencies({ result }))).toBe(0);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan complete · 12345678");
-    expect(stderr.text()).not.toContain(result.manifest.scan.id);
+    expect(stderr.text()).toContain(`scans show ${result.manifest.scan.id}`);
+    expect(stderr.text()).toContain(`scans logs ${result.manifest.scan.id}`);
     expect(stderr.text()).toContain(
       [
         `  REPORT    ${result.reportPath}`,
@@ -4241,40 +4402,26 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("warning:");
   });
 
-  test("prints trusted cyber access guidance without failing or corrupting JSON scans", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    const deps = scanDependencies(
-      warningResult(
-        "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
-      ),
-    );
-
-    expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
+  test.each([
+    [
+      "prints trusted cyber access guidance without failing or corrupting JSON scans",
+      "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
       "codex-security: warning: Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber.",
-    );
-    expect(stderr.text()).toContain("Apply at https://chatgpt.com/cyber.");
-  });
-
-  test("prints unverified trusted cyber access guidance without corrupting JSON scans", async () => {
+      "Apply at https://chatgpt.com/cyber.",
+    ],
+    [
+      "prints unverified trusted cyber access guidance without corrupting JSON scans",
+      "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
+      "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
+      "Check your access or apply at https://chatgpt.com/cyber.",
+    ],
+  ] as const)("%s", async (_name, warning, message, guidance) => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
-    const deps = scanDependencies(
-      warningResult(
-        "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
-      ),
-    );
-
+    const deps = scanDependencies(warningResult(warning));
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
-    );
-    expect(stderr.text()).toContain(
-      "Check your access or apply at https://chatgpt.com/cyber.",
-    );
+    expect(stderr.text()).toContain(message);
+    expect(stderr.text()).toContain(guidance);
   });
 
   test("prints organizational trusted cyber access guidance without corrupting JSON scans", async () => {

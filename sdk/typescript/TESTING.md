@@ -108,7 +108,7 @@ default to 100 cases; filesystem contract properties default to 20.
 inspects one package archive, then passes that archive to jobs in the same
 workflow run, using the commit SHA in the artifact name. Every supported Node
 runtime still installs and inspects the package, including a strict NodeNext
-TypeScript consumer, the actual CLI, credential locking, dashboard assets, and
+TypeScript consumer, the actual CLI, credential locking, and
 a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive

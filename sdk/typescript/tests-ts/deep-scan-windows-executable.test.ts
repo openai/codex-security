@@ -17,7 +17,7 @@ import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 async function bundledResolver() {
   const runtime = await loadBundledRuntime();
   const start = runtime.indexOf("function resolveCodexPath(");
-  const end = runtime.indexOf("\n// server.ts", start);
+  const end = runtime.indexOf("\n// ", start);
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const source = runtime.slice(start, end);

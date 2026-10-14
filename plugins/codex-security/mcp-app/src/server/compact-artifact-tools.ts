@@ -22,11 +22,9 @@ import {
 import {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} from "../artifact-validation-phase.js";
-import {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} from "../artifact-attack-path.js";
+} from "../artifact-candidate-ledger.js";
 import {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
@@ -66,6 +64,12 @@ export interface CompactArtifactToolOptions {
 const modelOnlyMeta = {
   ui: { visibility: ["model"] as const },
 };
+
+const semanticFindingGuidance =
+  " Findings require severity:{level}, confidence:{level,rationale}, taxonomy:{category,cwe:[]}, locations:[{path,startLine,endLine?}], and provenance:{source}, alongside ruleId,title,summary,remediation. Use repository-relative paths. Each codeEvidence entry needs id,label,path,startLine,code,explanation. Omit host-owned findingId,occurrenceId,fingerprints and scope.includePaths/excludePaths.";
+
+const semanticCoverageGuidance =
+  ' Coverage shape: {completeness:"partial"|"complete"|"unknown",surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Omit host-owned coverage documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.';
 
 function signalFromRequestContext(
   requestContext: unknown,
@@ -117,7 +121,7 @@ export function registerCompactArtifactTools(
     readOnly: false,
     handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
-        { candidates: input.candidates },
+        input,
         await phaseScanContext(input, options, requestContext, "diff"),
       );
     },
@@ -131,10 +135,7 @@ export function registerCompactArtifactTools(
     readOnly: true,
     handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
-        {
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        },
+        input,
         await phaseScanContext(input, options, requestContext),
       );
     },
@@ -150,7 +151,7 @@ export function registerCompactArtifactTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateValidations(
         await phaseScanContext(input, options, requestContext),
-        { validations: input.validations },
+        input,
       );
     },
   });
@@ -165,7 +166,7 @@ export function registerCompactArtifactTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateAttackPaths(
         await phaseScanContext(input, options, requestContext),
-        { attackPaths: input.attackPaths },
+        input,
       );
     },
   });
@@ -175,7 +176,9 @@ export function registerCompactArtifactTools(
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
+      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      semanticCoverageGuidance,
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (input, requestContext) => {
@@ -272,7 +275,9 @@ export function registerCompactWorkerArtifactTools(
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
       description:
-        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
+        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
+        semanticFindingGuidance +
+        semanticCoverageGuidance,
       inputSchema: scanDraftInputSchema,
       readOnly: false,
       handler: async (value) =>
@@ -293,7 +298,8 @@ export function registerCompactWorkerArtifactTools(
       title: "Get Codex Security Deep Reducer Inputs",
       description:
         "Read a byte-budgeted JSON fragment of the assigned findings and previous aggregate. " +
-        "Continue with nextCursor; concatenate json fragments before parsing. " +
+        "Continue with nextCursor until absent; concatenate json fragments before parsing. " +
+        "When using code-mode store, save fragments, cursor:nextCursor??null, and done:!nextCursor together in one state object; undefined cannot be stored. Reuse completed state without fetching again. " +
         "Use findingRef source:<sourceFindingId> or previous:N to read full retained provenance.",
       inputSchema: deepReducerInputsInputSchema,
       annotations: readingAnnotations,
@@ -308,7 +314,9 @@ export function registerCompactWorkerArtifactTools(
   registerCompactTool(server, {
     name: "record_codex_security_deep_reduction",
     title: "Record Codex Security Deep Reduction",
-    description: "Record the merged findings and context for this Deep scan.",
+    description:
+      "Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies." +
+      semanticFindingGuidance,
     inputSchema: deepReductionInputSchema,
     readOnly: false,
     handler: async (value) => recordCodexSecurityDeepReduction(context, value),
@@ -341,9 +349,20 @@ function registerCompactTool<Input>(
     },
     async (input, requestContext) => {
       const value = await registration.handler(input, requestContext);
+      let structured = true;
+      const text = JSON.stringify(value, (key, item: unknown) => {
+        if (
+          !key.isWellFormed() ||
+          (typeof item === "string" && !item.isWellFormed())
+        )
+          structured = false;
+        return item;
+      });
+      // Codex's native JSON decoder rejects lone surrogates; the JSON text retains
+      // their exact escaped representation, including raw POSIX filename bytes.
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(value) }],
-        structuredContent: value as JsonRecord,
+        content: [{ type: "text" as const, text }],
+        ...(structured ? { structuredContent: value as JsonRecord } : {}),
       };
     },
   );

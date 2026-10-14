@@ -1,5 +1,5 @@
 {
-  "name": "Ona findings",
+  "name": "Codex Security in Ona",
   // devcontainers/universal publishes a linux/amd64 manifest only, so it cannot
   // run natively on arm64 hosts. base:noble keeps the Ubuntu Noble userland the
   // Ona automations expect and supplies the toolchains through features.

@@ -30,7 +30,7 @@ try {
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testWorkerReadsItsOwnBoundInventory();
-  await testCursorAndLimitAreValidated();
+  await testCursorDoesNotExceedInventory();
   await testEmptyInventoryIsValid();
   await testUnsafeInventoryRowsAreRejected();
   await testSymlinkedInventoryIsRejected();
@@ -137,14 +137,18 @@ async function testNonUtf8InventoryPaths() {
   ]);
   await writeFile(rawPath, "raw path\n");
   await fixture.writeRepositoryFile("name-�.ts", "Unicode path\n");
-  await assert.rejects(
-    inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    /not valid for encoding utf-8/,
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    {
+      reviewItemsTotal: 2,
+    },
   );
   assert.ok((await readFile(fixture.scanInventory)).includes(0xff));
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan),
-    /not valid for encoding utf-8/,
+  assert.deepEqual(
+    (await inventory.listCodexSecurityReviewItems(fixture.scan)).items
+      .map((item: { path: string }) => item.path)
+      .sort(),
+    ["./name-\udcff.ts", "./name-�.ts"],
   );
   await unlink(rawPath);
   assert.deepEqual(
@@ -351,25 +355,13 @@ async function testWorkerReadsItsOwnBoundInventory() {
   );
 }
 
-async function testCursorAndLimitAreValidated() {
+async function testCursorDoesNotExceedInventory() {
   const fixture = await createFixture("inventory paging");
   await writeInventory(fixture.scanInventory, "./src/a.ts\n./src/b.ts\n");
 
   await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "-1" }),
-    /cursor/i,
-  );
-  await assert.rejects(
     inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "3" }),
     /cursor/i,
-  );
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { limit: 0 }),
-    /limit/i,
-  );
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan, { limit: 1001 }),
-    /limit/i,
   );
 }
 

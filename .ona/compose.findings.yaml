@@ -1,4 +1,0 @@
-services:
-  findings:
-    network_mode: host
-    ports: !reset []

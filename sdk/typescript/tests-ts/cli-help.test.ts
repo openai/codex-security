@@ -67,6 +67,9 @@ describe("CLI help", () => {
     for (const command of ["login", "policy .", "scan .", "findings"]) {
       expect(text).toContain(`  codex-security ${command}`);
     }
+    expect(text.indexOf("codex-security policy .")).toBeLessThan(
+      text.indexOf("codex-security scan ."),
+    );
     expect(text).toContain("<command> --help");
   });
 
@@ -121,7 +124,7 @@ describe("CLI help", () => {
     }
   });
 
-  test.each(["validate", "login", "logout", "serve"])(
+  test.each(["validate", "login", "logout"])(
     "%s does not promise unsupported JSON command output",
     async (command) => {
       const text = await help([command, "--help"]);

@@ -4,21 +4,19 @@ import { z } from "incur";
 import { deduplicateRecords, type DeduplicateRecordsInput } from "./records.js";
 
 const rpcId = z.union([z.string(), z.number().int()]);
-const request = z.strictObject({
-  jsonrpc: z.literal("2.0"),
+const envelope = z.strictObject({ jsonrpc: z.literal("2.0") });
+const request = envelope.extend({
   id: rpcId,
   method: z.literal("run"),
   params: z.unknown(),
 });
-const cancellation = z.strictObject({
-  jsonrpc: z.literal("2.0"),
+const cancellation = envelope.extend({
   method: z.literal("cancel"),
   params: z.strictObject({ id: rpcId }),
 });
 const response = z.union([
-  z.strictObject({ jsonrpc: z.literal("2.0"), id: rpcId, result: z.unknown() }),
-  z.strictObject({
-    jsonrpc: z.literal("2.0"),
+  envelope.extend({ id: rpcId, result: z.unknown() }),
+  envelope.extend({
     id: rpcId,
     error: z.strictObject({
       code: z.number().int(),

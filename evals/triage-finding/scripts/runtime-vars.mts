@@ -4,13 +4,16 @@ import path from "node:path";
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const sourceRoot = path.resolve(evalRoot, "../..");
 
-// Resolve paths for each execution, including retries of persisted evaluations.
+// Preserve the stable bindings used by saved native-provider configs, including
+// viewer replay, which does not rerun transforms. Current configs bind their
+// temporary runtime through the beforeAll extension instead.
 export default (vars: Record<string, unknown>) => {
   const nodePath = fs.realpathSync(process.execPath);
   let targetRepo = vars.target_repo;
   if (vars.calibration_repo) {
     targetRepo = path.join(
       (vars.calibration_repo_root ||
+        process.env.TRIAGE_CALIBRATION_ROOT ||
         path.join(evalRoot, "artifacts", "calibration-repos")) as string,
       vars.calibration_repo as string,
     );

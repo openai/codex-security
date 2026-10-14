@@ -87,6 +87,7 @@ for (const surface of ["review", "feedback"] as const) {
             if (message === "ready") {
               holderStarted = true;
               ready.resolve();
+              child!.send("ready-ack");
             }
             if (message === "ignored-term") ignored.resolve();
           });
