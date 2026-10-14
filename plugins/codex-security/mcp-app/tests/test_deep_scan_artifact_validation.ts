@@ -45,84 +45,22 @@ async function testDiscoveryValidation(root: string) {
     result,
   );
 
-  const legacyFinding = {
-    ...result.findings[0],
-    attackPath: { steps: { first: "upload" } },
-    code_evidence: null,
-    root_cause: null,
-    validation: { evidence: { kind: "trace" } },
-  };
-  await writeResult(worker.resultPath, {
-    ...result,
-    findings: [legacyFinding],
-  });
-  const recoveredLegacy = await validateDiscoveryArtifacts(
-    artifacts,
-    worker.resultPath,
-    scanId,
-  );
-  assert.deepEqual(recoveredLegacy.findings[0], {
-    ...result.findings[0],
-    attackPath: {},
-    validation: {},
-  });
-  await writeResult(worker.resultPath, {
-    ...result,
-    findings: [{ ...result.findings[0], root_cause: "" }],
-  });
-  assert.deepEqual(
-    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    result,
-  );
-
-  await writeResult(worker.resultPath, {
-    ...result,
-    findings: [
-      {
-        ...result.findings[0],
-        root_cause: " ",
-        validation: {
-          method: " ",
-          status: " ",
-          summary: " ",
-          disposition: " ",
-          result: " ",
-        },
-        attackPath: {
-          summary: " ",
-          dataFlow: " ",
-          data_flow: { summary: " ", source: " ", sink: " ", outcome: " " },
-          reachability: {
-            summary: " ",
-            attacker: " ",
-            entrypoint: " ",
-            source: " ",
-            sink: " ",
-            outcome: " ",
-          },
-          impact: " ",
-          likelihood: { level: " ", rationale: " ", why: " " },
-        },
-      },
-    ],
-  });
-  assert.deepEqual(
-    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    {
+  for (const details of [
+    { code_evidence: [{ id: "legacy", code: "source()" }] },
+    { root_cause: "Legacy root cause" },
+    { validation: { evidence: { kind: "trace" } } },
+    { attackPath: { steps: { first: "upload" } } },
+  ]) {
+    await writeResult(worker.resultPath, {
       ...result,
-      findings: [
-        {
-          ...result.findings[0],
-          validation: {},
-          attackPath: {
-            data_flow: {},
-            reachability: {},
-            likelihood: {},
-          },
-        },
-      ],
-    },
-  );
+      findings: [{ ...result.findings[0], ...details }],
+    });
+    const original = await readFile(worker.resultPath, "utf8");
+    await assert.rejects(
+      validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    );
+    assert.equal(await readFile(worker.resultPath, "utf8"), original);
+  }
 
   await writeResult(worker.resultPath, { ...result, scanId: otherScanId });
   await assert.rejects(

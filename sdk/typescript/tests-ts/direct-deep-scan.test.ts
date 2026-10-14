@@ -9,7 +9,7 @@ import {
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout } from "node:timers/promises";
-import { runDeepScan, supportsDirectDeepScan } from "../src/deep-scan.js";
+import { runDeepScan } from "../src/deep-scan.js";
 import { ScanCostTracker } from "../src/cost.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -290,11 +290,4 @@ test("waits for the direct engine to stop when the scan is canceled", async () =
     controller.abort();
     await outcome;
   }
-});
-
-test("selects the direct engine only in Node", async () => {
-  assert.equal(
-    await supportsDirectDeepScan(PLUGIN_ROOT),
-    !process.versions["bun"],
-  );
 });

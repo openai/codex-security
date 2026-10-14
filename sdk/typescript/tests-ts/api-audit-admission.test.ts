@@ -35,7 +35,6 @@ const {
   createDeepScanArtifacts,
   recordCodexSecurityScanDraftViaWorkbench,
   parseCanonicalScanDraft,
-  parseScanDraft,
   validateDiscoveryArtifacts,
   DeepScanWorkerRunner,
 } = await import(pathToFileURL(bundlePath).href);
@@ -51,7 +50,11 @@ interface DraftFixture {
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
 type Mutation =
-  "missing-findings" | "inverted-lines" | "wrong-scan" | "legacy-details";
+  | "missing-findings"
+  | "inverted-lines"
+  | "wrong-scan"
+  | "legacy-details"
+  | "legacy-surface";
 const cases: {
   name: string;
   legacyCompleteness?: string;
@@ -68,10 +71,11 @@ const cases: {
   },
   { name: "omitted completion marker", accepted: true },
   {
-    name: "persisted legacy details",
+    name: "legacy finding details",
     mutation: "legacy-details",
-    accepted: true,
+    accepted: false,
   },
+  { name: "legacy surface ID", mutation: "legacy-surface", accepted: false },
   { name: "unfinished checkpoint", complete: false, accepted: false },
   { name: "missing findings", mutation: "missing-findings", accepted: false },
   {
@@ -263,11 +267,6 @@ for (const scenario of cases) {
       expect(deepDraft.coverage).toEqual(canonicalDraft.coverage);
       expect(deepDraft.scope).toEqual(canonicalDraft.scope);
       expect(deepDraft.threatModel).toEqual(canonicalDraft.threatModel);
-      if (scenario.mutation === "legacy-details") {
-        expect(deepDraft.findings[0]!["validation"]).toEqual({
-          limitations: ["Legacy persisted limitation."],
-        });
-      }
     } else {
       expect(standard.error).toBeInstanceOf(Error);
       expect(standard.error).not.toBe(standard.finalization);
@@ -317,147 +316,7 @@ test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
   },
 );
 
-test.each(["HTTP API", "ArchiveSurface", "", 17])(
-  "canonical coverage ID %j follows the canonical contract",
-  async (id) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    await mkdir(repository);
-    const scanDir = await copyCompletedScan(root);
-    const [manifest, findings, coverage] = await Promise.all(
-      ["scan-manifest.json", "findings.json", "coverage.json"].map(
-        async (name) => JSON.parse(await readFile(join(scanDir, name), "utf8")),
-      ),
-    );
-    coverage.surfaces[0].id = id;
-    await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
-    const canonical = {
-      scanId: manifest.scan.id,
-      manifest,
-      findings,
-      coverage,
-    };
-    const standard = await observeStandardAdmission(repository, scanDir);
-    if (typeof id === "string" && id.length > 0) {
-      const draft = parseCanonicalScanDraft(canonical);
-      expect(draft.coverage.surfaces[0].id).toBe(id);
-      expect(standard.error).toBe(standard.finalization);
-      expect(standard.finalizations).toBe(1);
-      expect(() => parseScanDraft({ ...draft, scanId })).toThrow();
-      const live = structuredClone(draft);
-      for (const surface of live.coverage.surfaces) surface.id = "http-api";
-      expect(() => parseScanDraft({ ...live, scanId })).not.toThrow();
-    } else {
-      expect(() => parseCanonicalScanDraft(canonical)).toThrow();
-      expect(standard.error).toBeInstanceOf(Error);
-      expect(standard.error).not.toBe(standard.finalization);
-      expect(standard.finalizations).toBe(0);
-    }
-  },
-);
-
-test.each([
-  { path: "src/./extract.py", notes: " ", accepted: true },
-  { path: "src//extract.py", notes: " ", accepted: true },
-  { path: "src/extract.py/", notes: " ", accepted: true },
-  { path: "../extract.py", notes: "Checked", accepted: false },
-  { path: "/src/extract.py", notes: "Checked", accepted: false },
-  { path: "C:/extract.py", notes: "Checked", accepted: false },
-  { path: "src\\extract.py", notes: "Checked", accepted: false },
-  { path: "src/\u0000extract.py", notes: "Checked", accepted: false },
-  { path: "src/\ud800extract.py", notes: "Checked", accepted: false },
-  { path: ".", notes: "Checked", accepted: false },
-  { path: "src/extract.py", notes: "", accepted: false },
-  { path: "src/extract.py", notes: 17, accepted: false },
-  {
-    path: "src/extract.py",
-    notes: "Checked",
-    questions: [17],
-    accepted: false,
-  },
-])(
-  "canonical fields retain their rules: %j",
-  async ({ path, notes, questions, accepted }) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    await mkdir(repository);
-    const scanDir = await copyCompletedScan(root);
-    const [manifest, findings, coverage] = await Promise.all(
-      ["scan-manifest.json", "findings.json", "coverage.json"].map(
-        async (name) => JSON.parse(await readFile(join(scanDir, name), "utf8")),
-      ),
-    );
-    manifest.scan.scope.context = " ";
-    manifest.scan.threatModel = {
-      summary: "Archive input",
-      assumptions: [" "],
-    };
-    const finding = findings.findings[0];
-    finding.locations[0].path = path;
-    finding.locations[0].role = " ";
-    finding.severity.vector = " ";
-    finding.codeEvidence = [
-      {
-        id: "archive-write",
-        label: "Filesystem write",
-        path,
-        startLine: 41,
-        code: "write(entry)",
-        explanation: "Archive entry reaches a write.",
-      },
-    ];
-    coverage.surfaces[0].notes = notes;
-    coverage.surfaces[0].riskArea = " ";
-    coverage.openQuestions = questions ?? [
-      "What deployment controls apply?",
-      { question: "Which controls apply?", followUpPrompt: " " },
-    ];
-    await Promise.all([
-      writeFile(join(scanDir, "scan-manifest.json"), JSON.stringify(manifest)),
-      writeFile(join(scanDir, "findings.json"), JSON.stringify(findings)),
-      writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage)),
-    ]);
-    const canonical = {
-      scanId: manifest.scan.id,
-      manifest,
-      findings,
-      coverage,
-    };
-    const standard = await observeStandardAdmission(repository, scanDir);
-    if (accepted) {
-      const draft = parseCanonicalScanDraft(canonical);
-      expect(draft.findings[0].locations[0].path).toBe(path);
-      expect(draft.coverage.surfaces[0].notes).toBe(notes);
-      expect(draft.coverage.openQuestions).toEqual(coverage.openQuestions);
-      expect(draft.scope.context).toBe(" ");
-      expect(draft.threatModel.assumptions).toEqual([" "]);
-      expect(standard.error).toBe(standard.finalization);
-      expect(standard.finalizations).toBe(1);
-      expect(() => parseScanDraft({ ...draft, scanId })).toThrow();
-      const live = structuredClone(draft);
-      delete live.scope.context;
-      delete live.threatModel;
-      delete live.findings[0].severity.vector;
-      live.findings[0].locations[0] = { path: "src/extract.py", startLine: 41 };
-      live.findings[0].codeEvidence[0].path = "src/extract.py";
-      live.coverage.surfaces[0].notes = "Checked";
-      delete live.coverage.surfaces[0].riskArea;
-      live.coverage.openQuestions[1].followUpPrompt = "Describe controls.";
-      expect(() => parseScanDraft({ ...live, scanId })).not.toThrow();
-      const unsafeEvidence = structuredClone(canonical);
-      unsafeEvidence.findings.findings[0].codeEvidence[0].path =
-        "../outside.py";
-      expect(() => parseCanonicalScanDraft(unsafeEvidence)).toThrow();
-    } else {
-      expect(() => parseCanonicalScanDraft(canonical)).toThrow();
-      expect(standard.error).toBeInstanceOf(Error);
-      expect(standard.error).not.toBe(standard.finalization);
-      expect(standard.finalizations).toBe(0);
-    }
-  },
-);
-
-test("canonical admission preserves legacy evidence coordinates", async () => {
+test("sealed legacy evidence stays readable but is not admitted as a new draft", async () => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
   const file = join(scanDir, "findings.json");
   const findings = JSON.parse(await readFile(file, "utf8"));
@@ -484,44 +343,25 @@ test("canonical admission preserves legacy evidence coordinates", async () => {
     mode: "standard" as const,
     pluginVersion: "0.1.0",
   };
-  let finalizations = 0;
-  const result = await runScanEvents({
-    thread: { id: null },
-    events: completedEvents(),
-    signal: new AbortController().signal,
-    scanDir,
+  const contract = await loadContract(scanDir, {
     pluginRoot: PLUGIN_ROOT,
     expectation,
     workbenchValidated: true,
-    onFinalize: async () => {
-      const contract = await loadContract(scanDir, {
-        pluginRoot: PLUGIN_ROOT,
-        expectation,
-        workbenchValidated: true,
-      });
-      expect(contract.findings.findings[0]?.["code_evidence"]).toEqual([
-        evidence,
-      ]);
-      finalizations++;
-    },
   });
-  expect(finalizations).toBe(1);
-  expect(result.turnResult.status).toBe("completed");
+  expect(contract.findings.findings[0]?.["code_evidence"]).toEqual([evidence]);
   expect(await readFile(file, "utf8")).toBe(saved);
 
   const coverage = JSON.parse(
     await readFile(join(scanDir, "coverage.json"), "utf8"),
   );
-  const draft = parseCanonicalScanDraft({
-    scanId: manifest.scan.id,
-    manifest,
-    findings,
-    coverage,
-  });
-  draft.coverage.surfaces[0].id = "archive-extraction";
-  expect(() => parseScanDraft({ ...draft, scanId })).toThrow(
-    "code_evidence[0].endLine must not precede startLine",
-  );
+  expect(() =>
+    parseCanonicalScanDraft({
+      scanId: manifest.scan.id,
+      manifest,
+      findings,
+      coverage,
+    }),
+  ).toThrow();
 });
 
 test("canonical admission still rejects reversed typed evidence bounds", async () => {
@@ -601,6 +441,9 @@ function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
     >[];
     locations[0]!["endLine"] = 1;
   }
+  if (mutation === "legacy-surface")
+    (draft.coverage["surfaces"] as Record<string, unknown>[])[0]!["id"] =
+      "HTTP API";
   if (mutation === "legacy-details")
     draft.findings[0]!["validation"] = {
       method: null,

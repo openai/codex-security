@@ -1231,26 +1231,33 @@ try {
       findingInput({ codeEvidence: [incompleteCodeEvidence] }),
     ],
     [
-      "legacy code evidence must be an array",
-      findingInput({ code_evidence: null }),
+      "new writes reject legacy code-evidence fields",
+      findingInput({ code_evidence: [{ id: "legacy", code: "source()" }] }),
     ],
+    ...[
+      { root_cause: "Legacy root cause" },
+      { rootCause: { summary: "Current root cause", evidence_refs: [] } },
+      { validation: { evidence_refs: [] } },
+      { attackPath: { dataFlow: "Legacy flow" } },
+      { attackPath: { data_flow: "Legacy flow" } },
+      { attackPath: { evidence_refs: [] } },
+      { attackPath: { dataflow: { evidence_refs: [] } } },
+      { attackPath: { reachability: { evidence_refs: [] } } },
+    ].map((fields): [string, unknown] => [
+      "new writes reject legacy aliases instead of silently accepting them",
+      findingInput(fields),
+    ]),
     [
-      "legacy root-cause code must be text",
-      findingInput({ root_cause: { code: ["not text"] } }),
-    ],
-    [
-      "legacy root-cause language must be text",
-      findingInput({ root_cause: { language: 42 } }),
-    ],
-    [
-      "canonical root-cause code must be text",
+      "new root-cause snippets belong in codeEvidence",
       findingInput({
-        rootCause: { summary: "Root cause.", code: ["not text"] },
+        rootCause: { summary: "Root cause.", code: "source()" },
       }),
     ],
     [
-      "canonical root-cause language must be text",
-      findingInput({ rootCause: { summary: "Root cause.", language: 42 } }),
+      "new root-cause snippet language belongs in codeEvidence",
+      findingInput({
+        rootCause: { summary: "Root cause.", language: "python" },
+      }),
     ],
     [
       "coverage surfaces must use canonical labels and dispositions",
@@ -2528,25 +2535,6 @@ try {
   assert.deepEqual(evidencedOutput.provenance, finding.provenance);
   assert.deepEqual(evidencedOutput.extensions, finding.extensions);
 
-  const legacyEvidencedFinding = {
-    ...finding,
-    code_evidence: [completeCodeEvidence],
-    attackPath: {
-      dataflow: { evidence_refs: [completeCodeEvidence.id] },
-    },
-  };
-  await recordFreshScanDraft(context, {
-    ...input,
-    findings: [legacyEvidencedFinding],
-  });
-  const legacyEvidencedOutput = (await readJson(root, "findings.json"))
-    .findings[0];
-  assert.deepEqual(legacyEvidencedOutput.code_evidence, [completeCodeEvidence]);
-  assert.deepEqual(
-    legacyEvidencedOutput.attackPath,
-    legacyEvidencedFinding.attackPath,
-  );
-
   await recordFreshScanDraft(
     context,
     findingInput({ taxonomy: { category: "path-traversal", cwe: [] } }),
@@ -2709,16 +2697,9 @@ try {
   );
   await rejectsDraft(
     findingInput({
-      code_evidence: [completeCodeEvidence, completeCodeEvidence],
+      codeEvidence: [completeCodeEvidence, completeCodeEvidence],
     }),
-    /code_evidence\[1\]\.id duplicates/,
-  );
-  await rejectsDraft(
-    findingInput({
-      codeEvidence: [completeCodeEvidence],
-      code_evidence: [completeCodeEvidence],
-    }),
-    /code_evidence\[0\]\.id duplicates/,
+    /codeEvidence\[1\]\.id duplicates/,
   );
   for (const legacy of [undefined, "complete", "partial", "unknown"]) {
     const parsed = draftApi.parseScanDraft(
@@ -2743,13 +2724,12 @@ try {
   );
   await rejectsDraft(
     findingInput({
-      root_cause: { evidenceRefs: ["missing-root-cause-evidence"] },
+      rootCause: {
+        summary: "Current root cause",
+        evidenceRefs: ["missing-root-cause-evidence"],
+      },
     }),
-    /root_cause\.evidenceRefs must refer/,
-  );
-  await rejectsDraft(
-    findingInput({ root_cause: { summary: ["not a string"] } }),
-    /root_cause/,
+    /rootCause\.evidenceRefs must refer/,
   );
   await rejectsDraft(
     findingInput({
@@ -2758,12 +2738,6 @@ try {
       },
     }),
     /attackPath\.dataflow\.evidenceRefs must refer/,
-  );
-  await rejectsDraft(
-    findingInput({
-      validation: { evidence_refs: ["missing-validation-evidence"] },
-    }),
-    /validation\.evidence_refs must refer/,
   );
   await assert.rejects(
     recordCodexSecurityScanDraft(context, {

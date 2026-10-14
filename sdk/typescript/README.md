@@ -228,17 +228,16 @@ Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 
-Deep Scans with non-default provider selection or custom provider definitions
-require a plugin that supports per-scan worker provider snapshots. Older custom plugins
-fail before starting model work with an upgrade message; update the plugin or
-omit `pluginPath` to use the bundled version. Older custom plugins remain usable
-for standard scans and Deep Scans that inherit native provider configuration or
-explicitly select the built-in OpenAI provider without custom provider definitions
-when their workers forward that selection or native configuration selects the
-same effective provider for both the parent and workers. Otherwise, the scan
-stops before model work with the plugin upgrade message.
-When no provider is selected, discovery, reducer, and resumed workers inherit the
-same native configuration as the parent.
+New and resumed Deep Scans require a current plugin with
+`directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker
+configuration support. Older custom plugins fail before scan execution; update
+the plugin or omit `pluginPath` to use the bundled version. Discovery, reducer,
+and resumed workers inherit per-scan provider, authentication, environment, and
+executable settings, with their existing read-only permissions. Reading saved
+reports does not require these execution capabilities.
+
+The SDK no longer adapts the older `node ./mcp/server.mjs` MCP entrypoint; use
+the current shell or Windows launcher for runtime-root routing.
 
 Custom plugins must support the current workbench protocol for scan comparison
 and archival. Update an older custom plugin or omit `pluginPath` to use the

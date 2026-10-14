@@ -3299,7 +3299,7 @@ describe("CodexSecurity orchestration", () => {
       }),
     ).rejects.toThrow("deep scan settings captured");
     const configuration = await readFile(
-      join(codexHome, "codex-security", "config.toml"),
+      preparedRuntime(codexHome).deepScanConfigPath!,
       "utf8",
     );
     expect(configuration).toContain("workers = 2");
@@ -3427,10 +3427,7 @@ describe("CodexSecurity orchestration", () => {
         "deep scan settings captured",
       );
       expect(
-        await readFile(
-          join(codexHome, "codex-security", "config.toml"),
-          "utf8",
-        ),
+        await readFile(preparedRuntime(codexHome).deepScanConfigPath!, "utf8"),
       ).toContain("workers = 5");
       await client.close();
     },
@@ -3454,7 +3451,7 @@ describe("CodexSecurity orchestration", () => {
       const runtimeHome = join(root, "runtime-home");
       const scanDir = join(root, "scan");
       const ambientConfig = join(ambientHome, "codex-security", "config.toml");
-      const runtimeConfig = join(runtimeHome, "codex-security", "config.toml");
+      const runtimeConfig = preparedRuntime(runtimeHome).deepScanConfigPath!;
       const escapedConfig = join(root, "escaped-config.toml");
       await mkdir(repository);
       await mkdir(join(ambientHome, "codex-security"), { recursive: true });
@@ -3568,23 +3565,19 @@ describe("CodexSecurity orchestration", () => {
           code: "ENOENT",
         });
       } else {
-        const written = await readFile(configPath, "utf8");
-        if (settings === "defaults") {
-          expect(written).toBe(originalConfiguration);
-        } else {
-          expect(parseToml(written)).toEqual({
-            other: { enabled: true },
-            deep_scan: {
-              workers: 2,
-              subagents: 0,
-              stop_after_no_new: 7,
-              stop_after_consecutive_errors: 2,
-              max_discovery_runs: 12,
-              max_time_hours: 1.5,
-            },
-          });
-        }
+        expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
       }
+      expect(
+        parseToml(
+          await readFile(
+            preparedRuntime(codexHome).deepScanConfigPath!,
+            "utf8",
+          ),
+        ),
+      ).toMatchObject({
+        worker_runtime: { features: { plugins: true } },
+        deep_scan: { workers: settings === "complete overrides" ? 2 : 4 },
+      });
     },
   );
 
@@ -6173,68 +6166,32 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("keeps legacy custom-plugin Deep Scan settings under the credential lock", async () => {
+  test("rejects custom Deep plugins without isolated worker configuration", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
-    const ambientHome = join(root, "ambient-codex-home");
-    const stateDirectory = join(root, "state");
-    const credentialHome = join(stateDirectory, "codex-home");
-    const legacyPlugin = join(root, "legacy-plugin");
-    const scanDir = join(root, "scan");
+    const pluginRoot = join(root, "custom-plugin");
     await mkdir(repository);
-    await mkdir(ambientHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(join(ambientHome, "auth.json"), "{}\n");
-    await cp(PLUGIN_ROOT, legacyPlugin, { recursive: true });
-    const mcpPath = join(legacyPlugin, ".mcp.json");
-    const mcpConfiguration = JSON.parse(await readFile(mcpPath, "utf8")) as {
-      mcpServers: Record<string, { env_vars: string[] }>;
-    };
-    const server = mcpConfiguration.mcpServers["codex-security"]!;
+    await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+    const mcpPath = join(pluginRoot, ".mcp.json");
+    const mcpConfiguration = JSON.parse(await readFile(mcpPath, "utf8"));
+    const server = mcpConfiguration.mcpServers["codex-security"];
     server.env_vars = server.env_vars.filter(
-      (name) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      (name: string) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     );
-    await writeFile(mcpPath, `${JSON.stringify(mcpConfiguration, null, 2)}\n`);
-
+    await writeFile(mcpPath, JSON.stringify(mcpConfiguration));
+    const createCodex = mock(throwing("Codex should not start"));
     const client = new TestClient(
-      { pluginPath: legacyPlugin },
+      { pluginPath: pluginRoot },
       {
-        environment: {
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              expect(
-                options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
-              ).toBeUndefined();
-              expect(
-                existsSync(join(credentialHome, ".codex-security-scan.lock")),
-              ).toBe(true);
-              expect(
-                parseToml(
-                  await readFile(
-                    join(credentialHome, "codex-security", "config.toml"),
-                    "utf8",
-                  ),
-                )["deep_scan"],
-              ).toMatchObject({ workers: 7 });
-              throw new Error("legacy custom plugin scan reached");
-            },
-          }),
-        }),
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        createCodex,
       },
     );
-
     try {
-      await expect(
-        client.run(repository, { mode: "deep", workers: 7 }),
-      ).rejects.toThrow("legacy custom plugin scan reached");
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "Update the custom plugin or use the bundled plugin",
+      );
+      expect(createCodex).not.toHaveBeenCalled();
     } finally {
       await client.close();
     }
@@ -6269,7 +6226,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("isolates selected skill settings in generated snapshot-free Deep worker configs", async () => {
+  test("isolates selected skill settings in current Deep worker snapshots", async () => {
     const root = await temporaryDirectory();
     const started = Promise.withResolvers<void>();
     let starts = 0;
@@ -6310,7 +6267,7 @@ describe("CodexSecurity orchestration", () => {
                   await started.promise;
                   expect(
                     options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
-                  ).toBeUndefined();
+                  ).toBe(preparedRuntime(codexHome).deepScanConfigPath);
                   expect(options.env?.["CODEX_SECURITY_CONFIG_PATH"]).toBe(
                     configPath,
                   );
@@ -6322,6 +6279,15 @@ describe("CodexSecurity orchestration", () => {
                     options.config as JsonObject,
                   );
                   expect(saved["skills"]).toEqual(effective["skills"]);
+                  const snapshot = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  );
+                  expect(
+                    (snapshot["worker_runtime"] as JsonObject)["skills"],
+                  ).toEqual(effective["skills"]);
                   const selections = (saved["skills"] as JsonObject)[
                     "config"
                   ] as JsonObject[];
@@ -6338,7 +6304,7 @@ describe("CodexSecurity orchestration", () => {
                   expect(JSON.stringify(selections)).not.toContain(
                     `unrelated-${1 - index}`,
                   );
-                  throw new Error("snapshot-free skill configuration captured");
+                  throw new Error("worker skill configuration captured");
                 },
               }),
             }),
@@ -6357,7 +6323,7 @@ describe("CodexSecurity orchestration", () => {
         expect(result).toMatchObject({
           status: "rejected",
           reason: expect.objectContaining({
-            message: "snapshot-free skill configuration captured",
+            message: "worker skill configuration captured",
           }),
         });
       expect(starts).toBe(2);

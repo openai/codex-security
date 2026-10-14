@@ -38,7 +38,6 @@ import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
-  legacyWorkerUsesScanProvider,
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
@@ -91,7 +90,7 @@ import {
   type DeepScanProgress,
 } from "./deep-progress.js";
 import { findScanSession } from "./scan-logs.js";
-import { runDeepScan, supportsDirectDeepScan } from "./deep-scan.js";
+import { runDeepScan } from "./deep-scan.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -501,7 +500,7 @@ interface ClientDependencies {
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
   runDeepScan?: typeof runDeepScan;
-  supportsDirectDeepScan?: typeof supportsDirectDeepScan;
+  canRunDirectDeepScan?: () => boolean;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1414,25 +1413,6 @@ export class CodexSecurity {
                 session.apiKey,
             }),
       };
-      if (
-        mode === "deep" &&
-        modelProvider === "openai" &&
-        !(await pluginForwardsWorkerProviderSelection(
-          runtime,
-          preflightConfig,
-        )) &&
-        !(await legacyWorkerUsesScanProvider(
-          this.#codexCommand(),
-          definedEnvironment(workerProviderEnvironment),
-          scanDir,
-          modelProvider,
-          signal,
-        ))
-      ) {
-        throw new CodexSecurityError(
-          "This custom plugin cannot forward the scan's selected provider to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
-        );
-      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
@@ -1462,10 +1442,9 @@ export class CodexSecurity {
       }
       if (deepScanConfiguration !== undefined) {
         await writeDeepScanConfig(
-          runtime.deepScanConfigPath ??
-            join(runtimeHome, "codex-security", "config.toml"),
+          runtime.deepScanConfigPath!,
           deepScanConfiguration,
-          runtime.deepScanConfigPath === undefined ? undefined : workerSnapshot,
+          workerSnapshot,
         );
       }
       checkOpen();
@@ -1498,9 +1477,8 @@ export class CodexSecurity {
           authentication.method === "api_key" ||
           (authentication.method === "stored_credentials" &&
             authentication.credentialType === "api_key")) &&
-        (await (
-          this.#dependencies.supportsDirectDeepScan ?? supportsDirectDeepScan
-        )(runtime.plugin.pluginRoot));
+        (this.#dependencies.canRunDirectDeepScan?.() ??
+          !process.versions["bun"]);
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
@@ -3025,6 +3003,7 @@ export class CodexSecurity {
         );
       }
       const runtime = this.#runtime;
+      if (deepScan) await requireCurrentDeepScanPlugin(runtime);
       const effectiveConfig = await scanSkillConfig(
         scanCyberAccessConfig(requestedConfig, options.cyberAccessProgram),
         runtime.plugin,
@@ -3034,20 +3013,6 @@ export class CodexSecurity {
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const resolvedConfig = resolveCodexProfile(effectiveConfig);
       const providers = resolvedConfig["model_providers"];
-      if (
-        deepScan &&
-        ((typeof modelProvider === "string" && modelProvider !== "openai") ||
-          (isRecord(providers) && Object.keys(providers).length > 0) ||
-          resolvedConfig["openai_base_url"] !== undefined) &&
-        (runtime.deepScanConfigPath === undefined ||
-          !(await pluginSupportsWorkerProviderSnapshot(
-            runtime.plugin.pluginRoot,
-          )))
-      ) {
-        throw new CodexSecurityError(
-          "This custom plugin cannot forward per-scan provider settings to Deep Scan workers. Update the custom plugin or use the bundled plugin.",
-        );
-      }
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(runtime.configPath, {
           ...preflightConfig,
@@ -5009,43 +4974,28 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   return result;
 }
 
-async function pluginSupportsWorkerProviderSnapshot(
-  pluginRoot: string,
-): Promise<boolean> {
-  const manifest: unknown = JSON.parse(
-    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
-  );
-  return (
-    isRecord(manifest) &&
-    isRecord(manifest["codexSecurity"]) &&
-    manifest["codexSecurity"]["workerProviderSnapshot"] === 4
-  );
-}
-
-async function pluginForwardsWorkerProviderSelection(
+async function requireCurrentDeepScanPlugin(
   runtime: PreparedRuntime,
-  preflightConfig: JsonObject,
-): Promise<boolean> {
+): Promise<void> {
   const manifest: unknown = JSON.parse(
     await readFile(
       join(runtime.plugin.pluginRoot, ".codex-plugin", "plugin.json"),
       "utf8",
     ),
   );
-  const capability =
-    isRecord(manifest) && isRecord(manifest["codexSecurity"])
-      ? manifest["codexSecurity"]["workerProviderSnapshot"]
-      : undefined;
-  if (capability === true) {
-    return (
-      runtime.configPath !== undefined &&
-      resolveCodexProfile(preflightConfig)["model_provider"] === "openai"
+  const capabilities = isRecord(manifest)
+    ? manifest["codexSecurity"]
+    : undefined;
+  if (
+    runtime.deepScanConfigPath === undefined ||
+    !isRecord(capabilities) ||
+    capabilities["directDeepScanEngine"] !== 1 ||
+    capabilities["workerProviderSnapshot"] !== 4
+  ) {
+    throw new CodexSecurityError(
+      "Deep Scan requires the current plugin's direct engine and isolated worker runtime support. Update the custom plugin or use the bundled plugin.",
     );
   }
-  return (
-    runtime.deepScanConfigPath !== undefined &&
-    (capability === 2 || capability === 3 || capability === 4)
-  );
 }
 
 function selectedWorkerRuntimeConfig(

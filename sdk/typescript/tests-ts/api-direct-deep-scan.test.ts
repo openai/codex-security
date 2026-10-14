@@ -44,7 +44,7 @@ test.each([undefined, "Summarize the completed scan."])(
     const started = mock();
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      supportsDirectDeepScan: async () => true,
+      canRunDirectDeepScan: () => true,
       environment: {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
         CODEX_API_KEY: "synthetic-direct-scan-key",

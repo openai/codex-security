@@ -835,7 +835,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert finding["codeEvidence"][0]["code"] == "destination.write_bytes(entry.read())"
     assert finding["validation"]["evidenceRefs"] == ["archive-write"]
     assert finding["evidenceExcerpt"] == "destination.write_bytes(entry.read())"
-    assert finding["attackPath"]["dataFlow"] == (
+    assert finding["attackPath"]["dataflow"] == (
         "archive entry -> destination path -> filesystem write"
     )
     assert finding["attackPath"]["impact"]["level"] == "high"

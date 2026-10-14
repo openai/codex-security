@@ -40,65 +40,55 @@ const findingFor = (candidateId: string) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
-test("persisted draft recovery preserves evidence while removing unsupported optional details", async (t) => {
+test("persisted drafts reject unsupported details without dropping source evidence", async (t) => {
   const f = await fixture(t, "worker");
-  const evidence = {
-    id: "canonical-source",
-    label: "Synthetic evidence",
-    path: "src/example.py",
-    startLine: 1,
-    code: "example()",
-    explanation: "Synthetic recovery fixture.",
-  };
-  const legacyEvidence = { id: "legacy-source", code: "legacy_example()" };
-  const input = {
-    ...f.draft(),
-    findings: [
+  const finding = {
+    ...findingFor("candidate-1"),
+    codeEvidence: [
       {
-        ...findingFor("candidate-1"),
-        codeEvidence: [evidence],
-        code_evidence: [
-          evidence,
-          legacyEvidence,
-          legacyEvidence,
-          { id: " ", code: " " },
-          null,
-        ],
-        rootCause: { summary: " " },
-        root_cause: null,
-        validation: {
-          evidence: "single proof",
-          counterEvidence: [],
-          status: null,
-          evidenceRefs: ["canonical-source", "legacy-source", "missing"],
-        },
-        attackPath: {
-          steps: [" ", "Check the entrypoint", null],
-          reachability: {
-            attacker: false,
-            preconditions: [],
-            evidence_refs: ["missing"],
-          },
-        },
+        id: "canonical-source",
+        label: "Synthetic evidence",
+        path: "src/example.py",
+        startLine: 1,
+        code: "example()",
+        explanation: "Synthetic recovery fixture.",
       },
     ],
+    validation: {
+      evidence: "single proof",
+      evidenceRefs: ["canonical-source"],
+    },
   };
-  const original = structuredClone(input);
-  const recovered = draftApi.parsePersistedScanDraft(input).findings[0];
-
-  assert.deepEqual(recovered.codeEvidence, [evidence]);
-  assert.deepEqual(recovered.code_evidence, [legacyEvidence]);
-  assert.equal(recovered.rootCause, undefined);
-  assert.equal(recovered.root_cause, undefined);
-  assert.deepEqual(recovered.validation, {
-    evidence: ["single proof"],
-    evidenceRefs: ["canonical-source", "legacy-source"],
-  });
-  assert.deepEqual(recovered.attackPath, {
-    steps: ["Check the entrypoint"],
-    reachability: { evidence_refs: [] },
-  });
-  assert.deepEqual(input, original);
+  const input = { ...f.draft(), findings: [finding] };
+  assert.deepEqual(draftApi.parsePersistedScanDraft(input).findings, [finding]);
+  for (const details of [
+    { code_evidence: [{ id: "legacy-source", code: "legacy_example()" }] },
+    { root_cause: "Legacy root cause" },
+    { rootCause: { summary: " " } },
+    {
+      rootCause: {
+        summary: "Duplicate snippet",
+        code: "source()",
+        language: "python",
+      },
+    },
+    { validation: { evidence: { kind: "trace" } } },
+    { validation: { evidenceRefs: ["missing"] } },
+    { attackPath: { steps: ["Check the entrypoint", null] } },
+  ]) {
+    const invalid = { ...input, findings: [{ ...finding, ...details }] };
+    const original = structuredClone(invalid);
+    assert.throws(() => draftApi.parsePersistedScanDraft(invalid));
+    assert.throws(() =>
+      draftApi.parseCanonicalScanDraft({
+        scanId: input.scanId,
+        manifest: { scan: { id: input.scanId } },
+        findings: { findings: invalid.findings },
+        coverage: invalid.coverage,
+      }),
+    );
+    assert.deepEqual(invalid, original);
+  }
 });
 
 test("worker checkpoints retain typed surface IDs", async (t) => {

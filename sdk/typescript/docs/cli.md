@@ -371,6 +371,15 @@ failures from findings-policy violations. Legacy completeness values affect neit
 Bulk and component summaries report completed and failed scans without an
 `incomplete` count. Component matching errors have status `failed`.
 
+New drafts use the current finding schema: `codeEvidence`, `rootCause`,
+`attackPath.dataflow`, and `evidenceRefs`. Source snippets belong in
+`codeEvidence`; `rootCause.evidenceRefs` links to them. Legacy aliases and
+malformed optional fields are rejected before completion rather than repaired.
+This applies to model-authored files, worker results, custom validation, and new
+imports. Existing sealed reports remain readable and exportable without
+rewriting their contents. Older unfinished drafts must be updated to the current
+schema or completed with their original CLI/plugin version.
+
 `scan`, `scans rerun`, and `scans resume` execution failures with `--json`, JSON,
 or JSONL output produce:
 
@@ -610,7 +619,12 @@ Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
 rejected, including a `--model` or `--effort` flag plus its native equivalent.
 Choose plugins with `--plugin-path`; native plugin and marketplace overrides are
-rejected. Multi-agent v2 must remain enabled; `agents.max_threads` is unsupported.
+rejected. New and resumed Deep Scans require the current plugin's direct engine,
+worker provider snapshot, and isolated worker configuration capabilities. Update
+older custom plugins or omit `--plugin-path` to use the bundled plugin. The SDK
+no longer adapts direct `node ./mcp/server.mjs` entrypoints; use the current shell
+or Windows MCP launcher. Saved reports remain readable.
+Multi-agent v2 must remain enabled; `agents.max_threads` is unsupported.
 
 `validate`, `patch`, and `verify-fix` limit native overrides to `model`,
 `model_reasoning_effort`, `model_provider`, `model_providers`, and

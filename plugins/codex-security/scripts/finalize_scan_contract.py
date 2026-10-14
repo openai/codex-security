@@ -1871,7 +1871,9 @@ def _validate_schema_node(
     if isinstance(value, str):
         if schema.get("minLength", 0) and len(value) < schema["minLength"]:
             raise ContractError(f"{context}: string is too short")
-        if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise ContractError(f"{context}: string is too long")
+        if "pattern" in schema and not re.search(schema["pattern"], value):
             raise ContractError(f"{context}: string does not match schema pattern")
         if schema.get("format") == "date-time":
             _validate_date_time(value, context)
@@ -1929,6 +1931,8 @@ def _validate_schema_node(
         additional_properties = schema.get("additionalProperties", True)
         for key, item in value.items():
             item_schema = properties.get(key)
+            if item_schema is False:
+                raise ContractError(f"{context}.{key}: unexpected schema property")
             if isinstance(item_schema, dict):
                 _validate_schema_node(item, item_schema, f"{context}.{key}", root_schema)
             elif additional_properties is False:
@@ -1945,6 +1949,42 @@ def _validate_schema_node(
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
     _validate_schema_node(payload, schema, schema_path.stem, schema)
+
+
+def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> None:
+    """Use the model's current finding contract for new completed results."""
+
+    draft = _read_json(schema_dir / "tools" / "scan-draft.schema.json")
+    common = _read_json(schema_dir / "definitions" / "artifact-common.schema.json")
+    documents = {document["$id"]: document for document in (draft, common)}
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        resolved = {key: resolve(value) for key, value in node.items() if key != "$ref"}
+        if "$ref" in node:
+            document_id, fragment = node["$ref"].split("#", 1)
+            referenced = _resolve_schema_reference(
+                documents[document_id], f"#{fragment}", "finding schema"
+            )
+            resolved = {**resolve(referenced), **resolved}
+        return resolved
+
+    finding_schema = resolve(draft["$defs"]["finding"])
+    for index, finding in enumerate(_require_list(findings, "findings", "findings")):
+        # These fields belong to the host, not the authored finding contract.
+        authored = (
+            {
+                key: value
+                for key, value in finding.items()
+                if key not in {"findingId", "occurrenceId", "fingerprints"}
+            }
+            if isinstance(finding, dict)
+            else finding
+        )
+        _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
 def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
@@ -2965,21 +3005,28 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if not was_sealed and completion_warnings is not None:
+    discarded_findings: list[str] = []
+    if not was_sealed and scan["status"] == "completed":
+        try:
+            _populate_unsealed_finding_identities(manifest, findings)
+            _validate_findings(manifest, findings)
+            _validate_current_findings(findings, schema_dir)
+        except ContractError as exc:
+            raise RecoverableContractError(
+                "Scan result contains invalid findings; repair the finding records "
+                f"before completion. {exc}"
+            ) from exc
+    elif not was_sealed and completion_warnings is not None:
         discarded_findings = _recover_unsealed_findings(
             manifest, findings, schema_dir, scan_dir, completion_warnings
         )
-        if scan["status"] == "completed" and discarded_findings:
-            raise RecoverableContractError(
-                "Scan result contains invalid findings; repair the required finding records "
-                "before completion. " + " ".join(discarded_findings)
-            )
+    elif not was_sealed:
+        _populate_unsealed_finding_identities(manifest, findings)
+    if not was_sealed and completion_warnings is not None:
         _recover_unsealed_coverage(
             coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
         )
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
-    elif not was_sealed:
-        _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings_for_validation)
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)

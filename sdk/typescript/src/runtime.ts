@@ -2594,14 +2594,12 @@ async function pluginRuntimeProjection(
   if (
     !isRecord(server) ||
     (server["command"] !== "./scripts/launch_codex_security_mcp" &&
-      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
-      !isLegacyNodeMcpServer(server))
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd")
   ) {
     return;
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  const directNode = isLegacyNodeMcpServer(server);
   if (
     !Array.isArray(environment) ||
     !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
@@ -2612,66 +2610,34 @@ async function pluginRuntimeProjection(
     ];
   }
   const files: PluginRuntimeProjection["files"] = new Map();
-  if (directNode) {
-    const args = [...(server["args"] as string[])];
-    args[args.findIndex(isLegacyNodeMcpEntry)] =
-      "./mcp/codex_security_sdk_bridge.mjs";
-    server["args"] = args;
-    files.set("mcp/codex_security_sdk_bridge.mjs", {
-      contents: Buffer.from(
-        'import { runMain } from "node:module";\n' +
-          'import { dirname, join } from "node:path";\n' +
-          'import { fileURLToPath } from "node:url";\n' +
-          "const root = process.env.CODEX_SECURITY_PLUGIN_ROOT;\n" +
-          'process.argv[1] = root ? join(root, "mcp", "server.mjs") : join(dirname(fileURLToPath(import.meta.url)), "server.mjs");\n' +
-          "runMain(process.argv[1]);\n",
-      ),
-      mode: 0o644,
-    });
-  } else {
-    server["command"] =
-      server["command"] === "./scripts/launch_codex_security_mcp.cmd"
-        ? "./scripts/launch_codex_security_mcp_sdk.cmd"
-        : "./scripts/launch_codex_security_mcp_sdk";
-    files.set("scripts/launch_codex_security_mcp_sdk", {
-      contents: Buffer.from(
-        "#!/bin/sh\n" +
-          'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
-          '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
-          "fi\n" +
-          'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
-      ),
-      mode: 0o755,
-    });
-    files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
-      contents: Buffer.from(
-        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
-          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
-          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
-          "exit /b\r\n:codex_security_sdk_original\r\n" +
-          '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
-      ),
-      mode: 0o755,
-    });
-  }
+  server["command"] =
+    server["command"] === "./scripts/launch_codex_security_mcp.cmd"
+      ? "./scripts/launch_codex_security_mcp_sdk.cmd"
+      : "./scripts/launch_codex_security_mcp_sdk";
+  files.set("scripts/launch_codex_security_mcp_sdk", {
+    contents: Buffer.from(
+      "#!/bin/sh\n" +
+        'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+        '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+        "fi\n" +
+        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+    ),
+    mode: 0o755,
+  });
+  files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
+    contents: Buffer.from(
+      "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+        "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+        '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+        "exit /b\r\n:codex_security_sdk_original\r\n" +
+        '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
+    ),
+    mode: 0o755,
+  });
   files.set(".mcp.json", {
     contents: Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`),
   });
   return { root, files };
-}
-
-function isLegacyNodeMcpEntry(argument: unknown): boolean {
-  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
-}
-
-function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
-  const command = server["command"];
-  return (
-    typeof command === "string" &&
-    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
-    Array.isArray(server["args"]) &&
-    server["args"].some(isLegacyNodeMcpEntry)
-  );
 }
 
 export function resolveCodexCommand(

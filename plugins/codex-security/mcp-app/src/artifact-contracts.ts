@@ -174,7 +174,6 @@ const {
   confidence: draft_confidence,
   location: draft_location,
   codeEvidence,
-  legacyCodeEvidence: draft_legacyCodeEvidence,
   findingAssessment: draft_findingAssessment,
   textOrSummary: draft_textOrSummary,
   findingReachability: draft_findingReachability,
@@ -231,30 +230,20 @@ const draft_finding = z.looseObject({
     })
     .optional(),
   codeEvidence: z.array(draft_codeEvidence).optional(),
-  code_evidence: z.array(draft_legacyCodeEvidence).optional(),
+  code_evidence: z.never().optional(),
   rootCause: z
     .union([
       nonEmptyText,
       z.looseObject({
         summary: nonEmptyText,
-        code: nonEmptyText.optional(),
-        language: nonEmptyText.optional(),
+        code: z.never().optional(),
+        language: z.never().optional(),
         evidenceRefs: draft_textList.optional(),
+        evidence_refs: z.never().optional(),
       }),
     ])
     .optional(),
-  root_cause: z
-    .union([
-      nonEmptyText,
-      z.looseObject({
-        summary: nonEmptyText.optional(),
-        code: nonEmptyText.optional(),
-        language: nonEmptyText.optional(),
-        evidenceRefs: draft_textList.optional(),
-        evidence_refs: draft_textList.optional(),
-      }),
-    ])
-    .optional(),
+  root_cause: z.never().optional(),
   remediation: nonEmptyText,
   validation: z.union([draft_findingValidation, z.null()]).optional(),
   attackPath: z.union([draft_findingAttackPath, z.null()]).optional(),
@@ -475,7 +464,6 @@ export const artifactSchemaDocuments = {
       confidence: draft_confidence,
       taxonomy: draft_taxonomy,
       codeEvidence: draft_codeEvidence,
-      legacyCodeEvidence: draft_legacyCodeEvidence,
       findingAssessment: draft_findingAssessment,
       textOrSummary: draft_textOrSummary,
       findingReachability: draft_findingReachability,

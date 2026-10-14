@@ -415,7 +415,7 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
     );
     const coverage = await readJson(run.scanDir, "coverage.json");
     coverage.surfaces = [
-      { id: "HTTP API", label: "HTTP API", disposition: "reported" },
+      { id: "http-api", label: "HTTP API", disposition: "reported" },
     ];
     const findings = await readJson(run.scanDir, "findings.json");
     findings.findings[0].locations[0].path = "./fixture.py";
@@ -435,11 +435,11 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
       );
       assert.equal(
         (await readJson(run.scanDir, "coverage.json")).surfaces[0].id,
-        "HTTP API",
+        "http-api",
       );
       const head = await readJson(run.scanDir, "checkpoint-head.json");
       const saved = await readJson(run.scanDir, "checkpoints", head.checkpoint);
-      assert.equal(saved.coverage.surfaces[0].id, "HTTP API");
+      assert.equal(saved.coverage.surfaces[0].id, "http-api");
       assert.equal(saved.findings[0].locations[0].path, "./fixture.py");
     }
 
@@ -460,7 +460,7 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
         checkpoint(run.scanId, "unsafe-checkpoint", "Review remains pending."),
         runWorkbench,
       ),
-      /expected a safe scan-relative POSIX path/,
+      /Invalid string.*pattern|expected a safe scan-relative POSIX path/,
     );
     assert.deepEqual(
       await Promise.all(

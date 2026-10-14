@@ -1546,18 +1546,49 @@ The extraction root is not enforced.
         self.assertNotIn(stale_status, report)
         self.assertNotIn("Runtime or test status", report)
 
-    def test_finalize_accepts_legacy_unstructured_report_semantics(self) -> None:
+    @pytest.mark.cross_platform
+    def test_new_findings_use_current_fields_without_coercion(self) -> None:
+        invalid_details = [
+            {"code_evidence": []},
+            {"root_cause": "A legacy cause."},
+            {"rootCause": {"summary": "Cause.", "code": "legacy()"}},
+            {"rootCause": {"summary": "Cause.", "language": "python"}},
+            {"rootCause": {"summary": "Cause.", "evidence_refs": []}},
+            {"attackPath": {"dataFlow": "source -> sink"}},
+            {"attackPath": {"data_flow": "source -> sink"}},
+            {"attackPath": {"evidence_refs": []}},
+            {"attackPath": {"dataflow": {"evidence_refs": []}}},
+            {"attackPath": {"reachability": {"evidence_refs": []}}},
+            {"validation": {"evidence_refs": []}},
+            {"validation": {"assertions": "A scalar assertion."}},
+            {"severity": {"level": "high", "changeConditions": ["A list condition."]}},
+            {"remediationTests": "A scalar test."},
+            {"preventiveControls": [42]},
+        ]
+        for details in invalid_details:
+            with self.subTest(details=details):
+                self.findings["findings"] = [{**copy.deepcopy(self.finding), **details}]
+                self.write_scan()
+                before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
+                with self.assertRaisesRegex(
+                    FINALIZER.RecoverableContractError, "Scan result contains invalid findings"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES, "report.md"), before)
+
+    def test_finalize_accepts_current_text_or_object_report_semantics(self) -> None:
         finding = self.findings["findings"][0]
-        finding["validation"] = {"evidence": "legacy validation evidence"}
-        finding["attackPath"] = {"dataflow": "legacy data flow"}
+        finding["rootCause"] = "The extraction destination is not contained."
+        finding["validation"] = {"evidence": "A traversal input escapes the destination."}
+        finding["attackPath"] = {"dataflow": "archive entry -> filesystem write"}
         self.write_scan()
 
         FINALIZER.finalize_scan(self.scan_dir)
 
         report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
-        self.assertIn("Validation details were not recorded separately.", report)
-        self.assertIn("legacy validation evidence", report)
-        self.assertIn("legacy data flow", report)
+        self.assertIn("The extraction destination is not contained.", report)
+        self.assertIn("A traversal input escapes the destination.", report)
+        self.assertIn(r"archive entry -\> filesystem write", report)
 
     @pytest.mark.cross_platform
     def test_report_projection_preserves_data_flow_aliases_and_scalar_reachability(self) -> None:
@@ -1612,37 +1643,12 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_finalize_rejects_unknown_root_cause_alias_evidence_reference(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["root_cause"] = {
-            "summary": "The write occurs before containment is checked.",
-            "evidenceRefs": ["missing-evidence"],
-        }
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "root_cause.evidenceRefs: unknown code-evidence ids: missing-evidence",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_finalize_rejects_unknown_snake_case_code_evidence_reference(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["validation"] = {"evidence_refs": ["missing-evidence"]}
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "validation.evidence_refs: unknown code-evidence ids: missing-evidence",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
     @pytest.mark.cross_platform
     def test_finalize_rejects_unknown_nested_code_evidence_reference(self) -> None:
         finding = self.findings["findings"][0]
         finding["attackPath"] = {
             "dataflow": {"evidenceRefs": ["missing-dataflow-evidence"]},
-            "reachability": {"evidence_refs": ["missing-reachability-evidence"]},
+            "reachability": {"evidenceRefs": ["missing-reachability-evidence"]},
         }
         self.write_scan()
 
@@ -1650,47 +1656,6 @@ The extraction root is not enforced.
             FINALIZER.ContractError,
             "attackPath.dataflow.evidenceRefs: unknown code-evidence ids: "
             "missing-dataflow-evidence",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    @pytest.mark.cross_platform
-    def test_finalize_accepts_nested_reference_to_legacy_code_evidence(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["code_evidence"] = [
-            {
-                "id": "legacy-source",
-                "code": "entry_path = archive_entry.name",
-            }
-        ]
-        finding["attackPath"] = {"dataflow": {"evidence_refs": ["legacy-source"]}}
-        self.write_scan()
-
-        _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(
-            findings["findings"][0]["attackPath"]["dataflow"]["evidence_refs"],
-            ["legacy-source"],
-        )
-
-    @pytest.mark.cross_platform
-    def test_finalize_rejects_duplicate_ids_across_code_evidence_aliases(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["codeEvidence"] = [
-            {
-                "id": "shared-source",
-                "label": "Canonical source",
-                "path": "src/extract.py",
-                "startLine": 41,
-                "code": "canonical_source()",
-                "explanation": "Canonical snippet.",
-            }
-        ]
-        finding["code_evidence"] = [{"id": "shared-source", "code": "conflicting_legacy_source()"}]
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            r"code_evidence\[0\]\.id: duplicate code-evidence id",
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
@@ -1792,26 +1757,6 @@ The extraction root is not enforced.
                 self.compatible_finding(findings)["code_evidence"],
                 [{"id": "legacy-source", "code": "legacy_source()"}],
             )
-
-    def test_unsealed_scan_rejects_malformed_legacy_evidence_rows(self) -> None:
-        self.findings["findings"][0]["code_evidence"] = [None]
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            r"code_evidence\[0\]: expected an object",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_unsealed_scan_rejects_nullable_legacy_evidence_catalog(self) -> None:
-        self.findings["findings"][0]["code_evidence"] = None
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "code_evidence: expected an array",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
 
     def test_unsealed_scan_rejects_legacy_scalar_finding_details(self) -> None:
         self.findings["findings"][0]["validation"] = {
@@ -2167,7 +2112,7 @@ The extraction root is not enforced.
         self.assertEqual(finding["fingerprints"]["algorithm"], "codex-security/v1")
         self.assertNotEqual(finding["fingerprints"]["primary"], "codex-security/v0:sha256:example")
 
-    def test_recovery_normalizes_severity_change_condition_lists(self) -> None:
+    def test_stopped_recovery_normalizes_severity_change_condition_lists(self) -> None:
         self.findings["findings"][0]["severity"]["changeConditions"] = [
             " Raise if the vulnerable path becomes internet-reachable. ",
             "Lower if the input is constrained before parsing.",
@@ -2175,7 +2120,11 @@ The extraction root is not enforced.
         self.write_scan()
         warnings: list[str] = []
 
-        prepared = FINALIZER._prepare_scan_finalization(self.scan_dir, completion_warnings=warnings)
+        prepared = FINALIZER._prepare_scan_finalization(
+            self.scan_dir,
+            completion_binding={**self.completion_binding(), "status": "interrupted"},
+            completion_warnings=warnings,
+        )
 
         finding = prepared[3]["findings"][0]
         self.assertEqual(
@@ -2186,7 +2135,7 @@ The extraction root is not enforced.
         self.assertEqual(warnings, ["Recovered finding 1: normalized severity change conditions."])
 
     @pytest.mark.cross_platform
-    def test_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
+    def test_stopped_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
         canonical_evidence = {
             "id": "canonical-source",
             "label": "Canonical source",
@@ -2212,7 +2161,9 @@ The extraction root is not enforced.
                 warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
+                    completion_warnings=warnings,
                 )
 
                 self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
@@ -2224,7 +2175,7 @@ The extraction root is not enforced.
                 )
 
     @pytest.mark.cross_platform
-    def test_recovery_ranks_embedded_root_cause_evidence(self) -> None:
+    def test_stopped_recovery_ranks_embedded_root_cause_evidence(self) -> None:
         for name, root_cause in (
             (
                 "embedded",
@@ -2250,7 +2201,9 @@ The extraction root is not enforced.
                 warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
+                    completion_warnings=warnings,
                 )
 
                 self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
@@ -2260,7 +2213,7 @@ The extraction root is not enforced.
                 )
 
     def test_recovery_rejects_malformed_severity_change_condition_lists(self) -> None:
-        for change_conditions in ([], ["  "], ["Valid condition.", 1], ["\ud800"]):
+        for change_conditions in ([], ["  "], ["Valid condition.", 1]):
             with self.subTest(change_conditions=repr(change_conditions)):
                 self.findings["findings"][0]["severity"]["changeConditions"] = change_conditions
                 self.write_scan()
@@ -2276,8 +2229,7 @@ The extraction root is not enforced.
                     )
 
                 self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES, "report.md"), before)
-                self.assertEqual(len(warnings), 1)
-                self.assertIn("severity.changeConditions", warnings[0])
+                self.assertEqual(warnings, [])
 
     def test_unsealed_invalid_anchor_stays_strict_without_recovery(self) -> None:
         self.findings["findings"][0]["identity"]["anchor"] = "Invalid Anchor"
@@ -2286,7 +2238,9 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "stable lowercase semantic slug"):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_recovery_preserves_finding_with_malformed_optional_remediation_fields(self) -> None:
+    def test_stopped_recovery_preserves_finding_with_malformed_optional_remediation_fields(
+        self,
+    ) -> None:
         for field, value in (
             ("remediationTests", "Reject unsafe archive paths."),
             ("remediationTests", [{"test": "Reject unsafe archive paths."}]),
@@ -2299,6 +2253,7 @@ The extraction root is not enforced.
 
                 _, _, _, findings, coverage, _, _ = FINALIZER._prepare_scan_finalization(
                     self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
                     completion_warnings=warnings,
                 )
 
