@@ -127,7 +127,11 @@ test("builds and loads the host runtime from standalone plugin source", async (t
       "mcp-app/tests/test_plugin_bytecode.ts",
     ],
     {
-      env: { ...process.env, CODEX_SECURITY_TEST_PLUGIN_ROOT: output },
+      env: {
+        ...process.env,
+        NODE_TEST_CONTEXT: undefined,
+        CODEX_SECURITY_TEST_PLUGIN_ROOT: output,
+      },
     },
   );
 });
