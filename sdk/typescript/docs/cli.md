@@ -360,8 +360,8 @@ Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`)
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
 SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
 
-Scans are report-only by default. `--fail-on-severity high` exits with `1` for
-high or critical findings. Scope exclusions, skipped files, and follow-up notes
+Completed scans exit with `0` by default. Configure `--fail-on-severity high`
+to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
 do not fail a scan or bypass the findings threshold. Execution, target-integrity,
 and required-output failures exit with `2`.
 
@@ -746,8 +746,8 @@ work is needed, the scan is preserved and you can run `scans match --all`.
 
 When Deep discovery has finished at a cost stop, the scan returns a sealed
 report and lists unvalidated candidates as follow-up work. Reaching a configured
-limit with a valid finalized report does not fail the command; available findings
-still determine the severity-policy exit code.
+limit with a valid finalized report returns `0` by default, or `1` if findings
+meet a configured failure threshold.
 
 When Codex reports an exhausted usage limit, Deep Scan cancels active workers
 and stops retrying or launching replacements. Completed worker artifacts are retained.

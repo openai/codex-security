@@ -1458,7 +1458,7 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
     if (context.claimedWorkerIds) {
       const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
       const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
-      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [], coverage }));
+      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
     } else {
       writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
     }

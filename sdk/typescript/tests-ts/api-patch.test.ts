@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   CodexOptions,
@@ -357,14 +357,24 @@ describe("CodexSecurity headless patching", () => {
   });
 
   test("keeps the patch workspace untrusted across native config layers", async () => {
-    const { client, options, captured } = await patchClient();
+    const { client, options, captured, codexHome } = await patchClient();
     await using security = client;
     await security.patch(options);
-    expect(captured.codex?.configOverrides).toEqual([
-      "permissions.codex_security_scan.network.enabled=false",
-      "project_root_markers=[]",
-      `projects.${JSON.stringify(options.repositoryPath)}.trust_level="untrusted"`,
-    ]);
+    expect(parseToml(captured.codex!.configOverrides!.join("\n"))).toEqual({
+      permissions: {
+        codex_security_scan: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [await realpath(codexHome)]: { ".": "deny" },
+            [preparedRuntime(codexHome).deepScanConfigPath!]: { ".": "deny" },
+          },
+          network: { enabled: false },
+        },
+      },
+      project_root_markers: [],
+      projects: { [options.repositoryPath]: { trust_level: "untrusted" } },
+    });
     expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
   });
 
@@ -407,11 +417,21 @@ describe("CodexSecurity headless patching", () => {
       ).toEqual({
         model_providers: { "synthetic.provider": provider },
       });
-      expect(captured.codex?.configOverrides).toEqual([
-        "permissions.codex_security_scan.network.enabled=false",
-        "project_root_markers=[]",
-        `projects.${JSON.stringify(options.repositoryPath)}.trust_level="untrusted"`,
-      ]);
+      expect(parseToml(captured.codex!.configOverrides!.join("\n"))).toEqual({
+        permissions: {
+          codex_security_scan: {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [await realpath(codexHome)]: { ".": "deny" },
+              [preparedRuntime(codexHome).deepScanConfigPath!]: { ".": "deny" },
+            },
+            network: { enabled: false },
+          },
+        },
+        project_root_markers: [],
+        projects: { [options.repositoryPath]: { trust_level: "untrusted" } },
+      });
       expect(captured.codex?.config).not.toHaveProperty("model_providers");
       expect(captured.codex?.apiKey).toBeUndefined();
       expect(captured.codex?.env).not.toHaveProperty("OPENAI_API_KEY");
