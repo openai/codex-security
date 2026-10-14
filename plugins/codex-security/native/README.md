@@ -77,7 +77,7 @@ For plugin and npm releases, use the default `--native universal`. It requires a
 
 The `native-artifacts` workflow calls all three platform workflows and combines their eight verified payloads into `native-universal-<commit>`. PR validation jobs share one artifact assembled by `node-ci`; release and standalone validation runs assemble their own. By default, the standalone MCP builder and npm package include the same complete `mcp/native` tree; neither compiles nor downloads code at runtime.
 
-The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/4694e6d7c7d7eb2ac6b9a634374c3519a9e5851f/LICENSE). Review that override when upgrading those dependencies.
+The GNU x64 job also runs `notices.mjs` against the locked Cargo metadata. It collects crate licenses and the pinned Rust standard-library notices for both package surfaces. The NAPI crates omit license files from their registry archives, so `licenses/napi.txt` preserves their [pinned upstream license](https://github.com/napi-rs/napi-rs/blob/8bab46ee5dfd48a7b51e8bad3d09aed315ada4df/LICENSE). Review that override when upgrading those dependencies.
 
 For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run `native-artifacts` manually on a pushed branch. Use the artifact name shown by that run; pull-request artifacts use the tested merge commit. From the repository root:
 
