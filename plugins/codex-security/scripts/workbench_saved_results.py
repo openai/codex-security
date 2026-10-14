@@ -2039,12 +2039,12 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     try:
-        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+        prepared = _prepare_scan_finalization(scan_dir)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-    if not was_sealed or manifest["scan"]["id"] != scan["id"]:
+    if not prepared.was_sealed or prepared.manifest["scan"]["id"] != scan["id"]:
         raise SystemExit("Only sealed scans can be compared.")
-    return coverage
+    return prepared.coverage
 
 
 def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
@@ -2272,10 +2272,11 @@ def preserve_scan_results_locked(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
         completion_binding=binding,
-        completion_warnings=warnings,
+        recover_unsealed=True,
         draft_documents=documents,
         finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
+    warnings.extend(prepared.warnings)
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(
