@@ -680,12 +680,15 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
           },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
+        if (response.ok) {
+          return { data: await response.json(), headers: response.headers };
+        }
       } catch (error) {
-        if (method !== "GET" || retry >= 2) throw error;
+        if (method !== "GET" || retry >= 2 || error instanceof SyntaxError)
+          throw error;
         await delay(1000 * 2 ** retry);
         continue;
       }
-      if (response.ok) return response;
       if (
         method === "GET" &&
         retry < 2 &&
@@ -707,7 +710,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
     owner: repository.split("/")[0],
     repositoryUrl: `https://github.com/${repository}`,
     async request(method, path, body) {
-      return (await responseFor(method, path, body)).json();
+      return (await responseFor(method, path, body)).data;
     },
     async list(path) {
       const items = [];
@@ -716,7 +719,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
           "GET",
           `${path}${path.includes("?") ? "&" : "?"}page=${page}`,
         );
-        items.push(...(await response.json()));
+        items.push(...response.data);
         if (!response.headers.get("link")?.includes('rel="next"')) return items;
       }
     },

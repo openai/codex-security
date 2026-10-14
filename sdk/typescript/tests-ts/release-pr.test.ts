@@ -469,7 +469,24 @@ class FakeGitHub {
 }
 
 describe("GitHub request transport", () => {
-  test.each(["errored response body", "transport failure"])(
+  const interruptedJsonResponse = (error: Error) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('[{"number":'));
+        },
+        pull(controller) {
+          controller.error(error);
+        },
+      }),
+      { status: 200 },
+    );
+
+  test.each([
+    "errored response body",
+    "transport failure",
+    "interrupted success body",
+  ])(
     "recovers from %s without duplicating paginated results",
     async (failure) => {
       const pages: number[] = [];
@@ -487,6 +504,9 @@ describe("GitHub request transport", () => {
                   code: "UND_ERR_SOCKET",
                 }),
               });
+            }
+            if (failure === "interrupted success body") {
+              return interruptedJsonResponse(new TypeError("terminated"));
             }
             const body = new ReadableStream({
               start(controller) {
@@ -512,6 +532,24 @@ describe("GitHub request transport", () => {
       expect(pages).toEqual([1, 2, 2]);
     },
   );
+
+  test("recovers an interrupted successful request body", async () => {
+    let requests = 0;
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      async () => {
+        requests++;
+        return requests === 1
+          ? interruptedJsonResponse(new TypeError("terminated"))
+          : Response.json({ sha: "synthetic-main-sha" });
+      },
+    );
+    expect(await github.request("GET", "git/ref/heads/main")).toEqual({
+      sha: "synthetic-main-sha",
+    });
+    expect(requests).toBe(2);
+  });
 
   test.each([false, true])(
     "preserves a persistent transport error after bounded read retries (initial HTTP error: %j)",
@@ -540,9 +578,44 @@ describe("GitHub request transport", () => {
     },
   );
 
-  test.each(["POST", "PATCH", "DELETE"])(
-    "does not replay a %s request after a transport failure",
-    async (method) => {
+  test.each([false, true])(
+    "preserves an interrupted body error after bounded read retries (mixed failures: %j)",
+    async (mixedFailures) => {
+      let requests = 0;
+      const error = new TypeError("terminated", {
+        cause: Object.assign(new Error("other side closed"), {
+          code: "UND_ERR_SOCKET",
+        }),
+      });
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          if (mixedFailures && requests === 1) {
+            return Response.json({ message: "Unavailable" }, { status: 503 });
+          }
+          if (mixedFailures && requests === 2) throw error;
+          return interruptedJsonResponse(error);
+        },
+      );
+      await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
+        error,
+      );
+      expect(requests).toBe(3);
+    },
+  );
+
+  test.each([
+    ["POST", "fetch"],
+    ["PATCH", "fetch"],
+    ["DELETE", "fetch"],
+    ["POST", "body"],
+    ["PATCH", "body"],
+    ["DELETE", "body"],
+  ])(
+    "does not replay a %s request after a %s failure",
+    async (method, failure) => {
       let requests = 0;
       const error = new TypeError("fetch failed");
       const github = createGitHubClient(
@@ -550,10 +623,32 @@ describe("GitHub request transport", () => {
         "synthetic-release-token",
         async () => {
           requests++;
+          if (failure === "body") return interruptedJsonResponse(error);
           throw error;
         },
       );
       await expect(github.request(method, "pulls")).rejects.toBe(error);
+      expect(requests).toBe(1);
+    },
+  );
+
+  test.each(["request", "list"])(
+    "does not retry malformed JSON in a successful %s response",
+    async (operation) => {
+      let requests = 0;
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          return new Response("{", { status: 200 });
+        },
+      );
+      await expect(
+        operation === "request"
+          ? github.request("GET", "pulls")
+          : github.list("pulls"),
+      ).rejects.toBeInstanceOf(SyntaxError);
       expect(requests).toBe(1);
     },
   );
