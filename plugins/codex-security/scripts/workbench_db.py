@@ -1552,11 +1552,23 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                recover_unsealed=scan["mode"] != "deep",
+                allow_missing_writeups=scan["mode"] == "deep",
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        if scan["mode"] != "deep":
+            warnings.extend(prepared.warnings)
         add_warning()
+        if scan["mode"] == "deep" and prepared.warnings:
+            warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
+            # Save the explanation before publication removes the broken reference,
+            # so a retry after an output-write failure retains it.
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                    (json.dumps(warnings), scan_id),
+                )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings

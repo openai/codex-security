@@ -720,9 +720,14 @@ async function testSettledReducerIsNotStarvedByDiscoveryBacklog() {
 
   await executor.dedupStarted.promise;
   await eventually(
-    () => executor.discoveryCalls >= 8 && executor.runningDiscovery === 4,
+    () =>
+      executor.runningDiscovery > 0 &&
+      [...store.workers.values()].filter(
+        (worker) =>
+          worker.kind === "discovery" && worker.status === "succeeded",
+      ).length === 4,
   );
-  const dispatchedBeforeConvergence = executor.discoveryCalls;
+  const dispatchedBeforeConvergence = coordinator.snapshot().dispatchedCount;
   executor.dedupGate.resolve();
 
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -733,6 +738,45 @@ async function testSettledReducerIsNotStarvedByDiscoveryBacklog() {
     "a settled reducer must stop dispatch before canceled workers can refill the pool",
   );
   assert.equal(executor.discoveryAttempts.size, dispatchedBeforeConvergence);
+}
+
+async function testSlowReducerPausesDiscoveryRefill() {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 4,
+    subagents: 0,
+    stopAfterNoNew: 2,
+    maxDiscoveryRuns: 40,
+  });
+  const executor = new FakeExecutor();
+  executor.dedupGate = Promise.withResolvers<void>();
+  const coordinator = createCoordinator(fixture, store, executor);
+  coordinator.start();
+
+  await executor.dedupStarted.promise;
+  const dispatchedAtReduction = coordinator.snapshot().dispatchedCount;
+  await eventually(
+    () =>
+      [...store.workers.values()].filter(
+        (worker) =>
+          worker.kind === "discovery" && worker.status === "succeeded",
+      ).length >= dispatchedAtReduction,
+  );
+  const dispatchedWhileReducing = coordinator.snapshot().dispatchedCount;
+  executor.dedupGate.resolve();
+
+  const terminal = await coordinator.wait(undefined, 5_000);
+  assert.equal(
+    dispatchedWhileReducing,
+    dispatchedAtReduction,
+    "wait for novelty before refilling discovery",
+  );
+  assert.equal(terminal?.terminalReason, "saturated", terminal?.error);
+  assert.equal(terminal?.dispatchedCount, dispatchedAtReduction);
+  assert.equal(
+    new Set(store.dedupClaims.flatMap((claim) => claim.workerIds)).size,
+    dispatchedAtReduction,
+  );
+  assert.equal(store.run.noNewStreak, dispatchedAtReduction);
 }
 
 async function testSingletonHardCapReduction() {
@@ -4176,6 +4220,7 @@ try {
   await testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence();
   await testSaturationIgnoresWorkerFailureSettledAfterStop();
   await testSettledReducerIsNotStarvedByDiscoveryBacklog();
+  await testSlowReducerPausesDiscoveryRefill();
   await testSingletonHardCapReduction();
   await testExhaustedRetryFailsScan();
   await testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately();

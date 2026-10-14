@@ -774,6 +774,7 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     finding = standard_finding(tmp_path, scan_id, target)
+    finding["severity"]["changeConditions"] = ["Raise if the service becomes internet-reachable."]
     checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     result_path.write_text("{incomplete")
@@ -816,6 +817,9 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     )["scan"]
     assert preserved["findingCount"] == 1
     assert preserved["findings"][0]["locations"][0]["startLine"] != 91
+    assert preserved["findings"][0]["severity"]["changeConditions"] == (
+        "Raise if the service becomes internet-reachable."
+    )
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "canceled"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         warnings = json.loads(
@@ -824,6 +828,8 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
             ).fetchone()[0]
         )
     assert not any("result publication needs follow-up" in warning for warning in warnings)
+    assert "Recovered finding 1: normalized severity change conditions." in warnings
+    assert preserved["warnings"] == warnings
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
@@ -2466,7 +2472,7 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
     )
     assert documents is not None
     prepared = workbench_saved_results._prepare_scan_finalization(
-        scan_dir, completion_binding=binding, completion_warnings=[], draft_documents=documents
+        scan_dir, completion_binding=binding, recover_unsealed=True, draft_documents=documents
     )
     workbench_saved_results._write_prepared_scan_finalization(prepared)
     recovered = json.loads((scan_dir / "coverage.json").read_text())

@@ -10,7 +10,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 
 const plugin = resolve(import.meta.dirname, "../..");
@@ -113,6 +113,27 @@ test("builds and loads the host runtime from standalone plugin source", async (t
     },
   );
   assert.equal(launcherOutput, "[]\n");
+
+  for (const file of contract.shippedExact.filter(
+    (file: string) => !file.startsWith("mcp/"),
+  )) {
+    await mkdir(dirname(join(output, file)), { recursive: true });
+    await copyFile(join(plugin, file), join(output, file));
+  }
+  runNode(
+    [
+      "--experimental-strip-types",
+      "--test",
+      "mcp-app/tests/test_plugin_bytecode.ts",
+    ],
+    {
+      env: {
+        ...process.env,
+        NODE_TEST_CONTEXT: undefined,
+        CODEX_SECURITY_TEST_PLUGIN_ROOT: output,
+      },
+    },
+  );
 });
 
 test("rejects an unsupported native host before replacing existing output", async (t) => {

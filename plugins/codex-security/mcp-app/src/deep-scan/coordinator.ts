@@ -716,10 +716,9 @@ export class DeepScanCoordinator {
   }
 
   /**
-   * Keep the discovery pool full until the reducer establishes convergence or
-   * the configured run cap is exhausted. Completed discoveries enter a stable
-   * FIFO buffer. One reducer claims the current buffer snapshot; discoveries
-   * that finish during that reduction wait for the next one.
+   * Refill discovery between reductions so a slow reducer cannot build an
+   * unchecked backlog. One reducer claims the FIFO buffer. Discoveries that
+   * finish during reduction wait for the next one.
    */
   private async runScheduler(): Promise<SchedulerResult> {
     const config = this.state.config;
@@ -905,6 +904,7 @@ export class DeepScanCoordinator {
       }
       if (settlements.length === 0) {
         while (
+          !reducer &&
           !this.discoveryDeadlineReached &&
           (!previousReducerResultPath ||
             this.state.noNewStreak < config.stopAfterNoNew) &&

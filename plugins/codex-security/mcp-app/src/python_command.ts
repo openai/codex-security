@@ -115,7 +115,7 @@ export function runPythonWithInput(
   label: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(python, args, {
+    const child = spawn(python, ["-B", ...args], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
