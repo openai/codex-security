@@ -981,11 +981,14 @@ test("a malformed selected file fails before constructing a client", async () =>
     ),
   ).toBe(2);
   expect(onConfig).not.toHaveBeenCalled();
-  expect(stderr.text()).toContain("Cannot parse project configuration");
+  expect(stderr.text()).toContain(
+    `Cannot parse project configuration at ${input.config}: `,
+  );
+  expect(stderr.text()).toContain("end with a ]");
   expect(JSON.parse(stdout.text())).toEqual({
     status: "failed",
     code: "SCAN_FAILED",
-    message: `Cannot parse project configuration at ${input.config}.`,
+    message: expect.stringContaining("end with a ]"),
   });
 });
 
