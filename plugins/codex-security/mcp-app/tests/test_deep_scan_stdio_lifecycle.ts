@@ -944,9 +944,9 @@ model_reasoning_summary = "none"
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], "-c");
+          assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
           assert.equal(launch.args.at(-1), workbenchPath);
-          assert.equal(launch.args.length, 3);
+          assert.equal(launch.args.length, 4);
           assert.equal(launch.cwd, pluginRoot);
         }
       }

@@ -469,39 +469,189 @@ class FakeGitHub {
 }
 
 describe("GitHub request transport", () => {
-  test("recovers from an errored response body without duplicating paginated results", async () => {
-    const pages: number[] = [];
+  const interruptedJsonResponse = (error: Error) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('[{"number":'));
+        },
+        pull(controller) {
+          controller.error(error);
+        },
+      }),
+      { status: 200 },
+    );
+
+  test.each([
+    "errored response body",
+    "transport failure",
+    "interrupted success body",
+  ])(
+    "recovers from %s without duplicating paginated results",
+    async (failure) => {
+      const pages: number[] = [];
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async (url, options) => {
+          expect(options.method).toBe("GET");
+          const page = Number(new URL(url).searchParams.get("page"));
+          pages.push(page);
+          if (pages.length === 2) {
+            if (failure === "transport failure") {
+              throw new TypeError("fetch failed", {
+                cause: Object.assign(new Error("other side closed"), {
+                  code: "UND_ERR_SOCKET",
+                }),
+              });
+            }
+            if (failure === "interrupted success body") {
+              return interruptedJsonResponse(new TypeError("terminated"));
+            }
+            const body = new ReadableStream({
+              start(controller) {
+                controller.error(new Error("Synthetic response body failure"));
+              },
+            });
+            return new Response(body, { status: 500 });
+          }
+          return Response.json([{ number: page }], {
+            headers:
+              page === 1
+                ? {
+                    link: '<https://api.github.com/repos/example/release-fixture/pulls?per_page=1&page=2>; rel="next"',
+                  }
+                : {},
+          });
+        },
+      );
+      expect(await github.list("pulls?per_page=1")).toEqual([
+        { number: 1 },
+        { number: 2 },
+      ]);
+      expect(pages).toEqual([1, 2, 2]);
+    },
+  );
+
+  test("recovers an interrupted successful request body", async () => {
+    let requests = 0;
     const github = createGitHubClient(
       "example/release-fixture",
       "synthetic-release-token",
-      async (url, options) => {
-        expect(options.method).toBe("GET");
-        const page = Number(new URL(url).searchParams.get("page"));
-        pages.push(page);
-        if (pages.length === 2) {
-          const body = new ReadableStream({
-            start(controller) {
-              controller.error(new Error("Synthetic response body failure"));
-            },
-          });
-          return new Response(body, { status: 500 });
-        }
-        return Response.json([{ number: page }], {
-          headers:
-            page === 1
-              ? {
-                  link: '<https://api.github.com/repos/example/release-fixture/pulls?per_page=1&page=2>; rel="next"',
-                }
-              : {},
-        });
+      async () => {
+        requests++;
+        return requests === 1
+          ? interruptedJsonResponse(new TypeError("terminated"))
+          : Response.json({ sha: "synthetic-main-sha" });
       },
     );
-    expect(await github.list("pulls?per_page=1")).toEqual([
-      { number: 1 },
-      { number: 2 },
-    ]);
-    expect(pages).toEqual([1, 2, 2]);
+    expect(await github.request("GET", "git/ref/heads/main")).toEqual({
+      sha: "synthetic-main-sha",
+    });
+    expect(requests).toBe(2);
   });
+
+  test.each([false, true])(
+    "preserves a persistent transport error after bounded read retries (initial HTTP error: %j)",
+    async (initialHttpError) => {
+      let requests = 0;
+      const error = new TypeError("fetch failed", {
+        cause: Object.assign(new Error("other side closed"), {
+          code: "UND_ERR_SOCKET",
+        }),
+      });
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          if (initialHttpError && requests === 1) {
+            return Response.json({ message: "Unavailable" }, { status: 503 });
+          }
+          throw error;
+        },
+      );
+      await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
+        error,
+      );
+      expect(requests).toBe(3);
+    },
+  );
+
+  test.each([false, true])(
+    "preserves an interrupted body error after bounded read retries (mixed failures: %j)",
+    async (mixedFailures) => {
+      let requests = 0;
+      const error = new TypeError("terminated", {
+        cause: Object.assign(new Error("other side closed"), {
+          code: "UND_ERR_SOCKET",
+        }),
+      });
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          if (mixedFailures && requests === 1) {
+            return Response.json({ message: "Unavailable" }, { status: 503 });
+          }
+          if (mixedFailures && requests === 2) throw error;
+          return interruptedJsonResponse(error);
+        },
+      );
+      await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
+        error,
+      );
+      expect(requests).toBe(3);
+    },
+  );
+
+  test.each([
+    ["POST", "fetch"],
+    ["PATCH", "fetch"],
+    ["DELETE", "fetch"],
+    ["POST", "body"],
+    ["PATCH", "body"],
+    ["DELETE", "body"],
+  ])(
+    "does not replay a %s request after a %s failure",
+    async (method, failure) => {
+      let requests = 0;
+      const error = new TypeError("fetch failed");
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          if (failure === "body") return interruptedJsonResponse(error);
+          throw error;
+        },
+      );
+      await expect(github.request(method, "pulls")).rejects.toBe(error);
+      expect(requests).toBe(1);
+    },
+  );
+
+  test.each(["request", "list"])(
+    "does not retry malformed JSON in a successful %s response",
+    async (operation) => {
+      let requests = 0;
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async () => {
+          requests++;
+          return new Response("{", { status: 200 });
+        },
+      );
+      await expect(
+        operation === "request"
+          ? github.request("GET", "pulls")
+          : github.list("pulls"),
+      ).rejects.toBeInstanceOf(SyntaxError);
+      expect(requests).toBe(1);
+    },
+  );
 
   test("reports a persistent server error after bounded read retries", async () => {
     let requests = 0;

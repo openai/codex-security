@@ -913,7 +913,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     first = []
 
     def fail_publication(prepared, *, projection_warnings=None):
-        first.append(copy.deepcopy((prepared[3], prepared[4])))
+        first.append(copy.deepcopy((prepared.findings, prepared.coverage)))
         raise OSError("injected stopped publication failure")
 
     with monkeypatch.context() as patch:
