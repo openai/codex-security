@@ -709,6 +709,7 @@ export class CodexSecurity {
       );
       throwIfAborted(signal, outputDir);
       // Like CLI validation, load the skill directly without scan tools.
+      session.sessionConfig = resolveCodexProfile(session.sessionConfig);
       session.sessionConfig["features"] = {
         ...(session.sessionConfig["features"] as JsonObject),
         plugins: false,

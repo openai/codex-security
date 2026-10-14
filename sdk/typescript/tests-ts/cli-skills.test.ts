@@ -130,6 +130,7 @@ describe("CLI skill commands", () => {
 
   test.each([
     ["--context-file", "missing.md"],
+    ["--knowledge-base", "missing-directory"],
     ["--output-schema", "missing.json"],
     ["--output-schema", "invalid.json"],
   ])(
@@ -150,6 +151,84 @@ describe("CLI skill commands", () => {
       ).toBe(2);
       expect(onCodex).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
+    },
+  );
+
+  test.each([0, 2])(
+    "combines inline, file, and directory context and cleans up after exit %s",
+    async (status) => {
+      const directory = await temporaryDirectory("validation-context-");
+      await mkdir(join(directory, "context", "nested"), { recursive: true });
+      await writeFile(
+        join(directory, "context", "architecture.md"),
+        "Tenant isolation design.",
+      );
+      await writeFile(
+        join(directory, "context", "nested", "deployment.txt"),
+        "Internal service.",
+      );
+      await writeFile(
+        join(directory, "feedback.json"),
+        '{"reason":"Check the tenant guard."}',
+      );
+      await writeFile(
+        join(directory, "policy.md"),
+        "Cross-tenant access is prohibited.",
+      );
+      let preparedPath = "";
+      const { runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          [
+            "validate",
+            "Candidate A",
+            "--context",
+            "Focus on tenant boundaries.",
+            "--context-file",
+            "policy.md",
+            "--knowledge-base",
+            "context",
+            "--knowledge-base=feedback.json",
+            "Candidate B",
+          ],
+          dependencies({
+            currentDirectory: directory,
+            onCodex: async (args, output, _environment, input) => {
+              expect(args).not.toContain("--output-schema");
+              expect(output?.responseSchema).toBeUndefined();
+              expect(input).toContain(
+                JSON.stringify(
+                  "Focus on tenant boundaries.\n\nCross-tenant access is prohibited.",
+                ),
+              );
+              preparedPath = JSON.parse(
+                input!
+                  .split("\n")
+                  .find((line) => line.includes("codex-security-knowledge-"))!,
+              );
+              const documents = await Promise.all(
+                (await filesystem.readdir(preparedPath)).map((file) =>
+                  filesystem.readFile(join(preparedPath, file), "utf8"),
+                ),
+              );
+              expect(new Set(documents)).toEqual(
+                new Set([
+                  "Tenant isolation design.",
+                  "Internal service.",
+                  '{"reason":"Check the tenant guard."}',
+                ]),
+              );
+              expect(JSON.parse(input!.split("\n").at(-1)!)).toEqual([
+                "Candidate A",
+                "Candidate B",
+              ]);
+              return status;
+            },
+          }),
+        ),
+      ).toBe(status);
+      expect(preparedPath).not.toBe("");
+      expect(await filesystem.stat(preparedPath).catch(() => null)).toBeNull();
     },
   );
 

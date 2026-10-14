@@ -570,6 +570,69 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
+  test("applies validation settings after resolving a named profile at the SDK process boundary", async () => {
+    const { root, repository, codexHome } = await runtimeDirectories();
+    const preload = join(root, "validation-process.mjs");
+    await writeFile(
+      preload,
+      [
+        `process.stdout.write(JSON.stringify({type:"item.completed",item:{id:"result",type:"agent_message",text:JSON.stringify({disposition:"deferred",report:JSON.stringify(process.argv.slice(2))})}})+"\\n");`,
+        `process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,output_tokens:0}})+"\\n");`,
+        "process.exit(0);",
+      ].join("\n"),
+    );
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-validation-key",
+    };
+    await using client = new TestClient(
+      {
+        codexOverrides: {
+          profile: "review",
+          profiles: {
+            review: {
+              web_search: "cached",
+              approval_policy: "on-request",
+            },
+          },
+        },
+      },
+      {
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
+        resolvePluginPython: async () => "/managed/python",
+        createCodex: (options) =>
+          new Codex({
+            ...options,
+            codexPathOverride: nodeCommand().command,
+            env: {
+              ...options.env,
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            },
+          }),
+      },
+    );
+    const result = await client.validate({
+      repositoryPath: repository,
+      finding: "Candidate",
+    });
+    const args = JSON.parse(result.report) as string[];
+    const overrides = args.flatMap((arg, index) =>
+      arg === "--config" ? [args[index + 1]!] : [],
+    );
+    const config = Object.assign(
+      {},
+      ...overrides.map((override) => parseToml(override)),
+    );
+    expect(config).toMatchObject({
+      web_search: "disabled",
+      approval_policy: "never",
+      default_permissions: "codex_security_validation",
+    });
+    expect(config).not.toHaveProperty("profile");
+    expect(config).not.toHaveProperty("profiles");
+  });
+
   test("returns an inconclusive result and keeps default evidence after close", async () => {
     const {
       client: security,

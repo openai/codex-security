@@ -64,6 +64,9 @@ const PUBLISH_GROUPS: readonly Group[] = [
 ];
 
 const VALUE_LABELS: Record<string, string> = {
+  context: "text",
+  "context-file": "file",
+  "output-schema": "file",
   config: "file",
   path: "path",
   "knowledge-base": "path",
