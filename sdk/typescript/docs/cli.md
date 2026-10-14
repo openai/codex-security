@@ -1147,9 +1147,8 @@ name/email, with a reason and checked citations.
 Git identities do not establish current employment or tracker accounts; match
 accounts before assigning. Use a checkout matching the findings.
 
-Owner reports now use `schemaVersion: 2`: consumers must handle Git name/email,
-GitHub user/team handles, email-only owners, and `null`. This is a breaking change
-under the pre-1.0 release policy. Example JSON excerpt:
+Owner reports use `schemaVersion: 2`. An owner can be a Git name/email identity,
+a GitHub user or team handle, an email-only identity, or `null`. Example JSON excerpt:
 
 ```json
 {
