@@ -985,7 +985,9 @@ test("a malformed selected file fails before constructing a client", async () =>
   expect(JSON.parse(stdout.text())).toEqual({
     status: "failed",
     code: "SCAN_FAILED",
-    message: `Cannot parse project configuration at ${input.config}.`,
+    message: expect.stringContaining(
+      `Cannot parse project configuration at ${input.config}: `,
+    ),
   });
 });
 

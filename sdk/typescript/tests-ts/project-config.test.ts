@@ -266,6 +266,34 @@ describe("project configuration input contract", () => {
       readProjectConfig("missing.yaml", await temporaryDirectory()),
     ).rejects.toThrow("Cannot read project configuration");
   });
+
+  test.each([
+    ["scan.yaml", "scan: [\n"],
+    ["scan.json", '{"scan":'],
+  ])(
+    "includes the parser message when %s cannot be parsed",
+    async (name, contents) => {
+      const path = join(await temporaryDirectory(), name);
+      await writeFile(path, contents);
+      const error = await readProjectConfig(path).catch(
+        (cause: Error) => cause,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).cause).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        ((error as Error).cause as Error).message,
+      );
+    },
+  );
+
+  test("includes the system error when the selected file cannot be read", async () => {
+    const error = await readProjectConfig(
+      "missing.yaml",
+      await temporaryDirectory(),
+    ).catch((cause: Error) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("ENOENT");
+  });
 });
 
 describe("project configuration resolution", () => {
