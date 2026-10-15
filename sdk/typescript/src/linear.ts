@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import {
   AuthenticationLinearError,
   ForbiddenLinearError,
@@ -151,12 +152,7 @@ export async function importLinearIssues(options: {
 
 function linearIssueFilter(input: string | undefined): JsonObject {
   if (input === undefined) return {};
-  let filter: unknown;
-  try {
-    filter = JSON.parse(input);
-  } catch {
-    filter = null;
-  }
+  const filter = parseJson(() => input);
   if (typeof filter === "object" && filter !== null && !Array.isArray(filter)) {
     return filter as JsonObject;
   }

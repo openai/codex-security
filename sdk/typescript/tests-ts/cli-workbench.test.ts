@@ -1,7 +1,8 @@
 import { codexWithRun, jsonCodex } from "./support/codex.js";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { describe, expect, test, mock } from "bun:test";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { describe, expect, test, mock, spyOn } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
@@ -25,6 +26,318 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test.skipIf(process.platform !== "linux")(
+    "findings list distinguishes an undecodable directory name from its replacement spelling",
+    async () => {
+      const root = await temporaryDirectory("finding-repository-byte-name-");
+      try {
+        const bytePath = Buffer.concat([
+          Buffer.from(`${root}/repository-`),
+          Buffer.from([0xff]),
+        ]);
+        const replacementPath = join(root, "repository-\uFFFD");
+        const alias = join(root, "repository-link");
+        const savedAlias = join(root, "saved-link");
+        await Promise.all([mkdir(bytePath), mkdir(replacementPath)]);
+        await Promise.all([
+          symlink(bytePath, alias),
+          symlink(bytePath, savedAlias),
+        ]);
+        expect(await realpath(alias)).toBe(replacementPath);
+        const [actual, replacement] = await Promise.all([
+          fs.stat(alias, { bigint: true }),
+          fs.stat(replacementPath, { bigint: true }),
+        ]);
+        expect(actual.ino).not.toBe(replacement.ino);
+        for (const includeMatchingAlias of [false, true]) {
+          const calls: Array<readonly string[]> = [];
+          const stdout = captureCli(main, "stdout");
+          expect(
+            await stdout.run(
+              ["findings", "list", alias, "--json"],
+              dependencies({
+                onWorkbench: (args): JsonObject => {
+                  calls.push(args);
+                  return args[0] === "list-repositories"
+                    ? {
+                        repositories: [
+                          {
+                            targetId: "unrelated",
+                            targetPath: replacementPath,
+                          },
+                          ...(includeMatchingAlias
+                            ? [{ targetId: "selected", targetPath: savedAlias }]
+                            : []),
+                        ],
+                      }
+                    : {
+                        findings: [{ title: `${args[2]} finding` }],
+                        nextOffset: null,
+                      };
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(calls).toEqual([
+            ["list-repositories"],
+            ...(includeMatchingAlias
+              ? [
+                  [
+                    "list-global-findings",
+                    "--target-id",
+                    "selected",
+                    "--status",
+                    "open",
+                  ],
+                ]
+              : []),
+          ]);
+          expect(JSON.parse(stdout.text())).toEqual({
+            repository: alias,
+            findings: includeMatchingAlias
+              ? [{ title: "selected finding" }]
+              : [],
+          });
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+  test("findings list matches directory identity when realpath preserves alias spelling", async () => {
+    const root = await temporaryDirectory("finding-repository-identity-");
+    const originalRealpath = fs.realpath;
+    let spelling: ReturnType<typeof spyOn> | undefined;
+    try {
+      const repository = join(root, "repository");
+      const upper = join(root, "first-alias");
+      const lower = join(root, "second-alias");
+      const other = join(root, "other");
+      await Promise.all([mkdir(repository), mkdir(other)]);
+      for (const alias of [upper, lower]) {
+        await symlink(
+          repository,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+      const [upperMetadata, lowerMetadata, otherMetadata] = await Promise.all(
+        [upper, lower, other].map((path) => fs.stat(path, { bigint: true })),
+      );
+      expect(upperMetadata!.ino).toBe(lowerMetadata!.ino);
+      expect(upperMetadata!.dev).toBe(lowerMetadata!.dev);
+      expect(upperMetadata!.ino).not.toBe(otherMetadata!.ino);
+      // Case-insensitive POSIX realpath may retain each alias's spelling.
+      // Keep actual directory stat calls while controlling only that spelling.
+      const preserveSpelling = (async (
+        ...args: Parameters<typeof realpath>
+      ) => {
+        const result = await originalRealpath(...args);
+        const path = args[0];
+        return path === upper || path === lower
+          ? typeof result === "string"
+            ? path
+            : Buffer.from(path)
+          : result;
+      }) as typeof realpath;
+      spelling = spyOn(fs, "realpath").mockImplementation(preserveSpelling);
+      for (const [requested, stored] of [
+        [upper, lower],
+        [lower, upper],
+      ]) {
+        const calls: Array<readonly string[]> = [];
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            ["findings", "list", requested!, "--json"],
+            dependencies({
+              onWorkbench: (args): JsonObject => {
+                calls.push(args);
+                return args[0] === "list-repositories"
+                  ? {
+                      repositories: [
+                        { targetId: "other", targetPath: other },
+                        {
+                          targetId: "missing",
+                          targetPath: join(root, "missing"),
+                        },
+                        { targetId: "selected", targetPath: stored! },
+                      ],
+                    }
+                  : {
+                      findings: [{ title: "Saved finding" }],
+                      nextOffset: null,
+                    };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(calls[1]).toEqual([
+          "list-global-findings",
+          "--target-id",
+          "selected",
+          "--status",
+          "open",
+        ]);
+        expect(JSON.parse(stdout.text()).findings).toEqual([
+          { title: "Saved finding" },
+        ]);
+      }
+    } finally {
+      spelling?.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("findings list prefers an exact saved repository before directory aliases", async () => {
+    const root = await temporaryDirectory("finding-exact-repository-");
+    try {
+      const repository = join(root, "repository");
+      const alias = join(root, "previous-checkout");
+      await mkdir(repository);
+      await symlink(
+        repository,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const unsavedAlias = join(root, "selected-checkout");
+      await symlink(
+        repository,
+        unsavedAlias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      for (const [requested, first, exact] of [
+        [repository, alias, repository],
+        [alias, repository, alias],
+        [unsavedAlias, alias, repository],
+      ]) {
+        for (const args of [[], [requested!]]) {
+          const calls: Array<readonly string[]> = [];
+          const stdout = captureCli(main, "stdout");
+          expect(
+            await stdout.run(
+              ["findings", "list", ...args, "--json"],
+              dependencies({
+                currentDirectory: requested!,
+                onWorkbench: (args): JsonObject => {
+                  calls.push(args);
+                  return args[0] === "list-repositories"
+                    ? {
+                        repositories: [
+                          { targetId: "alias-target", targetPath: first! },
+                          { targetId: "exact-target", targetPath: exact! },
+                        ],
+                      }
+                    : {
+                        findings: [
+                          {
+                            title:
+                              args[2] === "exact-target"
+                                ? "Exact saved finding"
+                                : "Other target finding",
+                          },
+                        ],
+                        nextOffset: null,
+                      };
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(calls[1]).toEqual([
+            "list-global-findings",
+            "--target-id",
+            "exact-target",
+            "--status",
+            "open",
+          ]);
+          expect(JSON.parse(stdout.text())).toEqual({
+            repository: requested!,
+            findings: [{ title: "Exact saved finding" }],
+          });
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["json", "text"])(
+    "findings list preserves the requested alias in %s output",
+    async (format) => {
+      const root = await temporaryDirectory("finding-repository-alias-");
+      try {
+        const repository = join(root, "repository");
+        const alias = join(root, "alias");
+        await mkdir(repository);
+        await symlink(
+          repository,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        const canonical = await realpath(repository);
+        for (const [requested, stored] of [
+          [alias, canonical],
+          [canonical, alias],
+          [alias, alias],
+        ]) {
+          for (const args of [[], [requested!]]) {
+            const stdout = captureCli(main, "stdout", format === "text");
+            expect(
+              await stdout.run(
+                [
+                  "findings",
+                  "list",
+                  ...args,
+                  ...(format === "json" ? ["--json"] : []),
+                ],
+                dependencies({
+                  currentDirectory: requested!,
+                  onWorkbench: (args): JsonObject =>
+                    args[0] === "list-repositories"
+                      ? {
+                          repositories: [
+                            {
+                              targetId: "other",
+                              targetPath: join(root, "missing"),
+                            },
+                            { targetId: "selected", targetPath: stored! },
+                          ],
+                        }
+                      : {
+                          findings: [
+                            {
+                              title: "Saved finding",
+                              severity: "high",
+                              path: "source.ts:1",
+                            },
+                          ],
+                          nextOffset: null,
+                        },
+                }),
+              ),
+            ).toBe(0);
+            if (format === "json") {
+              expect(JSON.parse(stdout.text())).toEqual({
+                repository: requested!,
+                findings: [
+                  {
+                    title: "Saved finding",
+                    severity: "high",
+                    path: "source.ts:1",
+                  },
+                ],
+              });
+            } else {
+              expect(stdout.text()).toContain(basename(requested!));
+              expect(stdout.text()).toContain("Saved finding");
+            }
+          }
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = captureCli(main, "stdout");
@@ -201,12 +514,11 @@ describe("CLI workbench", () => {
           "--include-matching-inputs",
         ],
         {
-          comparable: true,
           matchingCached: true,
           matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
-        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { summary: { persisting: 1, resolved: 1 } },
       ],
       [
         [
@@ -229,12 +541,11 @@ describe("CLI workbench", () => {
           "--include-matching-inputs",
         ],
         {
-          comparable: true,
           matchingCached: true,
           matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
-        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { summary: { persisting: 1, resolved: 1 } },
       ],
     ];
     for (const [argv, expected, response, output] of cases) {
@@ -329,7 +640,10 @@ describe("CLI workbench", () => {
       const calls: Array<readonly string[]> = [];
       const stdout = captureCli(main, "stdout");
       const deps = dependencies({
-        environment: { CODEX_SECURITY_STATE_DIR: state },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: state,
+          CODEX_HOME: join(state, "codex-home"),
+        },
         onWorkbench: (args): JsonObject => {
           calls.push(args);
           if (args[0] === "list-scans") {
@@ -1297,61 +1611,90 @@ describe("CLI workbench", () => {
     expect(onTurn.mock.lastCall?.[1]?.parentScanId).toBe(scanId);
   });
 
+  test.each([null, "", "unknown", 1])(
+    "rejects an invalid saved severity policy: %j",
+    async (failOnSeverity) => {
+      const stderr = captureCli(main, "stderr");
+      const onRun = mock();
+      const saved = savedRecipe();
+      expect(
+        await stderr.run(
+          ["scans", "rerun", saved.scanId],
+          dependencies({
+            onRun,
+            onWorkbench: () => ({
+              ...saved,
+              recipe: { ...saved.recipe, failOnSeverity },
+            }),
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("invalid severity policy");
+      expect(onRun).not.toHaveBeenCalled();
+    },
+  );
+
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     const onTurn = mock<(repository: string, options: ScanOptions) => void>();
-    const knowledgeBasePath = resolve("/original/security.md");
-    const savedConfig = {
-      approval_policy: "on-request",
-      model: "gpt-original",
-      model_reasoning_effort: "high",
-      features: { goals: true },
-      agents: { max_threads: 6 },
-    };
-    expect(
-      await runCapturedCli(
-        main,
-        ["scans", "rerun", "scan-original"],
-        dependencies({
-          onConfig,
-          onTurn,
-          onWorkbench: () => ({
-            scanId: "scan-original",
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "paths", paths: ["src", "packages/core"] },
-              mode: "deep",
-              pluginVersion: "1.2.3",
-              failOnSeverity: "high",
-              knowledgeBasePaths: [knowledgeBasePath],
-              deepScan: {
-                workers: 2,
-                subagents: 0,
-                stopAfterNoNew: 3,
-                maxDiscoveryRuns: 10,
-                maxTimeHours: 1.5,
+    const knowledgeRoot = await temporaryDirectory("rerun-knowledge-");
+    try {
+      const knowledgeBasePath = join(knowledgeRoot, "security.md");
+      await writeFile(knowledgeBasePath, "Synthetic architecture context.\n");
+      const savedConfig = {
+        approval_policy: "on-request",
+        model: "gpt-original",
+        model_reasoning_effort: "high",
+        features: { goals: true },
+        agents: { max_threads: 6 },
+      };
+      expect(
+        await runCapturedCli(
+          main,
+          ["scans", "rerun", "scan-original"],
+          dependencies({
+            onConfig,
+            onTurn,
+            onWorkbench: () => ({
+              scanId: "scan-original",
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "paths", paths: ["src", "packages/core"] },
+                mode: "deep",
+                pluginVersion: "1.2.3",
+                failOnSeverity: "high",
+                knowledgeBasePaths: [knowledgeBasePath],
+                deepScan: {
+                  workers: 2,
+                  subagents: 0,
+                  stopAfterNoNew: 3,
+                  maxDiscoveryRuns: 10,
+                  maxTimeHours: 1.5,
+                },
+                config: savedConfig,
               },
-              config: savedConfig,
-            },
+            }),
           }),
-        }),
-      ),
-    ).toBe(0);
-    expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
-    expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
-    expect(onTurn.mock.lastCall?.[1]).toMatchObject({
-      target: ["src", "packages/core"],
-      mode: "deep",
-      parentScanId: "scan-original",
-      expectedPluginVersion: "1.2.3",
-      failureSeverity: "high",
-      knowledgeBasePaths: [knowledgeBasePath],
-      workers: 2,
-      subagents: 0,
-      stopAfterNoNew: 3,
-      maxDiscoveryRuns: 10,
-      maxTimeHours: 1.5,
-    });
+        ),
+      ).toBe(0);
+      expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
+      expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
+      expect(onTurn.mock.lastCall?.[1]).toMatchObject({
+        target: ["src", "packages/core"],
+        mode: "deep",
+        parentScanId: "scan-original",
+        expectedPluginVersion: "1.2.3",
+        failureSeverity: "high",
+        knowledgeBasePaths: [knowledgeBasePath],
+        workers: 2,
+        subagents: 0,
+        stopAfterNoNew: 3,
+        maxDiscoveryRuns: 10,
+        maxTimeHours: 1.5,
+      });
+    } finally {
+      await rm(knowledgeRoot, { recursive: true, force: true });
+    }
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =
       [

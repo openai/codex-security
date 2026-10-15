@@ -36,6 +36,7 @@ test("native startup provider metadata preserves identity and auth without priva
       wire_api: "responses",
     },
     "amazon-bedrock": { aws: { region: "us-east-1" } },
+    "omitted-provider": null,
   };
   const before = structuredClone(providers);
   assert.deepEqual(preflightProviderDefinitions(providers), {
@@ -76,6 +77,13 @@ test("native overrides preserve literal paths, prototype keys, and TOML control 
     permissions: { synthetic_worker: profile },
     model_instructions_file: "/synthetic/instructions\u007f.md",
   });
+});
+
+test("native overrides reject null array elements", () => {
+  assert.throws(
+    () => profileConfigOverrides({ values: [null] }),
+    /must contain finite TOML values/,
+  );
 });
 
 async function fixture(mode = "success") {
@@ -178,9 +186,10 @@ test("native profile turns preserve settings, JSON events, schema cleanup, and r
       ...f.options,
       baseUrl: "https://provider.example.test/v1",
       config: {
-        features: { plugins: true },
+        features: { plugins: true, optional: null },
+        service_tier: null,
         empty: {},
-        values: [1, { "dotted.key": "value" }],
+        values: [1, { "dotted.key": "value", optional: null }],
       },
       configOverrides: ["features.plugins=false"],
     });

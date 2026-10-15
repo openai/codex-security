@@ -1,6 +1,6 @@
 export const INPUT_NAMES = [
   'repository', 'scope', 'paths', 'diff-base', 'mode',
-  'model', 'effort', 'max-cost', 'max-time-hours', 'fail-on-severity', 'verbose', 'dry-run',
+  'model', 'cyber-access-program', 'effort', 'max-cost', 'max-time-hours', 'fail-on-severity', 'verbose', 'dry-run',
   'summary', 'annotations',
   'upload-artifacts', 'artifact-name', 'retention-days',
 ] as const;
@@ -42,8 +42,11 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
   const maxTimeHours = num('max-time-hours', false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== undefined && mode !== 'deep') throw new Error('max-time-hours requires mode: deep.');
   const dryRun = bool('dry-run', false);
+  const cyberAccessProgram = str('cyber-access-program')
+    ? choice('cyber-access-program', ['standard', 'daybreak_blue', 'daybreak_red'], 'standard')
+    : undefined;
   return {
-    repository: str('repository', workspace), scope, paths, diffBase, mode,
+    repository: str('repository', workspace), scope, paths, diffBase, mode, cyberAccessProgram,
     model: str('model', 'gpt-5.6-sol'), effort: choice('effort', ['minimal','low','medium','high','xhigh','max'], 'xhigh'),
     maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity: choice('fail-on-severity', ['none','low','medium','high','critical'], 'none'),
     verbose: bool('verbose', true), dryRun,
@@ -66,6 +69,7 @@ export function scanArguments(inputs: Inputs, target: {repository: string; diffB
   // leading '-' and '~' as literal repository filenames.
   for (const path of inputs.paths) args.push(`--path=./${path}`);
   const options: Array<[string, string | number | undefined]> = [
+    ['--cyber-access-program', inputs.cyberAccessProgram],
     ['--diff', target.diffBase], ['--head', target.diffHead], ['--max-cost', inputs.maxCost],
     ['--max-time-hours', inputs.maxTimeHours],
   ];

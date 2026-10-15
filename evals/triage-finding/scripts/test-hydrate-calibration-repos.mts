@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
+import { plannedJobs } from "./hydrate-calibration-repos.mts";
 
 const evalDir = path.join(import.meta.dirname, "..");
 const scriptPath = path.join(
@@ -89,20 +91,20 @@ try {
   const originalOrigin = git(parent, "remote", "get-url", "origin");
   const expectedHead = git(source, "rev-parse", "HEAD");
   const dataset = path.join(temporary, "dataset.json");
-  fs.writeFileSync(
-    dataset,
-    JSON.stringify({
-      cases: [
-        {
-          case_id: "case",
-          repo: { url: source },
-          variants: [{ variant_id: "variant", checkout_ref: expectedHead }],
-        },
-      ],
-    }),
-  );
-  const repoRoot = path.join(parent, "checkouts");
-  const target = path.join(repoRoot, "case", "variant");
+  const fixture = {
+    cases: [
+      {
+        case_id: "case",
+        repo: { url: source },
+        variants: [{ variant_id: "variant", checkout_ref: expectedHead }],
+      },
+    ],
+  };
+  fs.writeFileSync(dataset, JSON.stringify(fixture));
+  const repoRoot = path.join(parent, "checkout fixtures");
+  const target = plannedJobs(fixture as Parameters<typeof plannedJobs>[0], {
+    repoRoot,
+  })[0].targetDir;
   fs.mkdirSync(path.join(target, ".git"), { recursive: true });
   const rejected = childProcess.spawnSync(
     process.execPath,
@@ -128,6 +130,11 @@ try {
     /hydrated: case\/variant/,
   );
   assert.equal(git(target, "rev-parse", "HEAD"), expectedHead);
+  assert.ok(fs.lstatSync(path.join(target, ".git")).isFile());
+  assert.equal(
+    fs.realpathSync(git(target, "rev-parse", "--absolute-git-dir")),
+    fs.realpathSync(`${target}.git`),
+  );
   assert.equal(git(parent, "remote", "get-url", "origin"), originalOrigin);
   assert.equal(git(parent, "rev-parse", "HEAD"), originalHead);
   assert.match(
@@ -145,6 +152,50 @@ try {
     runHydrator(["--dataset", dataset, "--repo-root", alias]),
     /already current/,
   );
+
+  const legacyRoot = path.join(parent, "legacy checkouts");
+  const legacyTarget = path.join(legacyRoot, path.basename(target));
+  fs.mkdirSync(legacyRoot);
+  git(parent, "clone", source, legacyTarget);
+  assert.ok(fs.lstatSync(path.join(legacyTarget, ".git")).isDirectory());
+  const legacyAlias = path.join(temporary, "legacy checkout alias");
+  fs.symlinkSync(
+    legacyRoot,
+    legacyAlias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  assert.match(
+    runHydrator(["--dataset", dataset, "--repo-root", legacyAlias]),
+    /already current/,
+  );
+  assert.ok(fs.lstatSync(path.join(legacyTarget, ".git")).isFile());
+  assert.equal(git(legacyTarget, "rev-parse", "HEAD"), expectedHead);
+  assert.equal(git(legacyTarget, "remote", "get-url", "origin"), source);
+  assert.equal(
+    fs.readFileSync(path.join(legacyTarget, "fixture.txt"), "utf8"),
+    "source",
+  );
+
+  const worktreeRoot = path.join(parent, "linked checkouts");
+  const worktreeTarget = path.join(worktreeRoot, path.basename(target));
+  git(
+    legacyTarget,
+    "worktree",
+    "add",
+    "--detach",
+    worktreeTarget,
+    expectedHead,
+  );
+  const gitfile = fs.readFileSync(path.join(worktreeTarget, ".git"), "utf8");
+  assert.match(
+    runHydrator(["--dataset", dataset, "--repo-root", worktreeRoot]),
+    /already current/,
+  );
+  assert.equal(
+    fs.readFileSync(path.join(worktreeTarget, ".git"), "utf8"),
+    gitfile,
+  );
+  assert.equal(git(worktreeTarget, "rev-parse", "HEAD"), expectedHead);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

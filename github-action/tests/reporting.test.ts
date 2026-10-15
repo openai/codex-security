@@ -19,29 +19,24 @@ test('finding titles and messages cannot become Markdown links, images or raw HT
   assert.ok(!summary.includes('### HIGH:')); assert.ok(!summary.includes('<img'));
 });
 
-test('partial coverage summary preserves provisional findings and an unevaluated severity policy', () => {
-  const result = {scanStatus:'incomplete',policyStatus:'not-evaluated',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
-    errors:['Deferred work: Dependency implementation unavailable.'],findings:[{severity:'high',title:'Potential extraction issue',summary:'Validation needs dependency evidence.',path:'src/extract.ts',startLine:12}]} as ScanResults;
+test('completed findings are subject to severity policy without a coverage qualification', () => {
+  const result = {scanStatus:'completed',policyStatus:'failed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
+    errors:[],findings:[{severity:'high',title:'Extraction issue',summary:'Archive traversal reaches files outside the destination.',path:'src/extract.ts',startLine:12}]} as unknown as ScanResults;
   const inputs = parseInputs((name) => name === 'fail-on-severity' ? 'high' : '', '/checkout');
   const summary = resultSummary(result, inputs, {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
-  assert.match(resultTitle(result, inputs), /coverage is partial.*findings are provisional/i);
-  assert.match(summary, /\*\*Scan:\*\* incomplete · \*\*Findings policy:\*\* not-evaluated/);
+  assert.match(resultTitle(result, inputs), /Findings meet the configured failure threshold/);
+  assert.match(summary, /\*\*Scan:\*\* completed · \*\*Findings policy:\*\* failed/);
   assert.match(summary, /\*\*Failure threshold:\*\* high and above/);
-  assert.match(summary, /Partial coverage alone does not fail the job/);
-  assert.match(summary, /findings policy was not evaluated/);
-  assert.match(summary, /This is not a completed scan/);
-  assert.match(summary, /Deferred work: Dependency implementation unavailable/);
-  assert.match(summary, /HIGH: Potential extraction issue/);
-  assert.doesNotMatch(summary, /No findings meet the failure threshold|Findings policy:\*\* passed/);
+  assert.match(summary, /HIGH: Extraction issue/);
+  assert.doesNotMatch(summary, /provisional|partial|unknown|not evaluated/i);
 });
 
-test('partial coverage cannot hide a required reporting failure in the title', () => {
+test('required reporting failures remain visible after a completed scan', () => {
   const inputs = parseInputs(() => '', '/checkout');
-  const result = {scanStatus:'incomplete',policyStatus:'not-evaluated',reportStatus:'failed'} as ScanResults;
-  assert.match(resultTitle(result, inputs), /coverage is partial, and required reporting failed/i);
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'failed'} as ScanResults;
+  assert.match(resultTitle(result, inputs), /Scan completed, but required reporting failed/i);
   assert.match(resultTitle({...result, scanStatus:'failed'}, inputs), /Scan could not complete/);
 });
-
 
 test('multiline titles remain literal across blank lines without losing diagnostic text', () => {
   const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},errors:[],

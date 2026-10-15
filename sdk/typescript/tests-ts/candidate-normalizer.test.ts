@@ -18,12 +18,7 @@ const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const roots = createTemporaryDirectoriesSync(true);
 type Row = Record<string, unknown>;
-interface Fixture {
-  root: string;
-  repo: string;
-  scope: string;
-  output: string;
-}
+type Fixture = ReturnType<typeof fixture>;
 const location = (
   path = "app/routes.py",
   start_line = 2,
@@ -40,7 +35,7 @@ function write(path: string, data: string | Buffer): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, data);
 }
-function fixture(): Fixture {
+function fixture() {
   const root = roots.create("candidate-normalizer-");
   const repo = join(root, "İrepository");
   for (const path of [

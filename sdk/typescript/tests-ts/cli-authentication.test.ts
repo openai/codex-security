@@ -98,8 +98,6 @@ describe("CLI authentication", () => {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       const deps = dependencies();
-      deps.prepareAuthenticationHome = async () =>
-        join(stateDirectory, "codex-home");
       const runCodex = mock<typeof deps.runCodex>(resolving(17));
       deps.createSecurity = throwing("must not initialize Codex Security");
       deps.runCodex = runCodex;
@@ -135,6 +133,9 @@ describe("CLI authentication", () => {
       expect(forwarded).toEqual([...argv]);
       expect(environment?.["CODEX_HOME"]).toBe(expectedHome);
       expect(environment?.["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
+      expect(
+        await codexSecurityCredentialAllowsAmbientImport(expectedHome),
+      ).toBe(argv[0] !== "logout");
     }
   });
 
@@ -157,7 +158,6 @@ describe("CLI authentication", () => {
           const deps = dependencies({
             environment: { CODEX_SECURITY_STATE_DIR: linkedState },
           });
-          deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
           let forwardedHome: string | undefined;
           deps.runCodex = async (_args, _output, environment) => {
             forwardedHome = environment?.["CODEX_HOME"];
@@ -177,7 +177,6 @@ describe("CLI authentication", () => {
         const deps = dependencies({
           environment: { CODEX_SECURITY_STATE_DIR: linkedState },
         });
-        deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
         deps.runCodex = async () => 0;
         expect(await runCli(["login"], deps)).toBe(0);
         expect(
@@ -1180,41 +1179,82 @@ describe("CLI authentication", () => {
     expect(`${stdout.text()}${stderr.text()}`).not.toContain("synthetic");
   });
 
-  test("recognizes existing ambient Codex authentication on a fresh state directory during login status", async () => {
-    const root = await realpath(
-      await temporaryDirectory("codex-security-cli-ambient-auth-"),
-    );
-    try {
-      const ambientHome = join(root, "ambient-codex");
-      await mkdir(ambientHome, { mode: 0o700 });
-      await writeFile(
-        join(ambientHome, "auth.json"),
-        '{"auth_mode":"chatgpt"}\n',
-      );
-
-      const { runCli } = createCliTest(main);
-
-      let forwardedHome: string | undefined;
-      const deps = dependencies({
-        environment: {
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-      });
-      deps.runCodex = async (_args, _output, authEnvironment) => {
-        forwardedHome = authEnvironment?.["CODEX_HOME"];
-        return 0;
+  test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "reports unreadable ambient credentials during login status",
+    async () => {
+      const ambientHome = join(stateDirectory, "ambient-codex");
+      const authPath = join(ambientHome, "auth.json");
+      await mkdir(ambientHome);
+      await writeFile(authPath, '{"auth_mode":"chatgpt"}\n', { mode: 0o000 });
+      const deps = dependencies({ environment: { CODEX_HOME: ambientHome } });
+      deps.runCodex = async () => {
+        throw new Error("Must not query Codex after an import failure");
       };
+      const stderr = capture();
+      try {
+        expect(
+          await main(
+            ["login", "status"],
+            capture().stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain(
+          "Unable to copy ambient Codex authentication.",
+        );
+      } finally {
+        await chmod(authPath, 0o600);
+      }
+      deps.runCodex = async () => 0;
+      expect(
+        await main(["login", "status"], capture().stream, stderr.stream, deps),
+      ).toBe(0);
+    },
+  );
 
-      expect(await runCli(["login", "status"], deps)).toBe(0);
-      expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
-      expect(existsSync(join(stateDirectory, "codex-home", "auth.json"))).toBe(
-        true,
+  test.each([false, true])(
+    "recognizes existing ambient Codex authentication on a fresh state directory during login status (home-relative: %p)",
+    async (homeRelative) => {
+      const root = await realpath(
+        await temporaryDirectory("codex-security-cli-ambient-auth-"),
       );
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+      try {
+        const ambientHome = join(root, "ambient-codex");
+        await mkdir(ambientHome, { mode: 0o700 });
+        await writeFile(
+          join(ambientHome, "auth.json"),
+          '{"auth_mode":"chatgpt"}\n',
+        );
+
+        const stdout = capture();
+        const stderr = capture();
+        let forwardedHome: string | undefined;
+        const deps = dependencies({
+          environment: {
+            HOME: root,
+            USERPROFILE: root,
+            CODEX_HOME: homeRelative ? "~/ambient-codex" : ambientHome,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        });
+        deps.runCodex = async (_args, _output, authEnvironment) => {
+          forwardedHome = authEnvironment?.["CODEX_HOME"];
+          return 0;
+        };
+
+        expect(
+          await main(["login", "status"], stdout.stream, stderr.stream, deps),
+        ).toBe(0);
+        expect(forwardedHome).toBe(join(stateDirectory, "codex-home"));
+        expect(
+          existsSync(join(stateDirectory, "codex-home", "auth.json")),
+        ).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("does not import ambient Codex authentication during login status after explicit logout", async () => {
     const root = await realpath(
@@ -1252,6 +1292,30 @@ describe("CLI authentication", () => {
 });
 
 describe("skill authentication", () => {
+  test.each(["patch", "verify-fix"] as const)(
+    "%s inherits ambient command authentication through a null optional override",
+    async (command) => {
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        overrides: { model_providers: { gateway: { auth: null } } },
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          "[model_providers.gateway.auth]",
+          'command="synthetic-auth"',
+        ].join("\n"),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch).toBeDefined();
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
   test.each([
     ["validate", "auto", "gateway"],
     ["validate", "api-key", "gateway"],
@@ -1290,6 +1354,47 @@ describe("skill authentication", () => {
       }
     },
   );
+
+  for (const nullAuth of [false, true]) {
+    test.each(["validate", "patch", "verify-fix"] as const)(
+      `%s forwards a provider's OpenAI-named key (null auth: ${nullAuth})`,
+      async (command) => {
+        const stdout = capture();
+        const stderr = capture();
+        const status = await runCodexSkillCommand(
+          [
+            "-e",
+            'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({key:process.env.OPENAI_API_KEY})}}))',
+          ],
+          {
+            command,
+            auth: "api-key",
+            modelProvider: "gateway",
+            codexOverrides: {
+              model_provider: "gateway",
+              model_providers: {
+                gateway: {
+                  env_key: "OPENAI_API_KEY",
+                  ...(nullAuth ? { auth: null } : {}),
+                },
+              },
+            },
+            stdout: stdout.stream,
+            stderr: stderr.stream,
+          },
+          { command: process.execPath },
+          {
+            CODEX_HOME: join(stateDirectory, "ambient"),
+            OPENAI_API_KEY: "SYNTHETIC_PROVIDER_KEY",
+          },
+        );
+        expect(status, stderr.text()).toBe(0);
+        expect(JSON.parse(stdout.text())).toEqual({
+          key: "SYNTHETIC_PROVIDER_KEY",
+        });
+      },
+    );
+  }
 
   test("rejects a missing custom provider API key before launch", async () => {
     const result = await runProviderSkill(stateDirectory, {

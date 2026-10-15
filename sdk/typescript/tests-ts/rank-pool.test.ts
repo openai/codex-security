@@ -19,18 +19,7 @@ const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const newline = process.platform === "win32" ? "\r\n" : "\n";
 const roots = createTemporaryDirectoriesSync(true);
-interface Worker {
-  slot: number;
-  input_shards: string[];
-  output_shards: string[];
-}
-interface Plan {
-  schema_version: number;
-  strategy: string;
-  shard_count: number;
-  ranking_worker_count: number;
-  workers: Worker[];
-}
+
 const shardName = (index: number, output = false) =>
   `rank-shard-${String(index).padStart(4, "0")}.${output ? "output" : "input"}.jsonl`;
 const row = (index: number) => ({
@@ -45,6 +34,27 @@ const ranked = (index: number) => ({
   include: true,
   reason: "runtime surface",
 });
+const expectedPlan = {
+  ranking_worker_count: 2,
+  schema_version: 1,
+  shard_count: 5,
+  strategy: "round_robin",
+  workers: [
+    {
+      input_shards: [1, 3, 5].map((index) => shardName(index)),
+      output_shards: [1, 3, 5].map((index) => shardName(index, true)),
+      slot: 1,
+    },
+    {
+      input_shards: [2, 4].map((index) => shardName(index)),
+      output_shards: [2, 4].map((index) => shardName(index, true)),
+      slot: 2,
+    },
+  ],
+};
+type Plan = typeof expectedPlan;
+type Worker = Plan["workers"][number];
+
 function fixture(count = 5) {
   const root = roots.create("rank-pool-");
   const directory = join(root, "rank_shards");
@@ -117,26 +127,8 @@ describe("rank pool helpers", () => {
     expect(make(f).stdout).toBe(
       `Assigned 5 rank shards to 2 ranking workers in ${f.plan}${newline}`,
     );
-    const expected: Plan = {
-      ranking_worker_count: 2,
-      schema_version: 1,
-      shard_count: 5,
-      strategy: "round_robin",
-      workers: [
-        {
-          input_shards: [1, 3, 5].map((index) => shardName(index)),
-          output_shards: [1, 3, 5].map((index) => shardName(index, true)),
-          slot: 1,
-        },
-        {
-          input_shards: [2, 4].map((index) => shardName(index)),
-          output_shards: [2, 4].map((index) => shardName(index, true)),
-          slot: 2,
-        },
-      ],
-    };
     expect(readFileSync(f.plan, "utf8")).toBe(
-      (JSON.stringify(expected, null, 2) + "\n").replaceAll("\n", newline),
+      (JSON.stringify(expectedPlan, null, 2) + "\n").replaceAll("\n", newline),
     );
     const first = readFileSync(f.plan);
     expect(make(f).status).toBe(0);

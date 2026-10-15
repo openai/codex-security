@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { main } from "../src/cli.js";
+import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { dependencies, fakeResult } from "./cli-fixtures.js";
@@ -48,6 +49,12 @@ describe("read-only finding verification", () => {
           },
           linearClient,
           onCodex: (args, output, processEnvironment, input) => {
+            expect(args).toContain(
+              'responses_api_metadata.codex_security_command="verify-fix"',
+            );
+            expect(args).toContain(
+              `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
+            );
             expect(args[0]).toBe("app-server");
             expect(input).toBeUndefined();
             expect(args).toContain('approval_policy="on-request"');

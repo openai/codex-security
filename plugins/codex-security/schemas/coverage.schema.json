@@ -8,7 +8,6 @@
     "schemaVersion",
     "scanId",
     "mode",
-    "completeness",
     "inventoryStrategy",
     "includePaths",
     "excludePaths",
@@ -36,13 +35,6 @@
         "branch_diff",
         "working_tree",
         "deep_repository"
-      ]
-    },
-    "completeness": {
-      "enum": [
-        "complete",
-        "partial",
-        "unknown"
       ]
     },
     "inventoryStrategy": {
@@ -208,43 +200,5 @@
         }
       }
     }
-  },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "completeness": {
-            "const": "complete"
-          }
-        },
-        "required": [
-          "completeness"
-        ]
-      },
-      "then": {
-        "properties": {
-          "deferred": {
-            "contains": {},
-            "minContains": 0,
-            "maxContains": 0
-          },
-          "surfaces": {
-            "contains": {
-              "type": "object",
-              "required": [
-                "disposition"
-              ],
-              "properties": {
-                "disposition": {
-                  "const": "needs_follow_up"
-                }
-              }
-            },
-            "minContains": 0,
-            "maxContains": 0
-          }
-        }
-      }
-    }
-  ]
+  }
 }

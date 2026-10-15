@@ -1,21 +1,26 @@
 import { existsSync } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
+  copyFile,
   mkdir,
   readFile,
   readdir,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
+  createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
+import { structuredCodexConfig } from "../src/config.js";
 import {
   bundledPluginRoot,
   resolveCodexCommand,
@@ -48,7 +53,10 @@ const startupProvider = {
     args: ["synthetic-command-secret"],
   },
 };
-const startupProviders = { "synthetic.gateway": startupProvider };
+const startupProviders = {
+  omitted: null,
+  "synthetic.gateway": startupProvider,
+};
 
 test.each([
   [
@@ -214,6 +222,160 @@ test.each([
     );
   },
 );
+
+test("native profile turns omit optional null fields and retain array errors", async () => {
+  const home = await temporaryDirectory();
+  const script = join(home, "profile child.mjs");
+  await writeFile(
+    script,
+    `for await (const chunk of process.stdin) {}
+    console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
+    console.log(JSON.stringify({ type: "item.completed", item: {
+      type: "agent_message", id: "answer", text: JSON.stringify(process.argv.slice(1)),
+    } }));
+    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+    process.exit(0);`,
+  );
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const options = {
+    codexPathOverride: node!,
+    env: {
+      ...process.env,
+      CODEX_HOME: home,
+      NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+    },
+  };
+  const codex = await createProfileCodex(
+    {
+      ...options,
+      config: structuredCodexConfig({
+        model_provider: "synthetic.gateway",
+        service_tier: "fast",
+        profile: "review",
+        profiles: { review: { model_provider: null, service_tier: null } },
+        features: { plugins: false, optional: null },
+        nested: [{ enabled: true, optional: null }],
+      }) as CodexOptions["config"],
+    },
+    "synthetic-profile",
+  );
+  for (const resumed of [false, true]) {
+    const thread = resumed
+      ? codex.resumeThread("synthetic-thread")
+      : codex.startThread();
+    const result = await thread.run("synthetic prompt");
+    const args: string[] = JSON.parse(result.finalResponse);
+    const overrides = args.flatMap((arg, index) =>
+      arg === "--config" ? [args[index + 1]!] : [],
+    );
+    expect(parse(overrides.join("\n"))).toEqual({
+      model_provider: "synthetic.gateway",
+      service_tier: "fast",
+      features: { plugins: false },
+      nested: [{ enabled: true }],
+    });
+    expect(args.includes("resume")).toBe(resumed);
+  }
+  const invalid = await createProfileCodex(
+    {
+      ...options,
+      config: { invalid: [null] } as unknown as CodexOptions["config"],
+    },
+    "synthetic-profile",
+  );
+  await expect(invalid.startThread().run("synthetic prompt")).rejects.toThrow(
+    "Codex config overrides must contain finite TOML values",
+  );
+});
+
+test("API fixture cleanup retries a transient busy directory", async () => {
+  const root = await temporaryDirectory();
+  await writeFile(join(root, "child.txt"), "synthetic fixture");
+  const remove = fsPromises.rm;
+  let busy = true;
+  const removal = spyOn(fsPromises, "rm").mockImplementation(
+    async (path, options) => {
+      if (path === root && busy) {
+        busy = false;
+        throw Object.assign(new Error("Synthetic busy directory"), {
+          code: "EBUSY",
+        });
+      }
+      await remove(path, options);
+    },
+  );
+  try {
+    await cleanup();
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    removal.mockRestore();
+    await remove(root, { recursive: true, force: true });
+  }
+});
+
+test("native profile launches retain bundled tools through executable path aliases", async () => {
+  const root = await temporaryDirectory();
+  const bin = join(root, "vendor", "bin");
+  const tools = join(root, "vendor", "codex-path");
+  const executable = process.platform === "win32" ? "codex.exe" : "codex";
+  const tool = process.platform === "win32" ? "rg.exe" : "rg";
+  await mkdir(bin, { recursive: true });
+  await mkdir(tools);
+  const node = Bun.which("node")!;
+  await copyFile(node, join(bin, executable));
+  await copyFile(node, join(tools, tool));
+  const script = join(root, "profile tools.mjs");
+  await writeFile(
+    script,
+    `import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
+if (basename(process.execPath).startsWith("rg")) {
+  console.log("synthetic bundled search");
+  process.exit(0);
+}
+for await (const chunk of process.stdin) {}
+const result = spawnSync("rg", [], { encoding: "utf8" });
+if (result.error || result.status !== 0) throw result.error ?? new Error(result.stderr);
+console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
+console.log(JSON.stringify({ type: "item.completed", item: {
+  type: "agent_message", id: "answer", text: JSON.stringify({
+    path: process.env.PATH, configured: process.env.CODEX_CLI_PATH,
+    search: result.stdout.trim(), resumed: process.argv.includes("resume"),
+  }),
+} }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+process.exit(0);`,
+  );
+  const configured = `${bin}${sep}.${sep}${executable}`;
+  const environment = {
+    ...(process.env["SystemRoot"] === undefined
+      ? {}
+      : { SystemRoot: process.env["SystemRoot"] }),
+    PATH: "",
+    CODEX_HOME: root,
+    CODEX_CLI_PATH: configured,
+    NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+  };
+  const original = { ...environment };
+  const client = await createProfileCodex(
+    { env: environment },
+    "synthetic-profile",
+  );
+  for (const resumed of [false, true]) {
+    const thread = resumed
+      ? client.resumeThread("synthetic-thread")
+      : client.startThread();
+    const result = await thread.run("synthetic prompt");
+    expect(JSON.parse(result.finalResponse)).toEqual({
+      path: tools,
+      configured,
+      search: "synthetic bundled search",
+      resumed,
+    });
+  }
+  expect(environment).toEqual(original);
+});
 
 test("private profiles retain providers for native required and inherited selection", async () => {
   const home = await temporaryDirectory();

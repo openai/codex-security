@@ -1,3 +1,4 @@
+import { isRecord } from "./record.js";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
@@ -68,9 +69,7 @@ export async function resolveDeepScanConfig(
   const existing = document["deep_scan"];
   if (
     existing !== undefined &&
-    (typeof existing !== "object" ||
-      existing === null ||
-      Array.isArray(existing) ||
+    (!isRecord(existing) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(existing)))
   ) {
     throw new CodexSecurityError(
