@@ -265,6 +265,7 @@
 - update napi and napi-derive native dependencies ([#1646](https://github.com/openai/codex-security/pull/1646))
 - read saved Cloud findings in Codex ([#1422](https://github.com/openai/codex-security/pull/1422))
 - return pull request details for supplied-issue patches ([#1645](https://github.com/openai/codex-security/pull/1645))
+- make standalone validation source-only ([#1423](https://github.com/openai/codex-security/pull/1423))
 
 <!-- release-section: highlights:end -->
 
@@ -281,5 +282,6 @@ Review migration steps for these breaking changes:
 - preserve original knowledge context when resuming ([#1556](https://github.com/openai/codex-security/pull/1556))
 - simplify scan outcomes ([#1633](https://github.com/openai/codex-security/pull/1633))
 - prioritize CODEOWNERS in owner suggestions ([#1519](https://github.com/openai/codex-security/pull/1519))
+- make standalone validation source-only ([#1423](https://github.com/openai/codex-security/pull/1423))
 
 <!-- release-section: upgrades:end -->

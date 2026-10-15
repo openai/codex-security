@@ -401,6 +401,8 @@ See [progress and cost](docs/cli.md#progress-and-cost) for accounting and budget
 ### Validate an existing finding
 
 ```ts
+import { writeFile } from "node:fs/promises";
+
 const result = await security.validate({
   repositoryPath: "/path/to/repository",
   finding: {
@@ -409,11 +411,18 @@ const result = await security.validate({
   },
 });
 console.log(result.disposition, result.report);
+await writeFile("/path/to/reports/assessment.md", result.report, "utf8");
 ```
 
-Pass finding text or a JSON-serializable object, not a file path. Validation uses
-the client's settings and credentials without changing repository files or
-adding a scan to history.
+Pass finding text or a JSON-serializable object, not a file path. Standalone
+validation uses source evidence in a read-only, offline session. It does not build
+the target, execute application code, run tests or PoCs, or add a scan to history.
+The validator returns the assessment without writing report files. The example
+saves `result.report` in an existing directory. `outputDir` selects the session
+directory, not a report destination. Callers that previously read reports from it
+must save `result.report` instead.
+Callers needing runtime proof must arrange a separate reproduction step. Standard,
+Deep, and diff scan validation keep their existing workflows.
 
 The disposition is `reportable`, `suppressed`, `not_applicable`, or `deferred`.
 `reportable` can rely on static analysis; `deferred` means there is insufficient

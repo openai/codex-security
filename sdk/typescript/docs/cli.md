@@ -1438,7 +1438,8 @@ codex-security scan . --diff origin/main \
 | `130` / `143` | Interrupt / termination.                                                 |
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
-`--json`. For GitHub Actions setup, see the
+`--json`. Use `validate --output-schema FILE` for a schema-checked JSON assessment.
+For GitHub Actions setup, see the
 [Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md)
 or the [Bedrock workflow](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md).
 
@@ -1523,16 +1524,129 @@ The token needs code-scanning read access; access failures reject the import.
 
 ## Validate and patch findings
 
-`validate` assesses candidates; `patch` fixes and verifies them. Both accept files
+`validate` assesses candidates from local source evidence without building the
+target, executing application code, running tests or PoCs, or contacting services.
+It uses a read-only sandbox. Standard, Deep, and diff scans retain their existing
+validation, and `patch` still fixes and verifies findings. Both commands accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
 
 ```bash
 codex-security validate "Possible SQL injection" --effort high
+codex-security validate findings.json --knowledge-base ./context --context "Check the tenant boundary."
+codex-security validate findings.json --context-file context.md --output-schema result.schema.json > assessment.json
 codex-security patch OCCURRENCE_ID
 codex-security patch --scan SCAN_ID --severity high --json
 codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 ```
+
+Context inputs are optional and can be combined:
+
+- `--context TEXT` adds inline security context or reviewer feedback.
+- `--context-file PATH` reads a single UTF-8 file.
+- Repeat `--knowledge-base PATH` to add files or directories. It uses the scan
+  document loader: UTF-8 text (including JSON and YAML), PDF, and DOCX. Directories
+  are searched recursively; binary files, symlinks, and Git metadata are skipped.
+
+Inline and file context are included in the prompt. Knowledge-base documents are
+prepared in a temporary directory for Codex to read during the assessment, then
+removed. Context is separate from findings and checked against source evidence;
+feedback alone does not dismiss a finding.
+
+By default, `validate` prints a readable assessment without JSON-schema checking.
+`--output-schema PATH` supplies the schema to Codex **before generation** using
+native structured output. The CLI also checks the completed JSON before writing
+stdout; it does not convert a prose assessment into JSON afterward. Invalid JSON
+or a schema mismatch fails with exit code 2 and no assessment on stdout.
+
+Use a self-contained schema in the subset supported by the selected Codex model
+and provider. The local checker uses JSON Schema 2020-12, but accepting a schema
+locally does not guarantee provider support. Keep the schema small and use it only
+when the caller needs structured results. It checks the result's shape, not whether
+the security conclusion is correct. Relative paths resolve from the current directory.
+
+The validator no longer writes reports. Save the assessment by redirecting stdout:
+`codex-security validate findings.json > assessment.md`. For runtime proof, run a
+separate reproduction step. Missing facts are reported as proof gaps; a finding
+supported by source evidence does not require runtime reproduction.
+
+### Structured validation example
+
+Save two synthetic candidates as `findings.json`:
+
+```json
+[
+  {
+    "id": "candidate-1",
+    "title": "Missing tenant filter",
+    "location": "src/invoices.ts:24"
+  },
+  {
+    "id": "candidate-2",
+    "title": "Anonymous access",
+    "location": "src/routes.ts:18"
+  }
+]
+```
+
+Save this minimal schema as `result.schema.json`. Each `report` contains the
+assessment's source evidence, counterevidence, confidence, context used, and proof
+gaps; callers can instead define separate fields for those details.
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assessments"],
+  "properties": {
+    "assessments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "disposition", "report"],
+        "properties": {
+          "id": { "type": "string" },
+          "disposition": {
+            "type": "string",
+            "enum": ["reportable", "suppressed", "not_applicable", "deferred"]
+          },
+          "report": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+```
+
+Run from the repository directory:
+
+```bash
+codex-security validate findings.json --output-schema result.schema.json > assessment.json
+```
+
+An illustrative result is below. Actual decisions depend on the repository;
+this example assumes a tenant filter exists but deployment routing is unavailable.
+Both candidate IDs remain in the output, including the unresolved claim.
+
+```json
+{
+  "assessments": [
+    {
+      "id": "candidate-1",
+      "disposition": "suppressed",
+      "report": "Missing tenant filter: src/invoices.ts:24 filters by the authenticated tenant, defeating the claimed cross-tenant read. Static confidence: high. No material proof gap for this claim. No additional context supplied; no runtime checks performed."
+    },
+    {
+      "id": "candidate-2",
+      "disposition": "deferred",
+      "report": "Anonymous access: src/routes.ts:18 has no local authentication guard. An upstream gateway may provide one, but its routing configuration was not supplied. Proof gap: whether unauthenticated traffic can reach this route. Static confidence: low. No additional context supplied; no runtime checks performed."
+    }
+  ]
+}
+```
+
+### Patch existing findings
 
 `--scan latest` uses the current repository's latest completed scan. Patching
 supports JSON for saved findings, literal text, and files. Each finding gets a
