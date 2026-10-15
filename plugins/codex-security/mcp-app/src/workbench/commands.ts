@@ -11,17 +11,31 @@ import {
   storeDedupeGroups,
 } from "./duplicates";
 
-import { dashboard, type DashboardQuery } from "./dashboard";
+import {
+  readSeverityClassification,
+  severityCheckpoint,
+  type SeverityCheckpoint,
+} from "./severity";
 
-export async function findingsCommand(
+export async function workbenchCommand(
   command: string,
   input: string,
+  scanId?: string,
 ): Promise<unknown> {
   const request = parseJson(input) as {
     stateDirectory: string;
     payload: unknown;
   };
   const { stateDirectory, payload } = request;
+  if (command === "read-severity-classification") {
+    const selectedScanId = scanId ?? (payload as { scanId?: unknown })?.scanId;
+    if (typeof selectedScanId !== "string")
+      throw new Error("read-severity-classification requires --scan-id.");
+    return readSeverityClassification(
+      workbenchDatabasePath(stateDirectory),
+      selectedScanId,
+    );
+  }
   const page = payload as { limit: number; offset: number };
   if (
     command === "list-stored-findings" &&
@@ -61,10 +75,18 @@ export async function findingsCommand(
     workbenchDatabasePath(stateDirectory),
     {
       deferred:
-        command !== "store-findings" && command !== "store-dedupe-groups",
+        command !== "store-findings" &&
+        command !== "store-dedupe-groups" &&
+        command !== "severity-classification",
     },
   );
   try {
+    if (command === "severity-classification")
+      return severityCheckpoint(
+        database,
+        payload as SeverityCheckpoint,
+        new Date().toISOString(),
+      );
     if (command === "store-findings") {
       const { entries, repositoryId } = payload as {
         entries: EmbeddedFinding[];
@@ -93,8 +115,6 @@ export async function findingsCommand(
         selection.scope!.repositoryId,
         selection.cacheKeys,
       );
-    if (command === "dashboard")
-      return dashboard(database, payload as DashboardQuery);
     return listStoredFindings(database, page);
   } finally {
     database.close();

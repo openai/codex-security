@@ -146,11 +146,7 @@
               "minLength": 1
             },
             "artifactsReviewed": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
+              "$ref": "#/$defs/stringList"
             },
             "runtimeStatus": {
               "type": "string",
@@ -165,11 +161,7 @@
               "minLength": 1
             },
             "limitations": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
+              "$ref": "#/$defs/stringList"
             }
           }
         },
@@ -185,39 +177,19 @@
                   "minLength": 1
                 },
                 "assets": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                  "$ref": "#/$defs/stringList"
                 },
                 "trustBoundaries": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                  "$ref": "#/$defs/stringList"
                 },
                 "attackerCapabilities": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                  "$ref": "#/$defs/stringList"
                 },
                 "securityObjectives": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                  "$ref": "#/$defs/stringList"
                 },
                 "assumptions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
+                  "$ref": "#/$defs/stringList"
                 }
               }
             },
@@ -237,18 +209,10 @@
                   "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown.",
                   "properties": {
                     "includePaths": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      }
+                      "$ref": "#/$defs/stringList"
                     },
                     "excludePaths": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      }
+                      "$ref": "#/$defs/stringList"
                     },
                     "summary": {
                       "type": "string",
@@ -342,6 +306,15 @@
           }
         }
       ]
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     }
   }
 }

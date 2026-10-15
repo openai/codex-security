@@ -268,12 +268,10 @@ def project_trust_level(
 
 def project_config_paths(project_root: Path, cwd: Path) -> list[Path]:
     relative = cwd.relative_to(project_root)
-    directories = [project_root]
-    current = project_root
-    for part in relative.parts:
-        current /= part
-        directories.append(current)
-    return [directory / ".codex" / "config.toml" for directory in directories]
+    return [
+        project_root / directory / ".codex" / "config.toml"
+        for directory in reversed((relative, *relative.parents))
+    ]
 
 
 def discover_config_paths(

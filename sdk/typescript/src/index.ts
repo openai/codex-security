@@ -18,6 +18,7 @@ export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners } from "./suggest-owners.js";
 export type {
   OwnerFinding,
+  CodeownerIdentity,
   OwnerIdentity,
   OwnerSuggestion,
   OwnerSuggestions,
@@ -52,6 +53,7 @@ export type {
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
+export type { ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -65,6 +67,8 @@ export type {
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,

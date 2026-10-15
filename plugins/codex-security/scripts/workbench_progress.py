@@ -37,7 +37,6 @@ def preflight_issues_json(value: str | None) -> str | None:
         raise SystemExit(
             f"Preflight issues must be an array of at most {MAX_PREFLIGHT_ISSUES} objects."
         )
-    normalized: list[dict[str, str]] = []
     expected_keys = {"capability", "reason", "severity", "status"}
     for index, issue in enumerate(payload):
         label = f"{index + 1}"
@@ -49,17 +48,9 @@ def preflight_issues_json(value: str | None) -> str | None:
         status = issue.get("status")
         if severity not in {"block", "warn"} or status not in {"fail", "unknown"}:
             raise SystemExit(f"Preflight issue {label} has an invalid severity or status.")
-        normalized.append(
-            {
-                "capability": _preflight_issue_text(
-                    issue.get("capability"), 128, f"{label} capability"
-                ),
-                "reason": _preflight_issue_text(issue.get("reason"), 1200, f"{label} reason"),
-                "severity": severity,
-                "status": status,
-            }
-        )
-    return json.dumps(normalized, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        for field, maximum in (("capability", 128), ("reason", 1200)):
+            issue[field] = _preflight_issue_text(issue.get(field), maximum, f"{label} {field}")
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def reportable_count(

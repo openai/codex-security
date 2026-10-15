@@ -386,5 +386,12 @@
     "statements": [
       "CREATE TRIGGER invalidate_local_finding_embedding\nAFTER UPDATE OF details_json ON findings\nWHEN OLD.details_json IS NOT NEW.details_json\nBEGIN\n    DELETE FROM local_finding_embeddings WHERE finding_id = NEW.id;\nEND;"
     ]
+  },
+  {
+    "version": 47,
+    "name": "snapshot deep scan discovery context",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
+    ]
   }
 ]

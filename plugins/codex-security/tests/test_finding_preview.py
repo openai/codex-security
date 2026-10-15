@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import runpy
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 FINDING_PREVIEW_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "finding_preview.py"
+
+pytestmark = pytest.mark.cross_platform
 
 
 def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
@@ -167,6 +170,33 @@ def test_bounded_finding_details_normalizes_scalar_attack_path_assessments() -> 
 
     assert "impact" not in missing["attackPath"]
     assert "likelihood" not in missing["attackPath"]
+
+
+def test_nested_attack_path_string_arrays_survive_without_relaxing_section_depth() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    original = {
+        "attackPath": {
+            "dataflow": {
+                "evidenceRefs": ["source-to-sink"],
+                "nested": {"evidenceRefs": ["must remain depth-limited"]},
+            },
+            "reachability": {"preconditions": ["The handler is reachable."]},
+        }
+    }
+    finding = deepcopy(original)
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert bounded == {
+        "attackPath": {
+            "dataflow": {
+                "evidenceRefs": ["source-to-sink"],
+                "nested": {"evidenceRefs": [None]},
+            },
+            "reachability": {"preconditions": ["The handler is reachable."]},
+        }
+    }
+    assert finding == original
 
 
 def test_bounded_finding_details_merges_root_cause_aliases() -> None:
