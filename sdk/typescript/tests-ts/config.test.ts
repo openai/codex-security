@@ -5,6 +5,8 @@ import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
+  inlineToml,
+  modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -29,6 +31,32 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test("inline Codex overrides omit optional null fields like the file writer", async () => {
+  for (const value of [null, { args: ["fixture", null] }]) {
+    expect(() => inlineToml(value)).toThrow(ConfigurationError);
+  }
+  expect(modelProviderConfigOverride({ model_providers: null })).toEqual([]);
+  const provider = {
+    fixture: {
+      auth: { command: "synthetic-helper", args: null },
+      enabled: true,
+    },
+  };
+  const root = await temporaryDirectory();
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_providers: provider },
+  });
+  const path = join(root, "config.toml");
+  await writeCodexConfig(path, config);
+  const written = parse(await readFile(path, "utf8"));
+  expect(
+    parse(`model_providers = ${inlineToml(provider)}`)["model_providers"],
+  ).toEqual(written["model_providers"]);
+  expect(written["model_providers"]).toEqual({
+    fixture: { auth: { command: "synthetic-helper" }, enabled: true },
+  });
+});
 
 function runPinnedCodex(
   codexHome: string,
@@ -229,8 +257,13 @@ describe("Codex configuration", () => {
   test("rejects invalid model settings from the selected Codex profile", async () => {
     for (const [profile, message] of [
       [{ model: " " }, "model must be a nonempty string"],
+      [{ model: 12 }, "model must be a nonempty string"],
       [
         { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+      [
+        { model_reasoning_effort: false },
         "reasoning effort must be a nonempty string",
       ],
     ] as const) {
@@ -239,6 +272,19 @@ describe("Codex configuration", () => {
       });
 
       expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
+  test("still requires root model and effort when the profile omits them", async () => {
+    for (const field of ["model", "model_reasoning_effort"]) {
+      const config = await mergedCodexConfig({
+        codexOverrides: {
+          [field]: null,
+          profile: "review",
+          profiles: { review: { model: null, model_reasoning_effort: null } },
+        },
+      });
+      expect(() => scanModelConfiguration(config)).toThrow(ConfigurationError);
     }
   });
 
@@ -342,22 +388,20 @@ describe("Codex configuration", () => {
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
-  test("preserves legacy elevated Windows sandbox overrides", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+  test.each<{ name: string; overrides: JsonObject; expected: object }>([
+    {
+      name: "preserves legacy elevated Windows sandbox overrides",
+      overrides: {
         features: { elevated_windows_sandbox: true },
       },
-    });
-
-    expect(merged).toMatchObject({
-      features: { elevated_windows_sandbox: true },
-      windows: { sandbox: "elevated" },
-    });
-  });
-
-  test("projects legacy elevated Windows overrides into selected profiles", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+      expected: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "elevated" },
+      },
+    },
+    {
+      name: "projects legacy elevated Windows overrides into selected profiles",
+      overrides: {
         profile: "elevated",
         profiles: {
           elevated: {
@@ -365,22 +409,19 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      windows: { sandbox: "unelevated" },
-      profiles: {
-        elevated: {
-          features: { elevated_windows_sandbox: true },
-          windows: { sandbox: "elevated" },
+      expected: {
+        windows: { sandbox: "elevated" },
+        profiles: {
+          elevated: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "elevated" },
+          },
         },
       },
-    });
-  });
-
-  test("allows selected profiles to override root elevated sandbox defaults", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "allows selected profiles to override root elevated sandbox defaults",
+      overrides: {
         features: { elevated_windows_sandbox: true },
         profile: "restricted",
         profiles: {
@@ -389,22 +430,19 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      windows: { sandbox: "elevated" },
-      profiles: {
-        restricted: {
-          features: { elevated_windows_sandbox: false },
-          windows: { sandbox: "unelevated" },
+      expected: {
+        windows: { sandbox: "elevated" },
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: false },
+            windows: { sandbox: "unelevated" },
+          },
         },
       },
-    });
-  });
-
-  test("gives profile-local Windows sandbox overrides precedence", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "gives profile-local Windows sandbox overrides precedence",
+      overrides: {
         profile: "restricted",
         profiles: {
           restricted: {
@@ -413,37 +451,36 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      profiles: {
-        restricted: {
-          features: { elevated_windows_sandbox: true },
-          windows: { sandbox: "unelevated" },
+      expected: {
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "unelevated" },
+          },
         },
       },
-    });
-  });
-
-  test("gives explicit Windows sandbox overrides precedence", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "gives explicit Windows sandbox overrides precedence",
+      overrides: {
         features: { elevated_windows_sandbox: true },
         windows: { sandbox: "unelevated" },
       },
-    });
-
-    expect(merged).toMatchObject({
-      features: { elevated_windows_sandbox: true },
-      windows: { sandbox: "unelevated" },
-    });
+      expected: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "unelevated" },
+      },
+    },
+  ])("$name", async ({ overrides, expected }) => {
+    const merged = await mergedCodexConfig({ codexOverrides: overrides });
+    expect(merged).toMatchObject(expected);
   });
 
   test("retains the Windows sandbox in the hardened scan profile", async () => {
     const merged = await mergedCodexConfig({});
 
     expect(scanRuntimeCodexConfig(merged)).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       default_permissions: "codex_security_scan",
       permissions: {
         codex_security_scan: {
@@ -635,9 +672,12 @@ describe("Codex configuration", () => {
               details,
             )) ||
           (process.platform === "win32" &&
-            details.includes(
+            (details.includes(
               "Restricted read-only access requires the elevated Windows sandbox backend",
-            ))
+            ) ||
+              details.includes(
+                "elevated Windows sandbox requires effective `:root` read access",
+              )))
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,
@@ -691,7 +731,7 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, await mergedCodexConfig({}));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
     });
 
     const result = runPinnedCodex(root, ["features", "list"]);
@@ -778,7 +818,7 @@ describe("Codex configuration", () => {
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
       windows: {
-        sandbox: "unelevated",
+        sandbox: "elevated",
       },
     });
   });

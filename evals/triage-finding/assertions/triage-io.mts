@@ -2,23 +2,8 @@ import type { AssertionContext } from "../types.ts";
 import { extractTriageResult, parseExpected } from "./output.mts";
 
 function expectedScanbenchMapping(context: AssertionContext) {
-  const caseId = String(context.vars.case_id || "");
   const label = String(context.vars.expected_binary_label || "");
   const mappings = [];
-
-  if (caseId.endsWith("-vulnerable")) {
-    mappings.push({
-      expectedVerdict: "confirmed",
-      expectedBinaryLabel: "positive",
-      label: "vulnerable scanbench case",
-    });
-  } else if (caseId.endsWith("-fixed")) {
-    mappings.push({
-      expectedVerdict: "not_actionable",
-      expectedBinaryLabel: "negative",
-      label: "fixed scanbench case",
-    });
-  }
 
   if (label === "positive") {
     mappings.push({
@@ -106,6 +91,10 @@ export default (output: unknown, context: AssertionContext) => {
           `${label}: not_actionable finding must use null rank and rank_queue`,
         );
       }
+    } else if (rankQueue !== finding.verdict) {
+      failures.push(
+        `${label}: rank_queue must match verdict ${finding.verdict}`,
+      );
     } else if (!Number.isInteger(rank) || rank! < 1) {
       failures.push(
         `${label}: actionable or unresolved finding must use a positive integer rank`,

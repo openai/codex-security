@@ -274,8 +274,8 @@ scans. Batch `--workers` controls concurrent repositories or components, while
 `scan.deep.workers` controls discovery workers within each deep scan.
 
 The severity policy returns exit `1` without discarding completed results or
-retrying a scan just because it found issues. Errors or incomplete results take
-precedence with exit `2`. Bulk resume retains the saved policy outcome and checks
+retrying a scan just because it found issues. Execution failures take precedence
+with exit `2`. Bulk resume retains the saved policy outcome and checks
 that the selected scan configuration still matches the campaign.
 
 ## Dry run and editor support
@@ -306,7 +306,7 @@ to `default`; resolving preflight sources does not mutate previously returned ma
 Help, version, and command schema output do not load project files. Missing,
 malformed, or invalid selected files exit `2`. Scan exit codes remain `0` for
 completion without a policy failure, `1` for the finding threshold, and `2` for
-failed, invalid, or incomplete scans. Signal cancellation retains `130` for
+execution or required-output failures. Signal cancellation retains `130` for
 `SIGINT` and `143` for `SIGTERM`.
 
 The generated [project schema](../sdk/typescript/schemas/project-config.schema.json)

@@ -10,3 +10,6 @@
 *.tsx text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+
+# Bundled dependencies contain intentional whitespace in strings and comments.
+github-action/dist/*.cjs linguist-generated=true -whitespace

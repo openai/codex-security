@@ -1,5 +1,5 @@
 import { readJson } from "./support/json.ts";
-import { finding as draftFinding } from "./scan-draft-fixture.ts";
+import { workerDraft, finding as draftFinding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import type {
@@ -25,7 +25,7 @@ const {
       export * from "./artifact-deep-reducer-pages.ts";
       export * from "./artifact-deep-reducer.ts";
     `,
-    resolveDir: new URL("../src/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/"),
   },
 });
 
@@ -111,12 +111,7 @@ try {
     scanId,
     findings: [fresh],
     scope: { summary: largeText },
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
+    coverage: workerDraft([]).coverage,
   };
   const previous = {
     scanId,

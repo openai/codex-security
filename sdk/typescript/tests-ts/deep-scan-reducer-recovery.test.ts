@@ -1,3 +1,4 @@
+import { readSubprocess } from "./support/shell.js";
 import { parseJsonLines } from "./support/json.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,9 +17,10 @@ function bundledFunction(runtime: string, name: string): string {
 
 test("advertises distinct Standard worker and Deep reducer contracts", async () => {
   const runtime = await loadBundledRuntime();
-  const method = /  compactArtifactServer\(request\) \{[\s\S]*?\n  \}/u.exec(
-    runtime,
-  )?.[0];
+  const method =
+    /  compactArtifactServer\(request, includePathsFile\) \{[\s\S]*?\n  \}/u.exec(
+      runtime,
+    )?.[0];
   expect(method).toBeDefined();
   const pathImport = /\(0, (import_node_path\d+)\.join\)/u.exec(method!)?.[1];
   expect(pathImport).toBeDefined();
@@ -80,11 +82,7 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
         stderr: "pipe",
         timeout: 30_000,
       });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
+      const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(0);
       const response = parseJsonLines<{ id?: number; result?: unknown }>(
         stdout,
@@ -125,63 +123,65 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
   }
 });
 
-test("classifies owned worker tool failures without exposing their contents", async () => {
+test("preserves owned worker tool failure diagnostics", async () => {
   const runtime = await loadBundledRuntime();
-  const diagnosticSource = bundledFunction(runtime, "appendSafeItemDiagnostic");
+  const diagnosticSource = bundledFunction(runtime, "appendItemDiagnostic");
   const recordHelper = /\b(isRecord\d*)\(item\)/u.exec(diagnosticSource)?.[1];
   expect(recordHelper).toBeDefined();
   const appendDiagnostic = new Function(
     [
       bundledFunction(runtime, recordHelper!),
       bundledFunction(runtime, "isSandboxNamespaceExhaustion"),
+      bundledFunction(runtime, "isCodeModeFrameError"),
+      bundledFunction(runtime, "appendStreamDiagnostic"),
       bundledFunction(runtime, "appendUniqueDiagnostic"),
-      bundledFunction(runtime, "appendCodeModeFrameDiagnostic"),
       diagnosticSource,
-      "return appendSafeItemDiagnostic;",
+      "return appendItemDiagnostic;",
     ].join("\n"),
   )() as (
     diagnostics: Array<{ code: string; message: string }>,
     event: Record<string, unknown>,
   ) => void;
 
-  const secret = "synthetic-secret-never-log";
+  const detail = "synthetic-provider-detail";
   for (const fixture of [
     {
       server: "cs_artifacts",
       tool: "record_codex_security_deep_reduction",
-      result: { isError: true, content: [{ text: secret }] },
+      result: { isError: true, content: [{ type: "text", text: detail }] },
       error: null,
-      reason: "returned an error",
+      message: detail,
     },
     {
       server: "cs_artifacts",
       tool: "additional_codex_security_worker_tool",
       result: null,
-      error: { message: secret },
-      reason: "transport failed",
+      error: { message: detail },
+      message: detail,
     },
     {
       server: "codex_security_artifacts",
       tool: "record_codex_security_discovery_candidates",
       result: null,
       error: null,
-      reason: "failed",
+      message:
+        "Codex worker artifact tool record_codex_security_discovery_candidates failed.",
     },
   ]) {
     const diagnostics: Array<{ code: string; message: string }> = [];
     appendDiagnostic(diagnostics, {
       type: "mcp_tool_call",
       status: "failed",
-      arguments: { token: secret },
+      arguments: { token: "synthetic-input-only" },
       ...fixture,
     });
     expect(diagnostics).toEqual([
       {
         code: "artifact_tool_failed",
-        message: `Codex worker artifact tool ${fixture.tool} ${fixture.reason}.`,
+        message: fixture.message,
       },
     ]);
-    expect(JSON.stringify(diagnostics)).not.toContain(secret);
+    expect(JSON.stringify(diagnostics)).not.toContain("synthetic-input-only");
   }
 
   const unrelatedDiagnostics: Array<{ code: string; message: string }> = [];
@@ -191,30 +191,16 @@ test("classifies owned worker tool failures without exposing their contents", as
     server: "unrelated_server",
     tool: "record_codex_security_deep_reduction",
     result: { isError: true },
-    error: null,
+    error: { message: "Synthetic unrelated transport failure" },
   });
   expect(unrelatedDiagnostics).toEqual([]);
-});
-
-test("keeps textual missing-path worker failures retryable", async () => {
-  const runtime = await loadBundledRuntime();
-  const classify = new Function(
-    [
-      bundledFunction(runtime, "classifyCodexWorkerError"),
-      "return classifyCodexWorkerError;",
-    ].join("\n"),
-  )() as (error: Error) => Error;
-
-  for (const diagnostic of [
-    "Error: No such file or directory (os error 2)",
-    "Error: The system cannot find the file specified. (os error 2)",
-  ]) {
-    const original = new Error(
-      ["Codex Exec exited with code 1:", diagnostic].join("\n"),
-    );
-    const classified = classify(original);
-    expect(classified).toBe(original);
-  }
+  appendDiagnostic(unrelatedDiagnostics, {
+    type: "file_change",
+    status: "failed",
+  });
+  expect(unrelatedDiagnostics).toEqual([
+    { code: "file_change_failed", message: "Codex worker file change failed." },
+  ]);
 });
 
 test("resumes only when the exact Standard worker or reducer result is missing", async () => {

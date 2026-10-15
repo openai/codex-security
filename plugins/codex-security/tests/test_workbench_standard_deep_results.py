@@ -13,13 +13,27 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
+    begin_deep_scan,
+    cancel_scan,
+    claim_deep_scan_dedup,
+    commit_deep_dedup,
     fail_deep_scan,
+    fail_scan,
+    finish_deep_scan,
+    get_deep_scan,
+    get_scan,
+    preserve_scan_results,
     replay_saved_results,
     run_workbench,
     saved_binding,
+    saved_coverage,
     saved_discovery_worker,
     saved_draft,
+    scan_command,
+    upsert_deep_worker,
     worker_paths,
+    workspace_command,
     write_checkpoint,
     write_completed_contract,
 )
@@ -37,10 +51,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = standard_finding(tmp_path, scan_id, target)
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -50,18 +61,15 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
             "origin": "generated",
         },
         "findings": [finding],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [
+        "coverage": saved_coverage(
+            deferred=[
                 {
                     "candidateId": "pending-query",
                     "reason": "Query validation remains pending.",
                     "paths": ["app.py"],
                 }
-            ],
-        },
+            ]
+        ),
     }
     checkpoint_dir = result_path.parent / "checkpoints"
     write_checkpoint(checkpoint_dir, checkpoint)
@@ -79,19 +87,11 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
         )
     environment = {"CODEX_HOME": str(codex_home)}
     if termination == "canceled":
-        run_workbench(
-            state_dir,
-            "cancel-scan",
-            "--scan-id",
-            scan_id,
-            "--thread-id",
-            "standard-worker-thread",
-            environment=environment,
-        )
+        cancel_scan(state_dir, scan_id, "standard-worker-thread", environment=environment)
     else:
         fail_deep_scan(state_dir, codex_home, scan_id, deep_status=termination)
 
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id[:12])["scan"]
+    stopped = get_scan(state_dir, scan_id[:12])["scan"]
     assert stopped["progress"]["status"] == ("canceled" if termination == "canceled" else "failed")
     assert "threatModel" not in stopped
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == {
@@ -105,7 +105,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert "Model origin: recovered" in model_document
     assert stopped["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
     assert (
@@ -117,37 +117,17 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     late["findings"][0]["locations"][0]["endLine"] = 92
     archived = result_path.parent / "attempts" / "attempt-01" / "checkpoints"
     write_checkpoint(archived, late)
-    recovery_needed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    recovery_needed = get_scan(state_dir, scan_id)["scan"]
     assert recovery_needed["resultsRecoveryNeeded"] is (termination != "canceled")
     if termination == "canceled":
-        rejected = run_workbench(
-            state_dir,
-            "recover-scan-results",
-            "--scan-id",
-            scan_id,
-            check=False,
-        )
+        rejected = scan_command(state_dir, "recover-scan-results", scan_id, check=False)
         assert rejected["returncode"] != 0
         assert "Canceled scans cannot recover" in str(rejected["stderr"])
-    wrong_owner = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "not-the-owner",
-        check=False,
-    )
+    wrong_owner = preserve_scan_results(state_dir, scan_id, "not-the-owner", check=False)
     assert wrong_owner["returncode"] != 0
     assert (scan_dir / "scan-manifest.json").read_bytes() == first_seal
-    refreshed = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    refreshed = preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["scan"]
     expected_count = 1
     assert refreshed["findingCount"] == expected_count
@@ -155,10 +135,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert refreshed["findings"][0]["locations"][0]["startLine"] != 91
     seal = (scan_dir / "scan-manifest.json").read_bytes()
     assert seal == first_seal
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findingCount"]
-        == expected_count
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["findingCount"] == expected_count
     assert (scan_dir / "scan-manifest.json").read_bytes() == seal
 
 
@@ -170,9 +147,7 @@ def test_stopped_model_selection_survives_publication_retry(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     checkpoint = json.loads(result_path.read_text())
     checkpoint["complete"] = result_state == "complete"
     checkpoint["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
@@ -196,36 +171,19 @@ def test_stopped_model_selection_survives_publication_retry(
         os.utime(head_path, ns=(2_000_000_000, 2_000_000_000))
     expected_model = {**json.loads(selected.read_text())["threatModel"], "origin": "recovered"}
 
-    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
     wrapper = tmp_path / "fail_model_publication.py"
-    wrapper.write_text(
-        "import sys\n"
-        f"sys.path.insert(0, {str(scripts_dir)!r})\n"
-        "import workbench_db\n"
-        "import workbench_saved_results\n"
+    failed = run_workbench_with_fault(
+        wrapper,
+        state_dir,
+        codex_home,
         "def fail_publication(*args, **kwargs):\n"
         "    raise OSError('injected publication failure')\n"
-        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n"
-        "raise SystemExit(workbench_db.main())\n"
-    )
-    failed = subprocess.run(
-        [
-            sys.executable,
-            str(wrapper),
-            "fail-deep-scan",
-            "--scan-id",
-            scan_id,
-            "--message",
-            "Worker stopped.",
-        ],
-        capture_output=True,
-        env={
-            **os.environ,
-            "CODEX_HOME": str(codex_home),
-            "CODEX_SECURITY_STATE_DIR": str(state_dir),
-        },
-        text=True,
-        check=False,
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n",
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Worker stopped.",
     )
     assert failed.returncode == 0, failed.stderr
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -276,14 +234,8 @@ def test_stopped_model_selection_survives_publication_retry(
     late = write_checkpoint(checkpoint_dir, checkpoint)
     head_path.write_text(json.dumps({"checkpoint": late.name}))
     environment = {"CODEX_HOME": str(codex_home)}
-    retried = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    retried = preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["scan"]
     manifest_path = scan_dir / "scan-manifest.json"
     published = json.loads(manifest_path.read_text())["scan"]
@@ -300,19 +252,11 @@ def test_stopped_model_selection_survives_publication_retry(
             "UPDATE scans SET retained_source_digests_json = ? WHERE id = ?",
             (json.dumps(frozen["sources"]), scan_id),
         )
-    run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
-    )
+    preserve_scan_results(state_dir, scan_id, "standard-worker-thread", environment=environment)
     assert manifest_path.read_bytes() == first_seal
-    recovered = run_workbench(
-        state_dir, "recover-scan-results", "--scan-id", scan_id, environment=environment
-    )["scan"]
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id, environment=environment)[
+        "scan"
+    ]
     published = json.loads(manifest_path.read_text())["scan"]
     assert published["threatModel"] == {**checkpoint["threatModel"], "origin": "recovered"}
     assert late.relative_to(scan_dir).as_posix() in published["preservedSources"]
@@ -322,14 +266,11 @@ def test_stopped_model_selection_survives_publication_retry(
 def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    finding = standard_finding(tmp_path, scan_id, target)
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    stopped = get_scan(state_dir, scan_id)["scan"]
     assert stopped["resultsRecoveryNeeded"] is False
     late = copy.deepcopy(checkpoint)
     late["findings"][0]["locations"][0]["startLine"] = 91
@@ -345,28 +286,17 @@ def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> Non
             "SELECT workspace_id FROM scans WHERE id = ?", (scan_id,)
         ).fetchone()[0]
 
-    reopened = run_workbench(
-        state_dir,
-        "get-workspace",
-        "--workspace-id",
-        workspace_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    reopened = workspace_command(
+        state_dir, "get-workspace", workspace_id, environment={"CODEX_HOME": str(codex_home)}
     )
     assert reopened["results"]["findingCount"] == 1
-    stale = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    stale = get_scan(state_dir, scan_id)["scan"]
     assert stale["findingCount"] == 1
     assert stale["resultsRecoveryNeeded"] is True
-    assert (
-        run_workbench(state_dir, "list-findings", "--scan-id", scan_id)["findingsPage"]["total"]
-        == 1
-    )
+    assert scan_command(state_dir, "list-findings", scan_id)["findingsPage"]["total"] == 1
 
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )
 
     assert recovered["scan"]["findingCount"] == 2
@@ -377,11 +307,8 @@ def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> Non
 def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    finding = standard_finding(tmp_path, scan_id, target)
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
     manifest_path = scan_dir / "scan-manifest.json"
@@ -400,15 +327,11 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
     late["findings"][0]["locations"][0]["startLine"] = 91
     late["findings"][0]["locations"][0]["endLine"] = 92
     write_checkpoint(result_path.parent / "attempts" / "attempt-01" / "checkpoints", late)
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is True
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
 
-    rejected = run_workbench(
+    rejected = scan_command(
         state_dir,
         "recover-scan-results",
-        "--scan-id",
         scan_id,
         environment={"CODEX_HOME": str(codex_home)},
         check=False,
@@ -433,9 +356,7 @@ def test_explicit_recovery_preserves_unfrozen_parent_with_late_checkpoint(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
         (scan_dir / filename).write_bytes((contract_dir / filename).read_bytes())
     parent_finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
@@ -472,12 +393,8 @@ def test_explicit_recovery_preserves_unfrozen_parent_with_late_checkpoint(
     late["findings"] = [late_finding]
     write_checkpoint(result_path.parent / "checkpoints", late)
 
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered["findingCount"] == 2
@@ -534,7 +451,7 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     late_finding["identity"]["anchor"] = "late-checkpoint"
     late_finding["ruleId"] = "late.checkpoint"
     late_finding["title"] = "Late checkpoint finding"
-    late = saved_draft(scan_id, findings=[late_finding], completeness="partial")
+    late = saved_draft(scan_id, findings=[late_finding])
     write_checkpoint(result_path.parent / "checkpoints", late)
 
     manifest_before_failed_recovery = (scan_dir / "scan-manifest.json").read_bytes()
@@ -559,12 +476,8 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     assert (scan_dir / "scan-manifest.json").read_bytes() == manifest_before_failed_recovery
     assert (scan_dir / "findings.json").read_bytes() == findings_before_failed_recovery
 
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered["findingCount"] == 2
@@ -582,12 +495,8 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     later["findings"] = [later_finding]
     write_checkpoint(result_path.parent / "attempts" / "attempt-02" / "checkpoints", later)
 
-    recovered_again = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered_again = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered_again["findingCount"] == 3
@@ -683,17 +592,10 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         ).fetchone()
     assert seal_digest is not None
     assert json.loads(frozen_before)
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is True
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
 
-    recovered = run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = scan_command(
+        state_dir, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
 
     assert recovered["resultsRecoveryNeeded"] is False
@@ -744,7 +646,7 @@ def test_unsealed_manifest_without_saved_results_does_not_offer_recovery(
             (scan_id,),
         )
 
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
 
     assert failed["resultsRecoveryNeeded"] is False
 
@@ -765,11 +667,8 @@ def test_aggregate_queries_ignore_late_stopped_scan_checkpoints(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    finding = standard_finding(tmp_path, scan_id, target)
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
     late = copy.deepcopy(checkpoint)
@@ -798,7 +697,7 @@ def test_unreadable_only_checkpoint_records_recovery_warning(tmp_path: Path) -> 
     result_path.write_text("{not-json")
 
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
 
     assert any("Preserved unreadable checkpoint" in warning for warning in failed["warnings"])
 
@@ -806,10 +705,7 @@ def test_unreadable_only_checkpoint_records_recovery_warning(tmp_path: Path) -> 
 def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = standard_finding(tmp_path, scan_id, target)
     finding["provenance"]["candidateId"] = "rejected-candidate"
     checkpoint = json.loads(result_path.read_text())
     checkpoint["complete"] = False
@@ -834,7 +730,7 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
         scan_id,
         message="Stopped after rejecting a malformed current finding.",
     )
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
 
     assert failed["findingCount"] == 0
     coverage = json.loads((scan_dir / "coverage.json").read_text())
@@ -866,7 +762,7 @@ def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:
         connection.execute("UPDATE scans SET scope = 'src/' WHERE id = ?", (scan_id,))
 
     fail_deep_scan(state_dir, codex_home, scan_id)
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
 
     assert failed["findingCount"] == 1
     assert failed["findings"][0]["locations"][0]["path"] == "src/app.py"
@@ -877,11 +773,9 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    finding = standard_finding(tmp_path, scan_id, target)
+    finding["severity"]["changeConditions"] = ["Raise if the service becomes internet-reachable."]
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     result_path.write_text("{incomplete")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -918,17 +812,14 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     archived = result_path.parent / "attempts" / "attempt-01" / "checkpoints"
     write_checkpoint(archived, late)
 
-    preserved = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserved = preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
     assert preserved["findingCount"] == 1
     assert preserved["findings"][0]["locations"][0]["startLine"] != 91
+    assert preserved["findings"][0]["severity"]["changeConditions"] == (
+        "Raise if the service becomes internet-reachable."
+    )
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "canceled"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         warnings = json.loads(
@@ -937,6 +828,8 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
             ).fetchone()[0]
         )
     assert not any("result publication needs follow-up" in warning for warning in warnings)
+    assert "Recovered finding 1: normalized severity change conditions." in warnings
+    assert preserved["warnings"] == warnings
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
@@ -952,23 +845,16 @@ def test_existing_non_canceled_output_recovers_structured_publication_failure(
     fail_deep_scan(state_dir, codex_home, scan_id, message=original, deep_status=deep_status)
 
     if deep_status == "failed":
-        run_workbench(
+        scan_command(
             state_dir,
             "record-deep-scan-publication-failure",
-            "--scan-id",
             scan_id,
             "--message",
             publication,
             environment=environment,
         )
-        after_race = run_workbench(
-            state_dir,
-            "get-deep-scan",
-            "--scan-id",
-            scan_id,
-            "--thread-id",
-            "standard-worker-thread",
-            environment=environment,
+        after_race = get_deep_scan(
+            state_dir, scan_id, "standard-worker-thread", environment=environment
         )["deepScan"]
         assert after_race["error"] == original
 
@@ -977,33 +863,15 @@ def test_existing_non_canceled_output_recovers_structured_publication_failure(
             "UPDATE deep_scan_runs SET publication_error_message = ? WHERE scan_id = ?",
             (publication, scan_id),
         )
-    before_recovery = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    before_recovery = get_deep_scan(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["deepScan"]
     assert publication in before_recovery["error"]
     assert original in before_recovery["error"]
 
-    run_workbench(
-        state_dir,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment=environment,
-    )
-    recovered = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    scan_command(state_dir, "recover-scan-results", scan_id, environment=environment)
+    recovered = get_deep_scan(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["deepScan"]
     assert recovered["error"] == original
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -1044,12 +912,9 @@ def test_canceled_scan_reports_noop_coordinator_publication(tmp_path: Path) -> N
             is None
         )
 
-    preserved = run_workbench(
+    preserved = preserve_scan_results(
         state_dir,
-        "preserve-scan-results",
-        "--scan-id",
         scan_id,
-        "--thread-id",
         "standard-worker-thread",
         environment={"CODEX_HOME": str(codex_home)},
         check=False,
@@ -1063,9 +928,7 @@ def test_canceled_scan_reseals_prepared_completion_with_frozen_sources(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     result = json.loads(result_path.read_text())
     result["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
     result_path.write_text(json.dumps(result))
@@ -1093,7 +956,7 @@ def test_canceled_scan_reseals_prepared_completion_with_frozen_sources(
             "WHERE scan_id = ?",
             (str(manifest_path), scan_id),
         )
-    run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+    scan_command(state_dir, "prepare-scan-completion", scan_id)
     assert json.loads(manifest_path.read_text())["scan"]["status"] == "completed"
 
     wrapper = tmp_path / "fail_prepared_canceled_publication.py"
@@ -1113,14 +976,8 @@ def test_canceled_scan_reseals_prepared_completion_with_frozen_sources(
     assert canceled.returncode == 0, canceled.stderr
     assert json.loads(manifest_path.read_text())["scan"]["status"] == "completed"
 
-    run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
 
     assert json.loads(manifest_path.read_text())["scan"]["status"] == "canceled"
@@ -1133,9 +990,7 @@ def test_canceled_scan_reseals_prepared_completion_with_frozen_sources(
 def test_stopped_deep_scan_recovers_when_parent_manifest_has_no_scan(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
     result = json.loads(result_path.read_text())
     result["findings"] = [finding]
@@ -1146,7 +1001,7 @@ def test_stopped_deep_scan_recovers_when_parent_manifest_has_no_scan(tmp_path: P
 
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
 
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    stopped = get_scan(state_dir, scan_id)["scan"]
     assert stopped["findingCount"] == 1
     assert any("has no scan object" in warning for warning in stopped["warnings"])
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == ("failed")
@@ -1170,6 +1025,18 @@ def run_workbench_with_fault(script_path, state_dir, codex_home, setup, *args):
         },
         text=True,
     )
+
+
+def standard_contract(tmp_path: Path, scan_id: str, target: Path) -> Path:
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    return contract_dir
+
+
+def standard_finding(tmp_path: Path, scan_id: str, target: Path) -> dict[str, object]:
+    contract_dir = standard_contract(tmp_path, scan_id, target)
+    return json.loads((contract_dir / "findings.json").read_text())["findings"][0]
 
 
 def deep_scan_fixture(
@@ -1207,20 +1074,12 @@ def deep_scan_fixture(
             ),
         )
         scan_id = str(registered["scanId"])
-        run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--thread-id",
-            "standard-worker-thread",
-            "--scan-id",
-            scan_id,
-            environment=environment,
+        begin_deep_scan(
+            state_dir, "standard-worker-thread", "--scan-id", scan_id, environment=environment
         )
     else:
-        begun = run_workbench(
+        begun = begin_deep_scan(
             state_dir,
-            "begin-deep-scan",
-            "--thread-id",
             "standard-worker-thread",
             "--target-path",
             str(target),
@@ -1270,12 +1129,7 @@ def accepted_standard_worker(
             {
                 "scanId": scan_id,
                 "findings": [],
-                "coverage": {
-                    "completeness": "complete",
-                    "surfaces": [],
-                    "explicitExclusions": [],
-                    "deferred": [],
-                },
+                "coverage": saved_coverage(),
                 "threatModel": {"summary": "The ordinary Standard worker threat model."},
             }
         )
@@ -1292,6 +1146,49 @@ def accepted_standard_worker(
     return worker_id, result_path
 
 
+def running_standard_reducer(
+    state_dir: Path,
+    codex_home: Path,
+    scan_dir: Path,
+    scan_id: str,
+    discovery_worker_id: str,
+    *,
+    name: str = "standard-reducer",
+    attempt: str = "1",
+    additional_worker_ids: tuple[str, ...] = (),
+) -> tuple[str, Path]:
+    reducer_id = str(uuid.uuid4())
+    prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
+    environment = {"CODEX_HOME": str(codex_home)}
+    input_worker_args = [
+        argument
+        for worker_id in (discovery_worker_id, *additional_worker_ids)
+        for argument in ("--input-worker-id", worker_id)
+    ]
+    claim_deep_scan_dedup(
+        state_dir,
+        scan_id,
+        reducer_id,
+        str(prompt_path),
+        str(artifact_dir),
+        *input_worker_args,
+        environment=environment,
+    )
+    upsert_deep_worker(
+        state_dir,
+        scan_id,
+        reducer_id,
+        "dedup",
+        "running",
+        str(prompt_path),
+        str(artifact_dir),
+        "--attempt",
+        attempt,
+        environment=environment,
+    )
+    return reducer_id, result_path
+
+
 def committed_standard_reducer(
     state_dir: Path,
     codex_home: Path,
@@ -1302,60 +1199,18 @@ def committed_standard_reducer(
     *,
     additional_worker_ids: tuple[str, ...] = (),
 ) -> tuple[str, Path, dict[str, object]]:
-    reducer_id = str(uuid.uuid4())
-    prompt_path, artifact_dir, result_path = worker_paths(scan_dir, "standard-reducer")
+    reducer_id, result_path = running_standard_reducer(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        discovery_worker_id,
+        additional_worker_ids=additional_worker_ids,
+    )
     environment = {"CODEX_HOME": str(codex_home)}
-    input_worker_args = [
-        argument
-        for worker_id in (discovery_worker_id, *additional_worker_ids)
-        for argument in ("--input-worker-id", worker_id)
-    ]
-    run_workbench(
-        state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        *input_worker_args,
-        environment=environment,
-    )
-    run_workbench(
-        state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--kind",
-        "dedup",
-        "--status",
-        "running",
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--attempt",
-        "1",
-        environment=environment,
-    )
     result_path.write_text(discovery_result.read_text())
-    committed = run_workbench(
-        state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--result-manifest-path",
-        str(result_path),
-        "--new-findings-count",
-        "0",
-        environment=environment,
+    committed = commit_deep_dedup(
+        state_dir, scan_id, reducer_id, str(result_path), "0", environment=environment
     )["deepScan"]
     return reducer_id, result_path, committed
 
@@ -1386,9 +1241,7 @@ def standard_parent_results_fixture(
 def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     draft = json.loads(result_path.read_text())
     draft["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
     result_path.write_text(json.dumps(draft))
@@ -1401,7 +1254,7 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path:
     )
     reducer_path.write_text(json.dumps(reduced))
     fail_deep_scan(state_dir, codex_home, scan_id, message="Later reducer failed.")
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 1
     assert failed["findings"][0]["summary"] == reduced["findings"][0]["summary"]
@@ -1413,9 +1266,7 @@ def test_stopped_rejection_recovers_malformed_parent_surfaces(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
     finding["extensions"] = {"candidateId": "rejected-candidate"}
     finding["provenance"]["candidateId"] = "rejected-candidate"
@@ -1460,7 +1311,7 @@ def test_stopped_rejection_recovers_malformed_parent_surfaces(
         state_dir, codex_home, scan_id, message="Stopped after rejecting a checkpointed candidate."
     )
 
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
@@ -1470,9 +1321,7 @@ def test_stopped_rejection_recovers_malformed_parent_surfaces(
 def test_stopped_scan_rebinds_prepared_completion_seal(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     result = json.loads(result_path.read_text())
     result["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
     result_path.write_text(json.dumps(result))
@@ -1488,16 +1337,13 @@ def test_stopped_scan_rebinds_prepared_completion_seal(tmp_path: Path) -> None:
             "WHERE scan_id = ?",
             (str(scan_dir / "scan-manifest.json"), scan_id),
         )
-    run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+    scan_command(state_dir, "prepare-scan-completion", scan_id)
     prepared_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert prepared_manifest["scan"]["status"] == "completed"
 
-    run_workbench(
+    fail_scan(
         state_dir,
-        "fail-scan",
-        "--scan-id",
         scan_id,
-        "--message",
         "Completion was not accepted.",
         environment={"CODEX_HOME": str(codex_home)},
     )
@@ -1528,14 +1374,12 @@ def test_stopped_findings_cannot_enter_remediation(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    contract_dir = standard_contract(tmp_path, scan_id, target)
     result = json.loads(result_path.read_text())
     result["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
     result_path.write_text(json.dumps(result))
     fail_deep_scan(state_dir, codex_home, scan_id, message="Stopped with a provisional finding.")
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["remediationAvailable"] is False
     assert failed["remediationUnavailableReason"] == (
         "Remediation is available only for successfully completed scans."
@@ -1583,10 +1427,9 @@ def test_complete_worker_model_uses_latest_terminal_source(
     newer_head = head_time >= 2_000_000_000
     os.utime(head_path, ns=(head_time, head_time))
 
-    run_workbench(
+    scan_command(
         state_dir,
         "fail-deep-scan",
-        "--scan-id",
         scan_id,
         "--message",
         "Stopped after the worker completed.",
@@ -1617,9 +1460,8 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
         "complete": False,
         "threatModel": {"summary": "An obsolete worker model."},
         "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [
+        "coverage": saved_coverage(
+            surfaces=[
                 {
                     "id": "obsolete-surface",
                     "label": "Obsolete review",
@@ -1627,9 +1469,8 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
                     "receiptRefs": [],
                 }
             ],
-            "explicitExclusions": [],
-            "deferred": [{"id": "obsolete-work", "reason": "This was later completed."}],
-        },
+            deferred=[{"id": "obsolete-work", "reason": "This was later completed."}],
+        ),
     }
     checkpoints = result_path.parent / "checkpoints"
     head = write_checkpoint(checkpoints, checkpoint)
@@ -1662,7 +1503,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
     )
     coverage_path = scan_dir / "coverage.json"
     final_coverage = json.loads(coverage_path.read_text())
-    final_coverage["completeness"] = "partial"
+
     final_coverage["openQuestions"] = []
     coverage_path.write_text(json.dumps(final_coverage))
     checkpoint = write_checkpoint(
@@ -1672,7 +1513,6 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
             "complete": False,
             "findings": [],
             "coverage": {
-                "completeness": "partial",
                 "surfaces": [],
                 "explicitExclusions": [],
                 "deferred": [],
@@ -1695,10 +1535,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
 def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    baseline = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    baseline = standard_finding(tmp_path, scan_id, target)
     baseline["extensions"] = {"candidateId": "candidate-reducer"}
     baseline["provenance"]["candidateId"] = "candidate-reducer"
     discovery = json.loads(worker_result.read_text())
@@ -1714,42 +1551,8 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     ]
     worker_result.write_text(json.dumps(discovery))
 
-    reducer_id = str(uuid.uuid4())
-    prompt_path, artifact_dir, reducer_result = worker_paths(scan_dir, "canceled-reducer")
-    environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(
-        state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--input-worker-id",
-        worker_id,
-        environment=environment,
-    )
-    run_workbench(
-        state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--kind",
-        "dedup",
-        "--status",
-        "running",
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--attempt",
-        "1",
-        environment=environment,
+    reducer_id, reducer_result = running_standard_reducer(
+        state_dir, codex_home, scan_dir, scan_id, worker_id, name="canceled-reducer", attempt="1"
     )
     reduced = copy.deepcopy(discovery)
     reduced["findings"][0]["summary"] = "The reducer retained stronger merged evidence."
@@ -1775,54 +1578,17 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
 def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = standard_finding(tmp_path, scan_id, target)
     discovery = json.loads(worker_result.read_text())
     discovery["findings"] = [finding]
     worker_result.write_text(json.dumps(discovery))
 
-    reducer_id = str(uuid.uuid4())
-    prompt_path, artifact_dir, reducer_result = worker_paths(scan_dir, "archived-reducer")
-    environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(
-        state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--input-worker-id",
-        worker_id,
-        environment=environment,
-    )
-    run_workbench(
-        state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--kind",
-        "dedup",
-        "--status",
-        "running",
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--attempt",
-        "2",
-        environment=environment,
+    reducer_id, reducer_result = running_standard_reducer(
+        state_dir, codex_home, scan_dir, scan_id, worker_id, name="archived-reducer", attempt="2"
     )
     reduced = copy.deepcopy(discovery)
     reduced["findings"][0]["summary"] = "The archived reducer retained the newest evidence."
-    archived = artifact_dir / "attempts" / "attempt-01"
+    archived = reducer_result.parent / "attempts" / "attempt-01"
     archived.mkdir(parents=True)
     (archived / "result.json").write_text(json.dumps(reduced))
     write_checkpoint(archived / "checkpoints", reduced)
@@ -1847,10 +1613,7 @@ def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
 def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    weak = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    weak = standard_finding(tmp_path, scan_id, target)
     weak["severity"]["level"] = "low"
     weak["confidence"]["level"] = "low"
     weak["summary"] = "Earlier weak checkpoint evidence."
@@ -1862,7 +1625,7 @@ def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> N
     checkpoint_dir.mkdir()
     for name, finding in (("0" * 64, weak), ("f" * 64, strong)):
         (checkpoint_dir / f"{name}.json").write_text(
-            json.dumps(saved_draft(scan_id, findings=[finding], completeness="partial"))
+            json.dumps(saved_draft(scan_id, findings=[finding]))
         )
     result_path.write_text("{incomplete")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -1884,10 +1647,7 @@ def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> N
 
 def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=3)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    baseline = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    baseline = standard_finding(tmp_path, scan_id, target)
     environment = {"CODEX_HOME": str(codex_home)}
 
     first_worker_id, first_result = accepted_standard_worker(
@@ -1922,16 +1682,11 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
 
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, _ = worker_paths(scan_dir, "failed-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--input-worker-id",
         second_worker_id,
@@ -1965,14 +1720,13 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
 
     fail_deep_scan(state_dir, codex_home, scan_id, message="Later reducers failed.")
 
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["progress"]["status"] == "failed"
     assert failed["findingCount"] == 2
     assert {finding["identity"]["anchor"] for finding in failed["findings"]} == {
         baseline["identity"]["anchor"],
         later["identity"]["anchor"],
     }
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == ("partial")
 
 
 def test_recovery_does_not_promote_already_retained_historical_finding(
@@ -1980,10 +1734,7 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    historical = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    historical = standard_finding(tmp_path, scan_id, target)
     historical["extensions"] = {"candidateId": "candidate-refined-location"}
     historical["provenance"]["candidateId"] = "candidate-refined-location"
     historical["locations"][0]["startLine"] = 1
@@ -2019,7 +1770,7 @@ def test_recovery_does_not_promote_already_retained_historical_finding(
         state_dir, codex_home, scan_id, message="Stopped after the canonical result was retained."
     )
 
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["findingCount"] == 1
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     assert retained["locations"][0]["startLine"] == 2
@@ -2033,10 +1784,7 @@ def test_recovery_retains_same_worker_checkpoint_version_as_history(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    checkpoint_finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    checkpoint_finding = standard_finding(tmp_path, scan_id, target)
     checkpoint_finding["extensions"] = {"candidateId": "candidate-refined-location"}
     checkpoint_finding["provenance"]["candidateId"] = "candidate-refined-location"
     checkpoint_finding["locations"][0]["startLine"] = 1
@@ -2067,7 +1815,7 @@ def test_recovery_retains_same_worker_checkpoint_version_as_history(
         state_dir, codex_home, scan_id, message="Stopped after the canonical result was retained."
     )
 
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["findingCount"] == 1
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     assert retained["locations"][0]["startLine"] == 2
@@ -2079,28 +1827,18 @@ def test_recovery_retains_same_worker_checkpoint_version_as_history(
 
 def test_independent_worker_candidate_ids_do_not_share_rejection(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
-    contract_dir = tmp_path / "contract"
-    contract_dir.mkdir()
-    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
-    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding = standard_finding(tmp_path, scan_id, target)
     finding["extensions"] = {"candidateId": "candidate-1"}
     environment = {"CODEX_HOME": str(codex_home)}
     for ordinal, name in enumerate(("rejecting", "reporting"), 1):
         prompt, output, result = worker_paths(scan_dir, name)
-        run_workbench(
+        upsert_deep_worker(
             state_dir,
-            "upsert-deep-scan-worker",
-            "--scan-id",
             scan_id,
-            "--worker-id",
             f"00000000-0000-4000-8000-{ordinal:012}",
-            "--kind",
             "discovery",
-            "--status",
             "running",
-            "--prompt-path",
             str(prompt),
-            "--artifact-dir",
             str(output),
             "--attempt",
             "1",
@@ -2111,9 +1849,8 @@ def test_independent_worker_candidate_ids_do_not_share_rejection(tmp_path: Path)
                 {
                     "scanId": scan_id,
                     "findings": [finding] if name == "reporting" else [],
-                    "coverage": {
-                        "completeness": "complete",
-                        "surfaces": []
+                    "coverage": saved_coverage(
+                        surfaces=[]
                         if name == "reporting"
                         else [
                             {
@@ -2122,15 +1859,13 @@ def test_independent_worker_candidate_ids_do_not_share_rejection(tmp_path: Path)
                                 "disposition": "rejected",
                                 "notes": "This route enforces containment.",
                             }
-                        ],
-                        "explicitExclusions": [],
-                        "deferred": [],
-                    },
+                        ]
+                    ),
                 }
             )
         )
     fail_deep_scan(state_dir, codex_home, scan_id, message="Stopped.")
-    failed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    failed = get_scan(state_dir, scan_id)["scan"]
     assert failed["findingCount"] == 1
     canonical_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert canonical_findings[0]["extensions"]["candidateId"] == "candidate-1"
@@ -2161,14 +1896,8 @@ def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
     assert workers[reducer_id]["resultManifestPath"] == str(reducer_result)
     assert not (scan_dir / "artifacts" / "02_discovery").exists()
 
-    recovered = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = get_deep_scan(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )["deepScan"]
     assert recovered["canonicalArtifacts"] is None
     assert recovered["workers"] == committed["workers"]
@@ -2180,14 +1909,10 @@ def test_standard_worker_results_finish_with_only_canonical_parent_manifest(
     state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
     manifest_path = scan_dir / "scan-manifest.json"
 
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest_path),
         environment={"CODEX_HOME": str(codex_home)},
     )["deepScan"]
@@ -2229,12 +1954,9 @@ def test_standard_worker_results_ignore_incidental_legacy_discovery_artifacts(
     assert committed["canonicalArtifacts"] is None
 
     def recovered() -> dict[str, object]:
-        return run_workbench(
+        return get_deep_scan(
             state_dir,
-            "get-deep-scan",
-            "--scan-id",
             scan_id,
-            "--thread-id",
             "standard-worker-thread",
             environment={"CODEX_HOME": str(codex_home)},
         )["deepScan"]
@@ -2247,14 +1969,10 @@ def test_standard_worker_results_ignore_incidental_legacy_discovery_artifacts(
         relative_path="app.py",
         coverage_mode="deep_repository",
     )
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment={"CODEX_HOME": str(codex_home)},
     )["deepScan"]
@@ -2283,7 +2001,7 @@ def test_standard_worker_deadline_can_finish_without_any_completed_worker(
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
+
     coverage["surfaces"] = []
     coverage["deferred"] = [
         {
@@ -2298,14 +2016,10 @@ def test_standard_worker_deadline_can_finish_without_any_completed_worker(
             ((datetime.now(timezone.utc) - timedelta(hours=97)).isoformat(), scan_id),
         )
 
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest_path),
         environment={"CODEX_HOME": str(codex_home)},
     )["deepScan"]
@@ -2322,14 +2036,10 @@ def test_standard_worker_finish_preserves_running_state_when_parent_draft_is_inc
     state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
     (scan_dir / "findings.json").unlink()
 
-    rejected = run_workbench(
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment={"CODEX_HOME": str(codex_home)},
         check=False,
@@ -2349,35 +2059,21 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         tmp_path, budget=True
     )
     manifest_path = scan_dir / "scan-manifest.json"
-    run_workbench(
+    finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest_path),
         environment={"CODEX_HOME": str(codex_home)},
     )
     warning = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
-    completed = run_workbench(
+    completed = scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
-        "--scan-id",
         scan_id,
         "--cost-json",
-        json.dumps(
-            {
-                "model": "gpt-5.6-sol",
-                "inputTokens": 1250,
-                "cachedInputTokens": 200,
-                "cacheWriteInputTokens": 0,
-                "outputTokens": 30,
-                "estimatedUsd": 0.00625,
-            }
-        ),
+        json.dumps(BUDGET_COST),
         "--message",
         warning,
     )["scan"]
@@ -2387,7 +2083,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     assert completed["warnings"] == [warning]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+
     assert coverage["deferred"] == [
         {
             "id": "scan-cost-limit",
@@ -2403,35 +2099,21 @@ def test_budget_exhaustion_rejects_incomplete_standard_result_draft(tmp_path: Pa
     state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(
         tmp_path, budget=True
     )
-    run_workbench(
+    finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment={"CODEX_HOME": str(codex_home)},
     )
     (scan_dir / "findings.json").unlink()
 
-    rejected = run_workbench(
+    rejected = scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
-        "--scan-id",
         scan_id,
         "--cost-json",
-        json.dumps(
-            {
-                "model": "gpt-5.6-sol",
-                "inputTokens": 1250,
-                "cachedInputTokens": 200,
-                "cacheWriteInputTokens": 0,
-                "outputTokens": 30,
-                "estimatedUsd": 0.00625,
-            }
-        ),
+        json.dumps(BUDGET_COST),
         check=False,
     )
 
@@ -2488,7 +2170,6 @@ def test_merge_saved_results_deduplicates_open_questions(
     (scan_dir / "coverage.json").write_text(
         json.dumps(
             {
-                "completeness": "partial",
                 "surfaces": [],
                 "explicitExclusions": [],
                 "deferred": [],
@@ -2504,7 +2185,6 @@ def test_merge_saved_results_deduplicates_open_questions(
                 "complete": False,
                 "findings": [],
                 "coverage": {
-                    "completeness": "partial",
                     "surfaces": [],
                     "explicitExclusions": [],
                     "deferred": [],
@@ -2544,16 +2224,13 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
     }
     unresolved = {"id": "unavailable-library", "reason": "Source is unavailable."}
     candidate = {"candidateId": "pending-candidate", "reason": "Validation remains."}
-    coverage = {
-        "completeness": "partial",
-        "surfaces": [],
-        "explicitExclusions": [],
-        "deferred": [
+    coverage = saved_coverage(
+        deferred=[
             pending_closeout,
             unresolved,
             candidate,
-        ],
-    }
+        ]
+    )
     initial = {"scanId": scan_id, "complete": False, "findings": [], "coverage": coverage}
     if canonical_state != "missing":
         scan = (
@@ -2609,7 +2286,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
         candidate["candidateId"],
         "scan-stopped",
     } | ({closure["id"]} if reopened else set())
-    assert recovered["completeness"] == "partial"
+
     assert original.read_bytes() == original_bytes
     if canonical_state == "checkpoint_reopened":
         assert existing_checkpoint.stat().st_mtime_ns == 300
@@ -2659,7 +2336,6 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
                     "complete": True,
                     "coverage": {
                         **draft["coverage"],
-                        "completeness": "complete",
                         "deferred": [],
                         "resolvedDeferred": [
                             {"id": "shared-review", "reason": "Review completed."}
@@ -2688,7 +2364,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
     assert {
         row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
     } == expected
-    assert coverage["completeness"] == "partial"
+
     assert not coverage.get("resolvedDeferred")
 
 
@@ -2698,7 +2374,6 @@ def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_
     scan_id = "closure-reason-recovery"
     closure = {"id": "review-closeout", "reason": "Review and follow-up are complete."}
     coverage = {
-        "completeness": "complete",
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
@@ -2748,12 +2423,7 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
             "title": "Retained review evidence",
             "evidence": "Unverified source trace.",
         }
-    coverage = {
-        "completeness": "partial",
-        "surfaces": [],
-        "explicitExclusions": [],
-        "deferred": [pending],
-    }
+    coverage = saved_coverage(deferred=[pending])
     draft = {"scanId": scan_id, "complete": False, "findings": [], "coverage": coverage}
     original = write_checkpoint(scan_dir / "checkpoints", draft)
     os.utime(original, ns=(100, 100))
@@ -2773,7 +2443,6 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
             "complete": True,
             "coverage": {
                 **coverage,
-                "completeness": "complete",
                 "deferred": [],
                 "resolvedDeferred": closures,
             },
@@ -2796,13 +2465,13 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
     )
     assert documents is not None
     prepared = workbench_saved_results._prepare_scan_finalization(
-        scan_dir, completion_binding=binding, completion_warnings=[], draft_documents=documents
+        scan_dir, completion_binding=binding, recover_unsealed=True, draft_documents=documents
     )
     workbench_saved_results._write_prepared_scan_finalization(prepared)
     recovered = json.loads((scan_dir / "coverage.json").read_text())
     assert pending in recovered["deferred"]
     assert not recovered.get("resolvedDeferred")
-    assert recovered["completeness"] == "partial"
+
     assert original.read_bytes() == original_bytes
 
 
@@ -2815,7 +2484,6 @@ def test_recovery_restores_work_reopened_after_parent_closure(
     closure = {"id": "review-closeout", "reason": "Initial review completed."}
     other = {"id": "other-review", "reason": "Separate review completed."}
     coverage = {
-        "completeness": "complete",
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
@@ -2834,7 +2502,6 @@ def test_recovery_restores_work_reopened_after_parent_closure(
             "findings": [],
             "coverage": {
                 **coverage,
-                "completeness": "partial",
                 "deferred": [pending],
                 "resolvedDeferred": [],
             },
@@ -2870,12 +2537,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
     attempt = output if layout == "current" else worker_root / "attempts" / "attempt-01"
     attempt.mkdir(parents=True, exist_ok=True)
     pending = {"id": "review-closeout", "reason": "Reopened source review."}
-    coverage = {
-        "completeness": "partial",
-        "surfaces": [],
-        "explicitExclusions": [],
-        "deferred": [pending],
-    }
+    coverage = saved_coverage(deferred=[pending])
     draft = {"scanId": scan_id, "complete": True, "findings": [], "coverage": coverage}
     closed = write_checkpoint(
         attempt / "checkpoints",
@@ -2883,7 +2545,6 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
             **draft,
             "coverage": {
                 **coverage,
-                "completeness": "complete",
                 "deferred": [],
                 "resolvedDeferred": [{"id": pending["id"], "reason": "Review completed."}],
             },
@@ -2901,7 +2562,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
         current = (
             draft
             if layout.endswith("attempt_reopens")
-            else {**draft, "coverage": {**coverage, "completeness": "complete", "deferred": []}}
+            else {**draft, "coverage": {**coverage, "deferred": []}}
         )
         (output / "result.json").write_text(json.dumps(current))
         os.utime(output / "result.json", ns=(300, 300))
@@ -2972,7 +2633,6 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
     scan_id = "worker-head-interruption"
     output = scan_dir / "workers" / "worker-one" / "output"
     coverage = {
-        "completeness": "complete",
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
@@ -2993,7 +2653,6 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
             **draft,
             "coverage": {
                 **coverage,
-                "completeness": "partial",
                 "deferred": [pending],
                 "resolvedDeferred": [],
             },
@@ -3120,7 +2779,7 @@ def test_recovery_applies_surface_update_with_generic_closure(
         remaining = {"id": "other-review", "reason": "Another caller needs review."}
         pending["coverage"]["deferred"].append(remaining)
         closed["coverage"]["deferred"].append(remaining)
-        closed["coverage"]["completeness"] = "partial"
+
     if layout in {"reopened_parent", "worker_idless_reopened"}:
         pending, closed = closed, pending
     output = tmp_path / "worker" if layout.startswith("worker") else tmp_path
@@ -3539,7 +3198,7 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     module, pending, closed, binding = generic_review_recovery
     other = {"id": "other-review", "reason": "Independent review remains."}
     closed["coverage"]["deferred"] = [other]
-    closed["coverage"]["completeness"] = "partial"
+
     pending["coverage"]["resolvedDeferred"] = [
         {"id": "other-review", "reason": "Previously reviewed."}
     ]
@@ -3569,7 +3228,7 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     assert pending["coverage"]["deferred"][0] in replay[2]["deferred"]
     assert old.stat().st_mtime_ns == 100
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
-    assert first[2]["completeness"] == replay[2]["completeness"] == "partial"
+
     assert not replay[2].get("resolvedDeferred")
 
 

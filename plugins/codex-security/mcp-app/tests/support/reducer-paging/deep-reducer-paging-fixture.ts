@@ -1,3 +1,4 @@
+import { workerDraft } from "../../scan-draft-fixture.ts";
 import { readJson, writeJson } from "../json.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -88,12 +89,7 @@ export async function createReducerPagingFixture(root: string) {
   const previousPath = path.join(previousRoot, "result.json");
   await writeJson(workerPath, {
     ...result,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
+    coverage: workerDraft([]).coverage,
   });
   await writeJson(previousPath, previous);
 

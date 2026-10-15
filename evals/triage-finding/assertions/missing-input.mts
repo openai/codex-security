@@ -1,4 +1,4 @@
-import { outputText } from "./output.mts";
+import { outputText, hasTriageJson } from "./output.mts";
 
 function matchedFormatNames(text: string) {
   const supportedFormats: [string, RegExp][] = [
@@ -40,23 +40,10 @@ export default (output: unknown) => {
     );
   }
 
-  if (/```(?:json)?\s*[\s\S]*?```/i.test(text)) {
+  if (hasTriageJson(text)) {
     failures.push(
-      "response must not return a fenced JSON block when no finding was supplied",
+      "response must not emit a triage result JSON object when no finding was supplied",
     );
-  }
-
-  for (const pattern of [
-    /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i,
-    /["']findings["']\s*:/i,
-    /["']verdict["']\s*:/i,
-  ]) {
-    if (pattern.test(text)) {
-      failures.push(
-        "response must not emit a triage result JSON object when no finding was supplied",
-      );
-      break;
-    }
   }
 
   return {

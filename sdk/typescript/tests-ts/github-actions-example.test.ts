@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
+import { runWorkflowScript } from "./support/workflow-script.js";
 
 interface Step {
   id?: string;
@@ -35,61 +35,29 @@ const workflow = parse(
 const job = workflow.jobs.scan;
 const scan = job.steps.find((step) => step.id === "scan")!;
 const sarif = job.steps.find((step) => step.id === "sarif")!;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function runStep(step: Step, overrides: Record<string, string> = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "codex actions example "));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("codex actions example ");
   // Git Bash accepts forward-slash drive paths on Windows.
   const root = directory.replaceAll("\\", "/");
-  const bash =
-    process.platform === "win32"
-      ? join(
-          process.env["ProgramFiles"] ?? "C:/Program Files",
-          "Git/bin/bash.exe",
-        )
-      : "bash";
-  const result = spawnSync(
-    bash,
-    [
-      "--noprofile",
-      "--norc",
-      "-e",
-      "-o",
-      "pipefail",
-      "-c",
-      `codex-security() {
-  printf '%s\\0' "$@" > "$RUNNER_TEMP/arguments"
-  printf '{"mock":true}\\n'
-  return "$MOCK_EXIT_CODE"
-}
-${step.run}`,
-    ],
+  const result = runWorkflowScript(
+    directory,
+    step.run,
     {
-      cwd: directory,
-      encoding: "utf8",
-      env: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        RUNNER_TEMP: root,
-        GITHUB_WORKSPACE: `${root}/repository with spaces`,
-        GITHUB_OUTPUT: `${root}/outputs`,
-        BEDROCK_MODEL_ID: "example.model",
-        EVENT_NAME: "workflow_dispatch",
-        BASE_SHA: "",
-        FAIL_ON_SEVERITY: "",
-        MOCK_EXIT_CODE: "0",
-        ...overrides,
-      },
+      RUNNER_TEMP: root,
+      GITHUB_WORKSPACE: `${root}/repository with spaces`,
+      GITHUB_OUTPUT: `${root}/outputs`,
+      EVENT_NAME: "workflow_dispatch",
+      BASE_SHA: "",
+      FAIL_ON_SEVERITY: "",
+      ...overrides,
     },
+    ["-e", "-o", "pipefail"],
+    "$RUNNER_TEMP/arguments",
   );
-  if (result.error) throw result.error;
   const args = readFileSync(join(directory, "arguments"), "utf8")
     .split("\0")
     .slice(0, -1);

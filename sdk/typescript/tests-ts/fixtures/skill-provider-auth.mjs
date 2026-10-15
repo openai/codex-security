@@ -1,3 +1,4 @@
+import { send, completeTurn } from "./app-server-messages.mjs";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -7,7 +8,6 @@ const record = (value) =>
     process.env.SYNTHETIC_PROVIDER_LOG,
     `${JSON.stringify(value)}\n`,
   );
-const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const configPath = join(process.env.CODEX_HOME, "config.toml");
 record({
   args: process.argv.slice(2),
@@ -50,36 +50,22 @@ if (process.env.SYNTHETIC_SKILL_COMMAND === "validate") {
     } else if (request.method === "command/exec") {
       send({ id: request.id, result: { exitCode: 0 } });
     } else if (request.method === "turn/start") {
-      send({ id: request.id, result: { turn: { id: "synthetic-turn" } } });
-      send({
-        method: "item/completed",
-        params: {
-          threadId: "synthetic-thread",
-          turnId: "synthetic-turn",
-          item: {
-            type: "agentMessage",
-            text:
-              process.env.SYNTHETIC_SKILL_COMMAND === "verify-fix"
-                ? JSON.stringify({
-                    results: [
-                      {
-                        id: "finding-1",
-                        status: "fixed",
-                        evidence: "Synthetic verification",
-                      },
-                    ],
-                  })
-                : "Synthetic patch complete",
-          },
-        },
-      });
-      send({
-        method: "turn/completed",
-        params: {
-          threadId: "synthetic-thread",
-          turn: { id: "synthetic-turn", status: "completed" },
-        },
-      });
+      completeTurn(
+        request,
+        () =>
+          process.env.SYNTHETIC_SKILL_COMMAND === "verify-fix"
+            ? JSON.stringify({
+                results: [
+                  {
+                    id: "finding-1",
+                    status: "fixed",
+                    evidence: "Synthetic verification",
+                  },
+                ],
+              })
+            : "Synthetic patch complete",
+        "synthetic-thread",
+      );
     }
   }
 }

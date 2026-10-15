@@ -206,9 +206,8 @@ is a separate path and does not establish crash recovery:
 
 Resume reads the saved model, provider, reasoning settings, and original output
 directory. Confirm discovery and reducer workers, including resumed workers, use
-those settings and AWS authentication. Check the final stop reason and coverage;
-a limit-triggered partial scan or unrecovered worker failure is not a complete
-test. If no resumable scan is available, record this check as not run.
+those settings and AWS authentication. Check the final stop reason and reported
+limitations. If no resumable scan is available, record this check as not run.
 
 Finally, view and export the saved result in a subshell without cloud credentials.
 The fresh credential files below exclude AWS profile credentials from this check:

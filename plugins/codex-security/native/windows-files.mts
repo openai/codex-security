@@ -144,6 +144,10 @@ export function windowsFileSystem(native: WindowsBinding) {
     check(native.createWindowsDirectories(operationPath(path)), path);
   }
 
+  function mkdirPrivate(path: Buffer): void {
+    check(native.createPrivateWindowsDirectory(operationPath(path)), path);
+  }
+
   function readInto(path: Buffer, buffer: Buffer): number {
     return withFile(path, flags.GENERIC_READ, (handle) => {
       let length = 0;
@@ -161,17 +165,25 @@ export function windowsFileSystem(native: WindowsBinding) {
     });
   }
 
-  function readFile(path: Buffer): Buffer {
-    return withFile(path, flags.GENERIC_READ, (handle) => {
-      const chunks: Buffer[] = [];
+  function readChunks(path: Buffer, consume: (chunk: Buffer) => boolean): void {
+    withFile(path, flags.GENERIC_READ, (handle) => {
       while (true) {
         const chunk = Buffer.alloc(64 * 1024);
         const result = handle.read(chunk, 0, chunk.length);
         check(result.error, path);
-        if (result.value === 0) return Buffer.concat(chunks);
-        chunks.push(chunk.subarray(0, result.value));
+        if (result.value === 0 || !consume(chunk.subarray(0, result.value)))
+          return;
       }
     });
+  }
+
+  function readFile(path: Buffer): Buffer {
+    const chunks: Buffer[] = [];
+    readChunks(path, (chunk) => {
+      chunks.push(chunk);
+      return true;
+    });
+    return Buffer.concat(chunks);
   }
 
   function writeFile(
@@ -235,7 +247,9 @@ export function windowsFileSystem(native: WindowsBinding) {
     identity,
     entriesWithTypes,
     mkdir,
+    mkdirPrivate,
     readInto,
+    readChunks,
     readFile,
     writeFile,
     rename,

@@ -16,11 +16,14 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     create_saved_workspace,
     fail_deep_scan,
+    get_scan,
+    preserve_scan_results,
     replay_saved_results,
     run_workbench,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    scan_command,
     start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
@@ -78,41 +81,22 @@ def test_late_head_changes_require_explicit_recovery(
         row["id"] == "review"
         for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
     )
-    assert (
-        run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is False
-    )
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
 
     select(result.parent, reopened if selection == "reopened" else completed, 300)
     snapshots = list((result.parent / "checkpoint-heads").iterdir())
-    assert (
-        run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is True
-    )
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is True
     assert list((result.parent / "checkpoint-heads").iterdir()) == snapshots
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
-    )
+    preserve_scan_results(state, scan_id, "standard-worker-thread", environment=environment)
     assert manifest_path.read_bytes() == first_manifest
-    recovered = run_workbench(
-        state, "recover-scan-results", "--scan-id", scan_id, environment=environment
-    )
+    recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert any(row["id"] == "review" for row in coverage["deferred"]) is (selection == "reopened")
     published = manifest_path.read_bytes()
-    run_workbench(state, "recover-scan-results", "--scan-id", scan_id, environment=environment)
+    scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert manifest_path.read_bytes() == published
-    assert (
-        run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is False
-    )
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
 
 
 @pytest.fixture
@@ -191,7 +175,7 @@ def test_file_authored_resolution_can_leave_manifest_unchanged(
         tmp_path, scan_id, binding, [], warnings, stopped=False, reason=""
     )
     # Headless file-authored documents replace their older checkpoint coverage.
-    assert result[2]["completeness"] == ("partial" if retain_pending else "complete")
+
     assert result[2]["deferred"] == ([independent] if retain_pending else [])
     assert warnings == []
 
@@ -317,7 +301,6 @@ def test_malformed_parent_deferred_id_reaches_existing_recovery_diagnostics(
         )
         assert warnings
         assert all(isinstance(row["id"], str) for row in coverage["deferred"])
-        assert coverage["completeness"] == "partial"
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
@@ -564,9 +547,7 @@ def test_completion_checks_selected_parent_checkpoint(
     manifest_path.write_text(json.dumps(manifest))
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     if complete is False:
-        coverage.update(
-            completeness="partial", deferred=[{"id": "review", "reason": "Review reopened."}]
-        )
+        coverage.update(deferred=[{"id": "review", "reason": "Review reopened."}])
     draft = {
         "scanId": scan_id,
         "findings": json.loads((scan_dir / "findings.json").read_text())["findings"],
@@ -591,9 +572,9 @@ def test_completion_checks_selected_parent_checkpoint(
         for path in (scan_dir / directory).glob("*.json")
     }
 
-    result = run_workbench(state, command, "--scan-id", scan_id, check=False)
+    result = scan_command(state, command, scan_id, check=False)
 
-    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    scan = get_scan(state, scan_id)["scan"]
     if complete is False:
         assert result["returncode"] != 0
         assert "The latest saved scan draft is incomplete" in result["stderr"]
@@ -832,7 +813,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     worker_id, worker_result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     worker = json.loads(worker_result.read_text())
     child_work = {"id": "child-review", "reason": "Worker review remains."}
-    worker["coverage"].update(completeness="partial", deferred=[child_work])
+    worker["coverage"].update(deferred=[child_work])
     worker_result.write_text(json.dumps(worker))
 
     contract = tmp_path / "contract"
@@ -864,7 +845,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     initial["coverage"].update(surfaces=[], deferred=[])
     if evidence == "deferred":
         initial["findings"]["findings"] = []
-        initial["coverage"].update(completeness="partial", deferred=[parent_work])
+        initial["coverage"].update(deferred=[parent_work])
     else:
         initial["findings"]["findings"][0]["extensions"] = {"candidateId": "candidate-review"}
         initial["coverage"]["surfaces"] = [
@@ -892,7 +873,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     terminal = copy.deepcopy(initial)
     terminal["manifest"]["scan"].pop("complete")
     terminal["findings"]["findings"] = []
-    terminal["coverage"].update(completeness="complete", deferred=[], surfaces=[])
+    terminal["coverage"].update(deferred=[], surfaces=[])
     if evidence == "reported":
         terminal["coverage"]["surfaces"] = [
             {
@@ -929,21 +910,15 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     first = []
 
     def fail_publication(prepared, *, projection_warnings=None):
-        first.append(copy.deepcopy((prepared[3], prepared[4])))
+        first.append(copy.deepcopy((prepared.findings, prepared.coverage)))
         raise OSError("injected stopped publication failure")
 
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
         call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
     assert len(first) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
     replay = (
         json.loads((scan_dir / "findings.json").read_text()),

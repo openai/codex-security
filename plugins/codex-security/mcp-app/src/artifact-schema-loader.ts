@@ -33,12 +33,71 @@ export function bundleArtifactSchema(
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Unknown Codex Security schema definition: " + definition);
   }
-  return dereferenceArtifactSchema(
-    source,
-    document,
-    documentsById,
-    new Set<string>(),
-  ) as ArtifactSchemaObject;
+
+  const activeReferences = new Set<string>();
+
+  function dereferenceArtifactSchema(
+    value: unknown,
+    document: SchemaDocument,
+  ): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => dereferenceArtifactSchema(item, document));
+    }
+    if (!value || typeof value !== "object") return value;
+
+    const object = value as ArtifactSchemaObject;
+    if (typeof object.$ref !== "string") {
+      return Object.fromEntries(
+        Object.entries(object).map(([name, child]) => [
+          name,
+          dereferenceArtifactSchema(child, document),
+        ]),
+      );
+    }
+
+    const reference = object.$ref;
+    const separator = reference.indexOf("#");
+    const referencedDocumentId =
+      separator < 0 ? reference : reference.slice(0, separator);
+    const pointer = separator < 0 ? "" : reference.slice(separator + 1);
+    const referencedDocument = referencedDocumentId
+      ? documentsById.get(referencedDocumentId)
+      : document;
+    if (!referencedDocument) {
+      throw new Error("Unknown Codex Security schema reference: " + reference);
+    }
+
+    const referenceKey = referencedDocument.$id + "#" + pointer;
+    if (activeReferences.has(referenceKey)) {
+      throw new Error("Cyclic Codex Security schema reference: " + reference);
+    }
+    activeReferences.add(referenceKey);
+    const resolved = dereferenceArtifactSchema(
+      readSchemaPointer(referencedDocument, pointer),
+      referencedDocument,
+    );
+    // A recursive failure exits this bundle. Siblings use the parent path.
+    activeReferences.delete(referenceKey);
+    const siblings = Object.fromEntries(
+      Object.entries(object).filter(([name]) => name !== "$ref"),
+    );
+    if (Object.keys(siblings).length === 0) return resolved;
+    if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
+      throw new Error(
+        "Codex Security schema reference cannot have sibling fields: " +
+          reference,
+      );
+    }
+    return {
+      ...resolved,
+      ...(dereferenceArtifactSchema(
+        siblings,
+        document,
+      ) as ArtifactSchemaObject),
+    };
+  }
+
+  return dereferenceArtifactSchema(source, document) as ArtifactSchemaObject;
 }
 
 /**
@@ -49,91 +108,75 @@ export function loadArtifactZodSchema(
   documentId: string,
   definition: string,
 ): z.ZodType {
-  return z.fromJSONSchema(
-    bundleArtifactSchema(
-      documents,
-      documentId,
-      definition,
-    ) as z.core.JSONSchema.JSONSchema,
+  const schema = bundleArtifactSchema(documents, documentId, definition);
+  const validator = z.fromJSONSchema(schema as z.core.JSONSchema.JSONSchema);
+  return validator.meta(modelFacingSchema(schema));
+}
+
+/** Project a native contract for tools/list while preserving its validator and type. */
+export function projectArtifactToolSchema<Schema extends z.ZodType>(
+  schema: Schema,
+): Schema {
+  return schema.meta(
+    modelFacingSchema(z.toJSONSchema(schema, { io: "input" })),
   );
 }
 
-function dereferenceArtifactSchema(
-  value: unknown,
-  document: SchemaDocument,
-  documentsById: ReadonlyMap<string, SchemaDocument>,
-  activeReferences: ReadonlySet<string>,
-): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) =>
-      dereferenceArtifactSchema(
-        item,
-        document,
-        documentsById,
-        activeReferences,
-      ),
-    );
-  }
-  if (!value || typeof value !== "object") return value;
-
-  const object = value as ArtifactSchemaObject;
-  if (typeof object.$ref !== "string") {
-    return Object.fromEntries(
-      Object.entries(object).map(([name, child]) => [
-        name,
-        dereferenceArtifactSchema(
-          child,
-          document,
-          documentsById,
-          activeReferences,
-        ),
+/** Keep forbidden fields out of native tool declarations without allowing them. */
+function modelFacingSchema(schema: ArtifactSchemaObject): ArtifactSchemaObject {
+  function visit(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== "object") return value;
+    const object = Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        ["const", "enum", "default", "examples"].includes(key)
+          ? child
+          : visit(child),
       ]),
     );
-  }
+    const properties = object.properties;
+    if (
+      !properties ||
+      typeof properties !== "object" ||
+      Array.isArray(properties)
+    )
+      return object;
+    const forbidden = Object.entries(properties)
+      .filter(([, property]) => forbiddenProperty(property))
+      .map(([name]) => name);
+    if (forbidden.length === 0) return object;
 
-  const reference = object.$ref;
-  const separator = reference.indexOf("#");
-  const referencedDocumentId =
-    separator < 0 ? reference : reference.slice(0, separator);
-  const pointer = separator < 0 ? "" : reference.slice(separator + 1);
-  const referencedDocument = referencedDocumentId
-    ? documentsById.get(referencedDocumentId)
-    : document;
-  if (!referencedDocument) {
-    throw new Error("Unknown Codex Security schema reference: " + reference);
-  }
-
-  const referenceKey = referencedDocument.$id + "#" + pointer;
-  if (activeReferences.has(referenceKey)) {
-    throw new Error("Cyclic Codex Security schema reference: " + reference);
-  }
-  const nextReferences = new Set(activeReferences);
-  nextReferences.add(referenceKey);
-  const resolved = dereferenceArtifactSchema(
-    readSchemaPointer(referencedDocument, pointer),
-    referencedDocument,
-    documentsById,
-    nextReferences,
-  );
-  const siblings = Object.fromEntries(
-    Object.entries(object).filter(([name]) => name !== "$ref"),
-  );
-  if (Object.keys(siblings).length === 0) return resolved;
-  if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
-    throw new Error(
-      "Codex Security schema reference cannot have sibling fields: " +
-        reference,
+    // Zod renders false properties as {not:{}}, which the native declaration
+    // projects as optional unknown fields. Exclude their names instead. This
+    // is equivalent JSON Schema; the original validator remains unchanged.
+    object.properties = Object.fromEntries(
+      Object.entries(properties).filter(
+        ([, property]) => !forbiddenProperty(property),
+      ),
     );
+    const names = { not: { enum: forbidden } };
+    object.propertyNames =
+      object.propertyNames === undefined
+        ? names
+        : { allOf: [object.propertyNames, names] };
+    return object;
   }
-  return {
-    ...resolved,
-    ...(dereferenceArtifactSchema(
-      siblings,
-      document,
-      documentsById,
-      activeReferences,
-    ) as ArtifactSchemaObject),
-  };
+  return visit(schema) as ArtifactSchemaObject;
+}
+
+function forbiddenProperty(property: unknown): boolean {
+  if (property === false) return true;
+  if (!property || typeof property !== "object" || Array.isArray(property))
+    return false;
+  const not = (property as ArtifactSchemaObject).not;
+  return (
+    Object.keys(property).length === 1 &&
+    not !== null &&
+    typeof not === "object" &&
+    !Array.isArray(not) &&
+    Object.keys(not).length === 0
+  );
 }
 
 function readSchemaPointer(document: SchemaDocument, pointer: string): unknown {
