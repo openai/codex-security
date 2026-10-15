@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import { createRequire } from "node:module";
+import runtimeVars from "./runtime-vars.mts";
 import path from "node:path";
 import { findingInput, variantCaseId } from "./generate-calibration-tests.mts";
 import type { CalibrationCase } from "../types.ts";
@@ -16,6 +18,8 @@ const generator = path.join(
   "generate-calibration-tests.mts",
 );
 const dataset = path.join(evalDir, "datasets", "triage-calibration-seed.json");
+const require = createRequire(import.meta.url);
+const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 const trackedTests = path.join(evalDir, "tests", "calibration-oss.yaml");
 
 const tmpDir = fs.realpathSync(
@@ -48,6 +52,18 @@ assert.equal(
   trackedYaml,
   "tracked calibration tests are stale; run calibration:generate",
 );
+const rows: {
+  metadata: Record<string, string>;
+  vars: Record<string, string>;
+}[] = parse(generatedYaml);
+assert.equal(rows.length, 16);
+assert.equal(new Set(rows.map((row) => row.vars.case_id)).size, rows.length);
+for (const row of rows) {
+  assert.equal(row.metadata.case_id, row.vars.case_id);
+  assert.equal(row.vars.expected_ids, row.vars.case_id);
+  assert.equal(row.vars.calibration_repo, row.vars.case_id);
+  assert.ok(row.vars.finding_input.includes(`input_id: ${row.vars.case_id}`));
+}
 const cases: CalibrationCase[] = JSON.parse(
   fs.readFileSync(dataset, "utf8"),
 ).cases;
@@ -137,6 +153,29 @@ assert.ok(
       smokeCase.variants.find((variant) => variant.variant_id === "fixed")!,
     )}`,
   ),
+);
+const smokeRows = parse(smokeYaml) as typeof rows;
+const hydration = execFileSync(
+  process.execPath,
+  [
+    "--experimental-strip-types",
+    path.join(evalDir, "scripts", "hydrate-calibration-repos.mts"),
+    "--case",
+    "oss-dompurify-ghsa-v8jm-5vwx-cfxm",
+    "--variant",
+    "vulnerable",
+    "--repo-root",
+    path.join(tmpDir, "custom targets # space"),
+    "--dry-run",
+  ],
+  { encoding: "utf8" },
+);
+assert.deepEqual(
+  smokeRows.map((row) => runtimeVars(row.vars).target_repo),
+  hydration
+    .split("\n")
+    .filter((line) => line.startsWith("  "))
+    .map((line) => line.slice(2)),
 );
 fs.rmSync(tmpDir, { recursive: true, force: true });
 

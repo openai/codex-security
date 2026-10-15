@@ -108,8 +108,8 @@ jobs:
           echo "exit-code=$scan_status" >> "$GITHUB_OUTPUT"
           exit "$scan_status"
 
-      # A policy violation (1) is still a completed scan. An incomplete/error
-      # result (2) must not replace code-scanning alerts with a partial report.
+      # A policy violation (1) is still a completed scan. An execution failure
+      # (2) must not replace code-scanning alerts with retained failure output.
       - name: Export completed findings as SARIF
         id: sarif
         if: ${{ !cancelled() && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}

@@ -7,6 +7,7 @@ import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const childSource = `
+import { send, completeTurn } from ${JSON.stringify(new URL("./fixtures/app-server-messages.mjs", import.meta.url).href)};
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -14,7 +15,6 @@ let homeConfig = "";
 try { homeConfig = readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"); }
 catch (error) { if (error.code !== "ENOENT") throw error; }
 const receipt = { argv: process.argv.slice(2), homeTier: homeConfig.match(/^service_tier\\s*=\\s*(.*)$/m)?.[1] ?? null };
-const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (request.method === "account/login/start") receipt.loginType = request.params.type;
@@ -27,9 +27,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ id: request.id, result: { exitCode: 0 } });
   } else if (request.method === "turn/start") {
     writeFileSync(process.env.SYNTHETIC_PATCH_RECEIPT, JSON.stringify(receipt));
-    send({ id: request.id, result: { turn: { id: "synthetic-turn" } } });
-    send({ method: "item/completed", params: { threadId: "synthetic-thread", turnId: "synthetic-turn", item: { type: "agentMessage", text: JSON.stringify({ patches: [{ occurrenceId: "occ_1", status: "no_change", files: [], verification: "Synthetic child-process fixture completed." }] }) } } });
-    send({ method: "turn/completed", params: { threadId: "synthetic-thread", turn: { id: "synthetic-turn", status: "completed" } } });
+    completeTurn(request, () => JSON.stringify({ patches: [{ occurrenceId: "occ_1", status: "no_change", files: [], verification: "Synthetic child-process fixture completed." }] }), "synthetic-thread");
   } else if (request.id !== undefined) send({ id: request.id, result: {} });
 }
 `;

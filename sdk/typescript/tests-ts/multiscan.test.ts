@@ -51,11 +51,7 @@ const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(cleanup);
 
-async function fixture(): Promise<{
-  root: string;
-  input: string;
-  output: string;
-}> {
+async function fixture() {
   const root = await temporaryDirectory();
   return {
     root,
@@ -70,17 +66,14 @@ function git(repository: string, ...args: string[]): string {
   }).trim();
 }
 
-async function repository(
-  root: string,
-  name: string,
-): Promise<{ path: string; revision: string }> {
+async function repository(root: string, name: string, objectFormat = "sha1") {
   const path = join(root, name);
   await mkdir(join(path, "src"), { recursive: true });
   await writeFile(
     join(path, "src", "app.ts"),
     `export const name = "${name}";\n`,
   );
-  git(path, "init", "-q");
+  git(path, "init", "-q", `--object-format=${objectFormat}`);
   git(path, "add", ".");
   git(
     path,
@@ -107,7 +100,7 @@ async function repositoryFixture(name: string, id = name) {
 
 async function completedScan(
   outputDir: string,
-  completeness: "complete" | "partial" | "unknown" = "complete",
+  completeness?: "complete" | "partial" | "unknown",
 ): Promise<ScanResult> {
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await Promise.all(
@@ -115,7 +108,12 @@ async function completedScan(
       (name) => writeFile(join(outputDir, name), "{}\n"),
     ),
   );
-  return { coverage: { completeness } } as ScanResult;
+  const result = fakeResult([], completeness);
+  await writeFile(
+    join(outputDir, "scan-manifest.json"),
+    JSON.stringify(result.manifest),
+  );
+  return { manifest: result.manifest, coverage: result.coverage } as ScanResult;
 }
 
 const completeRun: SecurityClient["run"] = async (
@@ -560,8 +558,7 @@ describe("multiscan", () => {
       }),
     );
     expect(result).toMatchObject({
-      completed: 1,
-      incomplete: 1,
+      completed: 2,
       failed: 0,
       skipped: 1,
     });
@@ -763,6 +760,7 @@ describe("multiscan", () => {
           await completedScan(scanDir);
           const recovered = fakeResult([severity]);
           return {
+            manifest: recovered.manifest,
             coverage: recovered.coverage,
             cost: recovered.cost,
             findings: recovered.findings,
@@ -915,9 +913,9 @@ describe("multiscan", () => {
       ),
     );
 
-    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "priced", status: "completed", coverage: "complete", cost },
+      { id: "priced", status: "completed", cost },
     ]);
   });
 
@@ -1006,7 +1004,6 @@ describe("multiscan", () => {
 
     expect(summary).toMatchObject({
       completed: 1,
-      incomplete: 0,
       failed: 0,
       warnings: [
         {
@@ -1074,7 +1071,7 @@ describe("multiscan", () => {
         }),
       );
 
-      expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
       expect(attempts.mock.calls.length).toBe(1);
       expect(progress).toEqual([
         "started",
@@ -1125,23 +1122,19 @@ describe("multiscan", () => {
       expect(attempts).toBe(1);
       expect(summary).toMatchObject({
         total: 1,
-        completed: 0,
-        incomplete: 1,
+        completed: 1,
         failed: 0,
         skipped: 0,
       });
       const outputDir = join(paths.output, "artifacts", "sealed", "attempt-1");
-      const warning = `Scan coverage is ${completeness}; results may be incomplete.`;
       const receipts = await results(summary.resultsPath);
       expect(receipts).toMatchObject([
         {
           id: "sealed",
-          status: "completed_with_incomplete_coverage",
+          status: "completed",
           attempt: 1,
           outputDir,
-          coverage: completeness,
           cost,
-          warning,
         },
       ]);
       expect(
@@ -1163,9 +1156,8 @@ describe("multiscan", () => {
         { repository: "sealed", status: "started", attempt: 1 },
         {
           repository: "sealed",
-          status: "completed_with_incomplete_coverage",
+          status: "completed",
           attempt: 1,
-          warning,
         },
       ]);
 
@@ -1177,8 +1169,7 @@ describe("multiscan", () => {
         }),
       );
       expect(resumed).toMatchObject({
-        completed: 0,
-        incomplete: 1,
+        completed: 1,
         failed: 0,
         skipped: 1,
       });
@@ -1187,11 +1178,11 @@ describe("multiscan", () => {
       await rm(document);
       expect(
         await runMultiscan(options(paths, security, { knowledgeBasePaths })),
-      ).toMatchObject({ completed: 0, incomplete: 0, failed: 1 });
+      ).toMatchObject({ completed: 0, failed: 1 });
       await writeFile(document, "Original context.");
       expect(
         await runMultiscan(options(paths, security, { knowledgeBasePaths })),
-      ).toMatchObject({ incomplete: 1, failed: 0, skipped: 1 });
+      ).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
       expect(attempts).toBe(1);
       const afterRepair = await results(resumed.resultsPath);
       expect(afterRepair).toHaveLength(3);
@@ -1206,9 +1197,12 @@ describe("multiscan", () => {
     },
   );
 
-  test.each(["partial", "unknown"] as const)(
-    "resumes legacy sealed %s coverage without rerunning or duplicating cost",
-    async (completeness) => {
+  test.each([
+    ["partial", "failed"],
+    ["unknown", "completed_with_incomplete_coverage"],
+  ] as const)(
+    "resumes legacy sealed %s coverage (%s receipt) without rerunning or duplicating cost",
+    async (completeness, status) => {
       const { paths, source } = await repositoryFixture(
         `legacy-${completeness}`,
         "legacy",
@@ -1232,7 +1226,7 @@ describe("multiscan", () => {
         repository: source.path,
         revision: source.revision,
         mode: "standard",
-        status: "failed",
+        status,
         attempt: 1,
         outputDir,
         cost,
@@ -1256,20 +1250,12 @@ describe("multiscan", () => {
 
       expect(summary).toMatchObject({
         total: 1,
-        completed: 0,
-        incomplete: 1,
+        completed: 1,
         failed: 0,
         skipped: 1,
       });
       expect(security.run.mock.calls.length).toBe(0);
-      expect(progress).toEqual([
-        {
-          repository: "legacy",
-          status: "completed_with_incomplete_coverage",
-          attempt: 1,
-          warning: `Scan coverage is ${completeness}; results may be incomplete.`,
-        },
-      ]);
+      expect(progress).toEqual([]);
       expect(await results(summary.resultsPath)).toEqual([receipt]);
 
       await runMultiscan(options(paths, security, { maxAttempts: 3 }));
@@ -1279,28 +1265,28 @@ describe("multiscan", () => {
   );
 
   test.each([
-    ["operational failures", "partial", "Worker exited unexpectedly.", false],
+    ["operational failures", "completed", "Worker exited unexpectedly.", false],
     [
-      "complete coverage",
-      "complete",
+      "failed manifest",
+      "failed",
       "Multiscan repository coverage is incomplete.",
       false,
     ],
     [
-      "malformed coverage",
+      "malformed manifest",
       "malformed",
       "Multiscan repository coverage is incomplete.",
       false,
     ],
     [
       "missing artifacts",
-      "partial",
+      "completed",
       "Multiscan repository coverage is incomplete.",
       true,
     ],
   ] as const)(
     "continues retrying legacy %s",
-    async (_scenario, completeness, error, missingArtifact) => {
+    async (_scenario, status, error, missingArtifact) => {
       const { paths, source } = await repositoryFixture(
         "legacy-retry",
         "legacy",
@@ -1308,10 +1294,8 @@ describe("multiscan", () => {
       const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
       await completedScan(outputDir);
       await writeFile(
-        join(outputDir, "coverage.json"),
-        completeness === "malformed"
-          ? "{\n"
-          : `${JSON.stringify({ completeness })}\n`,
+        join(outputDir, "scan-manifest.json"),
+        status === "malformed" ? "{\n" : JSON.stringify({ scan: { status } }),
       );
       if (missingArtifact) await rm(join(outputDir, "report.md"));
       await writeFile(
@@ -1333,20 +1317,19 @@ describe("multiscan", () => {
 
       expect(summary).toMatchObject({
         completed: 1,
-        incomplete: 0,
         failed: 0,
         skipped: 0,
       });
       expect(attempts.mock.calls.length).toBe(1);
       expect(await results(summary.resultsPath)).toMatchObject([
         { status: "failed", attempt: 1, error },
-        { status: "completed", attempt: 2, coverage: "complete" },
+        { status: "completed", attempt: 2 },
       ]);
     },
   );
 
   test.each(["partial", "unknown"] as const)(
-    "keeps sealed %s-coverage CLI runs fail-closed without retrying",
+    "accepts sealed legacy %s coverage without retrying",
     async (completeness) => {
       const { paths } = await repositoryFixture("sample");
       const outputDir = join(paths.output, "artifacts", "sample", "attempt-1");
@@ -1379,25 +1362,19 @@ describe("multiscan", () => {
         };
       };
 
-      expect(await runCli(arguments_, clientDependencies)).toBe(2);
+      expect(await runCli(arguments_, clientDependencies)).toBe(0);
       expect(onRun).toHaveBeenCalledTimes(1);
       expect(JSON.parse(stdout.text())).toMatchObject({
         total: 1,
-        completed: 0,
-        incomplete: 1,
+        completed: 1,
         failed: 0,
         skipped: 0,
       });
-      const warning = `Scan coverage is ${completeness}; results may be incomplete.`;
-      expect(stderr.text()).toContain(
-        "sample completed_with_incomplete_coverage (attempt 1)",
-      );
-      expect(stderr.text()).toContain(warning);
+      expect(stderr.text()).toContain("sample completed (attempt 1)");
       expect(stderr.text()).not.toContain("attempt 2");
       expect(await results(join(paths.output, "results.jsonl"))).toMatchObject([
         {
-          status: "completed_with_incomplete_coverage",
-          coverage: completeness,
+          status: "completed",
           outputDir,
         },
       ]);
@@ -1411,19 +1388,17 @@ describe("multiscan", () => {
           resumedError.stream,
           clientDependencies,
         ),
-      ).toBe(2);
+      ).toBe(0);
       expect(JSON.parse(resumedOutput.text())).toMatchObject({
-        completed: 0,
-        incomplete: 1,
+        completed: 1,
         failed: 0,
         skipped: 1,
       });
-      expect(resumedError.text()).toContain(warning);
       expect(onRun).toHaveBeenCalledTimes(1);
     },
   );
 
-  test("retries incomplete scans that are missing required artifacts", async () => {
+  test("retries actual failed manifests while retaining completed reports", async () => {
     const { paths } = await repositoryFixture("missing-artifact", "missing");
 
     const attempts = mock<SecurityClient["run"]>(
@@ -1433,7 +1408,7 @@ describe("multiscan", () => {
           attempts.mock.calls.length === 1 ? "partial" : "complete",
         );
         if (attempts.mock.calls.length === 1) {
-          await rm(join(scanOptions.outputDir!, "report.md"));
+          result.manifest.scan.status = "failed";
         }
         return result;
       },
@@ -1441,16 +1416,15 @@ describe("multiscan", () => {
     const summary = await runMultiscan(options(paths, client(attempts)));
 
     expect(attempts.mock.calls.length).toBe(2);
-    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
       {
         id: "missing",
         status: "failed",
         attempt: 1,
-        coverage: "partial",
-        error: "Multiscan scan output is missing required artifacts.",
+        error: "Multiscan scan failed.",
       },
-      { id: "missing", status: "completed", attempt: 2, coverage: "complete" },
+      { id: "missing", status: "completed", attempt: 2 },
     ]);
   });
 
@@ -3040,10 +3014,20 @@ describe("multiscan", () => {
   });
 
   test("removes mixed-case repository Git variables before cloning", async () => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/multiscan.test.ts",
+        "removes mixed-case repository Git variables before cloning",
+      )
+    )
+      return;
     const { paths } = await repositoryFixture("isolated");
     const trace = join(paths.root, "git-events.jsonl");
 
     const repositoryVariables = [
+      "GIT_DIR",
+      "GIT_COMMON_DIR",
+      "gIt_Replace_Ref_Base",
       "Git_Dir",
       "gIt_Work_Tree",
       "Git_Index_File",
@@ -3062,11 +3046,19 @@ describe("multiscan", () => {
       }
       process.env["GIT_TRACE2_EVENT"] = trace;
       process.env["GIT_TRACE2_ENV_VARS"] = repositoryVariables.join(",");
+      const inherited = repositoryVariables.map((name) => process.env[name]);
 
       const summary = await runMultiscan(
         options(paths, client(completeRunWithoutAwait)),
       );
       expect(summary).toMatchObject({ completed: 1, failed: 0 });
+      const resumed = await runMultiscan(
+        options(paths, client(completeRunWithoutAwait)),
+      );
+      expect(resumed).toMatchObject({ completed: 1, skipped: 1, failed: 0 });
+      expect(repositoryVariables.map((name) => process.env[name])).toEqual(
+        inherited,
+      );
 
       const leakedVariables = parseJsonLines<{
         event: string;
@@ -3414,7 +3406,7 @@ describe("multiscan", () => {
     expect(security.run.mock.calls.length).toBe(0);
   });
 
-  test("records incomplete coverage separately and still finishes other repositories", async () => {
+  test("accepts legacy coverage notes and still finishes other repositories", async () => {
     const paths = await fixture();
     const incomplete = await repository(paths.root, "incomplete");
     const complete = await repository(paths.root, "complete");
@@ -3447,18 +3439,111 @@ describe("multiscan", () => {
 
     expect(summary).toMatchObject({
       total: 2,
-      completed: 1,
-      incomplete: 1,
+      completed: 2,
       failed: 0,
     });
     expect(await results(summary.resultsPath)).toMatchObject([
       {
         id: "incomplete",
-        status: "completed_with_incomplete_coverage",
+        status: "completed",
         attempt: 1,
-        coverage: "partial",
       },
-      { id: "complete", status: "completed", attempt: 1, coverage: "complete" },
+      { id: "complete", status: "completed", attempt: 1 },
     ]);
   });
 });
+
+test.each([
+  ["sha1", "sha1"],
+  ["sha1", "sha256"],
+  ["sha256", "sha1"],
+  ["sha256", "sha256"],
+])(
+  "bulk checkout preserves %s object format with a %s default",
+  async (objectFormat, defaultFormat) => {
+    if (
+      runTestInSubprocess(
+        fileURLToPath(import.meta.url),
+        `bulk checkout preserves ${objectFormat} object format with a ${defaultFormat} default`,
+      )
+    )
+      return;
+    const paths = await fixture();
+    const repo = await repository(paths.root, "source", objectFormat);
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
+    );
+    const run = mock(async (checkout: string, scanOptions = {}) => {
+      expect(process.env["GIT_DEFAULT_HASH"]).toBe(defaultFormat);
+      expect(git(checkout, "rev-parse", "--show-object-format")).toBe(
+        objectFormat,
+      );
+      expect(git(checkout, "rev-parse", "HEAD")).toBe(repo.revision);
+      return completeRun(checkout, scanOptions);
+    });
+    const previous = process.env["GIT_DEFAULT_HASH"];
+    process.env["GIT_DEFAULT_HASH"] = defaultFormat;
+    try {
+      const result = await runMultiscan(options(paths, client(run)));
+      expect(result.failed).toBe(0);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(process.env["GIT_DEFAULT_HASH"]).toBe(defaultFormat);
+    } finally {
+      if (previous === undefined) delete process.env["GIT_DEFAULT_HASH"];
+      else process.env["GIT_DEFAULT_HASH"] = previous;
+    }
+  },
+);
+
+testPosix(
+  "bulk SHA-1 checkout works without Git object-format options",
+  async () => {
+    if (
+      runTestInSubprocess(
+        fileURLToPath(import.meta.url),
+        "bulk SHA-1 checkout works without Git object-format options",
+      )
+    )
+      return;
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfixture,${source.path},${source.revision}\n`,
+    );
+    const command = await resolveTrustedExecutable(
+      "git",
+      process.env,
+      process.cwd(),
+    );
+    expect(command).not.toBeNull();
+    const bin = await temporaryDirectory();
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh
+for argument do
+  case "$argument" in
+    --object-format=*) echo 'error: unknown option object-format' >&2; exit 129 ;;
+  esac
+done
+exec '${command!.executable.replaceAll("'", "'\\''")}' "$@"
+`,
+      { mode: 0o700 },
+    );
+    const previousPath = process.env["PATH"];
+    process.env["PATH"] = `${bin}:${previousPath ?? ""}`;
+    try {
+      const run = mock(async (checkout: string, scanOptions = {}) => {
+        expect(git(checkout, "rev-parse", "HEAD")).toBe(source.revision);
+        return completeRun(checkout, scanOptions);
+      });
+      const result = await runMultiscan(options(paths, client(run)));
+      expect(result.failed).toBe(0);
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previousPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previousPath;
+    }
+  },
+);
