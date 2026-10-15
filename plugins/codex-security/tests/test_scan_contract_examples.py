@@ -9,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
+from workbench_test_support import saved_coverage
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = PLUGIN_DIR / "examples" / "completed-scan"
@@ -39,6 +40,63 @@ class ScanContractExamplesTest(unittest.TestCase):
         self.manifest = read_json(EXAMPLE_DIR / "scan-manifest.json")
         self.findings = read_json(EXAMPLE_DIR / "findings.json")
         self.coverage = read_json(EXAMPLE_DIR / "coverage.json")
+
+    def test_deferred_paths_follow_existing_python_path_policy(self) -> None:
+        from workbench_test_support import load_script
+
+        finalizer = load_script("finalize_scan_contract")
+        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
+        # JS and Python disagree about U+0085 and U+FEFF as whitespace.
+        # Saved-path schema validation should follow the Python finalizer.
+        accepted = (
+            ".",
+            "./",
+            "src/extract.py",
+            "src/./extract.py",
+            "src//extract.py",
+            "src:stream.ts",
+            "src/a:b.py",
+            "src/é:helper.ts",
+            "src/naïve file.ts",
+            "src/.hidden",
+            "\ufeff",
+        )
+        rejected = (
+            "../../outside.ts",
+            "/etc/passwd",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "src\\outside.ts",
+            "src/\0outside.ts",
+            "src/\toutside.ts",
+            "src/\x01outside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "   ",
+            "\u0085",
+        )
+        for paths, valid in ((accepted, True), (rejected, False)):
+            for path in paths:
+                with self.subTest(path=repr(path)):
+                    coverage = copy.deepcopy(self.coverage)
+                    coverage["completeness"] = "partial"
+                    coverage["deferred"] = [
+                        {"id": "review", "reason": "Pending source review.", "paths": [path]}
+                    ]
+                    if valid:
+                        finalizer._require_safe_relative_path(
+                            path, "coverage.deferred[0].paths[0]", allow_dot=True
+                        )
+                        validate_schema_node(coverage, schema, "coverage")
+                    else:
+                        with self.assertRaises(finalizer.ContractError):
+                            finalizer._require_safe_relative_path(
+                                path, "coverage.deferred[0].paths[0]", allow_dot=True
+                            )
+                        with self.assertRaises(AssertionError):
+                            validate_schema_node(coverage, schema, "coverage")
 
     def test_examples_match_schemas(self) -> None:
         for name, payload in (
@@ -115,31 +173,12 @@ class ScanContractExamplesTest(unittest.TestCase):
         )
         standard_request = {
             **request,
-            "coverage": {**coverage, "completeness": "complete", "deferred": []},
+            "coverage": {**coverage, "deferred": []},
         }
         standard_validator.validate(standard_request)
         self.assertFalse(standard_validator.is_valid(request))
         self.assertFalse(standard_validator.is_valid({**request, "coverage": coverage}))
-        for completeness in ("complete", "partial", "unknown"):
-            with self.subTest(standard_completeness=completeness):
-                standard_coverage_request = {
-                    **standard_request,
-                    "coverage": {
-                        **standard_request["coverage"],
-                        "completeness": completeness,
-                    },
-                }
-                standard_validator.validate(standard_coverage_request)
-                self.assertFalse(validator.is_valid(standard_coverage_request))
-        self.assertFalse(
-            standard_validator.is_valid(
-                {
-                    **standard_request,
-                    "coverage": {**standard_request["coverage"], "completeness": "invalid"},
-                }
-            )
-        )
-        for missing_field in ("completeness", "surfaces", "explicitExclusions", "deferred"):
+        for missing_field in ("surfaces", "explicitExclusions", "deferred"):
             with self.subTest(standard_missing_coverage_field=missing_field):
                 self.assertFalse(
                     standard_validator.is_valid(
@@ -302,13 +341,6 @@ class ScanContractExamplesTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "was expected"):
             validate_schema_node(manifest, schema, "scan-manifest")
 
-    def test_coverage_rejects_unknown_completeness(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "probably-complete"
-        with self.assertRaisesRegex(AssertionError, "is not one of"):
-            validate_schema_node(coverage, schema, "coverage")
-
     def test_findings_accept_safe_writeup_and_reject_unsafe_path(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
         findings = copy.deepcopy(self.findings)
@@ -352,12 +384,7 @@ class ScanContractExamplesTest(unittest.TestCase):
         draft = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [draft_finding],
-            "coverage": {
-                "completeness": "complete",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
+            "coverage": saved_coverage(),
         }
         draft_validator.validate(draft)
 
@@ -388,34 +415,14 @@ class ScanContractExamplesTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "does not match"):
                     validate_schema_node(coverage, schema, "coverage")
 
-    def test_coverage_rejects_complete_with_needs_follow_up_surface(self) -> None:
+    def test_coverage_accepts_unresolved_work(self) -> None:
         schema = read_json(SCHEMA_DIR / "coverage.schema.json")
         coverage = copy.deepcopy(self.coverage)
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_rejects_complete_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["deferred"] = [
-            {
-                "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
-            }
-        ]
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_allows_partial_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "partial"
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
+                "reason": "Runtime verification remains unavailable.",
             }
         ]
         validate_schema_node(coverage, schema, "coverage")

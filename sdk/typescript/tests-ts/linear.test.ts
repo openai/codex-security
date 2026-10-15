@@ -1,3 +1,4 @@
+import { emptyPage } from "./support/linear-pagination.js";
 import { AuthenticationLinearError, RatelimitedLinearError } from "@linear/sdk";
 import { describe, expect, test } from "bun:test";
 import {
@@ -74,10 +75,7 @@ describe("Linear issue intake", () => {
               title: "Recheck a completed issue",
               description: null,
               url: "https://linear.app/example/issue/SEC-123",
-              comments: async () => ({
-                nodes: [],
-                pageInfo: { hasNextPage: false },
-              }),
+              comments: emptyPage,
             },
           ],
           (value) => (filter = value),
@@ -112,10 +110,7 @@ describe("Linear issue intake", () => {
                 title: "Synthetic finding",
                 description: "Synthetic evidence",
                 url,
-                comments: async () => ({
-                  nodes: [],
-                  pageInfo: { hasNextPage: false },
-                }),
+                comments: emptyPage,
               };
             },
           }) as unknown as LinearImportClient,
@@ -156,13 +151,13 @@ describe("Linear issue intake", () => {
     }
   });
 
-  test("reports SDK failures without exposing credentials", async () => {
+  test("reports SDK failures with original diagnostic details", async () => {
     for (const [error, message] of [
       [new AuthenticationLinearError(), "Linear authentication failed."],
       [new RatelimitedLinearError(), "Linear request was rate limited."],
       [
         new Error("Invalid lin_api_SYNTHETIC_SECRET"),
-        "Linear request failed: [redacted]",
+        "Linear request failed: Invalid lin_api_SYNTHETIC_SECRET",
       ],
     ] as const) {
       await expect(
@@ -177,9 +172,7 @@ describe("Linear issue intake", () => {
                 comments: async () => ({
                   nodes: [],
                   pageInfo: { hasNextPage: true },
-                  fetchNext: async () => {
-                    throw error;
-                  },
+                  fetchNext: (Promise.reject<never>).bind(Promise, error),
                 }),
               }),
             }) as unknown as LinearImportClient,

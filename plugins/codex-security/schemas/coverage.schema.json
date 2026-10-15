@@ -8,7 +8,6 @@
     "schemaVersion",
     "scanId",
     "mode",
-    "completeness",
     "inventoryStrategy",
     "includePaths",
     "excludePaths",
@@ -36,13 +35,6 @@
         "branch_diff",
         "working_tree",
         "deep_repository"
-      ]
-    },
-    "completeness": {
-      "enum": [
-        "complete",
-        "partial",
-        "unknown"
       ]
     },
     "inventoryStrategy": {
@@ -155,7 +147,7 @@
             "items": {
               "type": "string",
               "minLength": 1,
-              "pattern": "^(?!/)(?!\\.$)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:)(?!.*\\u0000).+$"
+              "pattern": "^(?!/)(?![A-Za-z]:)(?![\\s\\S]*(?:^|/)\\.\\.(?:/|$))(?![\\s\\S]*[\\\\\\u0000-\\u001f])(?=[\\s\\S]*(?:\\uFEFF|[^\\s\\u0085]))[\\s\\S]+$"
             }
           },
           "surfaceIds": {
@@ -166,6 +158,28 @@
             }
           }
         }
+      }
+    },
+    "resolvedDeferred": {
+      "description": "Completed generic review tasks, with their saved IDs and completion reasons.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "reason"
+        ],
+        "additionalProperties": false
       }
     },
     "openQuestions": {
@@ -187,43 +201,5 @@
         }
       }
     }
-  },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "completeness": {
-            "const": "complete"
-          }
-        },
-        "required": [
-          "completeness"
-        ]
-      },
-      "then": {
-        "properties": {
-          "deferred": {
-            "contains": {},
-            "minContains": 0,
-            "maxContains": 0
-          },
-          "surfaces": {
-            "contains": {
-              "type": "object",
-              "required": [
-                "disposition"
-              ],
-              "properties": {
-                "disposition": {
-                  "const": "needs_follow_up"
-                }
-              }
-            },
-            "minContains": 0,
-            "maxContains": 0
-          }
-        }
-      }
-    }
-  ]
+  }
 }

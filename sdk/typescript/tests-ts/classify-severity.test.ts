@@ -1,5 +1,5 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { modelResponseText } from "./support/model-response-text.js";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -10,19 +10,16 @@ import {
   type ClassifySeverityOptions,
   type SeverityClassificationFinding,
 } from "../src/classify-severity.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "severity-policy-",
+  false,
+);
+afterEach(cleanup);
 
 async function document(contents: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "severity-policy-"));
-  directories.push(directory);
+  const directory = await temporaryDirectory();
   const path = join(directory, "policy.md");
   await writeFile(path, contents);
   return path;
@@ -56,12 +53,7 @@ function fakeCodex(response: unknown) {
       return {
         async run(prompt, turn) {
           calls.push({ prompt, thread, turn });
-          return {
-            finalResponse:
-              typeof response === "string"
-                ? response
-                : JSON.stringify(response),
-          };
+          return { finalResponse: modelResponseText(response) };
         },
       };
     },
@@ -104,7 +96,7 @@ test("supplies complete evidence and separate policy/context to a restricted str
     codex,
     signal,
     model: "synthetic-model",
-    reasoningEffort: "high",
+    reasoningEffort: "future-effort",
   });
   expect(result.assessments[0]).toMatchObject({
     ...assessed,
@@ -118,7 +110,7 @@ test("supplies complete evidence and separate policy/context to a restricted str
   expect(calls[0]!.thread).toMatchObject({
     threadSource: "security_severity_classification",
     model: "synthetic-model",
-    modelReasoningEffort: "high",
+    modelReasoningEffort: "future-effort",
     sandboxMode: "read-only",
     approvalPolicy: "never",
     networkAccessEnabled: false,

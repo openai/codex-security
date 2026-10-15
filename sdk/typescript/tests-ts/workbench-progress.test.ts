@@ -1,17 +1,15 @@
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNodePython } from "./support/python-probe.js";
 
 function validatePreflightIssues(issues: object[], stdin = false) {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const serialized = JSON.stringify(issues);
-  return spawnSync(
+  return runNodePython(
     python!,
     [
-      "-I",
-      "-B",
       "-c",
       [
         "import json, sys",
@@ -31,7 +29,7 @@ function validatePreflightIssues(issues: object[], stdin = false) {
         ? ["--preflight-issues-json-stdin"]
         : ["--preflight-issues-json", serialized]),
     ],
-    { encoding: "utf8", input: stdin ? serialized : undefined },
+    { input: stdin ? serialized : undefined },
   );
 }
 

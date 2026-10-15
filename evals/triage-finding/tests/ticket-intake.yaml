@@ -17,7 +17,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts
 
 - description: "Linear permission failure stops with access guidance"
   metadata:
@@ -38,7 +38,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts
 
 - description: "Missing Linear issue stops with identifier guidance"
   metadata:
@@ -59,7 +59,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts
 
 - description: "Repeated transient Linear failure stops after one retry"
   metadata:
@@ -81,7 +81,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts
 
 - description: "Linear parent asks before importing direct sub-issues"
   metadata:
@@ -102,7 +102,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts
 
 - description: "Linear nested sub-issues ask again at the next depth"
   metadata:
@@ -123,7 +123,7 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts
 
 - description: "Ambiguous Linear parent asks whether it is a finding"
   metadata:
@@ -144,24 +144,4 @@
     disableDefaultAsserts: true
   assert:
     - type: javascript
-      value: file://./assertions/ticket-intake.js
-
-- description: "Linear issue tree over 250 stops for narrowing"
-  metadata:
-    case_id: linear-subissue-limit
-    source_type: scanner_ticket
-  vars:
-    case_id: linear-subissue-limit
-    target_repo: evals/triage-finding/fixtures/repo
-    source_type_under_test: scanner_ticket
-    finding_input: "The approved Linear parent and selected sub-issue levels contain 251 triage items. No issue bodies beyond the limit have been imported."
-    invocation_preamble: "Continue $codex-security:triage-finding for this Linear issue tree."
-    expected_linear_subissues: over_limit
-    eval_instructions: |-
-      This is an automated eval. Follow the skill's collection-size behavior.
-      Do not inspect code, silently truncate, split the run, or emit triage JSON.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.js
+      value: file://./assertions/ticket-intake.mts

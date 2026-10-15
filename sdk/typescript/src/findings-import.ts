@@ -1,16 +1,19 @@
-import { createHash } from "node:crypto";
+import { isRecord } from "./record.js";
+import { deriveFindingIdentity, sha256Text as sha256 } from "./contract.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "incur";
 import Papa from "papaparse";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Finding, FindingsDocument } from "./models.js";
 
 export const CSV_TARGET_ID = "codex-security-csv-import";
 export type FindingsImportFormat = "csv" | "json";
 
-const EXPORTED_CSV_ESCAPE = /^'(?:[\t\r\n]|\s*[=+\-@＝＋－＠])/u;
+// Match the Python exporter's str.lstrip(), including its extra C0 separators.
+const EXPORTED_CSV_ESCAPE =
+  /^'(?:['\t\r\n]|[\p{White_Space}\u001c-\u001f]*[=+\-@＝＋－＠])/u;
 const csvFindingRowSchema = z
   .object({
     occurrence_id: z.string().regex(/^occ_[a-f0-9]{24}$/u, {
@@ -107,11 +110,7 @@ export async function parseImportedFindings(
   pluginRoot: string,
 ): Promise<Finding[]> {
   if (format === "csv") {
-    return parseFindingsCsv(source).map((row) => ({
-      ...csvRowFinding(row, "import"),
-      findingId: row.finding_id,
-      occurrenceId: row.occurrence_id,
-    }));
+    return parseFindingsCsv(source).map(csvRowFinding);
   }
 
   let payload: unknown;
@@ -120,15 +119,12 @@ export async function parseImportedFindings(
     // the CSV parser already skips.
     payload = JSON.parse(source.replace(/^\uFEFF/u, ""));
   } catch (error) {
-    throw new CodexSecurityError("Findings JSON could not be parsed.", {
-      cause: error,
-    });
+    throw new CodexSecurityError(
+      `Findings JSON could not be parsed. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
-  if (
-    payload === null ||
-    typeof payload !== "object" ||
-    Array.isArray(payload)
-  ) {
+  if (!isRecord(payload)) {
     throw new CodexSecurityError(
       "Findings JSON must contain a findings document or an object with a findings array.",
     );
@@ -175,24 +171,14 @@ export function bindImportedFindings(
   targetId: string,
 ): Finding[] {
   return findings.map((finding) => {
-    const ruleId = `import.${format}`;
-    const anchor = finding.occurrenceId;
-    const fingerprint = `codex-security/v1:sha256:${sha256(
-      ["codex-security/v1", targetId, ruleId, anchor, ""].join("\0"),
-    )}`;
     // A source report path names another scan's artifact. Preserve it as
     // provenance without treating the imported path as permission to read it.
     const { writeup, ...content } = finding;
     return {
       ...content,
-      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(0, 24)}`,
-      ruleId,
-      identity: { anchor },
-      fingerprints: {
-        algorithm: "codex-security/v1",
-        primary: fingerprint,
-      },
+      ...deriveFindingIdentity(scanId, targetId, `import.${format}`, {
+        anchor: finding.occurrenceId,
+      }),
       provenance: { source: `${format}_import` },
       extensions: {
         ...finding.extensions,
@@ -248,13 +234,7 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
       `Findings CSV must use the Codex Security export columns: ${REQUIRED_CSV_COLUMNS.join(", ")} (candidate_id is optional).`,
     );
   }
-  if (rows.length === 0) {
-    throw new CodexSecurityError(
-      "Findings CSV must contain at least one finding.",
-    );
-  }
 
-  const findingIds = new Set<string>();
   const occurrenceIds = new Set<string>();
   return rows.map((record, index) => {
     const rowNumber = index + 2;
@@ -263,13 +243,9 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
       throw csvRowError(rowNumber, parsed.error.issues[0]!.message);
     }
     const row = parsed.data;
-    if (findingIds.has(row.finding_id)) {
-      throw csvRowError(rowNumber, "has a duplicate finding_id");
-    }
     if (occurrenceIds.has(row.occurrence_id)) {
       throw csvRowError(rowNumber, "has a duplicate occurrence_id");
     }
-    findingIds.add(row.finding_id);
     occurrenceIds.add(row.occurrence_id);
     return row;
   });
@@ -279,20 +255,15 @@ function decodeExportedCsvCell(value: string): string {
   return EXPORTED_CSV_ESCAPE.test(value) ? value.slice(1) : value;
 }
 
-export function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
+export function csvRowFinding(row: CsvFindingRow): Finding {
   const ruleId = "import.csv";
-  const anchor = row.finding_id;
+  const anchor = row.occurrence_id;
   const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;
-  const findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  const occurrenceId = `occ_${sha256([scanId, fingerprint].join("\0")).slice(
-    0,
-    24,
-  )}`;
   return {
-    findingId,
-    occurrenceId,
+    findingId: row.finding_id,
+    occurrenceId: row.occurrence_id,
     ruleId,
     identity: { anchor },
     fingerprints: {
@@ -345,8 +316,7 @@ function requiredCsvText(column: string) {
 
 function validCsvLine(value: string): boolean {
   if (!/^[1-9]\d*$/u.test(value)) return false;
-  const line = Number(value);
-  return Number.isSafeInteger(line);
+  return Number.isSafeInteger(Number(value));
 }
 
 function safeFindingPath(value: string): boolean {
@@ -367,8 +337,4 @@ function safeFindingPath(value: string): boolean {
 
 function csvRowError(rowNumber: number, detail: string): CodexSecurityError {
   return new CodexSecurityError(`Findings CSV row ${rowNumber} ${detail}.`);
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
 }

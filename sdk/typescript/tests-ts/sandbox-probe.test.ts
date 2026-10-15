@@ -1,39 +1,19 @@
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { SandboxUnavailableError } from "../src/index.js";
 import { probeCodexSandbox } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const SANDBOX_DENIAL =
   "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-sandbox-",
+);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const path = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-sandbox-")),
-  );
-  temporaryDirectories.push(path);
-  return path;
-}
+afterEach(cleanup);
 
 async function syntheticPlugin(root: string): Promise<string> {
   const path = join(root, "plugin");

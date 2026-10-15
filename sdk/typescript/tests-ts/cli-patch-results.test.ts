@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 type FixtureOptions = NonNullable<Parameters<typeof dependencies>[0]>;
 const execFileAsync = promisify(execFile);
@@ -45,12 +46,10 @@ async function repositoryFixture({ initializeGit = true } = {}) {
       await rm(directory, { recursive: true, force: true });
     },
     async patch(args: string[], options: FixtureOptions = {}) {
-      const stdout = capture();
-      const stderr = capture();
-      const status = await main(
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const status = await runCli(
         ["patch", ...args, "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           currentDirectory: directory,
           environment: {
@@ -100,15 +99,7 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
-        onCodex: (_args, output, environment) =>
-          runCodexSkillCommand(
-            ["-e", source],
-            output,
-            {
-              command: process.execPath,
-            },
-            environment,
-          ),
+        onCodex: nodeCodex(source),
       },
     );
     expect(outcome.status).toBe(0);
@@ -247,10 +238,22 @@ lines.on("line", (line) => {
     expect(outcome.stderr).toContain("No patch was applied; 0 files changed.");
   });
 
-  test.each(["exit", "rpc"])(
+  test.each(["exit", "rpc", "stdout", "empty"])(
     "fails before starting a model turn when sandbox preflight returns %s failure",
     async (failure) => {
       await using fixture = await repositoryFixture();
+      const diagnostic =
+        "sandbox: unshare: Permission denied /synthetic/repository sk-proj-SYNTHETIC_SECRET";
+      const response =
+        failure === "rpc"
+          ? { error: { code: -32603, message: diagnostic } }
+          : {
+              result: {
+                exitCode: 1,
+                stdout: failure === "stdout" ? diagnostic : "",
+                stderr: failure === "exit" ? diagnostic : "",
+              },
+            };
       const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -262,22 +265,14 @@ lines.on("line", (line) => {
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
     assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
-    send({ id: request.id, ${failure === "rpc" ? 'error: { code: -32603, message: "sandbox: unshare: Permission denied /private/repository sk-proj-SYNTHETIC_SECRET" }' : 'result: { exitCode: 1, stdout: "", stderr: "sandbox: unshare: Permission denied /private/repository sk-proj-SYNTHETIC_SECRET" }'} });
+    send({ id: request.id, ...${JSON.stringify(response)} });
   }
   if (request.method === "turn/start") throw new Error("Model turn must not start");
 });`;
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
-          onCodex: (_args, output, environment) =>
-            runCodexSkillCommand(
-              ["-e", source],
-              output,
-              {
-                command: process.execPath,
-              },
-              environment,
-            ),
+          onCodex: nodeCodex(source),
         },
       );
       expect(outcome.status).toBe(2);
@@ -285,11 +280,22 @@ lines.on("line", (line) => {
         ok: false,
         error: { code: "SANDBOX_UNAVAILABLE" },
       });
-      expect(outcome.stdout + outcome.stderr).not.toContain("SYNTHETIC_SECRET");
-      expect(outcome.stdout + outcome.stderr).not.toContain(
-        "/private/repository",
+      if (failure !== "empty")
+        expect(outcome.stdout + outcome.stderr).toContain(diagnostic);
+      expect(outcome.stderr).toContain(
+        "No patch was applied; 0 files changed.",
       );
       expect(await fixture.git("status", "--porcelain")).toBe("");
     },
   );
 });
+
+function nodeCodex(source: string): NonNullable<FixtureOptions["onCodex"]> {
+  return (_args, output, environment) =>
+    runCodexSkillCommand(
+      ["-e", source],
+      output,
+      { command: process.execPath },
+      environment,
+    );
+}

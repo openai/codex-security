@@ -55,34 +55,52 @@ async function scanWithDeferredPath(path: string): Promise<string> {
 }
 
 describe("canonical deferred coverage paths", () => {
-  test("rejects paths outside the repository-relative POSIX boundary", async () => {
-    for (const path of [
-      "../../outside.ts",
-      "/etc/passwd",
-      "C:/outside.ts",
-      "src\\outside.ts",
-      ".",
-      "src:stream.ts",
-      "src/\0outside.ts",
-    ]) {
-      const scanDir = await scanWithDeferredPath(path);
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow("coverage.json");
-    }
+  test.each([
+    "../../outside.ts",
+    "/etc/passwd",
+    "C:/outside.ts",
+    "c:outside.ts",
+    "src/../outside.ts",
+    "src/..",
+    "src\\outside.ts",
+    "src/\0outside.ts",
+    "src/\toutside.ts",
+    "src/\u0001outside.ts",
+    "src/outside.ts\n",
+    "src/\routside.ts",
+    "   ",
+    "\u0085",
+  ])("rejects invalid deferred path %p", async (path) => {
+    const scanDir = await scanWithDeferredPath(path);
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("coverage.json");
   });
 
-  test("accepts a repository-relative deferred path", async () => {
-    const scanDir = await scanWithDeferredPath("src/extract.py");
+  test.each([
+    ".",
+    "./",
+    "src/extract.py",
+    "src/./extract.py",
+    "src//extract.py",
+    "src:stream.ts",
+    "src/a:b.py",
+    "src/é:helper.ts",
+    "src/naïve file.ts",
+    "src/.hidden",
+    "\uFEFF",
+  ])("preserves accepted deferred path %p", async (path) => {
+    const scanDir = await scanWithDeferredPath(path);
+    const coverageFile = join(scanDir, "coverage.json");
+    const sealedBytes = await readFile(coverageFile);
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).resolves.toMatchObject({
       coverage: {
         completeness: "partial",
-        deferred: [
-          expect.objectContaining({ paths: ["src/extract.py"] }),
-        ],
+        deferred: [expect.objectContaining({ paths: [path] })],
       },
     });
+    expect(await readFile(coverageFile)).toEqual(sealedBytes);
   });
 });

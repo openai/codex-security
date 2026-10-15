@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import unittest
 from pathlib import Path
 
+from workbench_test_support import load_script
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = PLUGIN_ROOT / "examples" / "completed-scan"
-spec = importlib.util.spec_from_file_location(
-    "sarif_finalizer", PLUGIN_ROOT / "scripts" / "finalize_scan_contract.py"
-)
-assert spec is not None and spec.loader is not None
-FINALIZER = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(FINALIZER)
+FINALIZER = load_script("finalize_scan_contract", module_name="sarif_finalizer")
 
 
 class SarifProjectionTest(unittest.TestCase):

@@ -1,17 +1,15 @@
-import { spawnSync } from "node:child_process";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
+import { runWorkflowScript } from "./support/workflow-script.js";
 
 interface Step {
   name?: string;
@@ -46,21 +44,16 @@ const steps = job.steps.flatMap((step) =>
 ) as Step[];
 const scan = steps.find((step) => step.name === "runScan")!;
 const sarif = steps.find((step) => step.name === "exportSarif")!;
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function runStep(
   step: Step,
   overrides: Record<string, string> = {},
   scanFiles: string[] = [],
 ) {
-  const directory = mkdtempSync(join(tmpdir(), "codex azure example "));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("codex azure example ");
   for (const child of ["repository with spaces", "scan", "reports"]) {
     mkdirSync(join(directory, child));
   }
@@ -69,46 +62,20 @@ function runStep(
   }
   // Git Bash accepts forward-slash drive paths on Windows.
   const root = directory.replaceAll("\\", "/");
-  const bash =
-    process.platform === "win32"
-      ? join(
-          process.env["ProgramFiles"] ?? "C:/Program Files",
-          "Git/bin/bash.exe",
-        )
-      : "bash";
-  const result = spawnSync(
-    bash,
-    [
-      "--noprofile",
-      "--norc",
-      "-c",
-      `codex-security() {
-  printf '%s\\0' "$@" > "$ARGUMENTS_PATH"
-  printf '{"mock":true}\\n'
-  return "$MOCK_EXIT_CODE"
-}
-${step.inputs?.["inlineScript"] ?? step.inputs?.["script"]}`,
-    ],
+  const result = runWorkflowScript(
+    directory,
+    step.inputs?.["inlineScript"] ?? step.inputs?.["script"],
     {
-      cwd: directory,
-      encoding: "utf8",
-      env: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        ARGUMENTS_PATH: `${root}/arguments`,
-        TARGET_DIRECTORY: `${root}/repository with spaces`,
-        SCAN_DIRECTORY: `${root}/scan`,
-        REPORT_DIRECTORY: `${root}/reports`,
-        BEDROCK_MODEL_ID: "example.model",
-        SCAN_MODE: "full",
-        BASE_REVISION: "HEAD^",
-        FAIL_ON_SEVERITY: "none",
-        MOCK_EXIT_CODE: "0",
-        ...overrides,
-      },
+      ARGUMENTS_PATH: `${root}/arguments`,
+      TARGET_DIRECTORY: `${root}/repository with spaces`,
+      SCAN_DIRECTORY: `${root}/scan`,
+      REPORT_DIRECTORY: `${root}/reports`,
+      SCAN_MODE: "full",
+      BASE_REVISION: "HEAD^",
+      FAIL_ON_SEVERITY: "none",
+      ...overrides,
     },
   );
-  if (result.error) throw result.error;
   const argumentsPath = join(directory, "arguments");
   const args = existsSync(argumentsPath)
     ? readFileSync(argumentsPath, "utf8").split("\0").slice(0, -1)

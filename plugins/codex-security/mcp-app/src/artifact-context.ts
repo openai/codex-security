@@ -1,3 +1,4 @@
+import { asRecord } from "./record.js";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ArtifactContext } from "./artifact-io.js";
@@ -19,23 +20,6 @@ export interface ScanArtifactContextOptions {
   handoffClaimToken?: string;
   pluginRoot?: string;
   pythonCommand?: string;
-}
-
-export interface WorkerArtifactContextInput {
-  root: string;
-  repoRoot: string;
-  layout?: "worker" | "reducer";
-  scanId?: string;
-  scope?: string;
-  pluginRoot?: string;
-  pythonCommand?: string;
-  targetContract?: Readonly<Record<string, unknown>>;
-  targetRevision?: string;
-  targetSnapshotDigest?: string;
-  handoffClaimToken?: string;
-  status?: string;
-  mode?: string;
-  deepReducer?: ArtifactContext["deepReducer"];
 }
 
 /**
@@ -95,7 +79,6 @@ export async function createScanArtifactContext(
     "Codex Security scan " + scanId + " has no bound target context.",
   );
   const targetContract = asRecord(scan.contract);
-  const contractTarget = asRecord(targetContract?.target);
   return {
     root: await canonicalDirectory(
       rawRoot,
@@ -112,55 +95,10 @@ export async function createScanArtifactContext(
     ...defined("pythonCommand", options.pythonCommand),
     ...defined("targetContract", targetContract),
     ...defined("targetRevision", optionalString(scan.targetRevision)),
-    ...defined(
-      "targetSnapshotDigest",
-      optionalString(scan.targetSnapshotDigest) ??
-        optionalString(contractTarget?.requiredSnapshotDigest),
-    ),
     ...defined("handoffClaimToken", suppliedClaim ?? expectedClaim),
     ...defined("status", status),
     ...defined("mode", optionalString(scan.mode)),
   };
-}
-
-/**
- * Bind a lightweight worker to host-supplied state, never model-supplied paths.
- */
-export async function createWorkerArtifactContext(
-  input: WorkerArtifactContextInput,
-): Promise<ArtifactContext> {
-  const layout = input.layout ?? "worker";
-  if (layout !== "worker" && layout !== "reducer") {
-    throw new Error("Codex Security worker artifact layout is invalid.");
-  }
-  const context: ArtifactContext = {
-    root: await canonicalDirectory(
-      input.root,
-      "Codex Security worker artifact root",
-    ),
-    repoRoot: await canonicalDirectory(
-      input.repoRoot,
-      "Codex Security worker target root",
-    ),
-    layout,
-    ...defined("scanId", input.scanId),
-    ...defined("scope", input.scope),
-    ...defined("pluginRoot", input.pluginRoot),
-    ...defined("pythonCommand", input.pythonCommand),
-    ...defined("targetContract", input.targetContract),
-    ...defined("targetRevision", input.targetRevision),
-    ...defined("targetSnapshotDigest", input.targetSnapshotDigest),
-    ...defined("handoffClaimToken", input.handoffClaimToken),
-    ...defined("status", input.status),
-    ...defined("mode", input.mode),
-    ...defined("deepReducer", input.deepReducer),
-  };
-  if (context.deepReducer && layout !== "reducer") {
-    throw new Error(
-      "Codex Security reducer state requires a reducer-bound context.",
-    );
-  }
-  return context;
 }
 
 function scanRecord(
@@ -178,7 +116,7 @@ function scanRecord(
   return scan;
 }
 
-async function canonicalDirectory(
+export async function canonicalDirectory(
   value: string,
   label: string,
 ): Promise<string> {
@@ -186,8 +124,7 @@ async function canonicalDirectory(
     throw new Error(label + " must be an absolute directory.");
   }
   const requested = resolve(value);
-  const metadata = await fs.lstat(requested).catch(() => undefined);
-  if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
+  if (!(await fs.lstat(requested).catch(() => undefined))?.isDirectory()) {
     throw new Error(label + " is not a safe regular directory.");
   }
   try {
@@ -207,13 +144,7 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function defined<Key extends string, Value>(
+export function defined<Key extends string, Value>(
   key: Key,
   value: Value | undefined,
 ): Partial<Record<Key, Value>> {

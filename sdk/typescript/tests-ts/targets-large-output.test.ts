@@ -1,6 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { gitText } from "./support/shell.js";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
@@ -8,30 +7,20 @@ import {
   normalizeTarget,
   validateCommittedDiffCheckout,
 } from "../src/targets.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-large-targets-",
+);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 function git(repo: string, ...args: string[]): string {
-  return execFileSync("git", args, {
-    cwd: repo,
-    encoding: "utf8",
-    maxBuffer: Infinity,
-  }).trim();
+  return gitText(args, { cwd: repo, maxBuffer: Infinity }).trim();
 }
 
 test("validates committed diffs with tracked-file output larger than 1 MB", async () => {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-large-targets-")),
-  );
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectory();
   const repo = join(root, "repo");
   await mkdir(repo);
 

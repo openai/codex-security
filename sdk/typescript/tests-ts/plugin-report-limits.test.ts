@@ -22,7 +22,7 @@ describe("bundled scan report and source limits", () => {
       "    source = b'x' * (1024 * 1024 + 1)",
       "    excerpts.git_bytes = lambda *args: source",
       "    target = pathlib.Path(directory).resolve()",
-      "    excerpt = excerpts.scanned_source_text({'target_revision': 'deadbeef', 'target_snapshot_digest': None}, target, 'large.py')",
+      "    excerpt = excerpts.scanned_source_text({'target_revision': 'deadbeef', 'target_snapshot_digest': None, 'diff_target_kind': None}, target, 'large.py')",
       "    hashes = finalizer._github_line_hashes(io.StringIO('line\\n' * 100001), {100001})",
       "    print(json.dumps({'documentBytes': len(document), 'sourceBytes': len(excerpt), 'lateSourceLine': 100001 in hashes, 'unsafePathRejected': excerpts.safe_source_path(target, '../outside') is None}))",
     ].join("\n");
@@ -50,6 +50,7 @@ describe("bundled scan report and source limits", () => {
       "diagnostics = {'rootCause': {'summary': 'Missing authorization check.'}, 'validation': {'summary': 'An untrusted request reaches the protected resource.'}, 'attackPath': {'narrative': 'The request bypasses the authorization boundary.'}, 'codeEvidence': [{'id': 'evidence', 'label': 'Missing check', 'path': 'example.py', 'startLine': 1, 'code': 'return resource', 'explanation': 'No authorization check runs.'}], 'evidence': 'The protected resource was exposed.', 'evidenceExcerpt': 'return resource'}",
       "details = {'remediationTests': [f'test-{index}' for index in range(40)], 'preventiveControls': [f'control-{index}' for index in range(40)]}",
       "large = {**diagnostics, 'preventiveControls': ['x' * 900 for _ in range(20)], 'remediationTests': ['Verify authorization.'], 'writeup': {'reportPath': 'findings/example/example.md'}, 'provenance': {'source': 'scan'}, 'severity': {'level': 'high', 'rationale': 'Verified impact'}, 'status': 'open', 'taxonomy': {'category': 'injection', 'cwe': ['CWE-79']}}",
+      "oversized_severity = {**large, 'severity': {'level': 'high', 'rationale': 'x' * 18850}}",
       "code_evidence = [{'id': f'evidence-{index}', 'label': 'example', 'path': 'example.py', 'startLine': 1, 'code': 'c' * 1500, 'explanation': 'e' * 1500} for index in range(4)]",
       "rich = {'rootCause': {'summary': 'r' * 2000}, 'validation': {'summary': 'v' * 3000}, 'attackPath': {'narrative': 'a' * 4000}, 'codeEvidence': code_evidence, 'evidenceExcerpt': 'e' * 8000, 'identity': {'anchor': 'finding'}, 'preventiveControls': ['Centralize authorization.'], 'remediationTests': ['Verify authorization.']}",
       "boundary = {**diagnostics, 'remediationTests': ['x'] * 4000, 'preventiveControls': ['Keep authorization centralized.']}",
@@ -59,7 +60,7 @@ describe("bundled scan report and source limits", () => {
       "oversized_metadata = {**diagnostics, 'confidence': {'level': 'high', 'rationale': 'x' * 17000}, 'remediationTests': ['Verify authorization.'], 'preventiveControls': ['Centralize authorization.']}",
       "oversized_guidance = {'rootCause': {'summary': 'root'}, 'validation': {'summary': 'validation'}, 'attackPath': {'narrative': 'attack'}, 'codeEvidence': [{'id': 'evidence', 'label': 'evidence', 'path': 'example.py', 'startLine': 1, 'code': 'x', 'explanation': 'evidence'}], 'evidence': 'legacy', 'evidenceExcerpt': 'excerpt', 'remediationTests': ['x' * 7800], 'preventiveControls': ['y' * 7930]}",
       "nested_boundary = {'remediationTests': ['x'] * 3937, 'rootCause': {'summary': 'r' * 178, 'detail': {'x': {'y': 'z'}}}}",
-      "projections = {key: bounded_finding_details(value) for key, value in {'details': details, 'large': large, 'rich': rich, 'boundary': boundary, 'unicodeBoundary': unicode_boundary, 'emptyControls': empty_controls, 'emptyTests': empty_tests, 'oversizedMetadata': oversized_metadata, 'oversizedGuidance': oversized_guidance, 'nestedBoundary': nested_boundary}.items()}",
+      "projections = {key: bounded_finding_details(value) for key, value in {'details': details, 'large': large, 'rich': rich, 'boundary': boundary, 'unicodeBoundary': unicode_boundary, 'emptyControls': empty_controls, 'emptyTests': empty_tests, 'oversizedMetadata': oversized_metadata, 'oversizedSeverity': oversized_severity, 'oversizedGuidance': oversized_guidance, 'nestedBoundary': nested_boundary}.items()}",
       "print(json.dumps({'projections': projections, 'bytes': {key: len(json.dumps(value, separators=(',', ':')).encode()) for key, value in projections.items()}}))",
     ].join("\n");
     const result = Bun.spawnSync(
@@ -88,6 +89,7 @@ describe("bundled scan report and source limits", () => {
           remediationTests: string[];
           preventiveControls: string[];
         };
+        oversizedSeverity: Record<string, unknown>;
         oversizedMetadata: {
           remediationTests: string[];
           preventiveControls: string[];
@@ -121,6 +123,9 @@ describe("bundled scan report and source limits", () => {
       status: "open",
       taxonomy: { category: "injection", cwe: ["CWE-79"] },
     });
+    expect(projections.oversizedSeverity).toMatchObject({
+      writeup: { reportPath: "findings/example/example.md" },
+    });
     expect(projections.rich).toMatchObject({
       identity: { anchor: "finding" },
       preventiveControls: ["Centralize authorization."],
@@ -134,6 +139,7 @@ describe("bundled scan report and source limits", () => {
       projections.emptyControls,
       projections.emptyTests,
       projections.oversizedMetadata,
+      projections.oversizedSeverity,
       projections.oversizedGuidance,
     ]) {
       expect(finding).toMatchObject({
