@@ -187,6 +187,7 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { recordScanLogTurn, settleScanLogTurns } from "./scan-logs.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
@@ -649,6 +650,7 @@ export class CodexSecurity {
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
+  readonly #scanLogWrites = new Set<Promise<void>>();
   #runtime: PreparedRuntime | null = null;
   #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
@@ -2341,9 +2343,26 @@ export class CodexSecurity {
         signal,
         cyberAccessProgram: options.cyberAccessProgram,
       };
+      const runOwnedTurn = async (input: string) => ({
+        events: recordScanLogTurn(
+          {
+            scanId,
+            threadId: () => thread.id,
+            codexHome: runtime.codexHome,
+            tracker,
+            pendingWrites: this.#scanLogWrites,
+          },
+          () => thread.runStreamed(input, turnOptions),
+          (error) =>
+            notifyObserver(
+              options,
+              "onWarning",
+            )(`Could not save scan log attribution: ${errorMessage(error)}`),
+        ),
+      });
       const postScanPrompt = options.postScanPrompt;
       if (postScanPrompt?.trim()) {
-        runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
+        runPostScan = () => runOwnedTurn(postScanPrompt);
       }
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
@@ -2357,7 +2376,7 @@ export class CodexSecurity {
             prompt,
             signal,
           })
-        : (await thread.runStreamed(prompt, turnOptions)).events;
+        : (await runOwnedTurn(prompt)).events;
       checkOpen();
 
       let result = await runScanEvents({
@@ -2999,6 +3018,7 @@ export class CodexSecurity {
     );
     const runtime = this.#runtime;
     this.#runtime = null;
+    await settleScanLogTurns(this.#scanLogWrites);
     const cleanupErrors: unknown[] = [];
     try {
       await runtime?.providerProfile?.cleanup();

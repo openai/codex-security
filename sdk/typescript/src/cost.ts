@@ -47,6 +47,10 @@ function createSessionReasoning(id: string, text = "") {
   return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
+interface SessionTurn {
+  startedAt: number | null;
+}
+
 type SessionUsage = ReturnType<typeof createSessionUsage> & {
   events?: Record<string, unknown>[];
 };
@@ -78,6 +82,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage() {
   return {
     offset: 0,
+    turns: new Map<string, SessionTurn>(),
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
     unreadable: false,
@@ -182,6 +187,59 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
+  public async logTurns(
+    threadId: string,
+    startedAt: number,
+    endedAt: number,
+  ): Promise<{ threadId: string; turnId: string }[]> {
+    const update = this.#pending.then(async () => {
+      // Attribution is optional and runs after the owned turn has yielded back to
+      // its caller. Read native rollout state here rather than putting a full
+      // CODEX_HOME walk on the scan turn path.
+      await this.#readSessions(false);
+
+      const included = new Set([threadId]);
+      const scanDirectory = this.#options.scanDirectory;
+      if (scanDirectory !== undefined) {
+        for (const session of this.#sessions.values()) {
+          if (session.threadId === null || session.workingDirectory === null)
+            continue;
+          // The resumed/finishing owner can be a shared Desktop thread, so do
+          // not recursively claim all of its descendants. Scan workers are
+          // identifiable by the scan directory, including independent Deep Scan
+          // roots, while the owner itself is included explicitly above.
+          if (
+            session.workingDirectory === scanDirectory ||
+            isScanArtifactDirectory(scanDirectory, session.workingDirectory)
+          ) {
+            included.add(session.threadId);
+          }
+        }
+      }
+
+      const turns: { threadId: string; turnId: string }[] = [];
+      for (const session of this.#sessions.values()) {
+        if (session.threadId === null || !included.has(session.threadId))
+          continue;
+        for (const [turnId, turn] of session.turns) {
+          if (
+            turn.startedAt !== null &&
+            turn.startedAt >= startedAt &&
+            turn.startedAt <= endedAt
+          ) {
+            turns.push({ threadId: session.threadId, turnId });
+          }
+        }
+      }
+      return turns;
+    });
+    this.#pending = update.then(
+      () => {},
+      () => {},
+    );
+    return await update;
+  }
+
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
@@ -200,8 +258,8 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
-  async #readSessions(): Promise<void> {
-    if (this.#threadId === null) return;
+  async #readSessions(report = true): Promise<void> {
+    if (this.#threadId === null && report) return;
     const repository =
       this.#options.onActivity === undefined
         ? undefined
@@ -221,6 +279,12 @@ export class ScanCostTracker {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
       }
+    }
+
+    // Follow-up attribution shares the cursor without reopening settled cost/progress.
+    if (!report) {
+      if (unreadable.length > 0) throw unreadable[0]!.error;
+      return;
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -462,6 +526,26 @@ async function readSessionUsage(
   }
 }
 
+function rememberTurn(
+  event: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  session: SessionUsage,
+): void {
+  const turnId = payload["turn_id"];
+  if (typeof turnId !== "string") return;
+  const payloadStartedAt = payload["started_at"];
+  const timestamp = event["timestamp"];
+  const startedAt =
+    typeof payloadStartedAt === "number"
+      ? payloadStartedAt * 1_000
+      : typeof timestamp === "string"
+        ? Date.parse(timestamp)
+        : Number.NaN;
+  session.turns.set(turnId, {
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+  });
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
@@ -500,9 +584,12 @@ function readSessionEvent(
     ) {
       session.replaying = false;
       session.events?.push(event);
+      rememberTurn(event, payload, session);
     }
     return;
   }
+  if (event["type"] === "event_msg" && payload["type"] === "task_started")
+    rememberTurn(event, payload, session);
   session.events?.push(event);
   if (event["type"] === "token_usage_record") {
     const responseId = payload["response_id"];
