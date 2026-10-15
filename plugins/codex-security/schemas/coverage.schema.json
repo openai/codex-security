@@ -146,7 +146,8 @@
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^(?!/)(?![A-Za-z]:)(?![\\s\\S]*(?:^|/)\\.\\.(?:/|$))(?![\\s\\S]*[\\\\\\u0000-\\u001f])(?=[\\s\\S]*(?:\\uFEFF|[^\\s\\u0085]))[\\s\\S]+$"
             }
           },
           "surfaceIds": {
