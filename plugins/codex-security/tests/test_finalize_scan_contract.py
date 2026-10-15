@@ -1195,6 +1195,136 @@ The extraction root is not enforced.
 
         self.assertEqual(payload, {"source": "original"})
 
+    @staticmethod
+    def code_evidence(path: str) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "source-evidence",
+                "label": "Source evidence",
+                "path": path,
+                "startLine": 41,
+                "code": "synthetic_call()",
+                "explanation": "Source attribution.",
+            }
+        ]
+
+    @pytest.mark.cross_platform
+    def test_rejects_unsafe_canonical_code_evidence_before_sealing_and_export(self) -> None:
+        for path in (
+            "../../outside.ts",
+            "/outside.ts",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            ".",
+            "./",
+            "src/\0outside.ts",
+            "src/\toutside.ts",
+            "src/\u0001outside.ts",
+            "src/example.ts\n",
+            " ",
+        ):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = self.code_evidence(path)
+                self.write_scan()
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"codeEvidence\[0\].path"):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+                self.findings["findings"][0].pop("codeEvidence")
+                self.write_sealed_scan()
+                findings = self.read_json("findings.json")
+                findings["findings"][0]["codeEvidence"] = self.code_evidence(path)
+                self.rewrite_sealed_artifact("findings.json", findings)
+                before = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+                for consume in (FINALIZER.finalize_scan, FINALIZER.write_sarif_projection):
+                    with self.assertRaisesRegex(FINALIZER.ContractError, r"codeEvidence\[0\].path"):
+                        consume(self.scan_dir)
+                self.assertEqual(
+                    before,
+                    {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES},
+                )
+
+    @pytest.mark.cross_platform
+    def test_preserves_valid_canonical_code_evidence_paths(self) -> None:
+        for path in (
+            "src/extract.py",
+            "src/module:helper.ts",
+            "src:stream.ts",
+            "é:helper.ts",
+            "./src/extract.py",
+            "src//extract.py",
+            "src/naïve file.ts",
+        ):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = self.code_evidence("src/extract.py")
+                self.write_sealed_scan()
+                findings = self.read_json("findings.json")
+                findings["findings"][0]["codeEvidence"] = self.code_evidence(path)
+                self.rewrite_sealed_artifact("findings.json", findings)
+                before = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+                FINALIZER.finalize_scan(self.scan_dir)
+                FINALIZER.write_sarif_projection(self.scan_dir)
+                self.assertEqual(
+                    self.read_json("findings.json")["findings"][0]["codeEvidence"][0]["path"],
+                    path,
+                )
+                self.assertEqual(
+                    before,
+                    {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES},
+                )
+
+    @pytest.mark.cross_platform
+    def test_code_evidence_recovery_distinguishes_unicode_names_from_windows_drives(self) -> None:
+        for path, retained in (
+            ("é:helper.ts", True),
+            ("C:/outside.ts", False),
+            ("c:outside.ts", False),
+        ):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = self.code_evidence(path)
+                self.write_scan()
+                prepared = FINALIZER._prepare_scan_finalization(
+                    self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
+                    recover_unsealed=True,
+                )
+
+                self.assertEqual(prepared.manifest["scan"]["status"], "interrupted")
+                self.assertNotIn("completeness", prepared.coverage)
+                if retained:
+                    self.assertEqual(len(prepared.findings["findings"]), 1)
+                    self.assertEqual(
+                        prepared.findings["findings"][0]["codeEvidence"][0]["path"], path
+                    )
+                    self.assertEqual(prepared.warnings, [])
+                else:
+                    self.assertEqual(prepared.findings["findings"], [])
+                    self.assertTrue(
+                        any("codeEvidence[0].path" in warning for warning in prepared.warnings)
+                    )
+
+    @pytest.mark.cross_platform
+    def test_preserves_legacy_code_evidence_path_compatibility(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        findings["findings"][0]["code_evidence"] = self.code_evidence("../legacy.ts")
+        self.rewrite_sealed_artifact("findings.json", findings)
+        before = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        FINALIZER.finalize_scan(self.scan_dir)
+        FINALIZER.write_sarif_projection(self.scan_dir)
+        self.assertEqual(
+            self.read_json("findings.json")["findings"][0]["code_evidence"][0]["path"],
+            "../legacy.ts",
+        )
+        self.assertEqual(
+            before, {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        )
+        result = self.read_json("exports/results.sarif")["runs"][0]["results"][0]
+        self.assertNotIn(
+            "../legacy.ts",
+            [item["physicalLocation"]["artifactLocation"]["uri"] for item in result["locations"]],
+        )
+
     def test_sarif_projection_revalidates_sealed_findings(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")

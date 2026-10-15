@@ -301,6 +301,10 @@ function validateCanonicalContract(
       }
     }
 
+    for (const [index, evidence] of (finding.codeEvidence ?? []).entries()) {
+      safeRelativePath(evidence.path, `${context}.codeEvidence[${index}].path`);
+    }
+
     const { findingId, occurrenceId, fingerprints } = deriveFindingIdentity(
       manifest.scan.id,
       manifest.scan.target.targetId,
