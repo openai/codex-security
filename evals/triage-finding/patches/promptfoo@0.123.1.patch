@@ -1,0 +1,24 @@
+diff --git a/dist/src/main.js b/dist/src/main.js
+index 63b3515f0a43d58b4bfa0407e2749b8803f53399..1ac5c28580050c90ba60d3fc2fad0bdee03ac9e8 100755
+--- a/dist/src/main.js
++++ b/dist/src/main.js
+@@ -7143,6 +7143,7 @@ evalRouter.post("/replay", async (req, res) => {
+ 				label: "Replay"
+ 			}],
+ 			providers: [providerConfig],
++			extensions: eval_.config.extensions?.filter((extension) => extension.endsWith(":beforeAll")),
+ 			tests: [{ vars: variables || {} }]
+ 		}, {
+ 			maxConcurrency: 1,
+diff --git a/dist/src/server/index.js b/dist/src/server/index.js
+index 4d3710840e68d5570ef35011a1ff4cc105e617ee..7681d249b4d9bee02c0347b438fdf971e6909282 100644
+--- a/dist/src/server/index.js
++++ b/dist/src/server/index.js
+@@ -61896,6 +61896,7 @@ evalRouter.post("/replay", async (req, res) => {
+ 				label: "Replay"
+ 			}],
+ 			providers: [providerConfig],
++			extensions: eval_.config.extensions?.filter((extension) => extension.endsWith(":beforeAll")),
+ 			tests: [{ vars: variables || {} }]
+ 		}, {
+ 			maxConcurrency: 1,

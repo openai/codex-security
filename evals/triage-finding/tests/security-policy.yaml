@@ -1,0 +1,22 @@
+- description: "Root and scoped security policy guide claim-specific verdicts"
+  metadata:
+    case_id: policy-scope
+    source_type: freeform
+  vars:
+    case_id: policy-scope
+    target_repo: evals/triage-finding/fixtures/policy-repo
+    source_type_under_test: freeform
+    expected_ids: POLICY-CLI,POLICY-HTTP-REDIRECT,POLICY-HTTP-GUARDED
+    expected_source_types: freeform,freeform,freeform
+    expected_verdicts: not_actionable,confirmed,not_actionable
+    finding_input: |-
+      Source type: freeform
+      1. input_id: POLICY-CLI
+         claim: The local CLI passes its operator-supplied command argument to execSync without escaping it.
+         location: bin/run-command.js
+      2. input_id: POLICY-HTTP-REDIRECT
+         claim: The service launched by launch-service.js lets an unauthenticated HTTP requester choose an external redirect destination through the next query parameter.
+         starting location: launch-service.js; route /redirect
+      3. input_id: POLICY-HTTP-GUARDED
+         claim: The same launched service may allow an external redirect through the next query parameter on /safe-redirect.
+         starting location: launch-service.js; route /safe-redirect

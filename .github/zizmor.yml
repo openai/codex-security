@@ -1,0 +1,12 @@
+rules:
+  dangerous-triggers:
+    ignore:
+      # Labels only: no checkout or execution of pull request code.
+      - node-release-labels.yml:3
+      # Requires successful push CI on main and verifies commit ancestry before tagging.
+      - node-release-cut.yml:3
+      # The protected-main dispatcher reads event metadata and never checks out PR code.
+      - invoice-desk.yml:3
+      # The fallback runs trusted helpers on protected main and only dispatches a scan.
+      # Inference requires environment approval and treats extracted PR source as data.
+      - invoice-desk-scan.yml:4

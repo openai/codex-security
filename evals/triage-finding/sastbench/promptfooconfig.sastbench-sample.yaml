@@ -7,4 +7,4 @@ description: "Codex Security triage-finding representative SastBench v0.1 sample
 tags:
   suite: sastbench-v0.1-representative-sample
 
-tests: file://./scripts/generate-sastbench-tests.js:generateSampleTests
+tests: file://./scripts/sastbench-lib.mts:generateSampleTests

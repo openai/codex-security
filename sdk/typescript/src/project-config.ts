@@ -15,7 +15,7 @@ import {
   mergeCodexOverrides,
   type JsonObject,
 } from "./config.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, errorMessage } from "./errors.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
@@ -57,6 +57,7 @@ export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
 const PROJECT_SETTING_KEYS = {
   auth: "auth",
   mode: "scan.mode",
+  cyberAccessProgram: "scan.cyber_access_program",
   target: "scan.scope",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
@@ -137,7 +138,7 @@ export async function readProjectConfig(
     text = await readFile(path, "utf8");
   } catch (error) {
     throw new ConfigurationError(
-      `Cannot read project configuration at ${path}.`,
+      `Cannot read project configuration at ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
@@ -153,7 +154,7 @@ export async function readProjectConfig(
     }
   } catch (error) {
     throw new ConfigurationError(
-      `Cannot parse project configuration at ${path}.`,
+      `Cannot parse project configuration at ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
@@ -331,6 +332,11 @@ export function resolveScanSettings(
   const settings: ResolvedScanSettings = {
     ...pickScanSettings(overrides),
     auth: choose("auth", file?.auth, overrides.auth) ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: choose(
+      "scan.cyber_access_program",
+      file?.scan?.cyber_access_program,
+      overrides.cyberAccessProgram,
+    ),
     mode,
     target,
     knowledgeBasePaths,

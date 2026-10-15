@@ -1,8 +1,16 @@
 import type { DeduplicationReviewStage } from "../errors.js";
 
+export interface DeduplicationReviewAttribution {
+  version: 1;
+  beneficiaryObservationIds: string[];
+  contextObservationIds: string[];
+}
+
 /** Serializable review contract shared by local and host-provided execution. */
 export interface DeduplicationReviewRequest {
   requestId: string;
+  /** Present in records mode; IDs identify this review's host observations. */
+  attribution?: DeduplicationReviewAttribution;
   stage: DeduplicationReviewStage;
   model: string;
   effort: string;

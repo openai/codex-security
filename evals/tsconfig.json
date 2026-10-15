@@ -1,0 +1,14 @@
+{
+  "extends": "../plugins/codex-security/mcp-app/tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["../sdk/typescript/node_modules/@types"]
+  },
+  "include": [
+    "deep-reducer/*.mts",
+    "secret-discovery/*.mts",
+    "triage-finding/assertions/*.mts",
+    "triage-finding/scripts/*.mts",
+    "triage-finding/sastbench/assertions/*.mts",
+    "triage-finding/sastbench/scripts/*.mts"
+  ]
+}

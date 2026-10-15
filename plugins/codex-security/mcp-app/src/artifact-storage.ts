@@ -24,21 +24,17 @@ const locationShape = {
   path: z.string().min(1).optional(),
 };
 
-export const saveArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    content: z.string().optional(),
-    sourcePath: z.string().min(1).optional(),
-  })
-  .strict();
+export const saveArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  content: z.string().optional(),
+  sourcePath: z.string().min(1).optional(),
+});
 
-export const readArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    path: z.string().min(1),
-    encoding: z.enum(["utf8", "base64"]).default("utf8"),
-  })
-  .strict();
+export const readArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  path: z.string().min(1),
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+});
 
 export type ArtifactLocation = z.infer<typeof saveArtifactInputSchema>;
 
@@ -67,9 +63,13 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
   }
-  const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
-  if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
-    throw new Error("Artifact storage must be outside the target repository.");
+  for (const storagePath of [scanRoot, root]) {
+    const existingRoot = await resolveStoragePath(storagePath);
+    if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
+      throw new Error(
+        "Artifact storage must be outside the target repository.",
+      );
+    }
   }
   if (create) await fs.mkdir(root, { recursive: true, mode: 0o700 });
   return {
@@ -107,7 +107,17 @@ async function storageContext(
       .catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "EEXIST") throw error;
       });
-  return { ...context, root };
+  const canonicalRoot = await requireArtifactRoot(
+    root,
+    "Temporary artifact storage",
+  );
+  const uid = process.geteuid?.();
+  if (uid !== undefined && (await fs.lstat(root)).uid !== uid) {
+    throw new Error(
+      "Temporary artifact storage must be owned by the current user.",
+    );
+  }
+  return { ...context, root: canonicalRoot };
 }
 
 function components(path: string): string[] {
@@ -131,6 +141,7 @@ function components(path: string): string[] {
 function supplementalPath(
   input: ArtifactLocation,
   context: ArtifactContext,
+  write = false,
 ): string[] {
   const parts = components(input.path!);
   if (input.storage === "temporary") return parts;
@@ -139,7 +150,8 @@ function supplementalPath(
     (parts.length > 1 &&
       ["artifacts", "findings", "hardening"].includes(parts[0]!)) ||
     path === "report_validation.md" ||
-    (!context.scanId && path === "threat_model.md");
+    (path === "threatmodel.md" && (!context.scanId || !write)) ||
+    (!context.scanId && !write && path === "threat_model.md");
   if (
     !allowed ||
     reservedArtifactPaths.some(
@@ -170,7 +182,9 @@ export async function saveCodexSecurityArtifact(
     );
   }
   const parts =
-    input.path === undefined ? undefined : supplementalPath(input, context);
+    input.path === undefined
+      ? undefined
+      : supplementalPath(input, context, true);
   const selected = await storageContext(context, input.storage, true);
   selected.root = await requireArtifactRoot(selected.root, "Artifact storage");
   if (!parts) return { storage: input.storage, directory: selected.root };

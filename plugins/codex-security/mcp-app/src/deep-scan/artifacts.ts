@@ -1,15 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { errorMessage } from "./errors.js";
 export interface DeepScanArtifacts {
   scanDir: string;
   deepRoot: string;
   workersRoot: string;
   dedupRoot: string;
-}
-
-export interface DiscoveryArtifacts {
-  resultPath: string;
 }
 
 export function createDeepScanArtifacts(scanDir: string): DeepScanArtifacts {
@@ -19,12 +16,6 @@ export function createDeepScanArtifacts(scanDir: string): DeepScanArtifacts {
     deepRoot,
     workersRoot: join(deepRoot, "workers"),
     dedupRoot: join(deepRoot, "dedup"),
-  };
-}
-
-export function discoveryArtifacts(artifactDir: string): DiscoveryArtifacts {
-  return {
-    resultPath: join(artifactDir, "result.json"),
   };
 }
 
@@ -85,25 +76,27 @@ export async function readJsonObject(
 export async function requireRegularFile(
   path: string,
   root: string,
-  requireContent = true,
 ): Promise<void> {
   const rootPath = await fs.realpath(root);
   const resolvedPath = await fs.realpath(path);
-  assertInside(
-    rootPath,
-    resolvedPath,
-    `Deep Scan artifact escaped its scan directory: ${path}`,
-  );
-  assertCanonicalPath(path, resolvedPath);
+  const containmentMessage = `Deep Scan artifact escaped its scan directory: ${path}`;
+  const child = relative(rootPath, resolvedPath);
+  if (
+    child !== "" &&
+    (isAbsolute(child) || child === ".." || child.startsWith(`..${sep}`))
+  ) {
+    throw new Error(containmentMessage);
+  }
+  if (relative(resolve(path), resolvedPath) !== "") {
+    throw new Error(
+      `Deep Scan artifact must use a canonical non-symlink path: ${path}`,
+    );
+  }
   const [linkStat, fileStat] = await Promise.all([
     fs.lstat(path),
     fs.stat(path),
   ]);
-  if (
-    linkStat.isSymbolicLink() ||
-    !fileStat.isFile() ||
-    (requireContent && fileStat.size === 0)
-  ) {
+  if (linkStat.isSymbolicLink() || !fileStat.isFile() || fileStat.size === 0) {
     throw new Error(`Deep Scan artifact is not a valid regular file: ${path}`);
   }
 }
@@ -117,38 +110,13 @@ export async function archiveDirectory(
   try {
     await fs.rename(source, destination);
   } catch (error) {
-    if (!isMissing(error)) throw error;
+    if (
+      !error ||
+      typeof error !== "object" ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    )
+      throw error;
   }
   await fs.mkdir(source, { recursive: true });
-}
-
-function assertInside(root: string, path: string, message: string): void {
-  const child = relative(root, path);
-  if (
-    child === "" ||
-    (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`))
-  ) {
-    return;
-  }
-  throw new Error(message);
-}
-
-function assertCanonicalPath(path: string, resolvedPath: string): void {
-  if (relative(resolve(path), resolvedPath) === "") return;
-  throw new Error(
-    `Deep Scan artifact must use a canonical non-symlink path: ${path}`,
-  );
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isMissing(error: unknown): boolean {
-  return Boolean(
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    error.code === "ENOENT",
-  );
 }

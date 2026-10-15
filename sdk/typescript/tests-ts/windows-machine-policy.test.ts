@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 let temporaryRoot: string | undefined;
 afterEach(async () => {
@@ -22,9 +22,7 @@ describe("runtime directories and plugin Python boundary", () => {
   )(
     "prepares managed credential homes under constrained PowerShell",
     async () => {
-      const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-policy-")),
-      );
+      const root = await temporaryDirectory("codex-security-policy-", true);
       temporaryRoot = root;
       const powershell = join(
         process.env["SystemRoot"] ?? "C:\\Windows",

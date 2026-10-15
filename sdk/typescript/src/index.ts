@@ -1,3 +1,8 @@
+export { exportArtifact } from "./artifact-export.js";
+export type {
+  ExportArtifactOptions,
+  ArtifactExportResult,
+} from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
@@ -13,6 +18,7 @@ export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners } from "./suggest-owners.js";
 export type {
   OwnerFinding,
+  CodeownerIdentity,
   OwnerIdentity,
   OwnerSuggestion,
   OwnerSuggestions,
@@ -46,7 +52,8 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
+export type { ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./deep-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -60,6 +67,8 @@ export type {
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,
@@ -88,6 +97,7 @@ export {
   DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -137,6 +147,7 @@ export type {
 } from "./deduplication/records.js";
 export type {
   DeduplicationReviewRequest,
+  DeduplicationReviewAttribution,
   DeduplicationReviewRunner,
 } from "./deduplication/review.js";
 export {
@@ -149,6 +160,12 @@ export type {
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
+export type { FindingEmbeddingBinding } from "./deduplication/local.js";
+export type {
+  DeduplicationDiagnostic,
+  DeduplicationDiagnosticObserver,
+} from "./deduplication/diagnostics.js";
+export type { FindingEmbedder } from "./server/embeddings.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

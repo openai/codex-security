@@ -1,3 +1,4 @@
+import { isNonEmptyString } from "./value.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
@@ -145,19 +146,14 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
   ].join("\n");
 }
 
-function packageVersions(url: URL): {
-  package: string;
-  sdk: string;
-  executable: string;
-} {
+function packageVersions(url: URL) {
   try {
     const manifest: unknown = JSON.parse(readFileSync(url, "utf8"));
     if (
       typeof manifest !== "object" ||
       manifest === null ||
       !("version" in manifest) ||
-      typeof manifest.version !== "string" ||
-      manifest.version.length === 0
+      !isNonEmptyString(manifest.version)
     ) {
       throw new Error("version must be a non-empty string");
     }
@@ -174,12 +170,7 @@ function packageVersions(url: URL): {
       "@openai/codex" in dependencies
         ? dependencies["@openai/codex"]
         : undefined;
-    if (
-      typeof sdk !== "string" ||
-      sdk.length === 0 ||
-      typeof executable !== "string" ||
-      executable.length === 0
-    ) {
+    if (!isNonEmptyString(sdk) || !isNonEmptyString(executable)) {
       throw new Error("Codex dependencies must have non-empty versions");
     }
     return { package: manifest.version, sdk, executable };

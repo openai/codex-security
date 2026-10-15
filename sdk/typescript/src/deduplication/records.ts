@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { z } from "incur";
+import { hash, randomUUID } from "node:crypto";
+import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
@@ -14,39 +14,58 @@ import {
   screeningFindingFormatInstructions,
   pairFindingFormatInstructions,
 } from "./deduplication-prompts.js";
-import type { DeduplicationReviewRunner } from "./review.js";
+import type {
+  DeduplicationReviewAttribution,
+  DeduplicationReviewRunner,
+} from "./review.js";
+
+export function recordsReviewAttribution(
+  findingIds: readonly string[] | undefined,
+  references: ReadonlyMap<string, string>,
+  anchors: ReadonlyMap<string, readonly string[]>,
+): DeduplicationReviewAttribution {
+  if (!findingIds?.length)
+    throw new Error("Records review is missing its comparison participants.");
+  const participants = new Set(
+    findingIds.map((findingId) => {
+      const observationId = references.get(findingId);
+      if (observationId === undefined)
+        throw new Error(`Unknown records review finding ID: ${findingId}`);
+      return observationId;
+    }),
+  );
+  const beneficiaryObservationIds = [
+    ...participants.intersection(anchors),
+  ].sort();
+  if (beneficiaryObservationIds.length === 0)
+    throw new Error("Records review has no incoming observation participants.");
+  return {
+    version: 1,
+    beneficiaryObservationIds,
+    contextObservationIds: [...participants.difference(anchors)].sort(),
+  };
+}
 
 const id = z.string().min(1);
-const record = z
-  .object({
-    id,
-    finding: z.unknown().transform((value) => requireFinding(value)),
-  })
-  .strict();
+const record = z.strictObject({
+  id,
+  finding: z.unknown().transform((value) => requireFinding(value)),
+});
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
-  .object({
-    version: z.literal(1),
-    observations: z.array(record),
-    candidateRelationships: z.array(
-      z
-        .object({
-          observationId: id,
-          candidateObservationIds: z.array(id),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+const deduplicateRecordsInputSchema = z.strictObject({
+  version: z.literal(1),
+  observations: z.array(record),
+  candidateRelationships: z.array(
+    z.strictObject({
+      observationId: id,
+      candidateObservationIds: z.array(id),
+    }),
+  ),
+});
 
-export interface DeduplicateRecordsInput {
-  version: 1;
-  observations: { id: string; finding: Finding }[];
-  candidateRelationships: {
-    observationId: string;
-    candidateObservationIds: string[];
-  }[];
-}
+export interface DeduplicateRecordsInput extends z.infer<
+  typeof deduplicateRecordsInputSchema
+> {}
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;
@@ -79,10 +98,7 @@ export async function deduplicateRecords(
     if (observations.has(entry.id))
       throw new Error(`Duplicate observation ID: ${entry.id}`);
     // Original finding IDs can repeat across scans; host IDs identify observations.
-    const findingId = `csf_${createHash("sha256")
-      .update(entry.id)
-      .digest("hex")
-      .slice(0, 24)}`;
+    const findingId = `csf_${hash("sha256", entry.id).slice(0, 24)}`;
     observations.set(entry.id, { ...entry.finding, findingId });
     references.set(findingId, entry.id);
   }
@@ -113,11 +129,15 @@ export async function deduplicateRecords(
     groups: [],
     unresolved: [],
   };
-  const sourceFindings = [...relationships.keys()].map((id) =>
-    observations.get(id)!,
+  const sourceFindingIds = [...relationships.keys()].map(
+    (id) => observations.get(id)!.findingId,
   );
   const reviewer = new CodexDeduplicationReviewer({
-    async run<T>({ validate, ...review }: CodexReview<T>): Promise<T> {
+    async run<T>({
+      validate,
+      findingIds,
+      ...review
+    }: CodexReview<T>): Promise<T> {
       try {
         return await abortable(async () => {
           options.signal?.throwIfAborted();
@@ -126,6 +146,11 @@ export async function deduplicateRecords(
               {
                 ...review,
                 requestId: randomUUID(),
+                attribution: recordsReviewAttribution(
+                  findingIds,
+                  references,
+                  relationships,
+                ),
                 trustedInstructions: [
                   sourceReviewInstructions,
                   review.stage === "screening"
@@ -170,9 +195,7 @@ export async function deduplicateRecords(
   );
   let groups: string[][];
   try {
-    const decisions = await algorithm.run(
-      sourceFindings.map((finding) => finding.findingId),
-    );
+    const decisions = await algorithm.run(sourceFindingIds);
     options.signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
@@ -188,9 +211,7 @@ export async function deduplicateRecords(
   }
   const grouped = new Set(groups.flat());
   groups.push(
-    ...sourceFindings
-      .filter((finding) => !grouped.has(finding.findingId))
-      .map((finding) => [finding.findingId]),
+    ...sourceFindingIds.filter((id) => !grouped.has(id)).map((id) => [id]),
   );
   for (const group of groups) {
     const observationIds = group.map((id) => references.get(id)!);

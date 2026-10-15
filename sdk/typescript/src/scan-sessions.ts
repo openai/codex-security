@@ -1,9 +1,36 @@
 import { isAbsolute, join, relative, sep } from "node:path";
+import { isRecord } from "./record.js";
 
 export function sessionStartedAt(timestamp: unknown): number | null {
   const startedAt =
     typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
   return Number.isFinite(startedAt) ? startedAt : null;
+}
+
+export function sessionOwnsTurn(
+  session: { threadId: string | null; startedAt: number | null },
+  payload: Readonly<Record<string, unknown>>,
+): boolean {
+  // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
+  const threadOrder = uuid7Order(session.threadId);
+  const turnOrder = uuid7Order(payload["turn_id"]);
+  return threadOrder === null
+    ? typeof payload["started_at"] === "number" &&
+        session.startedAt !== null &&
+        payload["started_at"] >= Math.floor(session.startedAt / 1_000)
+    : turnOrder !== null && turnOrder >= threadOrder;
+}
+
+function uuid7Order(value: unknown): bigint | null {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+  return BigInt(`0x${value.replaceAll("-", "")}`);
 }
 
 export function sessionParentThreadId(
@@ -38,8 +65,4 @@ export function isScanArtifactDirectory(
     components[0] !== ".." &&
     relative(join(workers, components[0]!, "output"), workingDirectory) === ""
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

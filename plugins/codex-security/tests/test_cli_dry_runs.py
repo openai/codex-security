@@ -5,13 +5,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = PLUGIN_ROOT / "scripts"
 
 
-def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
+def run_script(name: str, *args: str, isolated: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / name), *args],
+        [sys.executable, *(["-I"] if isolated else []), str(SCRIPT_DIR / name), *args],
         check=False,
         capture_output=True,
         text=True,
@@ -25,6 +27,23 @@ def test_all_scripts_support_help() -> None:
         assert "usage:" in result.stdout.lower(), script.name
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "workbench_publication.py",
+        "finalize_scan_contract.py",
+        "validate_scan_contract.py",
+        "validate_tracking_source.py",
+        "threat_model_projection.py",
+    ),
+)
+def test_helpers_support_help_with_safe_path(name: str) -> None:
+    result = run_script(name, "--help", isolated=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout.lower()
+
+
 def test_recover_scan_results_help_describes_its_contract() -> None:
     result = run_script("workbench_db.py", "recover-scan-results", "--help")
 
@@ -33,7 +52,8 @@ def test_recover_scan_results_help_describes_its_contract() -> None:
     assert "retained checkpoints" in result.stdout
 
 
-def test_finalizer_cli_completes_checked_in_scan_bundle(tmp_path: Path) -> None:
+@pytest.mark.parametrize("isolated", (False, True))
+def test_finalizer_cli_completes_checked_in_scan_bundle(tmp_path: Path, isolated: bool) -> None:
     scan_dir = tmp_path / "completed-scan"
     shutil.copytree(PLUGIN_ROOT / "examples" / "completed-scan", scan_dir)
 
@@ -43,6 +63,7 @@ def test_finalizer_cli_completes_checked_in_scan_bundle(tmp_path: Path) -> None:
         str(scan_dir),
         "--schema-dir",
         str(PLUGIN_ROOT / "schemas"),
+        isolated=isolated,
     )
 
     assert result.returncode == 0, result.stderr
