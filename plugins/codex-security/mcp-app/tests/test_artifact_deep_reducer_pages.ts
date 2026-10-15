@@ -25,7 +25,7 @@ const {
       export * from "./artifact-deep-reducer-pages.ts";
       export * from "./artifact-deep-reducer.ts";
     `,
-    resolveDir: new URL("../src/", import.meta.url).pathname,
+    resolveDir: path.join(import.meta.dirname, "../src/"),
   },
 });
 

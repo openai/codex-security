@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { spawn } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -5,7 +6,6 @@ import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
-import type { ThreatModel } from "./models.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import {
   bundledPluginRoot,
@@ -36,12 +36,6 @@ export interface ArtifactExportArguments {
   pythonPath?: string;
   signal?: AbortSignal;
   includeMetadata?: boolean;
-}
-
-interface ThreatModelDescription {
-  threatModel: ThreatModel | null;
-  provenance: JsonObject;
-  path: string | null;
 }
 
 export type ExportArtifactOptions = {
@@ -180,7 +174,7 @@ export async function readThreatModelPath(
       ["--scan-dir", directory, "--describe-threat-model"],
       options,
     );
-    return (JSON.parse(result.stdout) as ThreatModelDescription).path;
+    return (JSON.parse(result.stdout) as ArtifactExportResult).path;
   } catch {
     options.signal?.throwIfAborted();
     return null;
@@ -190,7 +184,7 @@ export async function readThreatModelPath(
 export async function runArtifactExport(
   arguments_: ArtifactExportArguments,
   output?: ArtifactOutput,
-): Promise<Uint8Array | undefined> {
+): Promise<string | undefined> {
   const artifact = arguments_.artifact ?? "findings";
   resolveArtifactFormat(artifact, arguments_.format);
   const result = await runArtifactHelper(
@@ -220,7 +214,7 @@ export async function runArtifactExport(
   );
   return (arguments_.output === "-" && output === undefined) ||
     arguments_.includeMetadata
-    ? Buffer.from(result.stdout)
+    ? result.stdout
     : undefined;
 }
 
@@ -316,16 +310,14 @@ export async function resolveSavedArtifactDirectory(
 ): Promise<string> {
   // Reuse the workbench's recorded digest and scan binding checks without
   // requiring a writable saved-scan directory for stdout or external exports.
-  const context = await workbench([
-    "export-findings",
-    "--scan-id",
-    scanId,
-    "--artifact",
-    artifact,
-    "--format",
-    format,
-    "--validate-only",
-  ]);
+  const context = await workbench(
+    workbenchArgs("export-findings", {
+      scanId,
+      artifact,
+      format,
+      validateOnly: true,
+    }),
+  );
   const scan = context["scan"] as JsonObject | undefined;
   if (typeof scan?.["scanDir"] !== "string")
     throw new CodexSecurityError(
@@ -394,9 +386,7 @@ export async function exportArtifact(
   const description =
     metadata === undefined
       ? null
-      : (JSON.parse(
-          Buffer.from(metadata).toString("utf8"),
-        ) as ThreatModelDescription);
+      : (JSON.parse(metadata) as ArtifactExportResult);
   return {
     path: arguments_.output === "-" ? null : arguments_.output,
     provenance: description?.provenance ?? null,
@@ -460,6 +450,7 @@ export function exportEnvironment(
         "TEMP",
         "TMPDIR",
         "PYTHON",
+        "XDG_CACHE_HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",

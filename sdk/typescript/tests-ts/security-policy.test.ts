@@ -33,11 +33,28 @@ import {
   addPolicySubmodule,
   createPolicyTestFixtures,
   policyGit,
+  policyGitDirectory,
   stageResult,
 } from "./support/security-policy.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
+
+function createPolicyWorktree(repository: string, root: string, name: string) {
+  policyGit(repository, "init", "--quiet");
+  policyGit(repository, "commit", "--allow-empty", "--quiet", "-m", "initial");
+  const linked = join(root, name);
+  policyGit(
+    repository,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    linked,
+    "HEAD",
+  );
+  return linked;
+}
 
 describe("security policy generation", () => {
   test("stores policy drafts separately from scans and rejects linked state children", async () => {
@@ -349,30 +366,8 @@ describe("security policy generation", () => {
 
   test("excludes copied linked-worktree metadata", async () => {
     const f = await fixture();
-    policyGit(f.repository, "init", "--quiet");
-    policyGit(
-      f.repository,
-      "commit",
-      "--allow-empty",
-      "--quiet",
-      "-m",
-      "initial",
-    );
-    const linked = join(f.root, "linked");
-    policyGit(
-      f.repository,
-      "worktree",
-      "add",
-      "--quiet",
-      "--detach",
-      linked,
-      "HEAD",
-    );
-    const original = execFileSync(
-      "git",
-      ["-C", linked, "rev-parse", "--absolute-git-dir"],
-      { encoding: "utf8" },
-    ).trim();
+    const linked = createPolicyWorktree(f.repository, f.root, "linked");
+    const original = policyGitDirectory(linked);
     const archived = join(f.repository, "archived-admin");
     const common = join(f.repository, "shared-data");
     await cp(join(f.repository, ".git"), common, { recursive: true });
@@ -585,24 +580,10 @@ describe("security policy generation", () => {
 
   test("keeps linked worktrees and submodules as their own policy roots", async () => {
     const f = await fixture();
-    policyGit(f.repository, "init", "--quiet");
-    policyGit(
+    const linked = createPolicyWorktree(
       f.repository,
-      "commit",
-      "--allow-empty",
-      "--quiet",
-      "-m",
-      "initial",
-    );
-    const linked = join(f.root, "linked-worktree");
-    policyGit(
-      f.repository,
-      "worktree",
-      "add",
-      "--quiet",
-      "--detach",
-      linked,
-      "HEAD",
+      f.root,
+      "linked-worktree",
     );
     await mkdir(join(linked, "component"));
     expect(
@@ -612,11 +593,7 @@ describe("security policy generation", () => {
       scope: "component",
       targetPath: join(linked, "component", "SECURITY.md"),
     });
-    const linkedMetadata = execFileSync(
-      "git",
-      ["-C", linked, "rev-parse", "--absolute-git-dir"],
-      { encoding: "utf8" },
-    ).trim();
+    const linkedMetadata = policyGitDirectory(linked);
     const backlink = join(linkedMetadata, "gitdir");
     const originalBacklink = await readFile(backlink);
     await writeFile(
@@ -1108,19 +1085,113 @@ describe("security policy preview", () => {
     expect(diff.match(/No newline at end of file/gu)).toHaveLength(2);
   });
 
-  test("reports an early diff subprocess exit without an unhandled stdin error", async () => {
-    const name =
-      "reports an early diff subprocess exit without an unhandled stdin error";
-    if (runTestInSubprocess(import.meta.path, name)) return;
+  test("preserves native launch errors and settles failed diff input", async () => {
     const f = await fixture();
     const draft = await f.generate();
-    const node = nodeCommand().command;
-    await expect(
-      securityPolicyDiff(
-        { ...draft, content: `# Policy\n${"x".repeat(900_000)}` },
-        node,
+    const source = new URL("../src/security-policy.ts", import.meta.url);
+    const built = await Bun.build({
+      entrypoints: [fileURLToPath(source)],
+      target: "node",
+      format: "esm",
+      define: { "import.meta.url": JSON.stringify(source.href) },
+    });
+    expect(built.success).toBe(true);
+    const module = join(f.root, "policy.mjs");
+    await writeFile(module, await built.outputs[0]!.text());
+    const ignoreInput = join(f.root, "ignore-input");
+    const deniedInterpreter = join(f.root, "denied-interpreter");
+    if (process.platform !== "win32") {
+      await writeFile(ignoreInput, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(deniedInterpreter, "#!/bin/sh\nexit 0\n", {
+        mode: 0o600,
+      });
+    }
+    const result = JSON.parse(
+      execFileSync(
+        nodeCommand().command,
+        [
+          "--input-type=module",
+          "--eval",
+          `
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+const { securityPolicyDiff } = await import(process.argv[1]);
+const draft = JSON.parse(readFileSync(0, "utf8"));
+const failures = [];
+for (const [interpreter, size] of [[process.execPath, 100], [process.argv[3], 900000], [process.argv[4], 900000], [process.argv[2], 900000]].filter(([interpreter]) => interpreter)) {
+  try { await securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(size) }, interpreter); failures.push(null); }
+  catch (error) { failures.push({ code: error.code, message: error.message }); }
+}
+if (process.argv[2]) {
+  const wrapper = process.argv[2];
+  const release = wrapper + '-held';
+  const diagnostic = '  synthetic café 日本語 😀 error\\n  ';
+  const holder = "const fs = require('fs'); process.send('ready'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(timer); fs.writeFileSync(process.argv[1] + '.done', 'done'); process.exit(0); } }, 10); setTimeout(() => process.exit(2), 10000).unref();";
+  const launcher = [
+    '#!' + process.execPath,
+    "require('fs').closeSync(0);",
+    "const child = require('child_process').spawn(process.execPath, ['-e', " + JSON.stringify(holder) + ", " + JSON.stringify(release) + "], { stdio: ['ignore', 1, 2, 'ipc'] });",
+    "child.once('message', () => process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(0)));",
+  ].join('\\n');
+  writeFileSync(wrapper, launcher, { mode: 0o700 });
+  const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
+    () => ({ code: null }), error => ({ code: error.code, message: error.message }));
+  let outcome;
+  try {
+    outcome = await Promise.race([task, delay(2000).then(() => null)]);
+  } finally {
+    writeFileSync(release, 'release');
+    await task;
+    while (!existsSync(release + '.done')) await delay(10);
+  }
+  failures.push({ ...outcome, settledBeforeRelease: outcome !== null });
+  for (const live of [true, false]) {
+    const release = wrapper + '-live-' + live;
+    const pid = release + '.pid';
+    const finish = "require('fs').writeFileSync(" + JSON.stringify(release + '.done') + ", 'done'); process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(7));";
+    const body = live
+      ? "const fs=require('fs'); fs.writeFileSync(" + JSON.stringify(pid) + ", String(process.pid)); fs.closeSync(0); const timer=setInterval(() => { if (fs.existsSync(" + JSON.stringify(release) + ")) { clearInterval(timer); " + finish + " } }, 10);"
+      : "process.stdin.resume(); process.stdin.once('end', () => { " + finish + " });";
+    writeFileSync(wrapper, ['#!' + process.execPath, body].join('\\n'), { mode: 0o700 });
+    const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
+      () => ({ code: null }), error => ({ code: error.code, message: error.message }));
+    let outcome;
+    let childAlive = false;
+    try {
+      outcome = await Promise.race([task, delay(2000).then(() => null)]);
+      if (live) {
+        process.kill(Number(readFileSync(pid, 'utf8')), 0);
+        childAlive = true;
+      }
+    } finally {
+      writeFileSync(release, 'release');
+      await task;
+      while (!existsSync(release + '.done')) await delay(10);
+    }
+    failures.push({ ...outcome, settledBeforeRelease: outcome !== null, childAlive, preservedDiagnostic: live || outcome?.message.endsWith(diagnostic) });
+  }
+}
+console.log(JSON.stringify(failures));`,
+          pathToFileURL(module).href,
+          process.platform === "win32" ? "" : ignoreInput,
+          join(f.root, "missing-interpreter"),
+          process.platform === "win32" ? "" : deniedInterpreter,
+        ],
+        { encoding: "utf8", input: JSON.stringify(draft), timeout: 20_000 },
       ),
-    ).rejects.toThrow();
+    );
+    expect(result[0].code).toBe(9);
+    expect(result[0].message).toContain("bad option: -I");
+    expect(result[1].code).toBe("ENOENT");
+    if (process.platform !== "win32") {
+      expect(result[2].code).toBe("EACCES");
+      expect(result[3].code).toBe("EPIPE");
+      expect(result.slice(4)).toMatchObject([
+        { code: "EPIPE", settledBeforeRelease: true },
+        { code: "EPIPE", settledBeforeRelease: true, childAlive: true },
+        { code: 7, settledBeforeRelease: true, preservedDiagnostic: true },
+      ]);
+    }
     expect(await readdir(f.repository)).toEqual([]);
   });
 

@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { sha256Text as digest } from "./contract.js";
@@ -23,7 +24,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { z } from "incur";
+import { z } from "zod";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt } from "./codex-prompt.js";
 import type { ScanModelConfiguration } from "./config.js";
@@ -130,21 +131,16 @@ export interface SecurityPolicyPreflight
   maxCostUsd?: number;
 }
 
-const securityPolicyStageSchema = z
-  .object({
-    markdown: z.string(),
-    questions: z.array(z.string()),
-    reviewNotes: z.array(z.string()),
-    blockedReason: z.string().nullable(),
-  })
-  .strict();
+const securityPolicyStageSchema = z.strictObject({
+  markdown: z.string(),
+  questions: z.array(z.string()),
+  reviewNotes: z.array(z.string()),
+  blockedReason: z.string().nullable(),
+});
 
-export interface SecurityPolicyStageResult {
-  markdown: string;
-  questions: string[];
-  reviewNotes: string[];
-  blockedReason: string | null;
-}
+export interface SecurityPolicyStageResult extends z.infer<
+  typeof securityPolicyStageSchema
+> {}
 
 export function securityPolicyStageOutputSchema(): Record<string, unknown> {
   return z.toJSONSchema(securityPolicyStageSchema, {
@@ -695,13 +691,11 @@ export async function resolveSecurityPolicyGuidance(
     process.execPath,
     [
       join(pluginRoot, "mcp", "helpers.mjs"),
-      "resolve-security-md",
-      "--repo",
-      target.repository,
-      "--scope",
-      dirname(target.targetPath),
-      "--out",
-      "-",
+      ...workbenchArgs("resolve-security-md", {
+        repo: target.repository,
+        scope: dirname(target.targetPath),
+        out: "-",
+      }),
     ],
     { encoding: "utf8", maxBuffer: Infinity, env: environment, signal },
   );
@@ -1015,6 +1009,7 @@ export async function securityPolicyDiff(
     "    if not line.endswith('\\n'): sys.stdout.buffer.write(b'\\n\\\\ No newline at end of file\\n')",
   ].join("\n");
   const diff = await new Promise<string>((resolve, reject) => {
+    let inputError: Error | undefined;
     const child = execFile(
       interpreter,
       ["-I", "-c", script],
@@ -1023,9 +1018,26 @@ export async function securityPolicyDiff(
         maxBuffer: Infinity,
         signal,
       },
-      (error, stdout) => (error === null ? resolve(stdout) : reject(error)),
+      (error, stdout) => {
+        const failure = error ?? inputError;
+        if (failure === undefined) resolve(stdout);
+        else reject(failure);
+      },
     );
-    child.stdin!.on("error", reject);
+    const releaseFailedInput = () => {
+      if (inputError === undefined) return;
+      if (child.exitCode === null && child.signalCode === null) {
+        if (child.pid !== undefined) reject(inputError);
+        return;
+      }
+      child.stdout!.destroy();
+      child.stderr!.destroy();
+    };
+    child.once("exit", releaseFailedInput);
+    child.stdin!.on("error", (error: Error) => {
+      inputError = error;
+      releaseFailedInput();
+    });
     child.stdin!.end(
       JSON.stringify([
         draft.previousContent ?? "",

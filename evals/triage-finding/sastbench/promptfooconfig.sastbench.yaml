@@ -10,13 +10,12 @@ providers:
   - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding SastBench (gpt-5.5)"
     config:
-      # The plugin checkout excludes the label-bearing dataset and eval harness.
-      working_dir: "{{triage_runtime_root}}"
-      # Read the target, its label-free Git cache, and the helper runtime.
+      # The provider binds working_dir to the current staged skill runtime.
+      # The selected target worktree and its label-free Git cache are the only
+      # additional readable workspace roots.
       additional_directories:
+        - "{{env.SASTBENCH_GIT_CACHE_ROOT}}"
         - "{{target_repo}}"
-        - "{{sastbench_git_cache_root}}"
-        - "{{triage_node_root}}"
       skip_git_repo_check: true
       approval_policy: never
       # Pin a value supported by the eval's Codex SDK instead of inheriting a
@@ -35,20 +34,17 @@ providers:
               ":workspace_roots": read
             network:
               enabled: false
-        # The source skill is loaded explicitly from the checkout.
+        # The source skill is loaded explicitly from the staged runtime.
         # Global plugin and memory state would add machine-specific context.
         features:
           memories: false
           plugins: false
-      cli_env:
-        CODEX_MCP_NODE_PATH: "{{triage_node_path}}"
 
 extensions:
+  - file://{{env.TRIAGE_PROVIDER_PATH}}:beforeAll
   - file://./assertions/sastbench-metrics.mts:afterEach
 
 defaultTest:
-  options:
-    transformVars: process.mainModule.require(process.cwd() + '/scripts/runtime-vars.mts').default(vars)
   assert:
     - type: contains-json
       value: file://../schemas/triage-result-v0.schema.json

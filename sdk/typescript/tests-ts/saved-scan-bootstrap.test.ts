@@ -491,17 +491,34 @@ test("bootstrap fails before Python for ambiguous, absent, malformed and changed
   await expect(
     savedScanWorkbench(f.first.scanId + "}".repeat(100_000) + "x", options),
   ).rejects.toThrow("not found");
-  const missing = join(f.root, "missing-state");
-  await expect(
-    savedScanWorkbench(f.first.scanId, {
-      ...options,
-      environment: {
-        ...options.environment,
-        CODEX_SECURITY_STATE_DIR: missing,
-      },
-    }),
-  ).rejects.toThrow("before Python discovery");
-  expect(existsSync(missing)).toBe(false);
+  for (const [kind, detail] of [
+    ["missing", "unable to open database file"],
+    ["corrupt", "file is not a database"],
+    ["schema", "no such table: scans"],
+  ] as const) {
+    const state = join(f.root, `${kind}-state`);
+    if (kind !== "missing") {
+      await mkdir(state);
+      const file = join(state, "workbench.sqlite3");
+      if (kind === "corrupt") await writeFile(file, "not a SQLite database");
+      else new Database(file).close();
+    }
+    await expect(
+      savedScanWorkbench(f.first.scanId, {
+        ...options,
+        environment: {
+          ...options.environment,
+          CODEX_SECURITY_STATE_DIR: state,
+        },
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(detail),
+      cause: expect.objectContaining({
+        message: expect.stringContaining(detail),
+      }),
+    });
+    if (kind === "missing") expect(existsSync(state)).toBe(false);
+  }
   const pinned = await savedScanWorkbench(f.first.scanId, {
     ...options,
     environment: { ...f.environment, PYTHON: f.python },

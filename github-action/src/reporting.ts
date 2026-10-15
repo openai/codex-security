@@ -13,10 +13,7 @@ function html(value: string): string {
     .replace(/[\\`*_\[\]~]/g, character => `&#${character.charCodeAt(0)};`);
 }
 export function resultTitle(result: ScanResults, inputs: Inputs): string {
-  if (result.scanStatus === 'incomplete') return result.reportStatus === 'failed'
-    ? 'Scan coverage is partial, and required reporting failed.'
-    : 'Scan coverage is partial. Available findings are provisional.';
-  if (result.scanStatus !== 'completed') return 'Scan could not complete. Available findings are provisional.';
+  if (result.scanStatus !== 'completed') return 'Scan could not complete.';
   if (result.reportStatus === 'failed') return 'Scan completed, but required reporting failed.';
   if (result.policyStatus === 'failed') return 'Scan completed. Findings meet the configured failure threshold.';
   if (inputs.failOnSeverity === 'none') return 'Scan completed. Findings are reported without failing the job.';
@@ -31,13 +28,12 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(', '))}</code>` : ''} · **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
     `**Model:** <code>${esc(inputs.model)}</code> · **Reasoning effort:** ${inputs.effort}`,
-    `**Failure threshold:** ${inputs.failOnSeverity === 'none' ? 'report-only findings' : inputs.failOnSeverity + ' and above'}. Valid partial scans warn without evaluating this policy. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
+    `**Failure threshold:** ${inputs.failOnSeverity === 'none' ? 'report-only findings' : inputs.failOnSeverity + ' and above'}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...(inputs.maxCost !== undefined ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : []),
     'Applicable root and nested SECURITY.md policy is discovered by the scanner.',
   ];
   if (result.reportStatus === 'partial') parts.push('SARIF report is unavailable; scan results and other reports are still available.');
-  if (result.scanStatus === 'incomplete') parts.push('Partial coverage alone does not fail the job. The findings policy was not evaluated; review the deferred work before treating the security review as complete.');
-  if (result.scanStatus !== 'completed') parts.push('**Findings below are provisional. This is not a completed scan.**');
+  if (result.scanStatus !== 'completed') parts.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
   for (const error of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
@@ -50,7 +46,7 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
 
 export function emitAnnotations(result: ScanResults): void {
   for (const finding of result.findings.slice(0, 50)) {
-    const message = plain(`${result.scanStatus === 'completed' ? '' : 'Provisional finding: '}${finding.summary}`, 4000);
+    const message = plain(finding.summary, 4000);
     const props = {title: plain(`${finding.severity.toUpperCase()}: ${finding.title}`, 200), file: finding.path,
       startLine: finding.startLine, endLine: finding.endLine};
     core.warning(message, props);
