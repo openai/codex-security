@@ -10,14 +10,12 @@ providers:
   - id: openai:codex-sdk:gpt-5.5
     label: "Codex SDK triage-finding SastBench (gpt-5.5)"
     config:
-      # The runner stages only the skill runtime here. The label-bearing
-      # dataset and Promptfoo harness stay outside this tree.
-      working_dir: "{{env.SASTBENCH_RUNTIME_ROOT}}"
-      # Target worktrees and their label-free Git cache are the only
+      # The provider binds working_dir to the current staged skill runtime.
+      # The selected target worktree and its label-free Git cache are the only
       # additional readable workspace roots.
       additional_directories:
-        - "{{env.SASTBENCH_TARGET_ROOT}}"
         - "{{env.SASTBENCH_GIT_CACHE_ROOT}}"
+        - "{{target_repo}}"
       skip_git_repo_check: true
       approval_policy: never
       # Pin a value supported by the eval's Codex SDK instead of inheriting a
@@ -43,6 +41,7 @@ providers:
           plugins: false
 
 extensions:
+  - file://{{env.TRIAGE_PROVIDER_PATH}}:beforeAll
   - file://./assertions/sastbench-metrics.mts:afterEach
 
 defaultTest:

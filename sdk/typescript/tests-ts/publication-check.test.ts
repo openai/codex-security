@@ -18,7 +18,6 @@ const OPTIONS: CheckScanPublicationOptions = {
 };
 const PUBLICATION: PreparedScanPublication = {
   scanId: "scan-example",
-  uploadId: "scan-example",
   scanDirectory: join(tmpdir(), "completed-scan"),
   destination: {
     type: "linear",

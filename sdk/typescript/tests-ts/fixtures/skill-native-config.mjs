@@ -1,3 +1,4 @@
+import { send, completeTurn } from "./app-server-messages.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
@@ -7,7 +8,6 @@ const child = spawn(process.env.SYNTHETIC_NATIVE_CODEX, process.argv.slice(2), {
   windowsHide: true,
 });
 child.stderr.pipe(process.stderr);
-const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 let turnRequest;
 let modelProvider;
 await Promise.all([
@@ -38,28 +38,17 @@ await Promise.all([
         continue;
       }
       const threadId = turnRequest.params.threadId;
-      const turnId = "synthetic-turn";
       const config = response.result.config;
-      send({ id: turnRequest.id, result: { turn: { id: turnId } } });
-      send({
-        method: "item/completed",
-        params: {
-          threadId,
-          turnId,
-          item: {
-            type: "agentMessage",
-            text: JSON.stringify({
-              modelProvider,
-              projectServerConfigured:
-                config.mcp_servers?.synthetic !== undefined,
-            }),
-          },
-        },
-      });
-      send({
-        method: "turn/completed",
-        params: { threadId, turn: { id: turnId, status: "completed" } },
-      });
+      completeTurn(
+        turnRequest,
+        () =>
+          JSON.stringify({
+            modelProvider,
+            projectServerConfigured:
+              config.mcp_servers?.synthetic !== undefined,
+          }),
+        threadId,
+      );
     }
   })(),
 ]);

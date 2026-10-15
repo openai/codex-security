@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { isNonEmptyString } from "./value.js";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -10,7 +11,11 @@ export type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 export interface SavedScanDependencies {
   currentDirectory(): string;
-  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
+  runWorkbench(
+    args: readonly string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
 }
 
 export async function resolveWorkflowScan(
@@ -40,13 +45,12 @@ export async function resolveCompletedScan(
 ): Promise<SavedScan> {
   let scanId = requestedId;
   if (scanId === "latest") {
-    const history = await dependencies.runWorkbench([
-      "list-scans",
-      "--repository",
-      resolve(dependencies.currentDirectory()),
-      "--status",
-      "complete",
-    ]);
+    const history = await dependencies.runWorkbench(
+      workbenchArgs("list-scans", {
+        repository: resolve(dependencies.currentDirectory()),
+        status: "complete",
+      }),
+    );
     const scans = history["scans"];
     const latest = Array.isArray(scans) ? scans[0] : undefined;
     if (!isJsonObject(latest) || typeof latest["scanId"] !== "string") {
@@ -56,11 +60,9 @@ export async function resolveCompletedScan(
     }
     scanId = latest["scanId"];
   }
-  const context = await dependencies.runWorkbench([
-    "get-scan",
-    "--scan-id",
-    scanId,
-  ]);
+  const context = await dependencies.runWorkbench(
+    workbenchArgs("get-scan", { scanId }),
+  );
   const scan = context["scan"];
   if (!isJsonObject(scan) || typeof scan["scanId"] !== "string") {
     throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);

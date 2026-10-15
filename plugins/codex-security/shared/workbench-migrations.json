@@ -1,0 +1,397 @@
+[
+  {
+    "version": 1,
+    "name": "initial workbench schema",
+    "statements": [
+      "CREATE TABLE workspaces (\n    id TEXT PRIMARY KEY,\n    target_path TEXT,\n    target_title TEXT,\n    target_summary TEXT,\n    default_scope TEXT NOT NULL DEFAULT '.',\n    default_mode TEXT NOT NULL DEFAULT 'standard'\n        CHECK (default_mode IN ('diff', 'standard', 'deep')),\n    user_context TEXT,\n    diff_target_kind TEXT\n        CHECK (diff_target_kind IN ('working_tree', 'commit', 'range')),\n    diff_base_revision TEXT,\n    diff_head_revision TEXT,\n    diff_content_digest TEXT,\n    diff_resolution_id TEXT,\n    submitted INTEGER NOT NULL DEFAULT 0 CHECK (submitted IN (0, 1)),\n    active_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);",
+      "CREATE TABLE scans (\n    id TEXT PRIMARY KEY,\n    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n    target_path TEXT NOT NULL,\n    target_revision TEXT NOT NULL,\n    target_snapshot_digest TEXT,\n    scope TEXT NOT NULL,\n    mode TEXT NOT NULL CHECK (mode IN ('diff', 'standard', 'deep')),\n    user_context TEXT,\n    diff_target_kind TEXT\n        CHECK (diff_target_kind IN ('working_tree', 'commit', 'range')),\n    diff_base_revision TEXT,\n    diff_head_revision TEXT,\n    diff_content_digest TEXT,\n    scan_dir TEXT NOT NULL UNIQUE,\n    status TEXT NOT NULL CHECK (status IN ('running', 'complete', 'failed')),\n    phase TEXT NOT NULL CHECK (\n        phase IN ('preflight', 'threat_model', 'discovery', 'validation', 'attack_path', 'reporting')\n    ),\n    handoff_status TEXT NOT NULL DEFAULT 'pending'\n        CHECK (handoff_status IN ('pending', 'delivered')),\n    failure_message TEXT,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);",
+      "CREATE TABLE scan_progress (\n    scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,\n    review_items_total INTEGER NOT NULL DEFAULT 0 CHECK (review_items_total >= 0),\n    review_items_completed INTEGER NOT NULL DEFAULT 0\n        CHECK (review_items_completed >= 0 AND review_items_completed <= review_items_total),\n    reportable_findings_count INTEGER NOT NULL DEFAULT 0\n        CHECK (reportable_findings_count >= 0),\n    deep_review_pass INTEGER CHECK (deep_review_pass IS NULL OR deep_review_pass >= 1),\n    updated_at TEXT NOT NULL\n);",
+      "CREATE TABLE scan_artifacts (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    kind TEXT NOT NULL CHECK (\n        kind IN ('coverage', 'findings', 'manifest', 'markdownReport')\n    ),\n    path TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (scan_id, kind)\n);",
+      "CREATE TABLE findings (\n    id TEXT PRIMARY KEY,\n    fingerprint TEXT NOT NULL UNIQUE,\n    rule_id TEXT NOT NULL,\n    identity_anchor TEXT NOT NULL,\n    identity_instance TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);",
+      "CREATE TABLE finding_occurrences (\n    id TEXT PRIMARY KEY,\n    finding_id TEXT NOT NULL REFERENCES findings(id),\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    title TEXT NOT NULL,\n    summary TEXT NOT NULL,\n    severity TEXT NOT NULL,\n    confidence TEXT NOT NULL,\n    remediation TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    UNIQUE (scan_id, finding_id)\n);",
+      "CREATE TABLE finding_locations (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    occurrence_id TEXT NOT NULL REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    relative_path TEXT NOT NULL,\n    start_line INTEGER NOT NULL CHECK (start_line >= 1),\n    end_line INTEGER NOT NULL CHECK (end_line >= start_line),\n    role TEXT,\n    sort_order INTEGER NOT NULL CHECK (sort_order >= 0),\n    UNIQUE (occurrence_id, sort_order)\n);",
+      "CREATE UNIQUE INDEX scans_one_running_per_workspace\nON scans(workspace_id)\nWHERE status = 'running';"
+    ]
+  },
+  {
+    "version": 2,
+    "name": "persist capability preflight summaries",
+    "statements": [
+      "ALTER TABLE workspaces ADD COLUMN capability_preflight_json TEXT;"
+    ]
+  },
+  {
+    "version": 3,
+    "name": "finding management schema",
+    "statements": [
+      "CREATE TABLE finding_triage (\n    occurrence_id TEXT PRIMARY KEY REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),\n    close_reason TEXT CHECK (\n        close_reason IS NULL OR close_reason IN ('already_fixed', 'wont_fix', 'false_positive')\n    ),\n    note TEXT,\n    updated_at TEXT NOT NULL,\n    CHECK (\n        (status = 'open' AND close_reason IS NULL)\n        OR (status = 'closed' AND close_reason IS NOT NULL)\n    )\n);",
+      "CREATE TABLE finding_remediation_attempts (\n    request_id TEXT PRIMARY KEY,\n    occurrence_id TEXT NOT NULL REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    state TEXT NOT NULL CHECK (\n        state IN ('idle', 'requested', 'generated', 'applied', 'verifying', 'verified', 'failed', 'superseded')\n    ),\n    version INTEGER NOT NULL CHECK (version >= 1),\n    base_revision TEXT NOT NULL,\n    base_content_digest TEXT,\n    applied_content_digest TEXT,\n    pending_action TEXT CHECK (\n        pending_action IS NULL OR pending_action IN ('generate', 'apply', 'verify')\n    ),\n    patch_path TEXT,\n    patch_digest TEXT,\n    summary TEXT,\n    verification_summary TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);",
+      "CREATE INDEX finding_remediation_attempts_by_occurrence\nON finding_remediation_attempts(occurrence_id, created_at DESC);",
+      "ALTER TABLE finding_occurrences\nADD COLUMN details_json TEXT NOT NULL DEFAULT '{}';"
+    ]
+  },
+  {
+    "version": 4,
+    "name": "scan handoff delivery claims",
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN handoff_claimed_at TEXT;",
+      "ALTER TABLE scans\nADD COLUMN handoff_claim_token TEXT;"
+    ]
+  },
+  {
+    "version": 5,
+    "name": "finding remediation action claims",
+    "statements": [
+      "ALTER TABLE finding_remediation_attempts\nADD COLUMN pending_action_claimed_at TEXT;",
+      "ALTER TABLE finding_remediation_attempts\nADD COLUMN pending_action_claim_token TEXT;"
+    ]
+  },
+  {
+    "version": 6,
+    "name": "thread-scoped workspaces",
+    "statements": [
+      "ALTER TABLE workspaces\nADD COLUMN thread_id TEXT;",
+      "CREATE INDEX workspaces_by_thread_and_updated_at\nON workspaces(thread_id, updated_at DESC);"
+    ]
+  },
+  {
+    "version": 7,
+    "name": "remediation host delivery state",
+    "statements": [
+      "ALTER TABLE finding_remediation_attempts\nADD COLUMN pending_action_delivered_at TEXT;"
+    ]
+  },
+  {
+    "version": 8,
+    "name": "sealed manifest digests",
+    "statements": ["ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"]
+  },
+  {
+    "version": 9,
+    "name": "scan target filesystem identity",
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN target_device INTEGER;",
+      "ALTER TABLE scans\nADD COLUMN target_inode INTEGER;"
+    ]
+  },
+  {
+    "version": 10,
+    "name": "scan cancellation state",
+    "statements": ["ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"]
+  },
+  {
+    "version": 11,
+    "name": "deep scan orchestration state",
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN deep_scan_owner_thread_id TEXT;",
+      "UPDATE scans\nSET deep_scan_owner_thread_id = (\n    SELECT workspaces.thread_id\n    FROM workspaces\n    WHERE workspaces.id = scans.workspace_id\n)\nWHERE mode = 'deep'\n    AND status = 'running'\n    AND id IN (\n        SELECT MIN(active_scans.id)\n        FROM scans AS active_scans\n        JOIN workspaces AS active_workspaces\n            ON active_workspaces.id = active_scans.workspace_id\n        WHERE active_scans.mode = 'deep'\n            AND active_scans.status = 'running'\n            AND active_workspaces.thread_id IS NOT NULL\n        GROUP BY active_workspaces.thread_id,\n            active_scans.target_path,\n            active_scans.scope\n    );",
+      "CREATE UNIQUE INDEX scans_one_running_deep_per_owner_target\nON scans(deep_scan_owner_thread_id, target_path, scope)\nWHERE mode = 'deep'\n    AND status = 'running'\n    AND deep_scan_owner_thread_id IS NOT NULL;",
+      "CREATE TABLE deep_scan_runs (\n    scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,\n    schema_version INTEGER NOT NULL CHECK (schema_version = 1),\n    workflow_version TEXT NOT NULL,\n    coordinator_generation INTEGER NOT NULL DEFAULT 1\n        CHECK (coordinator_generation >= 1),\n    status TEXT NOT NULL CHECK (\n        status IN ('running', 'succeeded', 'failed', 'canceled', 'interrupted')\n    ),\n    phase TEXT NOT NULL CHECK (\n        phase IN ('setup', 'discovery', 'reducing', 'terminal')\n    ),\n    workers INTEGER NOT NULL CHECK (workers >= 1),\n    subagents INTEGER NOT NULL CHECK (subagents >= 0),\n    stop_after_no_new INTEGER NOT NULL CHECK (stop_after_no_new >= 1),\n    max_discovery_runs INTEGER NOT NULL CHECK (max_discovery_runs >= 1),\n    discovery_runs_dispatched INTEGER NOT NULL DEFAULT 0\n        CHECK (discovery_runs_dispatched >= 0),\n    completion_sequence INTEGER NOT NULL DEFAULT 0\n        CHECK (completion_sequence >= 0),\n    consecutive_no_new INTEGER NOT NULL DEFAULT 0\n        CHECK (consecutive_no_new >= 0),\n    cancel_requested INTEGER NOT NULL DEFAULT 0\n        CHECK (cancel_requested IN (0, 1)),\n    canonical_inventory_path TEXT,\n    canonical_finding_report_path TEXT,\n    canonical_candidates_path TEXT,\n    dedupe_report_path TEXT,\n    seed_research_path TEXT,\n    work_ledger_path TEXT,\n    raw_candidates_path TEXT,\n    coverage_ledger_path TEXT,\n    findings_dir TEXT,\n    manifest_path TEXT,\n    terminal_reason TEXT CHECK (\n        terminal_reason IS NULL OR terminal_reason IN ('saturated', 'capped')\n    ),\n    error_message TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    completed_at TEXT,\n    CHECK (\n        (\n            canonical_inventory_path IS NULL\n            AND canonical_finding_report_path IS NULL\n            AND canonical_candidates_path IS NULL\n            AND dedupe_report_path IS NULL\n            AND seed_research_path IS NULL\n            AND work_ledger_path IS NULL\n            AND raw_candidates_path IS NULL\n            AND coverage_ledger_path IS NULL\n            AND findings_dir IS NULL\n        ) OR (\n            canonical_inventory_path IS NOT NULL\n            AND canonical_finding_report_path IS NOT NULL\n            AND canonical_candidates_path IS NOT NULL\n            AND dedupe_report_path IS NOT NULL\n            AND seed_research_path IS NOT NULL\n            AND work_ledger_path IS NOT NULL\n            AND raw_candidates_path IS NOT NULL\n            AND coverage_ledger_path IS NOT NULL\n            AND findings_dir IS NOT NULL\n        )\n    )\n);",
+      "CREATE TABLE deep_scan_workers (\n    id TEXT PRIMARY KEY,\n    scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n    kind TEXT NOT NULL CHECK (kind IN ('setup', 'discovery', 'dedup')),\n    status TEXT NOT NULL CHECK (\n        status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')\n    ),\n    merge_state TEXT NOT NULL DEFAULT 'none' CHECK (\n        merge_state IN ('none', 'buffered', 'merging', 'merged')\n    ),\n    prompt_path TEXT NOT NULL,\n    artifact_dir TEXT NOT NULL,\n    result_manifest_path TEXT,\n    attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),\n    sdk_thread_id TEXT,\n    completion_sequence INTEGER CHECK (completion_sequence >= 1),\n    error_message TEXT,\n    created_at TEXT NOT NULL,\n    started_at TEXT,\n    completed_at TEXT,\n    updated_at TEXT NOT NULL,\n    UNIQUE (scan_id, id),\n    CHECK (kind = 'discovery' OR merge_state = 'none'),\n    CHECK (kind = 'discovery' OR completion_sequence IS NULL)\n);",
+      "CREATE UNIQUE INDEX deep_scan_workers_completion_sequence\nON deep_scan_workers(scan_id, completion_sequence)\nWHERE completion_sequence IS NOT NULL;",
+      "CREATE INDEX deep_scan_workers_by_scan_status\nON deep_scan_workers(scan_id, status, kind, created_at);",
+      "CREATE TABLE deep_scan_dedup_inputs (\n    scan_id TEXT NOT NULL,\n    dedup_worker_id TEXT NOT NULL,\n    discovery_worker_id TEXT NOT NULL,\n    input_order INTEGER NOT NULL CHECK (input_order >= 0),\n    PRIMARY KEY (dedup_worker_id, discovery_worker_id),\n    UNIQUE (dedup_worker_id, input_order),\n    FOREIGN KEY (scan_id, dedup_worker_id)\n        REFERENCES deep_scan_workers(scan_id, id) ON DELETE CASCADE,\n    FOREIGN KEY (scan_id, discovery_worker_id)\n        REFERENCES deep_scan_workers(scan_id, id) ON DELETE CASCADE\n);"
+    ]
+  },
+  {
+    "version": 12,
+    "name": "scan continuation threads",
+    "statements": ["ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"]
+  },
+  {
+    "version": 13,
+    "name": "scan scope file counts",
+    "statements": [
+      "ALTER TABLE scan_progress\nADD COLUMN scope_file_count INTEGER\n    CHECK (scope_file_count >= 0);"
+    ]
+  },
+  {
+    "version": 14,
+    "name": "imported triage results",
+    "statements": [
+      "CREATE TABLE triage_results (\n    id TEXT PRIMARY KEY,\n    repository_path TEXT NOT NULL,\n    repository_revision TEXT,\n    finding_count INTEGER NOT NULL CHECK (finding_count >= 0),\n    result_json TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);",
+      "CREATE INDEX triage_results_by_updated_at\nON triage_results(updated_at DESC, id);"
+    ]
+  },
+  {
+    "version": 15,
+    "name": "append-only finding decisions",
+    "statements": [
+      "CREATE TABLE finding_decisions (\n    id TEXT PRIMARY KEY,\n    occurrence_id TEXT NOT NULL REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),\n    close_reason TEXT CHECK (\n        close_reason IS NULL OR close_reason IN ('already_fixed', 'wont_fix', 'false_positive')\n    ),\n    note TEXT,\n    created_at TEXT NOT NULL,\n    CHECK (\n        (status = 'open' AND close_reason IS NULL)\n        OR (status = 'closed' AND close_reason IS NOT NULL)\n    )\n);",
+      "CREATE INDEX finding_decisions_by_occurrence\nON finding_decisions(occurrence_id, created_at DESC, id DESC);",
+      "INSERT INTO finding_decisions (\n    id, occurrence_id, status, close_reason, note, created_at\n)\nSELECT\n    'legacy_' || occurrence_id,\n    occurrence_id,\n    status,\n    close_reason,\n    note,\n    updated_at\nFROM finding_triage;"
+    ]
+  },
+  {
+    "version": 16,
+    "name": "stable repository targets",
+    "statements": [
+      "CREATE TABLE security_targets (\n    id TEXT PRIMARY KEY,\n    current_path TEXT NOT NULL UNIQUE,\n    display_name TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);",
+      "ALTER TABLE workspaces\nADD COLUMN target_id TEXT REFERENCES security_targets(id);",
+      "ALTER TABLE scans\nADD COLUMN target_id TEXT REFERENCES security_targets(id);",
+      "CREATE INDEX scans_by_target\nON scans(target_id, started_at DESC, id);"
+    ]
+  },
+  {
+    "version": 17,
+    "name": "scan target summaries",
+    "statements": ["ALTER TABLE scans\nADD COLUMN target_summary TEXT;"]
+  },
+  {
+    "version": 18,
+    "name": "clear legacy delivered handoff claims",
+    "statements": [
+      "UPDATE scans\nSET handoff_claimed_at = NULL, handoff_claim_token = NULL\nWHERE handoff_status = 'delivered';"
+    ]
+  },
+  {
+    "version": 19,
+    "name": "persist setup workspace preference",
+    "statements": [
+      "CREATE TABLE setup_preferences (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    skip_setup_ui INTEGER NOT NULL CHECK (skip_setup_ui IN (0, 1)),\n    updated_at TEXT NOT NULL\n);"
+    ]
+  },
+  {
+    "version": 20,
+    "name": "phase-specific scan progress",
+    "statements": [
+      "ALTER TABLE scan_progress\nADD COLUMN phase_items_total INTEGER NOT NULL DEFAULT 0\n    CHECK (phase_items_total >= 0);",
+      "ALTER TABLE scan_progress\nADD COLUMN phase_items_completed INTEGER NOT NULL DEFAULT 0\n    CHECK (phase_items_completed >= 0 AND phase_items_completed <= phase_items_total);",
+      "ALTER TABLE scan_progress\nADD COLUMN phase_progress_unit TEXT CHECK (\n    phase_progress_unit IS NULL OR phase_progress_unit IN (\n        'checks',\n        'threat_surfaces',\n        'review_receipts',\n        'candidate_findings',\n        'validated_findings',\n        'report_artifacts'\n    )\n);"
+    ]
+  },
+  {
+    "version": 21,
+    "name": "current scan preflight state",
+    "statements": [
+      "ALTER TABLE scan_progress\nADD COLUMN preflight_issues_json TEXT NOT NULL DEFAULT '[]';",
+      "ALTER TABLE scan_progress\nADD COLUMN preflight_checks_total INTEGER NOT NULL DEFAULT 0\n    CHECK (preflight_checks_total >= 0);",
+      "ALTER TABLE scan_progress\nADD COLUMN preflight_checks_completed INTEGER NOT NULL DEFAULT 0\n    CHECK (\n        preflight_checks_completed >= 0\n        AND preflight_checks_completed <= preflight_checks_total\n    );"
+    ]
+  },
+  {
+    "version": 22,
+    "name": "replayable scan launch recipes",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN recipe_json TEXT;",
+      "ALTER TABLE scans ADD COLUMN parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL;"
+    ]
+  },
+  {
+    "version": 23,
+    "name": "semantic scan comparison matches",
+    "statements": [
+      "CREATE TABLE scan_comparisons (\n    before_scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    after_scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    result_json TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    PRIMARY KEY (before_scan_id, after_scan_id),\n    CHECK (before_scan_id != after_scan_id)\n);",
+      "CREATE TABLE scan_comparison_matches (\n    before_scan_id TEXT NOT NULL,\n    after_scan_id TEXT NOT NULL,\n    before_occurrence_id TEXT NOT NULL\n        REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    after_occurrence_id TEXT NOT NULL\n        REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    reason TEXT NOT NULL,\n    PRIMARY KEY (\n        before_scan_id, after_scan_id, before_occurrence_id, after_occurrence_id\n    ),\n    FOREIGN KEY (before_scan_id, after_scan_id)\n        REFERENCES scan_comparisons(before_scan_id, after_scan_id) ON DELETE CASCADE\n);",
+      "CREATE INDEX scan_comparison_matches_by_before_occurrence\nON scan_comparison_matches(before_occurrence_id);",
+      "CREATE INDEX scan_comparison_matches_by_after_occurrence\nON scan_comparison_matches(after_occurrence_id);"
+    ]
+  },
+  {
+    "version": 24,
+    "name": "persist scan cost estimates",
+    "statements": ["ALTER TABLE scans ADD COLUMN cost_json TEXT;"]
+  },
+  {
+    "version": 25,
+    "name": "persist scan model settings",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN model TEXT;",
+      "ALTER TABLE scans ADD COLUMN reasoning_effort TEXT;"
+    ]
+  },
+  {
+    "version": 26,
+    "name": "persist scan completion warnings",
+    "statements": [
+      "ALTER TABLE scans\nADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';"
+    ]
+  },
+  {
+    "version": 27,
+    "name": "persist deep scan consecutive discovery failures",
+    "statements": [
+      "ALTER TABLE deep_scan_runs\nADD COLUMN stop_after_consecutive_errors INTEGER NOT NULL DEFAULT 1\n    CHECK (stop_after_consecutive_errors >= 1);",
+      "ALTER TABLE deep_scan_runs\nADD COLUMN consecutive_errors INTEGER NOT NULL DEFAULT 0\n    CHECK (consecutive_errors >= 0);",
+      "UPDATE deep_scan_runs\nSET stop_after_consecutive_errors = stop_after_no_new;"
+    ]
+  },
+  {
+    "version": 28,
+    "name": "persist deep scan discovery time limit",
+    "statements": [
+      "ALTER TABLE deep_scan_runs\nADD COLUMN max_time_hours REAL NOT NULL DEFAULT 96;"
+    ]
+  },
+  {
+    "version": 29,
+    "name": "persist finding publication associations",
+    "statements": [
+      "CREATE TABLE finding_publications (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    finding_id TEXT NOT NULL REFERENCES findings(id),\n    occurrence_id TEXT NOT NULL\n        REFERENCES finding_occurrences(id) ON DELETE CASCADE,\n    destination_type TEXT NOT NULL,\n    team_id TEXT,\n    project_id TEXT,\n    external_id TEXT NOT NULL,\n    external_url TEXT,\n    created_at TEXT NOT NULL,\n    UNIQUE (occurrence_id, destination_type, team_id, project_id, external_id),\n    UNIQUE (destination_type, team_id, project_id, external_id)\n);",
+      "CREATE INDEX finding_publications_by_scan\nON finding_publications(scan_id, occurrence_id, id);",
+      "CREATE INDEX finding_publications_by_finding\nON finding_publications(finding_id, id);"
+    ]
+  },
+  {
+    "version": 30,
+    "name": "preserve team-only finding publication associations",
+    "statements": [
+      "CREATE UNIQUE INDEX finding_publications_team_only_occurrence\nON finding_publications(occurrence_id, destination_type, team_id, external_id)\nWHERE project_id IS NULL;",
+      "CREATE UNIQUE INDEX finding_publications_team_only_external_issue\nON finding_publications(destination_type, team_id, external_id)\nWHERE project_id IS NULL;"
+    ]
+  },
+  {
+    "version": 31,
+    "name": "freeze stopped scan source digests",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN retained_source_digests_json TEXT;"
+    ]
+  },
+  {
+    "version": 32,
+    "name": "separate deep scan publication failures",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN publication_error_message TEXT;"
+    ]
+  },
+  {
+    "version": 33,
+    "name": "store complete findings and embeddings without a scan",
+    "statements": [
+      "ALTER TABLE findings ADD COLUMN details_json TEXT;",
+      "UPDATE findings SET details_json = (\n    SELECT details_json FROM finding_occurrences\n    WHERE finding_id = findings.id AND details_json != '{}'\n    ORDER BY created_at DESC, id DESC LIMIT 1\n);",
+      "CREATE TABLE finding_embeddings (\n    finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,\n    model TEXT NOT NULL,\n    vector_json TEXT NOT NULL\n);",
+      "CREATE TRIGGER invalidate_finding_embedding\nAFTER UPDATE OF details_json ON findings\nWHEN OLD.details_json IS NOT NEW.details_json\nBEGIN\n    DELETE FROM finding_embeddings WHERE finding_id = NEW.id;\nEND;"
+    ]
+  },
+  {
+    "version": 34,
+    "name": "associate findings with repositories",
+    "statements": [
+      "CREATE TABLE finding_repositories (\n    repository_id TEXT NOT NULL,\n    finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,\n    PRIMARY KEY (repository_id, finding_id)\n);",
+      "INSERT OR IGNORE INTO finding_repositories (repository_id, finding_id)\nSELECT scans.target_id, finding_occurrences.finding_id\nFROM finding_occurrences JOIN scans ON scans.id = finding_occurrences.scan_id\nWHERE scans.target_id IS NOT NULL;"
+    ]
+  },
+  {
+    "version": 35,
+    "name": "persist finding dedupe groups",
+    "statements": [
+      "CREATE TABLE finding_dedupe_groups (\n    id TEXT PRIMARY KEY,\n    created_at TEXT NOT NULL\n);",
+      "CREATE TABLE finding_dedupe_group_members (\n    group_id TEXT NOT NULL REFERENCES finding_dedupe_groups(id) ON DELETE CASCADE,\n    finding_id TEXT NOT NULL REFERENCES findings(id),\n    PRIMARY KEY (group_id, finding_id)\n);",
+      "CREATE INDEX finding_dedupe_groups_by_finding\nON finding_dedupe_group_members(finding_id, group_id);"
+    ]
+  },
+  {
+    "version": 36,
+    "name": "persist local findings workflows",
+    "statements": [
+      "CREATE TABLE finding_workflows (\n    id TEXT PRIMARY KEY,\n    state_json TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n);"
+    ]
+  },
+  {
+    "version": 37,
+    "name": "checkpoint validated dedupe reviews",
+    "statements": [
+      "CREATE TABLE finding_workflow_reviews (\n    workflow_id TEXT NOT NULL REFERENCES finding_workflows(id) ON DELETE CASCADE,\n    review_key TEXT NOT NULL,\n    binding_json TEXT NOT NULL,\n    result_json TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (workflow_id, review_key)\n);"
+    ]
+  },
+  {
+    "version": 38,
+    "name": "store findings workflow metadata in columns",
+    "statements": [
+      "ALTER TABLE finding_workflows RENAME COLUMN state_json TO results_json;",
+      "ALTER TABLE finding_workflows ADD COLUMN repository_path TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN scan_request_digest TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN scan_id TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN scan_dir TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN artifact_digest TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN destination TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN scope_repository_id TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN scope_all_repositories INTEGER;",
+      "ALTER TABLE finding_workflows ADD COLUMN scan_status TEXT NOT NULL DEFAULT 'pending';",
+      "ALTER TABLE finding_workflows ADD COLUMN scan_error TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'pending';",
+      "ALTER TABLE finding_workflows ADD COLUMN publish_error TEXT;",
+      "ALTER TABLE finding_workflows ADD COLUMN dedupe_status TEXT NOT NULL DEFAULT 'pending';",
+      "ALTER TABLE finding_workflows ADD COLUMN dedupe_error TEXT;",
+      "UPDATE finding_workflows SET\n    repository_path = json_extract(results_json, '$.repositoryPath'),\n    scan_request_digest = json_extract(results_json, '$.scanRequestDigest'),\n    scan_id = json_extract(results_json, '$.scanId'),\n    scan_dir = json_extract(results_json, '$.scanDir'),\n    artifact_digest = json_extract(results_json, '$.artifactDigest'),\n    destination = json_extract(results_json, '$.destination'),\n    scope_repository_id = json_extract(results_json, '$.scope.repositoryId'),\n    scope_all_repositories = json_extract(results_json, '$.scope.allRepositories'),\n    scan_status = json_extract(results_json, '$.stages.scan.status'),\n    publish_status = json_extract(results_json, '$.stages.publish.status'),\n    dedupe_status = json_extract(results_json, '$.stages.dedupe.status');"
+    ]
+  },
+  {
+    "version": 39,
+    "name": "store dedupe checkpoint bindings in columns",
+    "statements": [
+      "ALTER TABLE finding_workflow_reviews RENAME COLUMN binding_json TO prompt_digest;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN review_contract_version INTEGER;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN codex_version TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN source_repository_path TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN source_revision TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN source_refs_digest TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN source_content_digest TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN scope_repository_id TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN scope_all_repositories INTEGER;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN model TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN effort TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN settings_digest TEXT;",
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN contract_digest TEXT;",
+      "UPDATE finding_workflow_reviews SET\n    review_contract_version = json_extract(prompt_digest, '$.version'),\n    codex_version = json_extract(prompt_digest, '$.codexVersion'),\n    source_repository_path = json_extract(prompt_digest, '$.source.repository'),\n    source_revision = json_extract(prompt_digest, '$.source.revision'),\n    source_refs_digest = json_extract(prompt_digest, '$.source.refsDigest'),\n    source_content_digest = json_extract(prompt_digest, '$.source.content'),\n    scope_repository_id = json_extract(prompt_digest, '$.scope.repositoryId'),\n    scope_all_repositories = json_extract(prompt_digest, '$.scope.allRepositories'),\n    model = json_extract(prompt_digest, '$.model'),\n    effort = json_extract(prompt_digest, '$.effort'),\n    settings_digest = json_extract(prompt_digest, '$.settingsDigest'),\n    contract_digest = json_extract(prompt_digest, '$.contractDigest'),\n    prompt_digest = json_extract(prompt_digest, '$.promptDigest');"
+    ]
+  },
+  {
+    "version": 40,
+    "name": "index finding identity and comparison history",
+    "statements": [
+      "CREATE INDEX finding_occurrences_by_finding\nON finding_occurrences(finding_id, id);",
+      "CREATE INDEX scan_comparisons_by_after_scan\nON scan_comparisons(after_scan_id, before_scan_id);"
+    ]
+  },
+  {
+    "version": 41,
+    "name": "checkpoint finding severity assessments",
+    "statements": [
+      "CREATE TABLE finding_severity_assessments (\n    finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,\n    occurrence_id TEXT,\n    input_sha256 TEXT NOT NULL,\n    rubric_sha256 TEXT,\n    knowledge_base_sha256 TEXT,\n    assessed_at TEXT NOT NULL,\n    source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),\n    decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),\n    level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),\n    rubric_label TEXT,\n    rationale TEXT NOT NULL,\n    confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),\n    review_trigger TEXT,\n    CHECK ((decision = 'assessed' AND level IS NOT NULL)\n        OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))\n);",
+      "CREATE TABLE scan_severity_classifications (\n    scan_id TEXT PRIMARY KEY,\n    finding_ids_json TEXT NOT NULL,\n    assessed_at TEXT NOT NULL,\n    rubric_sha256 TEXT,\n    knowledge_base_sha256 TEXT\n);"
+    ]
+  },
+  {
+    "version": 42,
+    "name": "editable scan names",
+    "statements": ["ALTER TABLE scans ADD COLUMN name TEXT;"]
+  },
+  {
+    "version": 43,
+    "name": "preserve severity assessments per scan",
+    "statements": [
+      "CREATE TABLE scan_severity_assessments (\n            scan_id TEXT NOT NULL REFERENCES scan_severity_classifications(scan_id) ON DELETE CASCADE,\n            finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,\n            occurrence_id TEXT,\n            input_sha256 TEXT NOT NULL,\n            rubric_sha256 TEXT,\n            knowledge_base_sha256 TEXT,\n            assessed_at TEXT NOT NULL,\n            source TEXT NOT NULL CHECK (source IN ('existing-severity', 'rubric')),\n            decision TEXT NOT NULL CHECK (decision IN ('assessed', 'excluded')),\n            level TEXT CHECK (level IN ('critical', 'high', 'medium', 'low', 'informational')),\n            rubric_label TEXT,\n            rationale TEXT NOT NULL,\n            confidence TEXT CHECK (confidence IN ('high', 'medium', 'low')),\n            review_trigger TEXT,\n            PRIMARY KEY (scan_id, finding_id),\n            CHECK ((decision = 'assessed' AND level IS NOT NULL)\n                OR (decision = 'excluded' AND level IS NULL AND rubric_label IS NULL))\n        );",
+      "INSERT INTO scan_severity_assessments\n        SELECT classification.scan_id, assessment.*\n        FROM scan_severity_classifications AS classification\n        CROSS JOIN json_each(classification.finding_ids_json) AS selected\n        CROSS JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value\n        WHERE assessment.rubric_sha256 IS classification.rubric_sha256\n          AND assessment.knowledge_base_sha256 IS classification.knowledge_base_sha256\n          AND EXISTS (\n              SELECT 1 FROM finding_occurrences AS occurrence\n              WHERE occurrence.id = assessment.occurrence_id\n                AND occurrence.scan_id = classification.scan_id\n          );"
+    ]
+  },
+  {
+    "version": 44,
+    "name": "version local finding embedding inputs",
+    "statements": ["ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"]
+  },
+  {
+    "version": 45,
+    "name": "separate local and service embedding caches",
+    "statements": [
+      "CREATE TABLE local_finding_embeddings (\n    finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,\n    model TEXT NOT NULL,\n    vector_json TEXT NOT NULL,\n    cache_key TEXT NOT NULL\n);",
+      "INSERT INTO local_finding_embeddings\n    SELECT finding_id, model, vector_json, cache_key FROM finding_embeddings\n    WHERE cache_key IS NOT NULL;",
+      "DELETE FROM finding_embeddings WHERE cache_key IS NOT NULL;"
+    ]
+  },
+  {
+    "version": 46,
+    "name": "invalidate local embeddings when finding bodies change",
+    "statements": [
+      "CREATE TRIGGER invalidate_local_finding_embedding\nAFTER UPDATE OF details_json ON findings\nWHEN OLD.details_json IS NOT NEW.details_json\nBEGIN\n    DELETE FROM local_finding_embeddings WHERE finding_id = NEW.id;\nEND;"
+    ]
+  },
+  {
+    "version": 47,
+    "name": "snapshot deep scan discovery context",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
+    ]
+  }
+]

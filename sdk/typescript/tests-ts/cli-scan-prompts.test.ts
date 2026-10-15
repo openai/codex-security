@@ -226,6 +226,7 @@ describe("CLI scan prompts", () => {
         currentDirectory: root,
         onTurn,
         onWorkbench: () => ({
+          scanId: "saved",
           recipe: {
             repository: root,
             target: { kind: "repository", paths: [] },

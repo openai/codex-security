@@ -4,39 +4,26 @@ import { z } from "incur";
 import { deduplicateRecords, type DeduplicateRecordsInput } from "./records.js";
 
 const rpcId = z.union([z.string(), z.number().int()]);
-const request = z
-  .object({
-    jsonrpc: z.literal("2.0"),
-    id: rpcId,
-    method: z.literal("run"),
-    params: z.unknown(),
-  })
-  .strict();
-const cancellation = z
-  .object({
-    jsonrpc: z.literal("2.0"),
-    method: z.literal("cancel"),
-    params: z.object({ id: rpcId }).strict(),
-  })
-  .strict();
+const envelope = z.strictObject({ jsonrpc: z.literal("2.0") });
+const request = envelope.extend({
+  id: rpcId,
+  method: z.literal("run"),
+  params: z.unknown(),
+});
+const cancellation = envelope.extend({
+  method: z.literal("cancel"),
+  params: z.strictObject({ id: rpcId }),
+});
 const response = z.union([
-  z
-    .object({ jsonrpc: z.literal("2.0"), id: rpcId, result: z.unknown() })
-    .strict()
-    .refine((value) => Object.hasOwn(value, "result")),
-  z
-    .object({
-      jsonrpc: z.literal("2.0"),
-      id: rpcId,
-      error: z
-        .object({
-          code: z.number().int(),
-          message: z.string(),
-          data: z.unknown().optional(),
-        })
-        .strict(),
-    })
-    .strict(),
+  envelope.extend({ id: rpcId, result: z.unknown() }),
+  envelope.extend({
+    id: rpcId,
+    error: z.strictObject({
+      code: z.number().int(),
+      message: z.string(),
+      data: z.unknown().optional(),
+    }),
+  }),
 ]);
 type Output = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;

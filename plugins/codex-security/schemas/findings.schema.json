@@ -162,11 +162,7 @@
                 "minLength": 1
               },
               "cwe": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               }
             }
           },
@@ -300,11 +296,7 @@
                 "minLength": 1
               },
               "evidenceRefs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "code": {
                 "type": "string",
@@ -328,18 +320,10 @@
                 "minLength": 1
               },
               "evidenceRefs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "evidence_refs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "code": {
                 "type": "string",
@@ -362,18 +346,10 @@
             ],
             "properties": {
               "assertions": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "counterEvidence": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "evidence": {
                 "type": [
@@ -387,25 +363,13 @@
                 }
               },
               "evidenceRefs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "evidence_refs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "limitations": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "method": {
                 "type": "string",
@@ -445,154 +409,40 @@
             ],
             "properties": {
               "assumptions": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "blindspots": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "controls": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "dataFlow": {
-                "type": [
-                  "string",
-                  "object"
-                ],
-                "minLength": 1,
-                "properties": {
-                  "summary": { "type": "string", "minLength": 1 },
-                  "source": { "type": "string", "minLength": 1 },
-                  "sink": { "type": "string", "minLength": 1 },
-                  "outcome": { "type": "string", "minLength": 1 },
-                  "transformations": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  },
-                  "evidenceRefs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  },
-                  "evidence_refs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  }
-                }
+                "$ref": "#/$defs/dataFlow"
               },
               "data_flow": {
-                "type": [
-                  "string",
-                  "object"
-                ],
-                "minLength": 1,
-                "properties": {
-                  "summary": { "type": "string", "minLength": 1 },
-                  "source": { "type": "string", "minLength": 1 },
-                  "sink": { "type": "string", "minLength": 1 },
-                  "outcome": { "type": "string", "minLength": 1 },
-                  "transformations": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  },
-                  "evidenceRefs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  },
-                  "evidence_refs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  }
-                }
+                "$ref": "#/$defs/dataFlow"
               },
               "dataflow": {
-                "type": [
-                  "string",
-                  "object"
-                ],
-                "minLength": 1,
-                "properties": {
-                  "summary": { "type": "string", "minLength": 1 },
-                  "source": { "type": "string", "minLength": 1 },
-                  "sink": { "type": "string", "minLength": 1 },
-                  "outcome": { "type": "string", "minLength": 1 },
-                  "transformations": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  },
-                  "evidenceRefs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  },
-                  "evidence_refs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
-                  }
-                }
+                "$ref": "#/$defs/dataFlow"
               },
               "evidenceRefs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "evidence_refs": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "impact": {
-                "type": [
-                  "string",
-                  "object",
-                  "null"
-                ],
-                "minLength": 1,
-                "properties": {
-                  "level": { "type": "string", "minLength": 1 },
-                  "rationale": { "type": "string", "minLength": 1 },
-                  "why": { "type": "string", "minLength": 1 }
-                }
+                "$ref": "#/$defs/assessment"
               },
               "likelihood": {
-                "type": [
-                  "string",
-                  "object",
-                  "null"
-                ],
-                "minLength": 1,
-                "properties": {
-                  "level": { "type": "string", "minLength": 1 },
-                  "rationale": { "type": "string", "minLength": 1 },
-                  "why": { "type": "string", "minLength": 1 }
-                }
+                "$ref": "#/$defs/assessment"
               },
               "limitations": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "preconditions": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "reachability": {
                 "type": [
@@ -608,25 +458,18 @@
                   "sink": { "type": "string", "minLength": 1 },
                   "outcome": { "type": "string", "minLength": 1 },
                   "preconditions": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
+                    "$ref": "#/$defs/stringList"
                   },
                   "evidenceRefs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
+                    "$ref": "#/$defs/stringList"
                   },
                   "evidence_refs": {
-                    "type": "array",
-                    "items": { "type": "string", "minLength": 1 }
+                    "$ref": "#/$defs/stringList"
                   }
                 }
               },
               "steps": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
+                "$ref": "#/$defs/stringList"
               },
               "summary": {
                 "type": "string",
@@ -635,18 +478,10 @@
             }
           },
           "remediationTests": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
+            "$ref": "#/$defs/stringList"
           },
           "preventiveControls": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
+            "$ref": "#/$defs/stringList"
           },
           "provenance": {
             "type": "object",
@@ -678,6 +513,50 @@
             }
           }
         }
+      }
+    }
+  },
+  "$defs": {
+    "dataFlow": {
+      "type": [
+        "string",
+        "object"
+      ],
+      "minLength": 1,
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "sink": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "minLength": 1 },
+        "transformations": {
+          "$ref": "#/$defs/stringList"
+        },
+        "evidenceRefs": {
+          "$ref": "#/$defs/stringList"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/stringList"
+        }
+      }
+    },
+    "assessment": {
+      "type": [
+        "string",
+        "object",
+        "null"
+      ],
+      "minLength": 1,
+      "properties": {
+        "level": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "why": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
       }
     }
   }

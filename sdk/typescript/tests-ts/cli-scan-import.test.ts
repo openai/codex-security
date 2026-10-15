@@ -206,32 +206,37 @@ describe("scan import", () => {
     });
   });
 
-  test("reruns an imported scan from its retained source", async () => {
-    const { deps, calls } = importDependencies();
-    deps.runWorkbench = async (args) => {
-      expect(args).toEqual(["get-scan-recipe", "--scan-id", "previous-scan"]);
-      return {
-        recipe: {
-          import: {
-            format: "csv",
-            sourcePath: resolve("retained", "source.csv"),
+  test.each(["12345678-1234-4234-8234-123456789abc", "12345678"])(
+    "reruns imported scan %s from its retained source with the resolved parent UUID",
+    async (selector) => {
+      const scanId = "12345678-1234-4234-8234-123456789abc";
+      const { deps, calls } = importDependencies();
+      deps.runWorkbench = async (args) => {
+        expect(args).toEqual(["get-scan-recipe", "--scan-id", selector]);
+        return {
+          scanId,
+          recipe: {
+            import: {
+              format: "csv",
+              sourcePath: resolve("retained", "source.csv"),
+            },
           },
-        },
+        };
       };
-    };
-    const stdout = captureCli(main, "stdout");
-    expect(
-      await stdout.run(["scans", "rerun", "previous-scan", "--json"], deps),
-    ).toBe(0);
-    expect(calls[0]).toMatchObject({
-      sourcePath: resolve("retained", "source.csv"),
-      format: "csv",
-      parentScanId: "previous-scan",
-    });
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      manifest: { scan: { id: "scan" } },
-    });
-  });
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(["scans", "rerun", selector, "--json"], deps),
+      ).toBe(0);
+      expect(calls[0]).toMatchObject({
+        sourcePath: resolve("retained", "source.csv"),
+        format: "csv",
+        parentScanId: scanId,
+      });
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { id: "scan" } },
+      });
+    },
+  );
 
   test.each(["--validation-prompt-file", "--scan-prompt-file"])(
     "rejects %s when rerunning an imported scan",

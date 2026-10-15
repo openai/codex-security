@@ -22,6 +22,12 @@ export interface WindowsHandle {
 /** Paths are UTF-16LE code units without a terminator, including lone surrogates. */
 export interface WindowsBinding {
   windowsArguments(): Buffer[];
+  runWindowsProcess(
+    executable: Buffer,
+    arguments_: Buffer[],
+    cwd?: Buffer,
+    environment?: { name: Buffer; value: Buffer }[],
+  ): { error: number; message?: string | null; status: number };
   windowsEnvironment(name: Buffer): Buffer | null;
   windowsAbsolutePath(path: Buffer): WindowsResult<Buffer>;
   windowsDirectoryEntries(
@@ -37,6 +43,7 @@ export interface WindowsBinding {
     flags: number,
   ): { error: number; handle?: WindowsHandle | null };
   createWindowsDirectories(path: Buffer): number;
+  createPrivateWindowsDirectory(path: Buffer): number;
 }
 
 export { windowsFlags } from "./windows-flags.mjs";

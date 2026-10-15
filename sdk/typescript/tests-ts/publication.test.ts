@@ -85,7 +85,7 @@ describe("scan publication preparation", () => {
     ).toBe("scan_example_001");
   });
 
-  test("prepares sealed findings with scan-based upload IDs and full traceability", async () => {
+  test("prepares sealed findings with full traceability", async () => {
     const scanDirectory = await copyExample();
     const publication = await prepareScanPublication(
       scanDirectory,
@@ -94,7 +94,6 @@ describe("scan publication preparation", () => {
 
     expect(publication).toMatchObject({
       scanId: "scan_example_001",
-      uploadId: "scan_example_001",
       scanDirectory: await realpath(scanDirectory),
       destination: {
         type: "linear",
@@ -126,7 +125,7 @@ describe("scan publication preparation", () => {
       "**Snapshot digest:** codex-security-snapshot/v1:sha256:",
     );
     expect(issue.description).toContain("**Scanned scope:** .");
-    expect(issue.description).toContain("**Coverage:** complete");
+    expect(issue.description).not.toContain("**Coverage:**");
     expect(issue.description).toContain("**Scan mode:** standard");
     expect(issue.description).toContain("**CWE:** CWE-22");
     expect(issue.description).toContain("**Sink:** `src/extract.py:41-44`");

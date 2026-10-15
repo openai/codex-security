@@ -41,6 +41,7 @@ export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
   }[value];
 }
 
+/** Preflight is tool-derived; dispatch counts depend on model-emitted markers. */
 export type ScanWorkerStatus =
   | {
       kind: "preflight";
@@ -84,12 +85,36 @@ export function scanProgressUpdatesFromEvent(
 
 export function scanProgressUpdatesFromText(output: string): ScanProgress[] {
   const updates: ScanProgress[] = [];
-  for (const line of linesOutsideCodeFences(output)) {
+  for (const line of linesOutsideFences(output)) {
     if (!line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
     const progress = scanProgressFromMarker(line);
     if (progress !== null) updates.push(progress);
   }
   return updates;
+}
+
+/** Return lines outside Markdown fences so quoted markers are not read as live. */
+function linesOutsideFences(text: string): string[] {
+  const lines: string[] = [];
+  let fence: { marker: string; length: number } | null = null;
+  for (const line of text.split(/\r?\n/u)) {
+    const delimiter = /^\s*(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (delimiter !== null) {
+      const run = delimiter[1]!;
+      if (fence === null) {
+        fence = { marker: run[0]!, length: run.length };
+      } else if (
+        run[0] === fence.marker &&
+        run.length >= fence.length &&
+        delimiter[2]!.trim() === ""
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fence === null) lines.push(line);
+  }
+  return lines;
 }
 
 function scanProgressFromMarker(marker: string): ScanProgress | null {
@@ -154,7 +179,6 @@ function preflightStatus(
   if (capacity.length > 1) return null;
   const capacityResult = capacity[0];
   const configuredSlots =
-    capacity.length === 1 &&
     capacityResult !== undefined &&
     isSafeNonNegativeInteger(capacityResult["actual"])
       ? capacityResult["actual"]
@@ -166,7 +190,7 @@ function dispatchStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
   if (typeof item["text"] !== "string") return null;
-  const markers = linesOutsideCodeFences(item["text"]).filter((line) =>
+  const markers = linesOutsideFences(item["text"]).filter((line) =>
     line.startsWith(WORKER_STATUS_PREFIX),
   );
   const marker = markers[0];
@@ -188,34 +212,6 @@ function dispatchStatus(
     planned: payload["planned"],
     started: payload["started"],
   };
-}
-
-function linesOutsideCodeFences(value: string): string[] {
-  const lines: string[] = [];
-  let fence: { marker: "`" | "~"; length: number } | null = null;
-  for (const line of value.split(/\r?\n/u)) {
-    if (fence !== null) {
-      const closing = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
-      if (
-        closing !== undefined &&
-        closing[0] === fence.marker &&
-        closing.length >= fence.length
-      ) {
-        fence = null;
-      }
-      continue;
-    }
-    const opening = /^[ \t]{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
-    if (opening !== undefined) {
-      fence = {
-        marker: opening[0] as "`" | "~",
-        length: opening.length,
-      };
-      continue;
-    }
-    lines.push(line);
-  }
-  return lines;
 }
 
 function isScanPhase(value: unknown): value is ScanPhase {

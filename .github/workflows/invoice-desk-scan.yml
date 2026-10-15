@@ -49,8 +49,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - &set-up-node-js
+        name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           package-manager-cache: false
@@ -92,7 +93,7 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.target.outputs.targets) }}
-    environment: invoice-desk-inference
+    environment: codex-security-smoke-test
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     cache-mode: read
@@ -110,11 +111,7 @@ jobs:
           ref: ${{ github.sha }}
           path: trusted-workflow
           persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          package-manager-cache: false
+      - *set-up-node-js
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -164,7 +161,7 @@ jobs:
           CODEX_SECURITY_STATE_DIR: ${{ runner.temp }}/invoice-desk-state
         run: |
           if [[ -z "$OPENAI_API_KEY" ]]; then
-            echo "::error::Configure OPENAI_API_KEY in the protected invoice-desk-inference environment."
+            echo "::error::Configure OPENAI_API_KEY in the protected codex-security-smoke-test environment."
             echo "exit-code=2" >> "$GITHUB_OUTPUT"
             echo "elapsed-seconds=0" >> "$GITHUB_OUTPUT"
             exit 2
@@ -173,6 +170,7 @@ jobs:
           scan_status=0
           "$RUNNER_TEMP/codex-security-cli/node_modules/.bin/codex-security" scan . \
             --provider openai --auth api-key \
+            --codex 'openai_base_url="https://us.api.openai.com/v1"' \
             --model gpt-5.6-sol --effort high --mode standard \
             --headless --format json \
             --output-dir "$RUNNER_TEMP/invoice-desk-scan" \
@@ -209,7 +207,7 @@ jobs:
 
           root = Path(os.environ["RUNNER_TEMP"])
           completed = os.environ["SCAN_EXIT_CODE"] == "0"
-          counts, coverage, total, usage, cost_range = {}, None, None, None, None
+          counts, total, usage, cost_range = {}, None, None, None
           result = {}
           result_path = root / "invoice-desk-result.json"
           if result_path.is_file() and result_path.stat().st_size:
@@ -225,14 +223,14 @@ jobs:
                   "cache_write_input_tokens_reported", "output_tokens"
               )}
           cost_range = (result.get("cost") or {}).get("estimatedUsdRange")
-          coverage = (result.get("coverage") or {}).get("completeness")
+          coverage = result.get("coverage") or {}
           if completed:
               findings = json.loads((root / "invoice-desk-scan/findings.json").read_text())["findings"]
-              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())["completeness"]
+              coverage = json.loads((root / "invoice-desk-scan/coverage.json").read_text())
               counts = Counter(finding["severity"]["level"] for finding in findings)
               total = len(findings)
           metrics = {
-              "schemaVersion": 1,
+              "schemaVersion": 2,
               "sourceSha": os.environ["SOURCE_SHA"],
               "workflowSha": os.environ["GITHUB_SHA"],
               "pullRequest": int(os.environ["PR_NUMBER"]) or None,
@@ -244,7 +242,8 @@ jobs:
               "packageCacheReusedFromPreviousRun": os.environ["PREVIOUS_CACHE_HIT"] == "true",
               "packageCacheRestoredForScan": os.environ["SCAN_CACHE_HIT"] == "true",
               "findings": total, "findingsBySeverity": dict(counts),
-              "coverage": coverage, "tokenUsage": usage, "estimatedUsdRange": cost_range,
+              "scope": {key: coverage.get(key, []) for key in ("includePaths", "excludePaths")},
+              "tokenUsage": usage, "estimatedUsdRange": cost_range,
               "seedRecall": None,
           }
           (root / "invoice-desk-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
@@ -257,7 +256,8 @@ jobs:
               if not completed:
                   summary.write("The scan did not complete. Check the scan step and any saved reports; this is not a clean security result.\n")
               else:
-                  summary.write(f"Reported findings: **{total}**. Coverage: **{coverage}**.\n\n")
+                  summary.write(f"Scan completed. Reported findings: **{total}**.\n\n")
+                  summary.write("Scope:\n\n```json\n" + json.dumps(metrics["scope"], indent=2) + "\n```\n\n")
                   summary.write("| Severity | Count |\n| --- | --- |\n")
                   for severity in ("critical", "high", "medium", "low", "informational"):
                       summary.write(f"| {severity} | {counts[severity]} |\n")
@@ -267,7 +267,7 @@ jobs:
 
       - name: Save reports and metrics
         if: ${{ !cancelled() && steps.scan.outputs.exit-code != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: invoice-desk-scan-${{ matrix.target.pr || 'main' }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7

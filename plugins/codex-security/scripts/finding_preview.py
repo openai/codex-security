@@ -19,7 +19,9 @@ from workbench_constants import (
     FINDING_CODE_EVIDENCE_SNIPPET_BYTES,
     FINDING_DETAILS_PREVIEW_BYTES,
     FINDING_EVIDENCE_EXCERPT_BYTES,
+    FINDING_LEVEL_BYTES,
     FINDING_ROOT_CAUSE_PREVIEW_BYTES,
+    FINDING_SUMMARY_BYTES,
     FINDING_VALIDATION_PREVIEW_BYTES,
 )
 
@@ -177,6 +179,37 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         for key in ("remediationTests", "preventiveControls")
         if key in prepared and isinstance(prepared[key], list)
     }
+    for key in ("severity", "confidence"):
+        if key in prepared:
+            prepared[key] = bounded_finding_section(
+                prepared[key],
+                FINDING_SUMMARY_BYTES,
+                ("level",),
+                ((("level",), FINDING_LEVEL_BYTES),),
+            )
+    if "taxonomy" in prepared:
+        prepared["taxonomy"] = bounded_finding_section(
+            prepared["taxonomy"], FINDING_SUMMARY_BYTES, ("cwe",), ()
+        )
+    metadata_keys = (
+        "ruleId",
+        "status",
+        "detectedAt",
+        "identity",
+        "taxonomy",
+        "severity",
+        "confidence",
+    )
+    metadata = {
+        key: bounded_json_value(prepared[key], [FINDING_SUMMARY_BYTES])
+        for key in metadata_keys
+        if key in prepared
+    }
+    metadata = dict(sorted(metadata.items(), key=lambda item: json_size(item[1])))
+    metadata_budget = FINDING_SUMMARY_BYTES - 2 - sum(json_size(key) + 2 for key in metadata)
+    for index, (key, item) in enumerate(metadata.items()):
+        metadata[key] = bounded_json_value(item, [metadata_budget // (len(metadata) - index)])
+        metadata_budget -= json_size(metadata[key])
     diagnostics = (
         "rootCause",
         "root_cause",
@@ -188,20 +221,15 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     core_keys = (
         "writeup",
         *diagnostics,
-        "confidence",
-        "detectedAt",
-        "identity",
         "provenance",
-        "ruleId",
-        "severity",
-        "status",
-        "taxonomy",
         "evidence",
         "evidenceExcerpt",
     )
     core = {key: prepared[key] for key in core_keys if key in prepared}
     extras = {
-        key: item for key, item in prepared.items() if key not in core and key not in guidance
+        key: item
+        for key, item in prepared.items()
+        if key not in core and key not in guidance and key not in metadata_keys
     }
     complete_guidance = {key: items[:1] for key, items in guidance.items()}
     minimum_guidance = {
@@ -216,6 +244,8 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             if selected_guidance
             else 0
         )
+        if metadata:
+            reserved += json_size(metadata) - 1
         if reserved >= FINDING_DETAILS_PREVIEW_BYTES:
             continue
         projected_core = bounded_json_value(
@@ -227,7 +257,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             break
     ordered_guidance = dict(sorted(guidance.items(), key=lambda entry: bool(entry[1])))
     bounded = bounded_json_value(
-        {**projected_core, **ordered_guidance, **extras},
+        {**metadata, **projected_core, **ordered_guidance, **extras},
         [FINDING_DETAILS_PREVIEW_BYTES],
         max_depth=5,
     )

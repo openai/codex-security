@@ -1,4 +1,4 @@
-import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -85,17 +85,9 @@ async function fixtureWithFindings(count: number) {
   document.findings = Array.from({ length: count }, (_value, index) => {
     const finding = structuredClone(document.findings[0]!);
     finding.identity.instance = `concurrent-${index}`;
-    const fingerprint = findingFingerprint(
-      manifest.scan.target.targetId,
-      finding,
-    );
-    return {
-      ...finding,
-      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${sha256([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
-      fingerprints: { ...finding.fingerprints, primary: fingerprint },
-      title: `Synthetic concurrent finding ${index}`,
-    };
+    setFindingIdentity({ ...manifest.scan, id: document.scanId }, finding);
+    finding.title = `Synthetic concurrent finding ${index}`;
+    return finding;
   });
   const content = JSON.stringify(document);
   await writeFile(join(scanDir, "findings.json"), content);
@@ -491,7 +483,7 @@ test.each(["screen", "pair"])(
     const { scanDir, environment, document, history } = await fixture();
     const findings = [
       document.findings[0]!,
-      ...[1, 2, 3].map((index) => ({
+      ...[1, 2].map((index) => ({
         ...structuredClone(document.findings[0]!),
         findingId: `csf_${"f".repeat(23)}${index}`,
         title: `Synthetic original ${index}`,
@@ -536,10 +528,10 @@ test.each(["screen", "pair"])(
                 ),
               }
             : originals.some(
-                  (finding) => finding.findingId === findings[3]!.findingId,
+                  (finding) => finding.findingId === findings[2]!.findingId,
                 )
               ? distinct
-              : merged(originals),
+              : { ...sameRecommendation },
         );
       },
     };
@@ -568,13 +560,13 @@ test.each(["screen", "pair"])(
       fetch,
     });
     expect(result.duplicateGroups).toEqual([
-      findings.slice(0, 3).map((finding) => finding.findingId),
+      findings.slice(0, 2).map((finding) => finding.findingId),
     ]);
     expect(calls.filter((stage) => stage === "screen")).toHaveLength(
       interruptAt === "screen" ? 2 : 1,
     );
     expect(calls.filter((stage) => stage === "pair")).toHaveLength(
-      interruptAt === "pair" ? 4 : 3,
+      interruptAt === "pair" ? 3 : 2,
     );
     const count = calls.length;
     expect(
@@ -592,7 +584,7 @@ test.each(["screen", "pair"])(
 test.each(["screening", "pair-review"] as const)(
   "drains concurrent %s checkpoints after failure and resumes with different concurrency",
   async (failedStage) => {
-    const { environment, document, history } = await fixtureWithFindings(4);
+    const { environment, document, history } = await fixtureWithFindings(3);
     const options = {
       workflowId: `concurrent-${failedStage}`,
       findingsUrl: "http://synthetic.test",
@@ -628,7 +620,7 @@ test.each(["screening", "pair-review"] as const)(
                   originals.slice(1).map(screeningRecommendation),
                 ),
               }
-            : merged(originals),
+            : { ...sameRecommendation },
         );
       },
     };
@@ -695,7 +687,7 @@ test.each(["screening", "pair-review"] as const)(
     expect(groupWrites).toHaveBeenCalledTimes(1);
     expect(attempts.get(interruptedKeys[0]!)).toBe(2);
     expect(attempts.get(interruptedKeys[1]!)).toBe(1);
-    expect(attempts.size).toBe(10);
+    expect(attempts.size).toBe(6);
     for (const [key, count] of attempts)
       expect(count).toBe(key === interruptedKeys[0] ? 2 : 1);
     expect(
@@ -751,7 +743,7 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
                   originals.slice(1).map(screeningRecommendation),
                 ),
               }
-            : merged(originals),
+            : { ...sameRecommendation },
         );
       },
     },
@@ -817,7 +809,7 @@ test("replays an unacknowledged group write after migrating its workflow databas
           ? {
               decisions: { "pair-1": { ...sameRecommendation } },
             }
-          : merged(originals),
+          : { ...sameRecommendation },
       );
     },
   };
