@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import {
@@ -10,9 +12,11 @@ import {
 } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { capture } from "./cli-fixtures.js";
+import { bashCommand, runCommand } from "./support/shell.js";
 
 interface WorkflowStep {
   name?: string;
+  id?: string;
   uses?: string;
   with?: Record<string, unknown>;
   run?: string;
@@ -203,6 +207,85 @@ describe("TypeScript package skeleton", () => {
       expect(jobs[name]?.steps!.some(({ name }) => name === "Set up Bun")).toBe(
         false,
       );
+    }
+  });
+
+  test("reuses npm downloads after lockfile changes without skipping package installation", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    for (const name of ["compatibility", "windows-verify"]) {
+      const steps = jobs[name]!.steps!;
+      const setup = steps.findIndex(({ id }) => id === "node");
+      const resolver = steps.findIndex(({ id }) => id === "npm-cache");
+      const restore = steps.findIndex(({ uses }) =>
+        uses?.startsWith("actions/cache/restore@"),
+      );
+      const inspection = steps.findIndex(
+        ({ name }) => name === "Inspect installed package",
+      );
+      expect(setup).toBeGreaterThanOrEqual(0);
+      expect(setup).toBeLessThan(resolver);
+      expect(resolver).toBeLessThan(restore);
+      expect(restore).toBeLessThan(inspection);
+      expect(steps[setup]?.with?.["cache"]).toBe("npm");
+      expect(steps[resolver]?.env).toEqual({
+        PRIMARY_CACHE_KEY: "${{ steps.node.outputs.cache-primary-key }}",
+      });
+      for (const index of [resolver, restore]) {
+        expect(steps[index]?.if).toBe("steps.node.outputs.cache-hit != 'true'");
+      }
+      expect(steps[restore]?.with).toEqual({
+        path: "${{ steps.npm-cache.outputs.path }}",
+        key: "${{ steps.node.outputs.cache-primary-key }}",
+        "restore-keys": "${{ steps.npm-cache.outputs.restore-prefix }}",
+      });
+      expect(steps[inspection]).not.toHaveProperty("if");
+    }
+  });
+
+  test("npm cache fallback shares lockfile versions within each platform and architecture", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const script = jobs["compatibility"]!.steps!.find(
+      ({ id }) => id === "npm-cache",
+    )!.run!;
+    const directory = await mkdtemp(join(tmpdir(), "npm-cache-workflow-"));
+    try {
+      for (const platform of ["Windows-x64", "Windows-arm64", "Linux-x64"]) {
+        for (const hash of ["a".repeat(64), "b".repeat(64)]) {
+          const cachePath = platform.startsWith("Windows")
+            ? "C:\\npm cache"
+            : "/tmp/npm cache";
+          const output = join(directory, "output.txt");
+          await rm(output, { force: true });
+          const result = await runCommand(
+            bashCommand(),
+            [
+              "-e",
+              "-o",
+              "pipefail",
+              "-c",
+              `npm() { test "$*" = "config get cache" && printf '%s\\n' "$TEST_NPM_CACHE"; }\n${script}`,
+            ],
+            {
+              cwd: directory,
+              env: {
+                ...process.env,
+                PRIMARY_CACHE_KEY: `node-cache-${platform}-npm-${hash}`,
+                GITHUB_OUTPUT: "output.txt",
+                TEST_NPM_CACHE: cachePath,
+              },
+            },
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            (await readFile(output, "utf8")).trim().split(/\r?\n/u),
+          ).toEqual([
+            `path=${cachePath}`,
+            `restore-prefix=node-cache-${platform}-npm-`,
+          ]);
+        }
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
