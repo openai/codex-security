@@ -2759,3 +2759,49 @@ test("Snyk CLI dry run selects its adapter without writing an import", async () 
   expect(await cli.runCli(command, f.cliDeps)).toBe(0);
   expect(f.posts).toHaveLength(0);
 });
+
+test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async () => {
+  const { endorFinding, endorSarif } =
+    await import("./support/endor-import-fixtures.js");
+  const input = endorFinding();
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "endor" as const,
+    sourceKey: "namespace/project/main",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  const sarif = endorSarif();
+  await writeFile(f.file, JSON.stringify(sarif));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  expect(changed.verified).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.source_data).toMatchObject({
+    result: sarif.runs[0]!.results[0],
+  });
+});
+test("Endor CLI dry-run recognizes SARIF without writing imports", async () => {
+  const { endorSarif } = await import("./support/endor-import-fixtures.js");
+  const f = await fixture(endorSarif());
+  const command = [...f.command, "--dry-run"];
+  command[command.indexOf("--provider") + 1] = "endor";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});

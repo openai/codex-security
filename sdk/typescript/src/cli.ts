@@ -3239,15 +3239,15 @@ export async function main(
   });
   publication.command("findings", {
     description:
-      "Preview and import selected Wiz, GitHub, or Snyk findings to Cloud.",
-    hint: "For Snyk, supply self-contained Open Source SARIF 2.1.0. For GitHub, supply unfiltered JSON/JSONL saved by import github or import github-advisories. For Wiz, supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      "Preview and import selected Wiz, GitHub, Snyk, or Endor findings to Cloud.",
+    hint: "For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For Snyk, supply self-contained Open Source SARIF 2.1.0. For GitHub, supply unfiltered JSON/JSONL saved by import github or import github-advisories. For Wiz, supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
         .describe(
-          "Snyk Open Source SARIF, saved GitHub import output, Wiz finding collections, or normalized Wiz JSONL.",
+          "Endor JSON/SARIF, Snyk Open Source SARIF, saved GitHub import output, Wiz finding collections, or normalized Wiz JSONL.",
         ),
     }),
     options: z.object({
@@ -3256,7 +3256,7 @@ export async function main(
         "Authorized Cloud repository ID or repository URL copied from Cloud.",
       ),
       provider: z
-        .enum(["wiz", "github", "snyk"])
+        .enum(["wiz", "github", "snyk", "endor"])
         .describe("Provider that produced these findings."),
       sourceKey: optionValue("--source-key").describe(
         "Stable vendor tenant and finding namespace; not a project selection filter.",

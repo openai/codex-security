@@ -251,3 +251,9 @@ export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
 
 export { normalizeSnykSarif, readSnykFindings } from "./snyk-findings.js";
+
+export {
+  normalizeEndorFindings,
+  normalizeEndorSarif,
+  readEndorFindings,
+} from "./endor-findings.js";
