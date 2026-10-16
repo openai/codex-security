@@ -316,3 +316,36 @@ test.each([undefined, "sast"])(
     });
   },
 );
+
+test.each(["json", "sarif"])(
+  "preserves %s findings with empty native messages",
+  (format) => {
+    const input: any = format === "json" ? semgrepJson() : semgrepSarif();
+    if (format === "json") input.results[0].extra.message = "";
+    else input.runs[0].results[0].message = { text: "" };
+    const output = normalizeSemgrepFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings).toHaveLength(1);
+    expect(output.findings[0]!.evidence.description).toBeNull();
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({
+      result:
+        format === "json"
+          ? { extra: { message: "" } }
+          : { message: { text: "" } },
+    });
+  },
+);
+
+test.each(["json", "sarif"])(
+  "still excludes %s findings with missing or non-string messages",
+  (format) => {
+    for (const message of [undefined, null, 42]) {
+      const input: any = format === "json" ? semgrepJson() : semgrepSarif();
+      if (format === "json") input.results[0].extra.message = message;
+      else input.runs[0].results[0].message = { text: message };
+      const output = normalizeSemgrepFindings(input);
+      expect(output.findings).toEqual([]);
+      expect(output.excluded).toHaveLength(1);
+    }
+  },
+);

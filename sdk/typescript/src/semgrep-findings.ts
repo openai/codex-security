@@ -42,6 +42,12 @@ function ungatedText(value: unknown): string | null {
   return supplied === "requires login" ? null : supplied;
 }
 
+function messageText(value: unknown): string | null {
+  if (typeof value !== "string")
+    throw new Error("Expected a Semgrep message string.");
+  return text(value);
+}
+
 function severity(value: unknown): string {
   const levels: Record<string, string> = {
     CRITICAL: "critical",
@@ -182,7 +188,7 @@ export function normalizeSemgrepFindings(
         source_finding_id: jsonIdentity(result),
         evidence: validateExternalEvidence({
           title: rule,
-          description: requiredText(extra["message"], "Semgrep message"),
+          description: messageText(extra["message"]),
           severity: severity(extra["severity"]),
           locations: path ? [{ path, line }] : [],
           details: {
@@ -353,8 +359,7 @@ export function normalizeSemgrepSarif(
         evidence: validateExternalEvidence({
           title: ruleId,
           description:
-            text(message["markdown"]) ??
-            requiredText(message["text"], "Semgrep message text"),
+            text(message["markdown"]) ?? messageText(message["text"]),
           severity: mappedSeverity,
           locations: path ? [{ path, line }] : [],
           details: {
