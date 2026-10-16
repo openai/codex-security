@@ -2323,7 +2323,6 @@ The extraction root is not enforced.
             with self.subTest(path=path):
                 self.manifest["scan"]["scope"]["includePaths"] = [path]
                 self.coverage["includePaths"] = [path]
-                self.coverage["completeness"] = "partial"
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]

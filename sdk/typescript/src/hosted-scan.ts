@@ -15,11 +15,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CodexSecurity } from "./api.js";
-import {
-  IncompleteScanError,
-  ScanInterruptedError,
-  errorMessage,
-} from "./errors.js";
+import { ScanInterruptedError, errorMessage } from "./errors.js";
 import { normalizeRepository, repositoryRevision } from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
 
@@ -300,10 +296,7 @@ export async function runHostedScan(
     );
     return {
       ...base(),
-      status:
-        result.coverage.completeness === "complete"
-          ? ("completed" as const)
-          : ("incomplete" as const),
+      status: "completed" as const,
       artifacts,
     };
   } catch (error) {
@@ -317,14 +310,25 @@ export async function runHostedScan(
               execution?.status === "canceled" ||
               error instanceof ScanInterruptedError
             ? ("canceled" as const)
-            : error instanceof IncompleteScanError
-              ? ("incomplete" as const)
-              : ("failed" as const),
+            : ("failed" as const),
       error: errorMessage(error),
       artifacts: [],
     };
   } finally {
-    await client.close();
+    try {
+      await client.close();
+    } catch (error) {
+      onEvent({
+        type: "activity",
+        activity: {
+          id: "runtime.cleanup",
+          kind: "message",
+          status: "failed",
+          description: `Hosted scan cleanup failed: ${errorMessage(error)}`,
+          paths: [],
+        },
+      });
+    }
   }
 }
 

@@ -3331,9 +3331,6 @@ export class CodexSecurity {
       // Hosted scans use only the explicitly selected bundle and configuration.
       // No local auth, Codex subprocess, provider profile, or ambient config.
       const environment = this.#dependencies.environment;
-      const runtimeHome = await createIsolatedHome(temporaryRoot, (path) =>
-        requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
-      );
       const pluginRoot = await bundledPluginRoot();
       const metadata = await pluginMetadata(pluginRoot);
       const effectiveConfig = {
@@ -3343,8 +3340,10 @@ export class CodexSecurity {
         ...this.config.codexOverrides,
       };
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+      const runtimeHome = await createIsolatedHome(temporaryRoot, (path) =>
+        requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+      );
       const configPath = join(runtimeHome, "config-preflight.toml");
-      await writeCodexConfig(configPath, preflightConfig);
       const runtime: PreparedRuntime = {
         codexHome: runtimeHome,
         bootstrapWorkspace: runtimeHome,
@@ -3360,6 +3359,7 @@ export class CodexSecurity {
         },
       };
       this.#runtime = runtime;
+      await writeCodexConfig(configPath, preflightConfig);
       const python = await resolvePluginPython({
         environment,
         protectedRoot,
@@ -3378,7 +3378,6 @@ export class CodexSecurity {
         authentication: { method: "host", verified: false },
         approvalPolicy: "never",
         python,
-        releaseCredentialHome: null,
       };
     }
     let releaseCredentialHome: (() => Promise<void>) | null = null;

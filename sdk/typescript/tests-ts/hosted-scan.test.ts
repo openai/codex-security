@@ -2,10 +2,10 @@ import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, symlink } from "node:fs/promises";
+import { readFile, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, expect, mock, test } from "bun:test";
+import { dirname, join } from "node:path";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -16,6 +16,7 @@ import {
 import { runHostedScanProtocol } from "../src/hosted-scan-protocol.js";
 import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
+import * as config from "../src/config.js";
 import {
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
@@ -29,7 +30,10 @@ import { runWorkbench } from "../src/runtime.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
+import {
+  createApiTestFixtures,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
@@ -84,7 +88,6 @@ async function writeDraft(request: ScanExecutionRequest) {
     },
     "findings.json": { findings: [] },
     "coverage.json": {
-      completeness: "complete",
       inventoryStrategy:
         request.scope.paths[0] === "." ? "repository" : "scoped_path",
       surfaces: [
@@ -132,6 +135,18 @@ function draftExecutor(
 
 function noExecution() {
   return { run: mock(rejecting("must not execute")) };
+}
+
+const cleanupFailureMessage = "Synthetic hosted cleanup failed";
+
+function failHostedCleanup() {
+  const close = CodexSecurity.prototype.close;
+  return spyOn(CodexSecurity.prototype, "close").mockImplementation(
+    async function (this: CodexSecurity) {
+      await close.call(this);
+      throw new Error(cleanupFailureMessage);
+    },
+  );
 }
 
 function send(stream: Pick<Writable, "write">, message: object) {
@@ -296,7 +311,6 @@ test.each(sealedScopes)(
     expect(coverage).toMatchObject({
       includePaths: normalized,
       mode: normalized[0] === "." ? "repository" : "scoped_path",
-      completeness: "complete",
     });
     const report = await readFile(
       join(result.outputDirectory, "report.md"),
@@ -383,36 +397,52 @@ test("hosted aliases require a canonical path before inference, including aliase
   expect(executor.run).not.toHaveBeenCalled();
 });
 
-test("a completed model turn without artifacts is not a completed scan", async () => {
-  const usage = { input_tokens: 123, output_tokens: 7 };
-  const result = await runHostedScan(await fixture(), {
-    executor: {
-      run: async (request) => receipt(request, { usage }),
-    },
-  });
-  expect(result.status).not.toBe("completed");
-  expect(result.artifacts).toEqual([]);
-  expect(result.execution).toMatchObject({
-    status: "completed",
-    sessionId: "host-session",
-    usage,
-  });
-});
+test.each(["missing", "invalid"] as const)(
+  "a completed model turn with %s artifacts fails the scan",
+  async (artifacts) => {
+    const usage = { input_tokens: 123, output_tokens: 7 };
+    const result = await runHostedScan(await fixture(), {
+      executor: {
+        async run(request) {
+          if (artifacts === "invalid") {
+            await writeDraft(request);
+            writeSource(
+              request.runtime.outputDirectory,
+              "findings.json",
+              "{invalid JSON",
+            );
+          }
+          return receipt(request, { usage });
+        },
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.artifacts).toEqual([]);
+    expect(result.execution).toMatchObject({
+      status: "completed",
+      sessionId: "host-session",
+      usage,
+    });
+  },
+);
 
-test("sealed partial coverage remains incomplete", async () => {
+test("sealed coverage with follow-up diagnostics remains completed", async () => {
   const result = await runHostedScan(await fixture(), {
     executor: draftExecutor(async (request) => {
       const file = join(request.runtime.outputDirectory, "coverage.json");
       const coverage = await readJson<any>(file);
-      coverage.completeness = "partial";
       coverage.surfaces[0].disposition = "needs_follow_up";
       await writeJson(file, coverage);
     }),
   });
-  expect(result.status).toBe("incomplete");
+  expect(result.status).toBe("completed");
   expect(result.artifacts.map((artifact) => artifact.path)).toContain(
     "coverage.json",
   );
+  const coverage = await readJson<any>(
+    join(result.outputDirectory, "coverage.json"),
+  );
+  expect(coverage.surfaces[0].disposition).toBe("needs_follow_up");
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {
@@ -422,7 +452,7 @@ test("a changed checkout cannot produce accepted completed output", async () => 
       git(input.repository, "commit", "--allow-empty", "-qm", "changed");
     }),
   });
-  expect(result.status).not.toBe("completed");
+  expect(result.status).toBe("failed");
   expect(result.artifacts).toEqual([]);
 });
 
@@ -641,6 +671,171 @@ test.each([
     expect(terminal.artifacts).toEqual([]);
   },
 );
+
+test("failed hosted config preparation removes its temporary runtime home", async () => {
+  const input = await fixture();
+  const executor = noExecution();
+  let runtimeHome: string | undefined;
+  const writeConfig = spyOn(config, "writeCodexConfig").mockImplementation(
+    async (path) => {
+      runtimeHome = dirname(path);
+      throw new Error("Synthetic hosted config preparation failed");
+    },
+  );
+  try {
+    const result = await runHostedScan(input, { executor });
+    expect(result).toMatchObject({
+      status: "failed",
+      error: "Synthetic hosted config preparation failed",
+    });
+    expect(executor.run).not.toHaveBeenCalled();
+    expect(runtimeHome).toBeDefined();
+    await expect(stat(runtimeHome!)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    writeConfig.mockRestore();
+    if (runtimeHome !== undefined) await removeTemporaryDirectory(runtimeHome);
+  }
+});
+
+test.each(["completed", "acceptance_unknown"] as const)(
+  "SDK cleanup failure preserves the %s receipt even when its observer throws",
+  async (status) => {
+    const input = await fixture();
+    const events: ScanExecutionEvent[] = [];
+    let execution: ScanExecutionResult | undefined;
+    const executor = {
+      run: mock<ScanExecutor["run"]>(async (request) => {
+        if (status === "completed") await writeDraft(request);
+        execution = receipt(request, {
+          status,
+          sessionId: "known-host-session",
+          usage: { input_tokens: 123, output_tokens: 7 },
+          ...(status === "acceptance_unknown"
+            ? {
+                error: {
+                  code: -32010,
+                  message: "Recorded remote uncertainty",
+                  data: { remoteTurnId: "turn-1" },
+                },
+              }
+            : {}),
+        });
+        return execution;
+      }),
+    };
+    const close = failHostedCleanup();
+    try {
+      const terminal = await runHostedScan(input, {
+        executor,
+        onEvent(event) {
+          events.push(event);
+          if (
+            event.type === "activity" &&
+            event.activity.id === "runtime.cleanup"
+          )
+            throw new Error("Optional cleanup observer failed");
+        },
+      });
+      expect(terminal.status).toBe(status);
+      expect(terminal.execution).toEqual(execution);
+      expect(terminal.identity).toEqual(input.identity);
+      expect(terminal.scanId).toBe(executor.run.mock.calls[0]![0].scanId);
+      expect(executor.run).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(events).toContainEqual({
+        type: "activity",
+        activity: {
+          id: "runtime.cleanup",
+          kind: "message",
+          status: "failed",
+          description: expect.stringContaining(cleanupFailureMessage),
+          paths: [],
+        },
+      });
+      if (status === "completed") {
+        expect(terminal.artifacts.map((artifact) => artifact.path)).toContain(
+          "scan-manifest.json",
+        );
+        const manifest = await readJson<any>(
+          join(terminal.outputDirectory, "scan-manifest.json"),
+        );
+        expect(manifest.scan.sealedAt).toBeTruthy();
+      } else {
+        expect(terminal).toHaveProperty("error", execution?.error?.message);
+        expect(terminal.artifacts).toEqual([]);
+      }
+    } finally {
+      close.mockRestore();
+    }
+  },
+);
+
+test("wire cleanup failure retains an uncertain terminal result and reports cleanup separately", async () => {
+  const params = await fixture();
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines = createInterface({ input: output });
+  const messages: any[] = [];
+  let execution: ScanExecutionResult | undefined;
+  const close = failHostedCleanup();
+  try {
+    const finished = runHostedScanProtocol(input, output);
+    send(input, { id: "run", method: "run", params });
+    for await (const line of lines) {
+      const message = JSON.parse(line);
+      messages.push(message);
+      if (message.method === "execution.run") {
+        execution = receipt(message.params, {
+          status: "acceptance_unknown",
+          sessionId: "known-host-session",
+          usage: { input_tokens: 42 },
+          error: {
+            code: -32010,
+            message: "Recorded remote uncertainty",
+            data: { remoteTurnId: "turn-1" },
+          },
+        });
+        send(input, { id: message.id, result: execution });
+      } else if (message.id === "run") {
+        break;
+      }
+    }
+    expect(await finished).toBe(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(
+      messages.filter((message) => message.method === "execution.run"),
+    ).toHaveLength(1);
+    expect(messages.filter((message) => message.id === "run")).toHaveLength(1);
+    expect(messages.at(-1)).toMatchObject({
+      id: "run",
+      result: { status: "acceptance_unknown", execution },
+    });
+    expect(messages.at(-1).result.execution).toEqual(execution);
+    expect(messages.filter((message) => "error" in message)).toEqual([]);
+    expect(messages).toContainEqual({
+      jsonrpc: "2.0",
+      method: "scan.progress",
+      params: {
+        id: "run",
+        event: {
+          type: "activity",
+          activity: {
+            id: "runtime.cleanup",
+            kind: "message",
+            status: "failed",
+            description: expect.stringContaining(cleanupFailureMessage),
+            paths: [],
+          },
+        },
+      },
+    });
+  } finally {
+    close.mockRestore();
+    lines.close();
+    input.destroy();
+    output.destroy();
+  }
+});
 
 test("cancellation after registration retains scan identity before executor dispatch", async () => {
   const input = await fixture();

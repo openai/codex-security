@@ -62,7 +62,7 @@ if (result.status === "completed") {
   // Look up the existing attempt/session; do not call runHostedScan again.
   await host.reconcileExecution(result.identity, result.execution);
 }
-// incomplete, failed and canceled receipts remain recorded but are not accepted
+// Failed and canceled receipts remain recorded but are not accepted
 // completed scans. Persistence retries reuse this receipt without more inference.
 ```
 
@@ -78,11 +78,17 @@ failures cannot stop execution. Aborting waits for the executor to settle; the
 host must cancel remote work and return its recorded outcome.
 
 Preparation errors throw before execution. Execution and finalization return a
-`HostedScanResult` receipt with status `completed`, `incomplete`, `failed`,
+`HostedScanResult` receipt with status `completed`, `failed`,
 `canceled`, or `acceptance_unknown`. The receipt retains the executor's outcome, session
 identity, usage, message and structured error even if artifact finalization
 fails. Only validated artifacts receive hashes and sizes. Repeated invocations
 are separate scans; the host decides whether a new invocation is allowed.
+
+Temporary runtime cleanup failures preserve the terminal receipt, including
+its execution outcome, session identity, usage, and validated artifacts. They
+are reported separately through `onEvent` as a failed message activity with
+ID `runtime.cleanup` (a `scan.progress` notification over JSON-RPC). A cleanup
+failure does not change the scan status or require another execution attempt.
 
 ## Wire contract
 
@@ -190,7 +196,6 @@ hashes and sizes are illustrative and do not validate any real files.
 | Final scan status      | Host handling                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------ |
 | `completed`            | Verify artifact receipts and seals before accepting output.                                      |
-| `incomplete`           | Preserve partial evidence; do not accept a completed scan.                                       |
 | `failed` or `canceled` | Retain identity, diagnostics and any execution/usage receipt.                                    |
 | `acceptance_unknown`   | Reconcile the existing remote attempt and collect usage before cleanup; do not resubmit blindly. |
 
@@ -228,8 +233,9 @@ identity/revision/normalized scope, output directory, scan ID when registered,
 plugin version when known, `provenance` (CLI/plugin/build identity), optional `execution`,
 and `artifacts`. Each artifact is `{path, sha256, bytes}` over its exact bytes.
 Receipts cover canonical outputs, sealed supplemental files, and preserved
-source files bound by the manifest. Sealed partial coverage stays `incomplete`;
-unvalidated files never receive artifact receipts. `acceptance_unknown`, failed
+source files bound by the manifest. Coverage limitations remain diagnostics in
+completed scans; required-output failures return `failed`, and unvalidated files
+never receive artifact receipts. `acceptance_unknown`, failed
 and canceled results are not accepted completed scans.
 
 The host verifies receipt paths, hashes, sizes, scope, revision and seals before
