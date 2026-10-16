@@ -158,10 +158,11 @@ export function normalizeSemgrepFindings(
       const extra = record(result["extra"], "Semgrep extra");
       const metadata = record(extra["metadata"] ?? {}, "Semgrep metadata");
       const product = metadata["product"];
+      const validation = extra["validation_state"];
       if (
         (product != null && product !== "sast") ||
         extra["sca_info"] != null ||
-        extra["validation_state"] != null
+        (validation != null && validation !== "NO_VALIDATOR")
       )
         throw new Error(
           "This adapter supports Semgrep SAST; Supply Chain and Secrets reports need separate qualification.",

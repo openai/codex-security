@@ -198,8 +198,10 @@ test.each([
   ["secrets", null],
   ["sca", undefined],
   ["sca", null],
+  ["secrets", "NO_VALIDATOR"],
+  ["sca", "NO_VALIDATOR"],
 ] as const)(
-  "excludes explicit %s product without validator metadata (%s)",
+  "excludes explicit %s product without validator metadata (%p)",
   (product, validation) => {
     const input: any = semgrepJson();
     input.results[0].extra.metadata = { product };
@@ -253,3 +255,19 @@ test("large scan inventories and timing tables do not exclude a small finding", 
   ).not.toContain("path-inventory-entry-");
   expect(input.paths.scanned).toHaveLength(10000);
 });
+
+test.each([undefined, "sast"])(
+  "accepts the documented Code NO_VALIDATOR marker with product %p",
+  (product) => {
+    const input: any = semgrepJson();
+    if (product) input.results[0].extra.metadata = { product };
+    else delete input.results[0].extra.metadata;
+    input.results[0].extra.validation_state = "NO_VALIDATOR";
+    const output = normalizeSemgrepFindings(input);
+    expect(output.findings).toHaveLength(1);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({
+      result: { extra: { validation_state: "NO_VALIDATOR" } },
+    });
+  },
+);
