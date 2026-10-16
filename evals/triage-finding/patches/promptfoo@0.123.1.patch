@@ -22,3 +22,24 @@ index 4d3710840e68d5570ef35011a1ff4cc105e617ee..7681d249b4d9bee02c0347b438fdf971
  			tests: [{ vars: variables || {} }]
  		}, {
  			maxConcurrency: 1,
+diff --git a/dist/src/scanner-Q4Ui82wE.js b/dist/src/scanner-Q4Ui82wE.js
+--- a/dist/src/scanner-Q4Ui82wE.js
++++ b/dist/src/scanner-Q4Ui82wE.js
+@@ -19,7 +19,7 @@
+ import { isText } from "istextorbinary";
+ import textExtensions from "text-extensions";
+ import { minimatch } from "minimatch";
+-import simpleGit from "simple-git";
++import { simpleGit } from "simple-git";
+ //#region src/types/codeScan.ts
+ const CodeScanSeverity = {
+ 	CRITICAL: "critical",
+@@ -1835,7 +1835,7 @@
+ 			}
+ 		}
+ 		logger.debug("Processing git diff...");
+-		const simpleGit = (await import("simple-git")).default;
++		const { simpleGit } = await import("simple-git");
+ 		const git = simpleGit(absoluteRepoPath);
+ 		if (!options.compare) await validateOnBranch(git);
+ 		let baseBranch;
