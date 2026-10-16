@@ -1,9 +1,11 @@
 import { workbenchArgs } from "./workbench-arguments.js";
 import { spawn } from "node:child_process";
+import { realpath as callbackRealpath } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
@@ -15,6 +17,8 @@ import {
   resolvePluginPython,
   runWorkbench,
 } from "./runtime.js";
+
+const nativeRealpath = promisify(callbackRealpath.native);
 
 export type ArtifactOutput = Pick<NodeJS.WriteStream, "write">;
 
@@ -270,7 +274,7 @@ export async function resolveArtifactExportOutput(
         ;
         directory = dirname(directory)
       ) {
-        const canonicalDirectory = await realpath(directory).catch(
+        const canonicalDirectory = await nativeRealpath(directory).catch(
           (error: NodeJS.ErrnoException) => {
             if (error.code === "ENOENT") return undefined;
             throw error;

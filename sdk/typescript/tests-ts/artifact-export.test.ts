@@ -238,6 +238,37 @@ describe("offline artifact export", () => {
     }
   });
 
+  test.each(["external", "scan-local"])(
+    "resolves %s exports outside the current directory",
+    async (destination) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-external-output-"),
+      );
+      const scanDir = join(root, "scan");
+      try {
+        await mkdir(scanDir);
+        const output =
+          destination === "scan-local"
+            ? join(scanDir, "exports", "findings.json")
+            : join(root, "findings.json");
+        expect(
+          (
+            await resolveArtifactExportOutput(
+              { scanDir, output, format: "json" },
+              process.cwd(),
+            )
+          ).output,
+        ).toBe(
+          destination === "scan-local"
+            ? join(await realpath(scanDir), "exports", "findings.json")
+            : join(await realpath(root), "findings.json"),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.skipIf(!caseInsensitiveVolume)(
     "accepts an export parent accessed through a case alias",
     async () => {
@@ -372,7 +403,7 @@ describe("offline artifact export", () => {
               repository,
             ),
           ).rejects.toThrow("cannot traverse a repository symlink");
-          await rm(reports);
+          await rm(reports, { recursive: true, force: true });
         }
       } finally {
         await rm(root, { recursive: true, force: true });
