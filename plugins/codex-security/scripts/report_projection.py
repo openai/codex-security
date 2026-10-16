@@ -406,13 +406,15 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
         item = location
     path = item.get("path")
     start = item.get("startLine")
-    end = item.get("endLine", start)
+    end = item.get("endLine")
     if not isinstance(path, str) or not path:
         return ""
     path = _path_label(path)
-    if not isinstance(start, int):
+    if not isinstance(start, int) or isinstance(start, bool) or start < 1:
         return path
-    return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
+    if not isinstance(end, int) or isinstance(end, bool) or end <= start:
+        return f"{path}:{start}"
+    return f"{path}:{start}-{end}"
 
 
 def _code_fence(code: str, minimum: int = 3) -> str:

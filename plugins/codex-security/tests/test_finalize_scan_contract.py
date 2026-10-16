@@ -1603,6 +1603,26 @@ The extraction root is not enforced.
         self.assertIn(r"archive entry -\> filesystem write", report)
 
     @pytest.mark.cross_platform
+    def test_finalize_renders_embedded_evidence_with_null_end_line(self) -> None:
+        self.findings["findings"][0]["validation"] = {
+            "codeEvidence": [
+                {
+                    "label": "Source control",
+                    "path": "src/evidence.py",
+                    "startLine": 37,
+                    "endLine": None,
+                    "code": "handle(request)",
+                }
+            ]
+        }
+        self.write_scan()
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:37`\n", report)
+
+    @pytest.mark.cross_platform
     def test_report_projection_preserves_data_flow_aliases_and_scalar_reachability(self) -> None:
         for data_flow_key in ("dataFlow", "data_flow", "dataflow"):
             with self.subTest(data_flow_key=data_flow_key):
@@ -1750,6 +1770,26 @@ The extraction root is not enforced.
         findings["findings"][0]["root_cause"] = ""
         with self.preserving_sealed_findings(findings):
             pass
+
+    @pytest.mark.cross_platform
+    def test_sealed_rerun_renders_legacy_evidence_with_reversed_bounds(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        finding = findings["findings"][0]
+        finding["code_evidence"] = [
+            {
+                "id": "legacy-source",
+                "label": "Source control",
+                "location": {"path": "src/evidence.py", "startLine": 48, "endLine": 47},
+                "code": "handle(request)",
+            }
+        ]
+        finding["validation"] = {"evidenceRefs": ["legacy-source"]}
+        with self.preserving_sealed_findings(findings):
+            pass
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:48`\n", report)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:

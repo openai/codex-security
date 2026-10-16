@@ -911,3 +911,34 @@ def test_projection_preserves_identifier_text_and_code_path_spelling(
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
     assert "\\_\\_proto\\_\\_ pollution" in markdown
     assert rendered_location in markdown
+
+
+@pytest.mark.parametrize(
+    ("bounds", "rendered_location"),
+    [
+        ({"startLine": 37, "endLine": None}, "`src/evidence.py:37`"),
+        ({"startLine": 48, "endLine": 47}, "`src/evidence.py:48`"),
+        ({"startLine": 59, "endLine": "60"}, "`src/evidence.py:59`"),
+        ({"startLine": 37, "endLine": True}, "`src/evidence.py:37`"),
+        ({"startLine": True, "endLine": 4}, "`src/evidence.py`"),
+        ({"startLine": 0}, "`src/evidence.py`"),
+        ({"startLine": -1}, "`src/evidence.py`"),
+    ],
+)
+def test_projection_normalizes_invalid_legacy_code_evidence_bounds(
+    bounds: dict[str, object], rendered_location: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["validation"] = {"evidenceRefs": ["source"]}
+    finding["code_evidence"] = [
+        {
+            "id": "source",
+            "label": "Source control",
+            "path": "src/evidence.py",
+            **bounds,
+            "code": "handle(request)",
+        }
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert rendered_location in markdown

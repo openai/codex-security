@@ -16,6 +16,7 @@
 - import Zod directly for schema consumers ([#1664](https://github.com/openai/codex-security/pull/1664))
 - correct underreported token totals in Codex Security scans ([#1657](https://github.com/openai/codex-security/pull/1657))
 - support hosted Standard scan execution ([#1559](https://github.com/openai/codex-security/pull/1559))
+- normalize invalid code evidence line ranges ([#1656](https://github.com/openai/codex-security/pull/1656))
 
 <!-- release-section: highlights:end -->
 
