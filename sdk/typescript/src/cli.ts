@@ -99,6 +99,11 @@ import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runRecordsProtocol } from "./deduplication/records-protocol.js";
+import { runHostRecordsProtocol } from "./host-records-protocol.js";
+import {
+  classifySeverityRecords,
+  type ClassifySeverityRecordsInput,
+} from "./classify-severity-records.js";
 import {
   classifyScanSeverityInternal,
   classifyScanDirectorySeverityInternal,
@@ -1717,7 +1722,7 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   if (
-    argv[0] === "dedupe" &&
+    (argv[0] === "dedupe" || argv[0] === "classify-severity") &&
     argv.includes("--records") &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
@@ -1725,7 +1730,7 @@ export async function main(
   ) {
     if (argv.length !== 2) {
       errorOutput.write(
-        "codex-security: --records must be used alone with dedupe.\n",
+        `codex-security: --records must be used alone with ${argv[0]}.\n`,
       );
       return 2;
     }
@@ -1733,11 +1738,23 @@ export async function main(
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
-      const code = await runRecordsProtocol(
-        dependencies.recordsInput ?? process.stdin,
-        output,
-        controller.signal,
-      );
+      const code =
+        argv[0] === "dedupe"
+          ? await runRecordsProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
+              controller.signal,
+            )
+          : await runHostRecordsProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
+              (value, options) =>
+                classifySeverityRecords(
+                  value as ClassifySeverityRecordsInput,
+                  options,
+                ),
+              controller.signal,
+            );
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -3899,11 +3916,17 @@ export async function main(
       },
     })
     .command("classify-severity", {
-      description: "Assess severity for saved findings.",
-      hint: "Use --rubric to classify findings with a policy. The assessment is saved separately.",
+      description: "Assess severity for saved findings or canonical records.",
+      hint: "Use --rubric for saved findings or --records alone for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
+        records: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; use alone.",
+          ),
         reprocess: z
           .boolean()
           .default(false)
@@ -3940,6 +3963,10 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ options }) {
+        if (options.records)
+          throw new CodexSecurityError(
+            "Use classify-severity --records alone.",
+          );
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
