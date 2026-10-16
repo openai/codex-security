@@ -1,8 +1,4 @@
-import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-  type SpawnOptionsWithoutStdio,
-} from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +9,7 @@ import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
   resolveCodexCommand,
+  type StartCodex,
 } from "./runtime.js";
 import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
 import {
@@ -30,12 +27,6 @@ interface FeedbackOptions {
   workingDirectory: string;
   signal?: AbortSignal;
 }
-
-type StartCodex = (
-  command: string,
-  args: readonly string[],
-  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
-) => ChildProcessWithoutNullStreams;
 
 export async function sendFeedback(
   options: FeedbackOptions,

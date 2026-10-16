@@ -76,6 +76,7 @@ const distModules = [
   "finding-retrieval",
   "finding-normalization",
   "workbench-arguments",
+  "executable-path",
   "finding-workflow",
   "findings-client",
   "findings-errors",

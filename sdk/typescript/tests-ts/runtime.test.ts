@@ -491,18 +491,20 @@ describe("plugin runtime preparation", () => {
       expect(inventory.status).toBe(2);
       expect(inventory.stderr).toContain("NTFS alternate data streams");
 
-      const rankInput = runNodePython(python!, [
+      const scopes = join(root, "scopes.json");
+      await writeFile(scopes, JSON.stringify(["source.ts:synthetic-stream"]));
+      const scopeInput = runNodePython(python!, [
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
+        "make-repo-scope-input",
         "--repo",
         repository,
-        "--scope",
-        "source.ts:synthetic-stream",
+        "--scopes-file",
+        scopes,
         "--out",
-        join(root, "rank-input.jsonl"),
+        join(root, "scope-input.jsonl"),
       ]);
-      expect(rankInput.status).toBe(1);
-      expect(rankInput.stderr).toContain("NTFS alternate data stream");
+      expect(scopeInput.status).toBe(1);
+      expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
   );
 
@@ -6276,14 +6278,18 @@ describe("runtime directories and plugin Python boundary", () => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
 
+      const scopes = join(root, "scopes.json");
+      await writeFile(scopes, JSON.stringify(["."]));
       const result = spawnSync(
         python!,
         [
           "-B",
           join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-          "make-repo-rank-input",
+          "make-repo-scope-input",
           "--repo",
           repository,
+          "--scopes-file",
+          scopes,
           "--out",
           output,
         ],
