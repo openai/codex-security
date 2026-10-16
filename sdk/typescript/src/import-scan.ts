@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -11,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { CodexSecurityConfig } from "./config.js";
 import { loadContract, sameCheckedFileDevice } from "./contract.js";
 import {
@@ -24,6 +26,7 @@ import {
 } from "./findings-import.js";
 import { ScanResult } from "./result.js";
 import {
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityStateDirectory,
   expandHome,
@@ -140,6 +143,29 @@ export async function importScan(
       options.format,
       pluginRoot,
     );
+    const helper = (
+      await import(
+        pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
+      )
+    ).default;
+    try {
+      helper.parseCurrentFindings(
+        findings.map((finding) => {
+          // Import assigns new identities and retains source metadata as provenance.
+          const { findingId, occurrenceId, fingerprints, writeup, ...content } =
+            finding;
+          return {
+            ...content,
+            provenance: { source: `${options.format}_import` },
+          };
+        }),
+      );
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Imported findings do not match the current scan-draft finding contract: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
     signal?.throwIfAborted();
     await validateOutputDir(options.outputDir, options.archiveExisting);
     if (options.dryRun) {
@@ -203,18 +229,13 @@ export async function importScan(
     signal?.throwIfAborted();
     const registration = await workbench(
       workbenchOptions,
-      [
-        "register-cli-scan",
-        "--repository",
+      workbenchArgs("register-cli-scan", {
         repository,
-        "--scan-dir",
         scanDir,
-        "--registration-json-stdin",
-        ...(options.archiveExisting ? ["--archive-existing"] : []),
-        ...(options.parentScanId === undefined
-          ? []
-          : ["--parent-scan-id", options.parentScanId]),
-      ],
+        registrationJsonStdin: true,
+        archiveExisting: Boolean(options.archiveExisting),
+        parentScanId: options.parentScanId,
+      }),
       JSON.stringify({
         recipe: {
           repository,
@@ -268,7 +289,6 @@ export async function importScan(
       },
       "findings.json": { findings: bound },
       "coverage.json": {
-        completeness: "unknown",
         inventoryStrategy: "custom",
         surfaces: findings.length
           ? [
@@ -292,11 +312,10 @@ export async function importScan(
         { flag: "wx", signal },
       );
     }
-    await workbench(workbenchOptions, [
-      "prepare-scan-completion",
-      "--scan-id",
-      scanId,
-    ]);
+    await workbench(
+      workbenchOptions,
+      workbenchArgs("prepare-scan-completion", { scanId }),
+    );
     // Finalization normally recovers partial output. An import must retain every supplied row.
     const contract = await loadContract(scanDir, {
       pluginRoot,

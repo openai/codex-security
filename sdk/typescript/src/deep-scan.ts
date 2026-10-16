@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,18 +7,6 @@ import { CodexSecurityError } from "./errors.js";
 import { executablePathForSpawn, type CodexCommand } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { withCodexPreflightLock } from "./provider-profile.js";
-
-/** Older custom plugins retain their existing prompt-driven launch path. */
-export async function supportsDirectDeepScan(
-  pluginRoot: string,
-): Promise<boolean> {
-  // The native parent keeps the plugin's configured Node selection under Bun.
-  if (process.versions["bun"]) return false;
-  const manifest = JSON.parse(
-    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
-  );
-  return manifest.codexSecurity?.directDeepScanEngine === 1;
-}
 
 export interface DirectDeepScanOptions {
   codexOptions: CodexOptions & { nativeProfile?: string };

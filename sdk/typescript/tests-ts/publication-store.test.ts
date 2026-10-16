@@ -345,6 +345,64 @@ describe("read-only publication history", () => {
     expect(existsSync(fixture.stateDirectory)).toBe(false);
   });
 
+  test("rejects inspection responses for another destination or occurrence", async () => {
+    const fixture = await publicationFixture({ count: 1 });
+    const receipt = {
+      ...publishedIssue(fixture.publication, 0),
+      scanId: SCAN_ID,
+    };
+    const response = {
+      scanId: SCAN_ID,
+      destination: { ...fixture.publication.destination },
+      findingCount: 1,
+      receipts: [receipt],
+    };
+    const workbench = spyOn(runtime, "runWorkbench");
+    try {
+      for (const invalidResponse of [
+        {
+          ...response,
+          destination: { ...response.destination, teamId: "another-team" },
+        },
+        {
+          ...response,
+          receipts: [
+            { ...receipt, occurrenceId: "occ_000000000000000000000000" },
+          ],
+        },
+      ]) {
+        workbench.mockResolvedValue(invalidResponse);
+        await expect(
+          inspectPublicationStore(fixture.publication, fixture.environment),
+        ).rejects.toThrow(/invalid persisted Linear publication records/u);
+      }
+    } finally {
+      workbench.mockRestore();
+    }
+  });
+
+  test("rejects a persisted receipt that differs from the accepted issue", async () => {
+    const fixture = await publicationFixture({ count: 1 });
+    const issue = publishedIssue(fixture.publication, 0, "EXAMPLE-101");
+    const workbench = spyOn(runtime, "runWorkbench").mockResolvedValue({
+      scanId: SCAN_ID,
+      destination: { ...fixture.publication.destination },
+      findingCount: 1,
+      receipts: [{ ...issue, scanId: SCAN_ID, issueIdentifier: "EXAMPLE-102" }],
+    });
+    try {
+      await expect(
+        recordPublishedIssues(
+          fixture.publication,
+          [issue],
+          fixture.environment,
+        ),
+      ).rejects.toThrow(/invalid persisted Linear publication records/u);
+    } finally {
+      workbench.mockRestore();
+    }
+  });
+
   test("does not create a missing database or migrate old history", async () => {
     const missing = await publicationFixture({ createDatabase: false });
     await expect(

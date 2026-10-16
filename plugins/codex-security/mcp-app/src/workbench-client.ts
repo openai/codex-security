@@ -89,7 +89,8 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
+      "-B",
       "-c",
       WORKBENCH_PYTHON,
       workbenchScriptPath(),

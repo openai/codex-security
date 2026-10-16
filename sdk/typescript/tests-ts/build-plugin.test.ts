@@ -64,6 +64,20 @@ async function snapshot(root: string) {
 afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
+  test("ships the Cloud connection and skill unchanged", async () => {
+    for (const path of [
+      ".app.json",
+      "skills/cloud-findings/SKILL.md",
+      "skills/cloud-findings/agents/openai.yaml",
+    ]) {
+      const source = await readFile(
+        new URL(`../../../plugins/codex-security/${path}`, import.meta.url),
+        "utf8",
+      );
+      expect(await readFile(join(PLUGIN_ROOT, path), "utf8")).toBe(source);
+    }
+  });
+
   test("copies Python contracts and completed examples unchanged from source", async () => {
     const source = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
@@ -282,12 +296,12 @@ describe("bundled plugin build", () => {
             manifest: { scan: {} },
             findings: { findings: [] },
             coverage: {
-              completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
+              surfaces: [], explicitExclusions: [], deferred: [],
             },
           };
           assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
           assert.throws(() => helpers.parseCanonicalScanDraft({
-            ...input, coverage: { ...input.coverage, completeness: "invalid" },
+            ...input, coverage: { ...input.coverage, surfaces: "invalid" },
           }));
           assert.equal(process.exitCode, undefined);
         `,

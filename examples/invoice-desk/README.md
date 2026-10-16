@@ -128,7 +128,7 @@ scan step, and no GitHub token is passed to the scanner.
 
 Results appear under **Actions → Invoice Desk OpenAI scan**. This separate
 workflow does not create a PR status check or merge gate. Its summary identifies
-the PR and source commit, completion, finding and severity counts, coverage,
+the PR and source commit, completion, finding and severity counts, requested scope,
 elapsed time, and package-cache reuse. Passing behavior tests alone does not
 mean a source scan completed.
 
@@ -136,13 +136,13 @@ Reports are retained for seven days. The artifact includes Markdown, findings
 and coverage JSON, the scan manifest, CLI result JSON, SARIF, and
 `invoice-desk-metrics.json`. Metrics record source and workflow revisions,
 scanner settings, exit code, elapsed time, cache hits, and any token usage or
-cost estimates reported by the CLI. Incomplete scans retain the measurements
+cost estimates reported by the CLI. Failed or interrupted scans retain measurements
 that were emitted; missing measurements and recall remain unknown. Failed scans
 do not count as zero findings. Authentication state and agent transcripts are
 not uploaded. SARIF is downloadable; the workflow does not create Code Scanning
 alerts or post PR comments.
 
-Findings are report-only. Scan errors and incomplete scans fail the job, with
+Findings are report-only. Execution and required-reporting errors fail the job, with
 available reports retained. A successful job means the scan completed; it does
 not establish that the application is secure or that all ten scenarios were
 found. Compare distinct root causes with the QA manifest and review extra

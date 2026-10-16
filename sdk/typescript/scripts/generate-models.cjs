@@ -75,7 +75,6 @@ async function generate() {
       'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
-      'export type CoverageCompleteness = CoverageDocument["completeness"];',
       'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',
@@ -88,7 +87,7 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const shared = ["finding-normalization"].map((name) => [
+  const shared = ["workbench-arguments", "executable-path"].map((name) => [
     `${name}.ts`,
     `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
       readFileSync(

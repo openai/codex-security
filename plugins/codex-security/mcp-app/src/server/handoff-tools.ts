@@ -1,3 +1,4 @@
+import { workbenchArgs } from "../workbench-arguments.js";
 import { writingAnnotations } from "./tool-annotations.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -45,7 +46,7 @@ export function registerScanHandoffTools(
   for (const { name, title, description, inputSchema, command } of [
     {
       name: "mark_codex_security_scan_handoff_delivered",
-      title: "Record Delivered Codex Security Handoff",
+      title: "Record Delivered Codex Security Local Handoff",
       description:
         "App-only. Record that the launched scan instructions were delivered to Codex.",
       inputSchema: handoffClaimSchema,
@@ -53,7 +54,7 @@ export function registerScanHandoffTools(
     },
     {
       name: "claim_codex_security_scan_handoff_delivery",
-      title: "Claim Codex Security Handoff Delivery",
+      title: "Claim Codex Security Local Handoff Delivery",
       description:
         "App-only. Durably claim scan handoff delivery before sending continuation instructions to Codex.",
       inputSchema: handoffTakeoverSchema,
@@ -61,7 +62,7 @@ export function registerScanHandoffTools(
     },
     {
       name: "release_codex_security_scan_handoff_delivery",
-      title: "Release Codex Security Handoff Delivery",
+      title: "Release Codex Security Local Handoff Delivery",
       description:
         "App-only. Release a failed scan handoff delivery claim so the app can retry it.",
       inputSchema: handoffClaimSchema,
@@ -69,7 +70,7 @@ export function registerScanHandoffTools(
     },
     {
       name: "attach_codex_security_scan_continuation_thread",
-      title: "Attach Codex Security Scan Thread",
+      title: "Attach Codex Security Local Scan Thread",
       description:
         "App-only. Persist the normal local Codex thread created for a claimed scan handoff.",
       inputSchema: scanContinuationThreadSchema,
@@ -86,16 +87,12 @@ export function registerScanHandoffTools(
         _meta: appMeta,
       },
       async (input: z.infer<typeof inputSchema>) => {
-        const arguments_ = [
-          command,
-          "--scan-id",
-          input.scanId,
-          "--claim-token",
-          input.claimToken,
-        ];
-        if ("takeOverStale" in input && input.takeOverStale)
-          arguments_.push("--take-over-stale");
-        if ("threadId" in input) arguments_.push("--thread-id", input.threadId);
+        const arguments_ = workbenchArgs(command, {
+          scanId: input.scanId,
+          claimToken: input.claimToken,
+          takeOverStale: "takeOverStale" in input && input.takeOverStale,
+          threadId: "threadId" in input ? input.threadId : undefined,
+        });
         return workspaceResult(
           (await runWorkbench(arguments_)) as HandoffWorkspaceState,
         );

@@ -63,7 +63,7 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"]
         == expected_status
     )
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
+
     for export_format in ("json", "csv", "sarif"):
         exported = scan_command(state_dir, "export-findings", scan_id, "--format", export_format)
         assert Path(str(exported["export"]["path"])).is_file()
@@ -95,7 +95,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     stopped = get_scan(state_dir, scan_id)["scan"]
     seal = (scan_dir / "scan-manifest.json").read_bytes()
     documents["findings"]["findings"][0]["identity"]["anchor"] = "late-independent-finding"
-    documents["coverage"]["completeness"] = "partial"
+
     documents["coverage"]["deferred"] = [
         {"id": "late-review", "reason": "This review completed after cancellation."}
     ]
@@ -155,7 +155,7 @@ def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
         "scanId": scan_id,
         "complete": False,
         "findings": [late_finding],
-        "coverage": {"completeness": "partial", "surfaces": []},
+        "coverage": {"surfaces": []},
     }
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
@@ -373,7 +373,7 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
         "scanId": str(uuid.uuid4()),
         "complete": False,
         "findings": [],
-        "coverage": {"completeness": "partial"},
+        "coverage": {"surfaces": [], "explicitExclusions": [], "deferred": []},
     }
     write_checkpoint(scan_dir / "checkpoints", foreign)
 
@@ -414,7 +414,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"
-    assert final_coverage["completeness"] == "complete"
+
     assert not any(item.get("candidateId") == "candidate-x" for item in final_coverage["deferred"])
     assert any(
         item.get("candidateId") == "candidate-x" and item["disposition"] == disposition
@@ -462,7 +462,7 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     }
     documents["manifest"]["scan"].update(threatModel=model, complete=False)
     documents["findings"]["findings"] = []
-    documents["coverage"].update(completeness="partial", surfaces=[])
+    documents["coverage"].update(surfaces=[])
     draft = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     draft.parent.mkdir()
     draft.write_text(json.dumps(documents))
@@ -1220,7 +1220,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         )
     }
     documents["findings"]["findings"] = []
-    documents["coverage"].update(completeness="partial", surfaces=[], deferred=[])
+    documents["coverage"].update(surfaces=[], deferred=[])
     for identity in ("review-a", "review-b"):
         documents["coverage"]["deferred"].append(
             {
@@ -1233,7 +1233,6 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         "scanId": scan_id,
         "findings": [],
         "coverage": saved_coverage(
-            completeness="partial",
             deferred=[
                 {key: value for key, value in row.items() if key != "id"}
                 for row in documents["coverage"]["deferred"]

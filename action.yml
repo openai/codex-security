@@ -30,7 +30,7 @@ inputs:
   max-time-hours:
     description: Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.
   fail-on-severity:
-    description: 'none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.'
+    description: 'none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail.'
     default: none
   verbose:
     description: Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.
@@ -63,21 +63,21 @@ outputs:
   results-directory:
     description: Runner-local reports directory; do not upload it recursively.
   scan-status:
-    description: 'completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run.'
+    description: 'completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.'
   skip-reason:
     description: empty-diff or dry-run when no scan ran; otherwise empty.
   policy-status:
-    description: 'passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured.'
+    description: 'passed, failed, or not-evaluated. Failed or skipped scans are not-evaluated.'
   report-status:
     description: 'ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.'
   exit-code:
-    description: CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step.
+    description: CLI exit code, or empty if the CLI was not started. 0 means success, 1 means findings policy failed, and 2 means execution failed.
   scanned-sha:
     description: Verified checkout commit SHA.
   analysis-ref:
     description: GitHub ref matching the scanned revision.
   sarif-upload-ready:
-    description: 'true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure.'
+    description: 'true only for validated SARIF from a completed scan with a publishable immutable revision. Remains true after severity-policy failure.'
   critical-count:
     description: Available critical findings, or empty before results are available.
   high-count:

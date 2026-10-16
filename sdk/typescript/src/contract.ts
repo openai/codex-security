@@ -16,6 +16,7 @@ import { ContractValidationError, abortReason } from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
@@ -91,9 +92,14 @@ export async function loadContractWithScanDirectory(
     );
   }
   throwIfAborted(options.signal);
-  let findingsPayload: unknown = payloads["findings.json"];
 
-  const ajv = createValidator();
+  // The plugin schemas are the immutable v0 contract. They are valid Draft
+  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
+  // optional strict-schema linter requires.
+  const ajv = new Ajv2020({ allErrors: false, strict: false }).addFormat(
+    "date-time",
+    { type: "string", validate: validRfc3339DateTime },
+  );
   for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
     const schema = await readJson(
       join(options.pluginRoot, "schemas", schemaName),
@@ -104,8 +110,7 @@ export async function loadContractWithScanDirectory(
     let valid: boolean;
     try {
       validate = ajv.compile(schema);
-      payload =
-        filename === "findings.json" ? findingsPayload : payloads[filename];
+      payload = payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
         if (typeof result !== "boolean") {
@@ -124,12 +129,12 @@ export async function loadContractWithScanDirectory(
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
-    if (filename === "findings.json") findingsPayload = payload;
+    payloads[filename] = payload;
     throwIfAborted(options.signal);
   }
-  const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = findingsPayload as FindingsDocument;
-  const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  const manifest = payloads["scan-manifest.json"] as ScanManifest;
+  const findings = payloads["findings.json"] as FindingsDocument;
+  const coverage = payloads["coverage.json"] as CoverageDocument;
   if (
     options.expectedScanId !== undefined &&
     manifest.scan.id !== options.expectedScanId
@@ -184,14 +189,14 @@ export async function loadContractWithScanDirectory(
 }
 
 /** Normalize optional legacy details on a copy, without changing saved artifacts. */
-export function normalizePersistedFindings(payload: unknown): unknown {
+function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    normalizePersistedFindingDetails(finding, "canonical");
+    normalizePersistedFindingDetails(finding);
   }
   return compatible;
 }
@@ -296,21 +301,12 @@ function validateCanonicalContract(
       }
     }
 
-    const fingerprint = `codex-security/v1:sha256:${hash(
-      "sha256",
-      [
-        "codex-security/v1",
-        manifest.scan.target.targetId,
-        finding.ruleId,
-        finding.identity.anchor,
-        finding.identity.instance ?? "",
-      ].join("\0"),
-    )}`;
-    const findingId = `csf_${hash("sha256", fingerprint).slice(0, 24)}`;
-    const occurrenceId = `occ_${hash(
-      "sha256",
-      [manifest.scan.id, fingerprint].join("\0"),
-    ).slice(0, 24)}`;
+    const { findingId, occurrenceId, fingerprints } = deriveFindingIdentity(
+      manifest.scan.id,
+      manifest.scan.target.targetId,
+      finding.ruleId,
+      finding.identity,
+    );
     if (finding.findingId !== findingId) {
       throw new ContractValidationError(
         `${context}.findingId: does not match derived fingerprint identity.`,
@@ -321,7 +317,7 @@ function validateCanonicalContract(
         `${context}.occurrenceId: does not match scan occurrence identity.`,
       );
     }
-    if (finding.fingerprints.primary !== fingerprint) {
+    if (finding.fingerprints.primary !== fingerprints.primary) {
       throw new ContractValidationError(
         `${context}.fingerprints: does not match derived fingerprint.`,
       );
@@ -838,18 +834,6 @@ function validateParsedJson(value: unknown, context: string): void {
   }
 }
 
-function createValidator(): Ajv2020 {
-  // The plugin schemas are the immutable v0 contract. They are valid Draft
-  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
-  // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false });
-  ajv.addFormat("date-time", {
-    type: "string",
-    validate: validRfc3339DateTime,
-  });
-  return ajv;
-}
-
 async function sha256ScanFile(
   scanDir: string,
   relativePath: string,
@@ -1025,4 +1009,31 @@ function nodeErrorCode(error: unknown): string | undefined {
 /** @internal */
 export function sha256Text(value: string): string {
   return hash("sha256", value);
+}
+
+export function deriveFindingIdentity(
+  scanId: string,
+  targetId: string,
+  ruleId: string,
+  identity: Finding["identity"],
+) {
+  const fingerprint = `codex-security/v1:sha256:${sha256Text(
+    [
+      "codex-security/v1",
+      targetId,
+      ruleId,
+      identity.anchor,
+      identity.instance ?? "",
+    ].join("\0"),
+  )}`;
+  return {
+    findingId: `csf_${sha256Text(fingerprint).slice(0, 24)}`,
+    occurrenceId: `occ_${sha256Text([scanId, fingerprint].join("\0")).slice(0, 24)}`,
+    ruleId,
+    identity,
+    fingerprints: {
+      algorithm: "codex-security/v1" as const,
+      primary: fingerprint,
+    },
+  };
 }

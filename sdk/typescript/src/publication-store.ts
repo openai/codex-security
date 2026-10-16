@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -55,13 +56,30 @@ export async function recordPublishedIssues(
     environment,
     issues,
   );
-  const recorded = new Map(
-    receipts.map((receipt) => [receipt.findingId, receipt]),
-  );
-  return publication.issues.flatMap(({ findingId }) => {
+  if (receipts.length !== issues.length) {
+    throw invalidPublicationRecords();
+  }
+  const recorded = new Map<string, StoredIssue>();
+  for (const [index, receipt] of receipts.entries()) {
+    const expectedIssue = issues[index]!;
+    if (
+      receipt.scanId !== publication.scanId ||
+      receipt.findingId !== expectedIssue.findingId ||
+      receipt.occurrenceId !== expectedIssue.occurrenceId ||
+      receipt.issueIdentifier !== expectedIssue.issueIdentifier ||
+      (expectedIssue.url !== undefined && receipt.url !== expectedIssue.url) ||
+      recorded.has(receipt.findingId)
+    ) {
+      throw invalidPublicationRecords();
+    }
+    recorded.set(receipt.findingId, receipt);
+  }
+  const ordered = publication.issues.flatMap(({ findingId }) => {
     const receipt = recorded.get(findingId);
     return receipt === undefined ? [] : [publishedIssue(receipt)];
   });
+  if (ordered.length !== issues.length) throw invalidPublicationRecords();
+  return ordered;
 }
 
 async function findingIssues(
@@ -121,7 +139,30 @@ async function findingIssues(
         : {}),
     }),
   );
-  return result["receipts"] as unknown as StoredIssue[];
+  const receipts = publicationRecordsSchema.safeParse(result["receipts"]);
+  if (
+    !matchesPublication(result, publication) ||
+    result["findingCount"] !== publication.issues.length ||
+    !receipts.success
+  ) {
+    throw invalidPublicationRecords();
+  }
+  const selected = new Map(
+    publication.issues.map(({ findingId, occurrenceId }) => [
+      findingId,
+      occurrenceId,
+    ]),
+  );
+  for (const receipt of receipts.data) {
+    if (
+      !selected.has(receipt.findingId) ||
+      (receipt.scanId === publication.scanId &&
+        selected.get(receipt.findingId) !== receipt.occurrenceId)
+    ) {
+      throw invalidPublicationRecords();
+    }
+  }
+  return receipts.data;
 }
 
 function publishedIssue(issue: StoredIssue): PublishedScanIssue {
@@ -131,4 +172,34 @@ function publishedIssue(issue: StoredIssue): PublishedScanIssue {
     issueIdentifier: issue.issueIdentifier,
     ...(issue.url === undefined ? {} : { url: issue.url }),
   };
+}
+
+function matchesPublication(
+  result: Record<string, unknown>,
+  publication: PreparedScanPublication,
+): boolean {
+  const destination = result["destination"];
+  return (
+    result["scanId"] === publication.scanId &&
+    isRecord(destination) &&
+    destination["type"] === publication.destination.type &&
+    destination["teamId"] === publication.destination.teamId &&
+    destination["projectId"] === publication.destination.projectId
+  );
+}
+
+const publicationRecordsSchema = z
+  .object({
+    scanId: z.string(),
+    findingId: z.string(),
+    occurrenceId: z.string(),
+    issueIdentifier: z.string().refine((value) => Boolean(value.trim())),
+    url: z.string().optional(),
+  })
+  .array();
+
+function invalidPublicationRecords(): CodexSecurityError {
+  return new CodexSecurityError(
+    "The workbench returned invalid persisted Linear publication records.",
+  );
 }

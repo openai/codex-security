@@ -1340,12 +1340,11 @@ def budget_exhausted_draft(
         manifest = {
             "scan": {
                 "target": target,
-                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+                "scope": {"limitations": [warning]},
             }
         }
         findings = {"findings": []}
         coverage = {
-            "completeness": "partial",
             "inventoryStrategy": (
                 "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
             ),
@@ -1431,7 +1430,7 @@ def budget_exhausted_draft(
                 "reason": "Validation was deferred because the scan reached its cost limit.",
             }
         )
-    coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     for name, payload in (
         ("findings.json", findings),
         ("coverage.json", coverage),
@@ -1552,11 +1551,21 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                recover_unsealed=scan["mode"] != "deep",
+                allow_missing_writeups=True,
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
+        if prepared.warnings:
+            # Save the explanation before publication removes the broken reference,
+            # so a retry after failed publication retains it.
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                    (json.dumps(warnings), scan_id),
+                )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
