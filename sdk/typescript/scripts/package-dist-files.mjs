@@ -19,6 +19,7 @@ const distModules = [
   "external-import-models",
   "endor-findings",
   "scanner-import",
+  "semgrep-findings",
   "snyk-findings",
   "wiz-findings",
   "codex-prompt",
