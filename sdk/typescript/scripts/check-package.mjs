@@ -102,6 +102,7 @@ function validatePackagePaths(entries) {
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/classify-severity-records.md",
     "package/LICENSE",
     "package/bin/codex-security.mjs",
     "package/dist/index.js",
