@@ -55586,6 +55586,9 @@ function parseInputs(read, workspace) {
   const maxTimeHours = num("max-time-hours", false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== void 0 && mode !== "deep") throw new Error("max-time-hours requires mode: deep.");
   const dryRun = bool("dry-run", false);
+  const provider = choice("provider", ["openai", "amazon-bedrock"], "openai");
+  const model = str("model", provider === "openai" ? "gpt-5.6-sol" : "");
+  if (!model) throw new Error("model is required when provider is amazon-bedrock. Use the exact Bedrock model ID your AWS identity can invoke.");
   const cyberAccessProgram = str("cyber-access-program") ? choice("cyber-access-program", ["standard", "daybreak_blue", "daybreak_red"], "standard") : void 0;
   return {
     repository: str("repository", workspace),
@@ -55594,7 +55597,8 @@ function parseInputs(read, workspace) {
     diffBase,
     mode,
     cyberAccessProgram,
-    model: str("model", "gpt-5.6-sol"),
+    provider,
+    model,
     effort: choice("effort", ["minimal", "low", "medium", "high", "xhigh", "max"], "xhigh"),
     maxCost: num("max-cost", false, Number.MIN_VALUE),
     maxTimeHours,
@@ -55609,13 +55613,14 @@ function parseInputs(read, workspace) {
   };
 }
 function scanArguments(inputs, target, resultsDirectory) {
+  const auth2 = inputs.dryRun || inputs.provider === "amazon-bedrock" ? "auto" : "api-key";
   const args = [
     "scan",
     target.repository,
     "--auth",
-    inputs.dryRun ? "auto" : "api-key",
+    auth2,
     "--provider",
-    "openai",
+    inputs.provider,
     "--mode",
     inputs.mode,
     `--model=${inputs.model}`,
@@ -55890,7 +55895,31 @@ var package_default = {
 // src/runtime.ts
 var SUPPORTED_CLI_VERSION = package_default.dependencies["@openai/codex-security"];
 var REGISTRY = "https://registry.npmjs.org/";
-function runtimeEnvironment(paths, apiKey) {
+var AWS_ENVIRONMENT_VARIABLES = [
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_PROFILE",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"
+];
+function scanCredentials(provider, source) {
+  if (provider === "openai") return { provider, apiKey: source.OPENAI_API_KEY || source.CODEX_API_KEY || "" };
+  const environment = {};
+  for (const name of AWS_ENVIRONMENT_VARIABLES) if (source[name] !== void 0) environment[name] = source[name];
+  return { provider, environment };
+}
+function runtimeEnvironment(paths, credentials) {
   const env = {
     PATH: `${(0, import_node_path4.join)(paths.root, "bin")}:${paths.runnerPath ?? "/usr/bin:/bin"}`,
     HOME: paths.home,
@@ -55931,9 +55960,12 @@ function runtimeEnvironment(paths, apiKey) {
     env.CODEX_MCP_NODE_PATH = (0, import_node_path4.join)(paths.root, "bin", "node");
   }
   if (paths.runnerLibraryPath !== void 0) env.LD_LIBRARY_PATH = paths.runnerLibraryPath;
-  if (apiKey !== void 0) {
+  if (credentials?.provider === "openai") {
+    const { apiKey } = credentials;
     if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error("OPENAI_API_KEY must be a nonempty single-line value.");
     env.OPENAI_API_KEY = apiKey;
+  } else if (credentials?.provider === "amazon-bedrock") {
+    Object.assign(env, credentials.environment);
   }
   return env;
 }
@@ -56011,7 +56043,7 @@ async function setupRuntime(options) {
     const cliPath = await regularFile((0, import_node_path4.join)(destination, "node_modules", "@openai", "codex-security", "bin", "codex-security.mjs"));
     const resultsDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path4.join)(tempRoot, "codex-security-reports-"));
     await (0, import_promises3.chmod)(resultsDirectory, 448);
-    return { ...paths, nodePath, cliPath, resultsDirectory, env: (apiKey) => runtimeEnvironment(paths, apiKey) };
+    return { ...paths, nodePath, cliPath, resultsDirectory, env: (credentials) => runtimeEnvironment(paths, credentials) };
   } catch (error2) {
     await cleanupRuntime(root, tempRoot);
     throw error2;
@@ -99259,8 +99291,8 @@ async function runAction(actionRoot, overrides = {}) {
   setOutput("report-status", "failed");
   setOutput("sarif-upload-ready", "false");
   try {
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "";
     inputs = parseInputs((name) => getInput(name), process.env.GITHUB_WORKSPACE ?? "");
+    const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context5();
     target = await resolveTarget(inputs, event);
     setOutput("scanned-sha", target.scannedSha);
@@ -99274,7 +99306,7 @@ async function runAction(actionRoot, overrides = {}) {
       finalSummary = "The requested diff is empty. No scan ran and no model cost was incurred.";
       info(finalSummary);
     } else {
-      if (!inputs.dryRun && (!apiKey || /[\r\n\u0000]/.test(apiKey))) throw new Error("Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.");
+      if (!inputs.dryRun && credentials.provider === "openai" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) throw new Error("Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.");
       tempRoot = await (0, import_promises9.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
@@ -99304,7 +99336,7 @@ async function runAction(actionRoot, overrides = {}) {
       try {
         execution = await deps.runProcess(runtime.nodePath, [runtime.cliPath, ...args], {
           cwd: target.repository,
-          env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(apiKey),
+          env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(credentials),
           // Stream stderr with terminal controls escaped; structured stdout is consumed below.
           log: inputs.verbose ? info : void 0
         });

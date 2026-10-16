@@ -97,6 +97,17 @@ try {
     assert.equal(preflight.mode, mode);
   }
 
+  // Bedrock uses the CLI's native AWS provider, including keyless local preflight.
+  for (const mode of ['standard', 'deep']) {
+    const values: Record<string, string> = {provider:'amazon-bedrock', model:'openai.gpt-5.6-luna', mode, 'dry-run':'true'};
+    const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
+      {repository}, join(root, `bedrock-${mode}`));
+    const preflight = JSON.parse(run(args, 0));
+    assert.equal(preflight.dryRun, true); assert.equal(preflight.mode, mode);
+    assert.equal(preflight.modelProvider, 'amazon-bedrock');
+    assert.equal(preflight.authentication.method, 'aws_credentials');
+  }
+
   // Normalization must not let a literal repository path become a framework option.
   await mkdir(join(repository, '--help'));
   await writeFile(join(repository, '--help/example.ts'), 'export const example = 1;\n');

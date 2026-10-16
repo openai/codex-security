@@ -7,7 +7,7 @@ test('defaults are stable across events', () => {
   const input = parse();
   assert.deepEqual(input, {
     repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
-    model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
+    provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
     verbose: true, dryRun: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
@@ -17,6 +17,19 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
   assert.ok(!args.includes('--cyber-access-program'));
+});
+test('Bedrock requires an explicit model and selects AWS authentication in both scan modes', () => {
+  for (const mode of ['standard', 'deep']) for (const dryRun of ['false', 'true']) {
+    const input = parse({provider:'amazon-bedrock', model:'openai.synthetic-model', mode, 'dry-run':dryRun});
+    const args = scanArguments(input, {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--provider') + 1], 'amazon-bedrock');
+    assert.equal(args[args.indexOf('--auth') + 1], 'auto');
+    assert.ok(args.includes('--model=openai.synthetic-model'));
+    assert.equal(args.includes('--dry-run'), dryRun === 'true');
+  }
+  assert.throws(() => parse({provider:'unsupported'}), /provider must be one of/);
+  for (const model of ['', '  ']) assert.throws(() => parse({provider:'amazon-bedrock', model}), /model is required/);
+  assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
 });
 test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
   for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
