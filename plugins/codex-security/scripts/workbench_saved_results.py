@@ -710,19 +710,7 @@ def _merge_tied_parent_observations(
         coverage["resolvedDeferred"] = list(closures.values())
     if current.get("complete") is False or previous.get("complete") is False:
         merged["complete"] = False
-    if (
-        coverage.get("deferred")
-        or merged.get("complete") is False
-        or (
-            isinstance(coverage.get("surfaces"), list)
-            and any(
-                isinstance(row, dict) and row.get("disposition") == "needs_follow_up"
-                for row in coverage["surfaces"]
-            )
-        )
-        or previous["coverage"].get("completeness") == "partial"
-    ):
-        coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     return merged
 
 
@@ -890,7 +878,7 @@ def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
     }
     try:
         yield
-    except ContractError:
+    except BaseException:
         if previous is None:
             _remove_scan_local_file_if_exists(scan_dir, "checkpoint-head.json")
         else:
@@ -1294,7 +1282,6 @@ def merge_saved_results(
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]
         else {
-            "completeness": "partial",
             "mode": binding["coverageMode"],
             "inventoryStrategy": "diff"
             if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
@@ -1702,17 +1689,6 @@ def merge_saved_results(
             and source_order[relative] >= accepted_order
             and any(isinstance(row, dict) for row in deferred_rows[relative])
         )
-        if (
-            (relative != "parent" or not parent_is_canonical)
-            and not superseded
-            and not selected_coverage_superseded
-            and (
-                draft.get("complete") is False
-                or draft["coverage"].get("completeness") != "complete"
-            )
-            and coverage.get("completeness") in {"complete", "unknown"}
-        ):
-            coverage["completeness"] = "partial"
         skip_superseded_findings = (
             superseded
             and not stopped
@@ -1818,7 +1794,6 @@ def merge_saved_results(
                 for location in locations
             ):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
-                coverage["completeness"] = "partial"
                 continue
             provenance = finding.setdefault("provenance", {"source": "local_plugin"})
             if not isinstance(provenance, dict):
@@ -2022,8 +1997,7 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
-    if stopped or any(warning not in initial_warnings for warning in warnings):
-        coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
@@ -2039,16 +2013,16 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     try:
-        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+        prepared = _prepare_scan_finalization(scan_dir)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-    if not was_sealed or manifest["scan"]["id"] != scan["id"]:
+    if not prepared.was_sealed or prepared.manifest["scan"]["id"] != scan["id"]:
         raise SystemExit("Only sealed scans can be compared.")
-    return coverage
+    return prepared.coverage
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
-    snapshots: dict[str, bytes | None] = {}
+def _snapshot_published_outputs(scan_dir: Path) -> dict[str, tuple[bytes, os.stat_result] | None]:
+    snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
     for relative in _PUBLISHED_OUTPUTS:
         descriptor = -1
         try:
@@ -2057,7 +2031,8 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
             )
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                snapshots[relative] = handle.read()
+                metadata = os.fstat(handle.fileno())
+                snapshots[relative] = (handle.read(), metadata)
         except ContractError:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
@@ -2072,14 +2047,80 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
     return snapshots
 
 
-def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None]) -> None:
-    for relative, contents in snapshots.items():
-        if contents is None:
+def _restore_published_outputs(
+    scan_dir: Path, snapshots: dict[str, tuple[bytes, os.stat_result] | None]
+) -> None:
+    for relative, snapshot in snapshots.items():
+        if snapshot is None:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
                 _remove_scan_local_file_if_exists(scan_dir, relative)
         else:
+            contents, metadata = snapshot
             write_scan_local_bytes(scan_dir, relative, contents)
+            # Saved-result selection uses mtime; rollback must preserve its ordering.
+            os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+
+@contextmanager
+def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterator[None]:
+    """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    snapshots = _snapshot_published_outputs(scan_dir)
+    warnings = json.loads(scan["completion_warnings_json"])
+    binding = db.workbench_completion_binding(scan, db.now())
+    with preserve_parent_head_on_error(scan_dir):
+        try:
+            documents = merge_saved_results(
+                scan_dir,
+                scan["id"],
+                binding,
+                connection.execute(
+                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                    (scan["id"],),
+                ).fetchall(),
+                warnings,
+                stopped=True,
+                reason=(
+                    "The configured discovery time limit elapsed before any source review completed. "
+                    "Saved findings and pending review were preserved without a completed reduction."
+                ),
+            )
+            if documents is None:
+                raise ContractError("Deep Scan deadline has no saved parent draft.")
+            documents[0]["scan"].pop("complete", None)
+            # Validate recovered evidence against the current finding contract,
+            # scope, source lineage, and receipts before admitting this draft.
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=db.expected_coverage_mode(scan),
+                completion_binding=binding,
+                recover_unsealed=True,
+                draft_documents=documents,
+            )
+            warnings.extend(prepared.warnings)
+            manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
+            manifest["scan"].pop("sealedAt", None)
+            manifest["scan"].pop("artifacts", None)
+            checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
+            contents = _encoded(checkpoint)
+            name = f"{hashlib.sha256(contents).hexdigest()}.json"
+            write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
+            write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
+            for filename, document in (
+                ("findings.json", findings),
+                ("coverage.json", coverage),
+                ("scan-manifest.json", manifest),
+            ):
+                write_scan_local_bytes(scan_dir, filename, _encoded(document))
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+            )
+            yield
+        except BaseException:
+            _restore_published_outputs(scan_dir, snapshots)
+            raise
 
 
 def preserve_scan_results_locked(
@@ -2272,10 +2313,11 @@ def preserve_scan_results_locked(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
         completion_binding=binding,
-        completion_warnings=warnings,
+        recover_unsealed=True,
         draft_documents=documents,
         finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
+    warnings.extend(prepared.warnings)
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(

@@ -393,6 +393,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       environment: f.env,
       prepareRuntime: async () => ({
         codexHome: f.home,
+        deepScanConfigPath: join(f.home, "deep-scan-config.toml"),
         environment: f.env,
         credentialsAvailable: true,
         plugin: {

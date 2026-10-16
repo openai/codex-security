@@ -981,11 +981,14 @@ test("a malformed selected file fails before constructing a client", async () =>
     ),
   ).toBe(2);
   expect(onConfig).not.toHaveBeenCalled();
-  expect(stderr.text()).toContain("Cannot parse project configuration");
+  expect(stderr.text()).toContain(
+    `Cannot parse project configuration at ${input.config}: `,
+  );
+  expect(stderr.text()).toContain("end with a ]");
   expect(JSON.parse(stdout.text())).toEqual({
     status: "failed",
     code: "SCAN_FAILED",
-    message: `Cannot parse project configuration at ${input.config}.`,
+    message: expect.stringContaining("end with a ]"),
   });
 });
 
@@ -1250,5 +1253,29 @@ test.each([
     expect(stderr.text().includes("Cost:")).toBe(
       showCost && model === "gpt-5.6-sol",
     );
+  },
+);
+
+test.each(["yaml", "toon", "json"])(
+  "a long framework error keeps its whole message with --format %s",
+  async (format) => {
+    const root = await temporaryDirectory();
+    const missing = join(
+      root,
+      "a-directory-name-long-enough-to-make-yaml-fold-the-line",
+      "nested\\scan.yaml",
+    );
+    const { stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["info", "-c", missing, "--format", format],
+        dependencies({ currentDirectory: root }),
+      ),
+    ).toBe(2);
+    const message =
+      format === "json"
+        ? JSON.parse(stderr.text().replace(/^codex-security: /u, "")).message
+        : stderr.text();
+    expect(message).toContain(missing);
   },
 );

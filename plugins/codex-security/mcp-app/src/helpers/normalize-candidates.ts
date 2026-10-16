@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { candidateSchemaV1 } from "../deep-scan/artifact-contracts.js";
-import discoverySchema from "../../../schemas/definitions/discovery-candidate.schema.json" with { type: "json" };
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { discoveryLocationRoles } from "../discovery-location-roles.js";
 import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
 import { createHash, randomBytes } from "node:crypto";
@@ -25,18 +26,11 @@ import {
 } from "./resolve-security-md";
 import { pathText, widePath } from "../../../native/windows-files.mjs";
 
-const roles = [
-  "entrypoint",
-  "entrypoint/wrapper",
-  "source",
-  "root_control",
-  "sink",
-  "concrete_implementation",
-  "evidence",
-];
-const { discoveryCandidate, rawDiscoveryLocation } = discoverySchema.$defs;
-const fields = new Set(Object.keys(discoveryCandidate.properties));
-const locationFields = new Set(Object.keys(rawDiscoveryLocation.properties));
+const roles: readonly string[] = discoveryLocationRoles;
+const { discoveryCandidate, rawDiscoveryLocation } =
+  artifactSchemaDocuments["definitions/discovery-candidate"].$defs;
+const fields = new Set(Object.keys(discoveryCandidate.shape));
+const locationFields = new Set(Object.keys(rawDiscoveryLocation.shape));
 const jsonFields = [...fields, ...locationFields].sort();
 type Row = Record<string, unknown>;
 type Candidate = Omit<z.infer<typeof candidateSchemaV1>, "candidate_id">;

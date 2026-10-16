@@ -131,11 +131,11 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           catch { checkoutError = 'The source checkout changed during scanning. Results cannot establish a completed scan of the requested revision.'; }
         }
         const result = await analyzeResults({stdout: execution.stdout, resultsDirectory: runtime.resultsDirectory, scannedSha: target.scannedSha,
-          exitCode: execution.exitCode, executionFailed: interrupted || !!checkoutError, publishable: target.publishable && !interrupted && !checkoutError});
+          exitCode: execution.exitCode, executionFailed: interrupted || !!checkoutError, publishable: target.publishable});
         if (result.paths.jsonPath && !result.paths.sarifPath)
           core.warning('SARIF report is unavailable; scan results and other reports are still available.');
         if (checkoutError) result.errors.unshift(checkoutError);
-        if (interrupted) result.errors.unshift('Scan was interrupted or exceeded its execution limit. Available findings are provisional.');
+        if (interrupted) result.errors.unshift('Scan was interrupted or exceeded its execution limit.');
         let reportsValidated = false;
         try {
           const reports = await collectReports(result);
@@ -153,16 +153,13 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         }
         outputs(result, target, execution.exitCode);
         core.info(`Scan: ${result.scanStatus}; findings policy: ${result.policyStatus}; report: ${result.reportStatus}; SARIF upload ready: ${result.sarifUploadReady}.`);
-        core.info(`${result.scanStatus === 'completed' ? 'Findings' : 'Provisional findings'}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
+        core.info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
         core.info(`Estimated cost: ${result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
         finalSummary = resultSummary(result, inputs, target);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== 'failed' && (result.scanStatus === 'incomplete' ||
-          (result.scanStatus === 'completed' && result.policyStatus === 'passed'));
+        success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === 'incomplete')
-          core.warning('Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.');
       }
     }
   } catch (error) {

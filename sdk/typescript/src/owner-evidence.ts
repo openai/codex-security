@@ -13,6 +13,11 @@ import {
   validatedGitEnvironment,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  codeownersForPath,
+  parseCodeowners,
+  type CodeownerIdentity,
+} from "./codeowners.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -23,11 +28,13 @@ export interface OwnerIdentity {
 
 export interface OwnerEvidence {
   id: string;
-  kind: "source" | "blame" | "history";
+  kind: "source" | "blame" | "history" | "codeowners";
   path: string;
   commit: string;
   startLine?: number;
   endLine?: number;
+  rule?: string;
+  matchedPath?: string;
   content: string;
   identityIndex: number | null;
 }
@@ -36,6 +43,7 @@ export interface OwnerContext {
   identities: OwnerIdentity[];
   evidence: OwnerEvidence[];
   limitations: string[];
+  codeowner: CodeownerIdentity | null;
 }
 
 /** Read committed objects, so dirty files and source symlinks are never followed. */
@@ -113,7 +121,28 @@ export async function ownerRepository(
   // Latin-1 keys preserve Git's filename bytes, including unrelated non-UTF-8 names.
   const hasFile = (path: string) =>
     path.isWellFormed() && files.has(Buffer.from(path).toString("latin1"));
-  return { git, revision, hasFile, shallow };
+  const loadCodeowners = async () => {
+    const path = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"].find(
+      hasFile,
+    );
+    if (path === undefined) return null;
+    const source = await git("cat-file", "blob", `${revision}:${path}`);
+    // GitHub requires CODEOWNERS to be under 3 MB.
+    return {
+      path,
+      rules:
+        Buffer.byteLength(source) >= 3_000_000 ? null : parseCodeowners(source),
+    };
+  };
+  let codeowners: ReturnType<typeof loadCodeowners> | undefined;
+  return {
+    git,
+    revision,
+    hasFile,
+    shallow,
+    // Keep the load lazy so failures remain inside per-finding error handling.
+    codeowners: () => (codeowners ??= loadCodeowners()),
+  };
 }
 
 /** Neither references nor objects may link into another checkout. */
@@ -163,6 +192,7 @@ export async function collectOwnerEvidence(
   const context: OwnerContext = {
     identities: [],
     evidence: [],
+    codeowner: null,
     limitations: [
       "Git authors are not verified tracker accounts or proof of current employment.",
     ],
@@ -189,6 +219,38 @@ export async function collectOwnerEvidence(
   const add = (item: Omit<OwnerEvidence, "id">) => {
     context.evidence.push({ id: `e${context.evidence.length + 1}`, ...item });
   };
+  const codeowners = await repository.codeowners();
+  if (codeowners !== null) {
+    if (codeowners.rules === null) {
+      context.limitations.push(
+        "CODEOWNERS meets or exceeds GitHub's 3 MB file-size limit and was ignored.",
+      );
+    } else {
+      for (const { path } of finding.locations) {
+        if (!hasFile(path)) continue;
+        const rule = codeownersForPath(codeowners.rules, path);
+        if (rule === undefined) continue;
+        const owner = rule.owners[0];
+        if (owner === undefined) continue;
+        context.codeowner = owner;
+        context.limitations.push(
+          "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
+        );
+        add({
+          kind: "codeowners",
+          path: codeowners.path,
+          commit: revision,
+          startLine: rule.line,
+          endLine: rule.line,
+          rule: rule.rule,
+          matchedPath: path,
+          content: rule.rule,
+          identityIndex: null,
+        });
+        return context;
+      }
+    }
+  }
   for (const path of new Set(finding.locations.map(({ path }) => path))) {
     if (!hasFile(path)) {
       context.limitations.push(`Not a regular file at HEAD: ${path}`);

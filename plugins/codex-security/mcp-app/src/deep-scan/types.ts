@@ -83,6 +83,7 @@ export interface CodexWorkerRequest {
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 export interface CodexWorkerResult {

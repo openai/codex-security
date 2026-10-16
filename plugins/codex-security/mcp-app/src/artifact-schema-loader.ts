@@ -113,6 +113,15 @@ export function loadArtifactZodSchema(
   return validator.meta(modelFacingSchema(schema));
 }
 
+/** Project a native contract for tools/list while preserving its validator and type. */
+export function projectArtifactToolSchema<Schema extends z.ZodType>(
+  schema: Schema,
+): Schema {
+  return schema.meta(
+    modelFacingSchema(z.toJSONSchema(schema, { io: "input" })),
+  );
+}
+
 /** Keep forbidden fields out of native tool declarations without allowing them. */
 function modelFacingSchema(schema: ArtifactSchemaObject): ArtifactSchemaObject {
   function visit(value: unknown): unknown {
@@ -134,7 +143,7 @@ function modelFacingSchema(schema: ArtifactSchemaObject): ArtifactSchemaObject {
     )
       return object;
     const forbidden = Object.entries(properties)
-      .filter(([, property]) => property === false)
+      .filter(([, property]) => forbiddenProperty(property))
       .map(([name]) => name);
     if (forbidden.length === 0) return object;
 
@@ -142,7 +151,9 @@ function modelFacingSchema(schema: ArtifactSchemaObject): ArtifactSchemaObject {
     // projects as optional unknown fields. Exclude their names instead. This
     // is equivalent JSON Schema; the original validator remains unchanged.
     object.properties = Object.fromEntries(
-      Object.entries(properties).filter(([, property]) => property !== false),
+      Object.entries(properties).filter(
+        ([, property]) => !forbiddenProperty(property),
+      ),
     );
     const names = { not: { enum: forbidden } };
     object.propertyNames =
@@ -152,6 +163,20 @@ function modelFacingSchema(schema: ArtifactSchemaObject): ArtifactSchemaObject {
     return object;
   }
   return visit(schema) as ArtifactSchemaObject;
+}
+
+function forbiddenProperty(property: unknown): boolean {
+  if (property === false) return true;
+  if (!property || typeof property !== "object" || Array.isArray(property))
+    return false;
+  const not = (property as ArtifactSchemaObject).not;
+  return (
+    Object.keys(property).length === 1 &&
+    not !== null &&
+    typeof not === "object" &&
+    !Array.isArray(not) &&
+    Object.keys(not).length === 0
+  );
 }
 
 function readSchemaPointer(document: SchemaDocument, pointer: string): unknown {

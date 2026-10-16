@@ -944,9 +944,9 @@ model_reasoning_summary = "none"
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], "-c");
+          assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
           assert.equal(launch.args.at(-1), workbenchPath);
-          assert.equal(launch.args.length, 3);
+          assert.equal(launch.args.length, 4);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -1454,11 +1454,11 @@ console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
   if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
-    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
     if (context.claimedWorkerIds) {
       const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
       const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
-      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [], coverage }));
+      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
     } else {
       writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
     }
@@ -1470,7 +1470,7 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
 setInterval(() => {}, 1_000);
 const stop = (signal) => {
   if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
-    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
     const checkpointDir = path.join(root, 'checkpoints');
     mkdirSync(checkpointDir, { recursive: true });
     writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));

@@ -1,6 +1,7 @@
 import { workbenchArgs } from "./workbench-arguments.js";
 import { existsSync } from "node:fs";
 import { isRecord } from "./record.js";
+import { notify } from "./value.js";
 import { dirname, join } from "node:path";
 import {
   Codex,
@@ -310,19 +311,15 @@ export async function matchScanFindingsInternal(
     after: new Map<string, EvidenceCursor>(),
   };
   const progress = (phase: ScanComparisonProgress["phase"], page?: number) => {
-    try {
-      void Promise.resolve(
-        options.onProgress?.({
-          phase,
-          beforeFindings: input.before.length,
-          beforeIssues: catalogue.size,
-          afterFindings: input.after.length,
-          ...(page === undefined ? {} : { page, pages: pages.length }),
-        }),
-      ).catch(() => {});
-    } catch {
-      // Progress observers must not interrupt matching.
-    }
+    notify(() =>
+      options.onProgress?.({
+        phase,
+        beforeFindings: input.before.length,
+        beforeIssues: catalogue.size,
+        afterFindings: input.after.length,
+        ...(page === undefined ? {} : { page, pages: pages.length }),
+      }),
+    );
   };
   const turnOptions = {
     // Native structured output requires every field; saved results can omit related.

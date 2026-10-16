@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
@@ -37,6 +38,7 @@ import type {
 export interface AcceptedDiscovery {
   id: string;
   resultPath: string;
+  result: ScanDraftInput;
   completionSequence: number;
 }
 
@@ -83,6 +85,7 @@ export interface DeepScanWorkerRunnerOptions {
   log: DeepScanLogger;
   retryDelaysMs: readonly number[];
   signal: AbortSignal;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 type WorkerAttemptOutcome =
@@ -143,7 +146,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryValidated = false;
+    let discoveryResult: ScanDraftInput | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -153,8 +156,11 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId);
-        discoveryValidated = true;
+        discoveryResult = await validateDiscoveryArtifacts(
+          artifacts,
+          resultPath,
+          run.scanId,
+        );
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -169,7 +175,7 @@ export class DeepScanWorkerRunner {
         outcome.threadId,
       );
     }
-    if (!discoveryValidated) {
+    if (!discoveryResult) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
@@ -218,6 +224,7 @@ export class DeepScanWorkerRunner {
       worker: {
         id: workerId,
         resultPath,
+        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
       },
     };
@@ -394,6 +401,7 @@ export class DeepScanWorkerRunner {
               : join(run.scanDir, "artifacts"),
           subagents: input.subagents,
           signal,
+          onNonRetryableError: this.options.onNonRetryableError,
           resumeThreadId: resumableThreadId,
           continuationPrompt: resumableThreadId
             ? (continuationPrompt ??

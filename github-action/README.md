@@ -55,9 +55,9 @@ jobs:
 
 The workflow runs weekly on Mondays at 07:23 UTC. To run it manually, use
 **Actions → Codex Security repository → Run workflow**.
-Findings are report-only by default. Valid partial results produce a warning;
-scanner and required reporting errors fail the job. Set `fail-on-severity` to
-fail on findings at or above a selected severity when the scan is complete.
+Findings are report-only by default. Set `fail-on-severity` to fail on reported
+findings at or above a selected severity. Scanner and required reporting errors
+also fail the job. Intentional exclusions and investigation notes do not.
 
 ### Ubuntu sandbox setup
 
@@ -149,10 +149,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
 
-This job fails on high or critical findings from a complete scan, or on scanner
-and required reporting errors. Valid partial results warn without failing the
-job; the severity policy is not evaluated for those results. File and line
-annotations are enabled by default.
+This job fails on reported high or critical findings, or on scanner and required
+reporting errors. File and line annotations are enabled by default.
 
 Use PR scanning for trusted contributors with branches in the calling repository.
 To scan Dependabot PRs, also configure `CODEX_SECURITY_API_KEY` as a
@@ -203,31 +201,28 @@ distinguish findings above the failure threshold from a scan that could not
 complete or a required reporting failure. With `fail-on-severity: none`, findings
 are report-only; scanner and required reporting failures still fail the job.
 
-When the CLI returns a valid finalized result with partial coverage, the Action
-warns and preserves the available findings and coverage explanations. It sets
-`scan-status: incomplete`, `policy-status: not-evaluated`, and
-`sarif-upload-ready: false`. Partial coverage alone does not fail the step, even
-when `fail-on-severity` is configured or the CLI returns exit code `2`.
+A completed scan means the configured analysis produced a valid result. Scope
+exclusions, deferred investigations, and other coverage notes remain in the
+coverage report; they do not create a separate scan outcome or bypass the
+findings policy. Completion does not certify that every vulnerability was found.
 
-A successful Action step therefore does not always mean the security review is
-complete. Workflows that require complete coverage can explicitly check the
-`scan-status` output after the scan step (which must have `id: security`):
+The Action follows the CLI outcome consistently:
 
-```yaml
-- name: Require a complete security review
-  env:
-    SCAN_STATUS: ${{ steps.security.outputs.scan-status }}
-  run: test "$SCAN_STATUS" = completed
-```
+| CLI exit | Action result |
+| --- | --- |
+| `0` | `scan-status: completed`, `policy-status: passed`; the step succeeds. |
+| `1` | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
+| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails. |
 
-Scanner failures, interruption, unknown coverage, invalid or missing required
-reports, and a changed checkout still fail the step. A partial coverage file
-left behind by a failed scan does not make that failure advisory. Required
-artifact-upload and runtime-cleanup failures also remain failures.
+Usable reports retained after an execution failure remain available, but are not
+eligible for SARIF upload. Invalid or missing required reports, a changed
+checkout, and requested artifact-upload or runtime-cleanup failures also fail
+the step. Empty diffs and dry runs use `scan-status: skipped`.
 
 SARIF is optional. If it cannot be produced, the Action warns and sets
 `report-status: partial` and `sarif-upload-ready: false`. Summaries, annotations,
-and JSON reports remain available, and the scan outcome is preserved. A requested
+and JSON reports remain available, and the scan outcome is preserved. This report
+availability status does not describe scan coverage. A requested
 artifact upload that fails still fails the job.
 
 ### GitHub code scanning
@@ -247,8 +242,8 @@ then add this step after it:
     category: codex-security-repository
 ```
 
-Complete scans remain uploadable when findings exceed the severity threshold.
-Incomplete scans and dry runs are not uploadable.
+Completed scans remain uploadable when findings exceed the severity threshold.
+Failed or interrupted scans, empty diffs, and dry runs are not uploadable.
 Use a distinct category for each scan scope, such as repository and PR scans.
 The Action removes the CLI scan identifier from SARIF automation details so the
 uploader can apply that category.
@@ -274,7 +269,7 @@ downstream steps.
 
 The Action uses the CLI’s validated JSON result for findings and scan status.
 If the CLI exits without a usable result, the Action reports failure and leaves
-report paths empty; it does not recover unvalidated partial files from disk.
+report paths empty; it does not recover unvalidated files from disk.
 
 ## Troubleshooting
 
@@ -288,9 +283,9 @@ report paths empty; it does not recover unvalidated partial files from disk.
   loaded successfully before running the Action.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
-- **Incomplete scans:** inspect the warning and coverage report before adjusting
-  scope or budget. A successful step with `scan-status: incomplete` has partial
-  results, not a completed review or a passed severity policy.
+- **Failed scans:** inspect the CLI diagnostics for execution errors. Scope
+  exclusions and deferred investigations in the coverage report do not cause
+  execution failures or bypass the severity policy.
 
 CLI diagnostics stream by default. Set `verbose: 'false'` for lifecycle and
 elapsed-time messages only.
@@ -360,7 +355,7 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
 | `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
-| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.                                                                                     |
+| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail.                                                                         |
 | `verbose`              | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                                                                                                               |
 | `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.                                                                                     |
 | `summary`              | `true`                    | Write a human-readable job summary.                                                                                                                                                                                          |
@@ -373,26 +368,26 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 
 All outputs are strings. An empty cost or count means unavailable, not zero.
 
-| Output                | Meaning                                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                                                         |
-| `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                                                      |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                                                |
-| `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                                                      |
-| `scan-status`         | completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run. |
-| `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                                                           |
-| `policy-status`       | passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured.                                                |
-| `report-status`       | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.                               |
-| `exit-code`           | CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step.                                            |
-| `scanned-sha`         | Verified checkout commit SHA.                                                                                                                                      |
-| `analysis-ref`        | GitHub ref matching the scanned revision.                                                                                                                          |
-| `sarif-upload-ready`  | true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure.                                       |
-| `critical-count`      | Available critical findings, or empty before results are available.                                                                                                |
-| `high-count`          | Available high findings, or empty before results are available.                                                                                                    |
-| `medium-count`        | Available medium findings, or empty before results are available.                                                                                                  |
-| `low-count`           | Available low findings, or empty before results are available.                                                                                                     |
-| `informational-count` | Available informational findings, or empty before results are available.                                                                                           |
-| `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                                                         |
+| Output                | Meaning                                                                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                             |
+| `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                          |
+| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                    |
+| `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                          |
+| `scan-status`         | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.       |
+| `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                               |
+| `policy-status`       | passed, failed, or not-evaluated. Failed or skipped scans are not-evaluated.                                                           |
+| `report-status`       | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.   |
+| `exit-code`           | CLI exit code, or empty if the CLI was not started. 0 means success, 1 means findings policy failed, and 2 means execution failed.     |
+| `scanned-sha`         | Verified checkout commit SHA.                                                                                                          |
+| `analysis-ref`        | GitHub ref matching the scanned revision.                                                                                              |
+| `sarif-upload-ready`  | true only for validated SARIF from a completed scan with a publishable immutable revision. Remains true after severity-policy failure. |
+| `critical-count`      | Available critical findings, or empty before results are available.                                                                    |
+| `high-count`          | Available high findings, or empty before results are available.                                                                        |
+| `medium-count`        | Available medium findings, or empty before results are available.                                                                      |
+| `low-count`           | Available low findings, or empty before results are available.                                                                         |
+| `informational-count` | Available informational findings, or empty before results are available.                                                               |
+| `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                             |
 
 <!-- action-reference:end -->
 

@@ -35,7 +35,6 @@ const {
 });
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 const coverage = {
-  completeness: "partial",
   surfaces: [],
   explicitExclusions: [],
   deferred: [],
@@ -298,6 +297,7 @@ test("overlapping draft projections retain the latest committed model", async (t
   t.mock.method(childProcess, "spawn", (command: string, args: string[]) => {
     assert.equal(command, "fixture-python");
     assert.deepEqual(args, [
+      "-B",
       "-I",
       "-X",
       "utf8",
