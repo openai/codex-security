@@ -59,6 +59,8 @@ When there are no reportable findings, include a short `No findings` section tha
 When there are reportable findings, render them as readable markdown findings rather than raw JSON or a dumped schema object.
 Order findings from highest severity to lowest severity: `critical`, then `high`, then `medium`, then `low`.
 
+`informational` findings are not detailed in the report. Record the count and severity mix of findings outside the reportable set and point readers to `findings.json` and the SARIF and CSV exports that retain them.
+
 Group observations only when they share the same broken security control and effective remediation. Preserve every affected route, operation, sink, and supporting source location; keep distinct security failures separate even when they share a CWE.
 
 Set the finding category and CWE from the primary broken control. Do not add secondary support-impact CWEs, such as data exposure or missing authentication, to an injection/RCE/path/file/parser finding merely because they make exploitation worse; mention those impacts in prose or emit a separate finding if that secondary control is independently vulnerable.
