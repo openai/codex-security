@@ -1542,6 +1542,7 @@ export class CodexSecurity {
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
+    let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
@@ -1561,6 +1562,48 @@ export class CodexSecurity {
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    const terminalScanTurnStatus = () =>
+      scanTurnStatus === "completed" || scanTurnStatus === "failed"
+        ? scanTurnStatus
+        : signal.aborted
+          ? ("interrupted" as const)
+          : null;
+    const finalizeScanUsage = async (
+      scanId: string,
+      workbenchOptions: WorkbenchCommandOptions,
+      completedScan: unknown,
+      turnStatus: "completed" | "failed" | "interrupted",
+    ): Promise<void> => {
+      const measuredUsage = isRecord(completedScan)
+        ? completedScan["usage"]
+        : undefined;
+      const usageCompletion = isRecord(measuredUsage)
+        ? measuredUsage["completion"]
+        : undefined;
+      if (
+        isRecord(usageCompletion) &&
+        usageCompletion["finalized"] === false &&
+        typeof usageCompletion["threadId"] === "string" &&
+        typeof usageCompletion["turnId"] === "string"
+      ) {
+        try {
+          await workbench(
+            { ...workbenchOptions, signal: undefined },
+            workbenchArgs("finalize-scan-usage", {
+              scanId,
+              threadId: usageCompletion["threadId"],
+              turnId: usageCompletion["turnId"],
+              turnStatus,
+            }),
+          );
+        } catch (error) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not finalize scan token usage: ${errorMessage(error)}`);
+        }
+      }
+    };
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
@@ -2358,6 +2401,7 @@ export class CodexSecurity {
             signal,
           })
         : (await thread.runStreamed(prompt, turnOptions)).events;
+      scanTurnStatus = "in_progress";
       checkOpen();
 
       let result = await runScanEvents({
@@ -2374,6 +2418,9 @@ export class CodexSecurity {
         modelProvider,
         workbenchValidated: true,
         model,
+        onTurnStatus: (status) => {
+          scanTurnStatus = status;
+        },
         onThreadStarted: async (threadId) => {
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
             throw new CodexSecurityError(
@@ -2545,6 +2592,13 @@ export class CodexSecurity {
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
       activeScan = null;
+      const completedScan = completion["scan"];
+      await finalizeScanUsage(
+        scanId,
+        workbenchOptions,
+        completedScan,
+        "completed",
+      );
       if (directDeepScan) {
         result = new ScanResult({
           ...result,
@@ -2556,7 +2610,6 @@ export class CodexSecurity {
           },
         });
       }
-      const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         const targetWarnings = new Set([
           ...preparedTargetWarnings,
@@ -2730,6 +2783,7 @@ export class CodexSecurity {
     } catch (error) {
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
+      const terminalTurnStatus = terminalScanTurnStatus();
       let failure =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
@@ -2765,6 +2819,13 @@ export class CodexSecurity {
               `--message=${failure.message.slice(0, 2400)}`,
             ],
           );
+          if (terminalTurnStatus !== null)
+            await finalizeScanUsage(
+              activeScan.id,
+              activeScan.options,
+              completion["scan"],
+              terminalTurnStatus,
+            );
           activeScan = null;
           runPostScan = null;
           const result = await collectResult(
@@ -2811,6 +2872,37 @@ export class CodexSecurity {
           }
           return result;
         } catch {}
+      }
+      if (activeScan !== null && scanTurnStatus !== null) {
+        try {
+          const cleanupOptions = { ...activeScan.options, signal: undefined };
+          const saved = await workbench(
+            cleanupOptions,
+            workbenchArgs("get-scan", { scanId: activeScan.id }),
+          );
+          const completedScan = saved["scan"];
+          const progress = isRecord(completedScan)
+            ? completedScan["progress"]
+            : undefined;
+          if (isRecord(progress) && progress["status"] === "complete") {
+            const scanId = activeScan.id;
+            activeScan = null;
+            if (terminalTurnStatus !== null)
+              await finalizeScanUsage(
+                scanId,
+                cleanupOptions,
+                completedScan,
+                terminalTurnStatus,
+              );
+          }
+        } catch (cleanupError) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(
+            `Could not finalize scan token usage: ${errorMessage(cleanupError)}`,
+          );
+        }
       }
       // A failed attachment must not turn a resumable coordinator into a terminal failure.
       // Deep Scan orchestration persists its own terminal failures and cancellations.
@@ -4100,6 +4192,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
+  onTurnStatus?: (status: "completed" | "failed") => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -4122,6 +4215,9 @@ export async function runScanEvents(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
+        if (event.type === "turn.completed")
+          options.onTurnStatus?.("completed");
+        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&

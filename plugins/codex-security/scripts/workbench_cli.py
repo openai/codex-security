@@ -208,6 +208,14 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
+    complete_scan.add_argument("--turn-id")
+
+    finalize_scan_usage = add_command(
+        "finalize-scan-usage", "--scan-id", "--thread-id", "--turn-id"
+    )
+    finalize_scan_usage.add_argument(
+        "--turn-status", choices=("completed", "interrupted", "failed"), default="completed"
+    )
 
     complete_budget_exhausted_scan = add_command(
         "complete-budget-exhausted-scan", "--scan-id", "--cost-json"

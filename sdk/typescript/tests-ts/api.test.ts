@@ -3783,6 +3783,7 @@ describe("CodexSecurity orchestration", () => {
       "get-scan-feedback",
       "set-scan-thread",
       "prepare-scan-completion",
+      "get-scan",
       "fail-scan",
     ]);
     await client.close();
@@ -5484,7 +5485,8 @@ describe("CodexSecurity orchestration", () => {
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands[3]).toEqual([
+    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
+    expect(commands[4]).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -5557,6 +5559,17 @@ describe("CodexSecurity orchestration", () => {
           await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
           return {
             scan: {
+              ...(completion === "completed"
+                ? {
+                    usage: {
+                      completion: {
+                        threadId: "scan-thread",
+                        turnId: "completion-turn",
+                        finalized: false,
+                      },
+                    },
+                  }
+                : {}),
               warnings: [
                 args
                   .find((value) => value.startsWith("--message="))!
@@ -5597,6 +5610,19 @@ describe("CodexSecurity orchestration", () => {
             `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+          expect(
+            commands.find((args) => args[0] === "finalize-scan-usage"),
+          ).toEqual([
+            "finalize-scan-usage",
+            "--scan-id",
+            "scan_example_001",
+            "--thread-id",
+            "scan-thread",
+            "--turn-id",
+            "completion-turn",
+            "--turn-status",
+            "interrupted",
+          ]);
         }
         expect(runStreamed).toHaveBeenCalledTimes(1);
         const recovery = commands.find(

@@ -539,7 +539,9 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
   }
 }
 
-async function assertHeadlessStandardScanWorksWithoutUiCapability() {
+async function assertHeadlessStandardScanWorksWithoutUiCapability(
+  threadSource?: string,
+) {
   const headlessStateDir = path.join(tmpdir(), randomUUID());
   const headlessScanRoot = path.join(tmpdir(), randomUUID());
   const headlessServer = startTestServer({
@@ -690,13 +692,48 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
         scanId: result.scanId,
         handoffClaimToken: result.handoffClaimToken,
       },
-      _meta: { "openai/threadId": ownerThread },
+      _meta: {
+        "x-codex-turn-metadata": {
+          thread_id: ownerThread,
+          turn_id: "fixture-completion-turn",
+          thread_source: threadSource,
+        },
+      },
     });
     assertNoError(completed);
     assert.equal(
       completed.result.structuredContent.scan.progress.status,
       "complete",
     );
+    if (threadSource === "security_scan") {
+      assert.deepEqual(
+        completed.result.structuredContent.scan.usage.completion,
+        {
+          threadId: ownerThread,
+          turnId: "fixture-completion-turn",
+          finalized: false,
+        },
+      );
+      const finalizedUsage = await headlessServer.callTool(10, {
+        name: "finalize_codex_security_scan_usage",
+        arguments: {
+          scanId: result.scanId,
+          threadId: ownerThread,
+          turnId: "fixture-completion-turn",
+          turnStatus: "completed",
+        },
+      });
+      assertNoError(finalizedUsage);
+      assert.deepEqual(
+        finalizedUsage.result.structuredContent.scan.usage,
+        completed.result.structuredContent.scan.usage,
+      );
+    } else {
+      assert.equal(
+        completed.result.structuredContent.scan.usage.completion,
+        undefined,
+      );
+    }
   } finally {
     await headlessServer.stop();
     await rm(headlessStateDir, { recursive: true, force: true });
@@ -1452,6 +1489,7 @@ try {
   ])
     await assertWorkspaceWorksWithoutUiCapability(scope);
   await assertHeadlessStandardScanWorksWithoutUiCapability();
+  await assertHeadlessStandardScanWorksWithoutUiCapability("security_scan");
   await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
   if (process.platform !== "win32") {
@@ -1714,6 +1752,7 @@ try {
   );
   const progress = findTool("update_codex_security_scan_progress");
   const complete = findTool("complete_codex_security_scan");
+  const finalizeUsage = findTool("finalize_codex_security_scan_usage");
   const fail = findTool("fail_codex_security_scan");
   const setFindingTriage = findTool("set_codex_security_finding_triage");
   const requestFindingRemediation = findTool(
@@ -1912,6 +1951,7 @@ try {
   assert.deepEqual(attachHandoff._meta.ui.visibility, ["app"]);
   assert.deepEqual(progress._meta.ui.visibility, ["model"]);
   assert.deepEqual(complete._meta.ui.visibility, ["model"]);
+  assert.deepEqual(finalizeUsage._meta.ui.visibility, ["app"]);
   assert.deepEqual(fail._meta.ui.visibility, ["model"]);
   for (const tool of [
     launcher,
