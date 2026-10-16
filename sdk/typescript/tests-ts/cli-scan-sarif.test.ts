@@ -284,6 +284,8 @@ test.each([
   "alias",
   "child-directory",
   "external-child-directory",
+  "external-alias-child-directory",
+  "output-only-alias",
 ] as const)(
   "rejects repository output symlinks with a %s path",
   async (pathKind) => {
@@ -294,7 +296,7 @@ test.each([
     const output = join(outside, "results.sarif");
     await mkdir(outside);
     await mkdir(launchDirectory);
-    if (pathKind === "external-child-directory") {
+    if (pathKind.startsWith("external-")) {
       const initialized = await runCommand("git", [
         "init",
         "--quiet",
@@ -306,6 +308,19 @@ test.each([
     const linkType = process.platform === "win32" ? "junction" : "dir";
     await symlink(repository, alias, linkType);
     await symlink(outside, join(repository, "reports"), linkType);
+    const targets = {
+      canonical: alias,
+      alias,
+      "child-directory": "src",
+      "external-child-directory": join(repository, "src"),
+      "external-alias-child-directory": join(alias, "src"),
+      "output-only-alias": repository,
+    };
+    const aliasOutput = [
+      "alias",
+      "external-alias-child-directory",
+      "output-only-alias",
+    ].includes(pathKind);
     const deps = dependencies({
       currentDirectory:
         pathKind === "child-directory" ? repository : launchDirectory,
@@ -319,16 +334,12 @@ test.each([
       await runCli(
         [
           "scan",
-          pathKind === "child-directory"
-            ? "src"
-            : pathKind === "external-child-directory"
-              ? join(repository, "src")
-              : alias,
+          targets[pathKind],
           "--sarif",
           pathKind === "child-directory"
             ? join("reports", "results.sarif")
             : join(
-                pathKind === "alias" ? alias : repository,
+                aliasOutput ? alias : repository,
                 "reports",
                 "results.sarif",
               ),

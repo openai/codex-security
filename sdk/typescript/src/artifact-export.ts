@@ -258,12 +258,40 @@ export async function resolveArtifactExportOutput(
             basename(arguments_.output),
           );
   if (arguments_.output !== "-") {
-    const outputFromCurrent = relative(currentDirectory, arguments_.output);
+    const canonicalCurrent = await realpath(currentDirectory).catch(
+      () => currentDirectory,
+    );
+    let outputRoot = currentDirectory;
+    let canonicalOutputRoot = canonicalCurrent;
+    let outputFromCurrent = relative(outputRoot, arguments_.output);
+    if (isOutsidePath(outputFromCurrent)) {
+      for (
+        let directory = dirname(arguments_.output);
+        ;
+        directory = dirname(directory)
+      ) {
+        const canonicalDirectory = await realpath(directory).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return undefined;
+            throw error;
+          },
+        );
+        if (
+          canonicalDirectory !== undefined &&
+          !isOutsidePath(relative(canonicalCurrent, canonicalDirectory))
+        ) {
+          outputRoot = directory;
+          canonicalOutputRoot = canonicalDirectory;
+          outputFromCurrent = relative(outputRoot, arguments_.output);
+        }
+        if (dirname(directory) === directory) break;
+      }
+    }
     if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
       let existingParent: string | undefined;
       for (
         let directory = dirname(arguments_.output);
-        relative(currentDirectory, directory) !== "";
+        relative(outputRoot, directory) !== "";
         directory = dirname(directory)
       ) {
         const metadata = await lstat(directory).catch(
@@ -279,12 +307,9 @@ export async function resolveArtifactExportOutput(
         }
         if (metadata !== undefined) existingParent ??= directory;
       }
-      const canonicalCurrent = await realpath(currentDirectory).catch(
-        () => currentDirectory,
-      );
       const expectedOutput =
         existingParent === undefined
-          ? resolve(canonicalCurrent, outputFromCurrent)
+          ? resolve(canonicalOutputRoot, outputFromCurrent)
           : resolve(
               await realpath(existingParent),
               relative(existingParent, arguments_.output),

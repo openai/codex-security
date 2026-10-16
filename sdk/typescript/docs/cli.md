@@ -1473,20 +1473,34 @@ enabled for the repository; see
     status=0
     codex-security scan . --headless --fail-on-severity high \
       --sarif "$RUNNER_TEMP/results.sarif" || status=$?
+    if [[ "$status" == 0 || "$status" == 1 ]]; then
+      node --input-type=module - "$RUNNER_TEMP/results.sarif" "$RUNNER_TEMP/upload.sarif" <<'NODE'
+    import { readFileSync, writeFileSync } from "node:fs";
+    const [, , source, destination] = process.argv;
+    const sarif = JSON.parse(readFileSync(source, "utf8"));
+    for (const run of sarif.runs) delete run.automationDetails;
+    writeFileSync(destination, JSON.stringify(sarif));
+    NODE
+    fi
     echo "exit-code=$status" >> "$GITHUB_OUTPUT"
     exit "$status"
 - name: Upload SARIF
   if: ${{ !cancelled() && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}
-  uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+  uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63
   with:
-    sarif_file: ${{ runner.temp }}/results.sarif
+    sarif_file: ${{ runner.temp }}/upload.sarif
     category: codex-security
 ```
 
+The upload copy removes the scan's `automationDetails` so the uploader can apply
+the workflow's stable `category`; the original export keeps its scan metadata.
+Use distinct categories, such as `codex-security/full` and `codex-security/diff`,
+for full-repository and diff scans.
+
 The upload runs for completed scans even when findings exceed the severity
-threshold, while the scan step keeps the job failed. Execution failures and
-interruptions skip upload. Use distinct categories for full-repository and diff
-scans. The [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md)
+threshold, while the scan step keeps the job failed. Execution failures,
+interruptions, and upload-copy preparation failures skip upload.
+The [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md)
 covers runner setup and a complete managed workflow.
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject

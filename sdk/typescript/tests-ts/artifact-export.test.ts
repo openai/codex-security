@@ -340,6 +340,74 @@ describe("offline artifact export", () => {
     }
   });
 
+  test.each(["repository", "descendant"])(
+    "checks repository-owned symlinks below an external alias into a %s",
+    async (destination) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-output-alias-"),
+      );
+      const repository = join(root, "repository");
+      const source =
+        destination === "repository" ? repository : join(repository, "src");
+      const alias = join(root, "alias");
+      const outside = join(root, "outside");
+      try {
+        await mkdir(source, { recursive: true });
+        await mkdir(outside);
+        await symlink(source, alias, "junction");
+        const options = {
+          scanDir: join(root, "scan"),
+          format: "sarif" as const,
+          output: join(alias, "results.sarif"),
+        };
+        expect(
+          (await resolveArtifactExportOutput(options, repository)).output,
+        ).toBe(join(await realpath(source), "results.sarif"));
+        for (const linkTarget of [outside, source]) {
+          const reports = join(source, "reports");
+          await symlink(linkTarget, reports, "junction");
+          await expect(
+            resolveArtifactExportOutput(
+              { ...options, output: join(alias, "reports", "results.sarif") },
+              repository,
+            ),
+          ).rejects.toThrow("cannot traverse a repository symlink");
+          await rm(reports);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("preserves trusted output aliases outside the repository", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-trusted-output-"),
+    );
+    const repository = join(root, "repository");
+    const reports = join(root, "reports");
+    const alias = join(root, "alias");
+    try {
+      await mkdir(repository);
+      await mkdir(reports);
+      await symlink(reports, alias, "junction");
+      expect(
+        (
+          await resolveArtifactExportOutput(
+            {
+              scanDir: join(root, "scan"),
+              format: "sarif",
+              output: join(alias, "results.sarif"),
+            },
+            repository,
+          )
+        ).output,
+      ).toBe(join(await realpath(reports), "results.sarif"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("only exposes a document matching the current canonical model", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-current-model-"));
     const modelPath = join(root, "threatmodel.md");
