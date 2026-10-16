@@ -16,7 +16,10 @@ The `run` request's `params` has this shape:
 {
   "version": 1,
   "findings": [
-    { "id": "finding-1", "finding": { "title": "Example candidate", "evidence": "..." } }
+    {
+      "id": "finding-1",
+      "finding": { "title": "Example candidate", "evidence": "..." }
+    }
   ],
   "context": "Optional deployment facts or reviewer feedback.",
   "knowledgeBasePath": "/validation/context",
