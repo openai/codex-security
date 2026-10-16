@@ -101,3 +101,23 @@ for (const [input, expected] of [
     `runtime: ${label}`,
   );
 }
+
+// Keep examples in the native JSON-schema input that the projector visits.
+const nativeFixture = z
+  .object({
+    findings: z.array(z.looseObject({ title: z.string() })),
+  })
+  .meta({ examples: structuredClone(document.$defs.input.examples) });
+const nativeInputBefore = structuredClone(
+  z.toJSONSchema(nativeFixture, { io: "input" }),
+);
+assert.deepEqual(nativeInputBefore.examples, document.$defs.input.examples);
+const nativeProjected = projectArtifactToolSchema(nativeFixture);
+assert.deepEqual(
+  nativeProjected.toJSONSchema({ io: "input" }).examples,
+  document.$defs.input.examples,
+);
+assert.deepEqual(
+  z.toJSONSchema(nativeFixture, { io: "input" }),
+  nativeInputBefore,
+);
