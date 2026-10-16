@@ -11,6 +11,23 @@ import {
   text,
 } from "./scanner-import.js";
 
+function snykIdentity(value: unknown): string {
+  const result = record(value, "SARIF result");
+  const id = requiredText(result["ruleId"], "Snyk advisory ruleId");
+  const paths = array(result["locations"] ?? [], "Result locations")
+    .map((value) => {
+      const physical = record(
+        record(value, "Location")["physicalLocation"] ?? {},
+        "Physical location",
+      );
+      return text(
+        record(physical["artifactLocation"] ?? {}, "Artifact location")["uri"],
+      );
+    })
+    .filter((path): path is string => path !== null);
+  return stableId("snyk-sarif", [id, [...new Set(paths)].sort()]);
+}
+
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */
 export function normalizeSnykSarif(input: unknown): ExternalFindings {
   const document = record(input, "Snyk SARIF");
@@ -142,7 +159,7 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
       // Use the advisory group + literal manifest set within the caller's stable project/branch namespace.
       // Automation IDs contain export timestamps and run indexes, so are provenance only.
       return {
-        source_finding_id: stableId("snyk-sarif", [id, manifestIds]),
+        source_finding_id: snykIdentity(result),
         evidence: validateExternalEvidence({
           title,
           description,
@@ -175,6 +192,7 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
         }),
       };
     },
+    ({ result }) => snykIdentity(result),
   );
 }
 

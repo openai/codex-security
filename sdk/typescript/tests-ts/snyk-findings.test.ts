@@ -171,3 +171,43 @@ test("BOM and gzip files use the same parser and malformed files fail", async ()
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test.each([0xfe, 0xff])(
+  "malformed UTF-8 byte %p cannot alter a finding identity",
+  async (byte) => {
+    const dir = await mkdtemp(join(tmpdir(), "snyk-invalid-utf8-"));
+    try {
+      const path = join(dir, "report.sarif");
+      const report = JSON.stringify(snykSarif());
+      const marker = report.indexOf("package.json");
+      const bytes = Buffer.concat([
+        Buffer.from(report.slice(0, marker)),
+        Buffer.from([byte]),
+        Buffer.from(report.slice(marker)),
+      ]);
+      for (const encoded of [bytes, gzipSync(bytes)]) {
+        await writeFile(path, encoded);
+        await expect(readSnykFindings(path)).rejects.toThrow("UTF-8");
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+test("an invalid duplicate cannot make its sibling eligible for publication", () => {
+  for (const mutate of [
+    (run: any) => (run.tool.driver.rules[0].help.markdown += "x".repeat(65536)),
+    (run: any) => delete run.tool.driver.rules[0].shortDescription,
+    (run: any) => (run.results[0].ruleIndex = 99),
+  ]) {
+    const input = snykSarif();
+    input.runs.push(structuredClone(input.runs[0]!));
+    mutate(input.runs[1]);
+    const output = normalizeSnykSarif(input);
+    expect(output.findings).toEqual([]);
+    expect(output.excluded).toHaveLength(2);
+    expect(
+      output.excluded.every((item) => item.reason.includes("duplicate")),
+    ).toBe(true);
+  }
+});

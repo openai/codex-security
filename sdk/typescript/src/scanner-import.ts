@@ -38,7 +38,7 @@ export function relativePath(value: unknown): string | null {
   return path &&
     !path.startsWith("/") &&
     !path.includes("\0") &&
-    !path.split("/")[0]!.includes(":") &&
+    !path.includes(":") &&
     !path.split("/").includes("..")
     ? path
     : null;
@@ -52,8 +52,17 @@ export async function readScannerJson(path: string): Promise<unknown> {
   let bytes = await readFile(path);
   if (bytes[0] === 0x1f && bytes[1] === 0x8b)
     bytes = await promisify(gunzip)(bytes);
+  let decoded: string;
   try {
-    return JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/u, ""));
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new CodexSecurityError(
+      `Scanner report is not valid UTF-8. ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+  try {
+    return JSON.parse(decoded.replace(/^\uFEFF/u, ""));
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner JSON could not be parsed. ${errorMessage(error)}`,
@@ -66,23 +75,23 @@ export async function readScannerJson(path: string): Promise<unknown> {
 export function normalizeRecords<T>(
   records: T[],
   normalize: (record: T) => ExternalFinding,
+  identify: (record: T) => string,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
   };
-  const mapped: { position: number; finding: ExternalFinding }[] = [];
+  const identified: { position: number; value: T; id: string }[] = [];
   const counts = new Map<string, number>();
   for (const [index, value] of records.entries()) {
     try {
-      const finding = normalize(value);
-      const id = finding.source_finding_id;
+      const id = identify(value);
       if (!id.trim() || id.includes("\0") || Buffer.byteLength(id) > 512)
         throw new Error(
           "Source finding ID must contain 1–512 UTF-8 bytes and no NUL characters.",
         );
-      mapped.push({ position: index + 1, finding });
+      identified.push({ position: index + 1, value, id });
       counts.set(id, (counts.get(id) ?? 0) + 1);
     } catch (error) {
       result.excluded.push({
@@ -92,15 +101,28 @@ export function normalizeRecords<T>(
       });
     }
   }
-  for (const { position, finding } of mapped) {
-    if (counts.get(finding.source_finding_id)! > 1)
+  for (const { position, value, id } of identified) {
+    if (counts.get(id)! > 1) {
       result.excluded.push({
         position,
-        source_finding_id: finding.source_finding_id,
+        source_finding_id: id,
         reason:
           "Ambiguous duplicate source identity; select one complete finding or separate source projects.",
       });
-    else result.findings.push(finding);
+      continue;
+    }
+    try {
+      const finding = normalize(value);
+      if (finding.source_finding_id !== id)
+        throw new Error("Finding identity changed during normalization.");
+      result.findings.push(finding);
+    } catch (error) {
+      result.excluded.push({
+        position,
+        source_finding_id: id,
+        reason: errorMessage(error),
+      });
+    }
   }
   result.excluded.sort((a, b) => a.position - b.position);
   return result;
