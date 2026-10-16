@@ -302,7 +302,7 @@ class AppServerPreflightClient {
     await this.request("initialize", {
       clientInfo: {
         name: "codex_security_deep_scan",
-        title: "Codex Security Local Deep Scan",
+        title: "Codex Security Deep Scan",
         version: MCP_APP_VERSION,
       },
       capabilities: { experimentalApi: true },

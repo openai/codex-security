@@ -1093,7 +1093,7 @@ try {
   });
   assertNoError(initialized);
   assert.equal(initialized.result.serverInfo.name, "codex-security");
-  assert.equal(initialized.result.serverInfo.title, "Codex Security Local");
+  assert.equal(initialized.result.serverInfo.title, "Codex Security");
   assert.equal(initialized.result.capabilities.resources, undefined);
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
@@ -1885,8 +1885,8 @@ try {
     "open",
     "closed",
   ]);
-  assert.equal(launcher.title, "Open Codex Security Local");
-  assert.equal(start.title, "Start Codex Security Local Scan");
+  assert.equal(launcher.title, "Open Codex Security");
+  assert.equal(start.title, "Start Codex Security Scan");
   assert.deepEqual(launcher.inputSchema.properties.mode.enum, [
     "diff",
     "standard",
