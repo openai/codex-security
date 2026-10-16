@@ -17,6 +17,8 @@ const distModules = [
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",
+  "scanner-import",
+  "snyk-findings",
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
