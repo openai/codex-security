@@ -359,27 +359,51 @@ test("dedupe does not emit an ok: true envelope for a failed structured dedupe r
   expect(stderr.text()).toContain("Finding has not been indexed");
 });
 
-test("dedupe forwards cancellation and removes signal handlers", async () => {
-  for (const [signal, expectedCode] of [
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const) {
-    const signals = new FakeSignals();
-    const deps = dependencies();
-    deps.addSignalListener = (name, listener) => signals.add(name, listener);
-    deps.removeSignalListener = (name, listener) =>
-      signals.remove(name, listener);
-    deps.deduplicateScan = async (_scanId, options) => {
-      signals.emit(signal);
-      options.signal!.throwIfAborted();
-      throw new Error("Cancellation must throw");
-    };
-    const { stdout, stderr, runCli } = createCliTest(main);
+test.each([
+  ["JSON", ["--json"]],
+  ["JSON full output", ["--json", "--full-output"]],
+  ["JSONL full output", ["--format", "jsonl", "--full-output"]],
+])(
+  "dedupe forwards cancellation and removes signal handlers: %s",
+  async (_label, outputFlags) => {
+    for (const [signal, expectedCode] of [
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      for (const [findingsFlags, expectedDiagnostic] of [
+        [
+          [],
+          "Deduplication canceled. Completed local preparation is saved for retry.",
+        ],
+        [
+          ["--findings-url", "http://127.0.0.1:3000"],
+          "Deduplication canceled. Findings are unchanged.",
+        ],
+      ] as const) {
+        const signals = new FakeSignals();
+        const deps = dependencies();
+        deps.addSignalListener = (name, listener) =>
+          signals.add(name, listener);
+        deps.removeSignalListener = (name, listener) =>
+          signals.remove(name, listener);
+        deps.deduplicateScan = async (_scanId, options) => {
+          signals.emit(signal);
+          options.signal!.throwIfAborted();
+          throw new Error("Cancellation must throw");
+        };
+        const { stdout, stderr, runCli } = createCliTest(main);
 
-    expect(await runCli(args, deps)).toBe(expectedCode);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Deduplication canceled");
-    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
-    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
-  }
-});
+        expect(
+          await runCli(
+            ["dedupe", "--scan", "latest", ...findingsFlags, ...outputFlags],
+            deps,
+          ),
+        ).toBe(expectedCode);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toBe(`codex-security: ${expectedDiagnostic}\n`);
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      }
+    }
+  },
+);
