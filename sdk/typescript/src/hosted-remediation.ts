@@ -127,14 +127,17 @@ export async function runHostedRemediation(
     instructions: input.instructions,
     validationInstructions: input.validationInstructions,
   });
-  const request: RemediationExecutionRequest = {
-    version: 1,
-    requestId: randomUUID(),
+  const target = {
+    version: 1 as const,
     operation: input.operation,
     repository,
     revision: input.revision,
     identity: input.identity,
     findingId: input.finding.id,
+  };
+  const request: RemediationExecutionRequest = {
+    ...target,
+    requestId: randomUUID(),
     prompt,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
@@ -142,12 +145,7 @@ export async function runHostedRemediation(
     runtime: { pluginRoot, pluginVersion },
   };
   const base = {
-    version: 1 as const,
-    operation: input.operation,
-    repository,
-    revision: input.revision,
-    identity: input.identity,
-    findingId: input.finding.id,
+    ...target,
     provenance: {
       cliVersion: VERSION,
       pluginVersion,
