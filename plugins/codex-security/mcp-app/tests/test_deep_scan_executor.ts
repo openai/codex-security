@@ -58,15 +58,17 @@ const {
   codexWorkerTurnError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
+  parseDeepScan,
 } = await importModule({
   define: {
     "import.meta.url": JSON.stringify(executorSource.href),
   },
   stdin: {
-    // Test the environment snapshot without adding a production export.
+    // Expose the environment snapshot only for tests.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export * from "./errors.js";`,
+export * from "./errors.js";
+export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource),
@@ -2660,15 +2662,37 @@ async function testLargeScopeTransport() {
                 (_, row) =>
                   `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
               );
+              const filePaths = includePaths.filter(
+                (_, index) => index % 2 === 0,
+              );
+              const run = parseDeepScan({
+                deepScan: {
+                  scanId,
+                  status: "running",
+                  targetPath: fixture.root,
+                  scope: ".",
+                  includePaths,
+                  filePaths,
+                  scanDir: workerRoot,
+                  config: {
+                    workers: 1,
+                    subagents: 0,
+                    stopAfterNoNew: 1,
+                    maxDiscoveryRuns: 1,
+                  },
+                  dispatchedCount: 0,
+                  noNewStreak: 0,
+                },
+              });
               const executor = new CodexSdkWorkerExecutor({
                 parentSandbox: trustedParentSandbox,
                 artifactContext: {
                   pluginRoot: fixture.root,
-                  repoRoot: fixture.root,
-                  scanId,
-                  scope: ".",
-                  includePaths,
-                  filePaths: includePaths.filter((_, index) => index % 2 === 0),
+                  repoRoot: run.targetPath,
+                  scanId: run.scanId,
+                  scope: run.scope,
+                  includePaths: run.includePaths,
+                  filePaths: run.filePaths,
                 },
               });
               await executor.run(
@@ -2701,10 +2725,7 @@ async function testLargeScopeTransport() {
               );
               const invocation = await readJson(output, "invocation.json");
               assert.deepEqual(invocation.scopeInput.paths, includePaths);
-              assert.deepEqual(
-                invocation.scopeInput.filePaths,
-                includePaths.filter((_, index) => index % 2 === 0),
-              );
+              assert.deepEqual(invocation.scopeInput.filePaths, filePaths);
               assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
               await assert.rejects(readFile(invocation.scopeInput.file), {
                 code: "ENOENT",
