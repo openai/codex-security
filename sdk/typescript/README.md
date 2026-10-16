@@ -557,6 +557,17 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
+Write SARIF 2.1.0 for GitHub Code Scanning directly from a completed scan:
+
+```bash
+cs scan . --sarif results.sarif --fail-on-severity high
+```
+
+`--sarif FILE` preserves normal scan output and also exports when findings cause
+exit code `1`. Failed or interrupted scans and `--dry-run` do not export;
+export failures return `2`. See the
+[GitHub Code Scanning upload example](docs/cli.md#upload-to-github-code-scanning).
+
 Export saved findings or a threat model without starting another analysis:
 
 ```bash

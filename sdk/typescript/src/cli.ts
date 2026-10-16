@@ -973,6 +973,7 @@ interface ScanArguments extends ResolvedScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   includeFailureResults?: boolean;
+  sarifPath?: string;
 }
 
 interface ScanOutcome {
@@ -3600,6 +3601,9 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Archive existing results; requires --output-dir."),
+          sarif: optionValue("--sarif")
+            .optional()
+            .describe("Export completed scan findings as SARIF 2.1.0 to FILE."),
           ...RUNTIME_OPTION_SCHEMAS,
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
@@ -3724,6 +3728,10 @@ export async function main(
               headless: options.headless,
               dryRun: options.dryRun,
               mock: options.mock,
+              sarifPath:
+                options.sarif === undefined
+                  ? undefined
+                  : resolveCliPath(directory, options.sarif),
               includeFailureResults:
                 argv.includes("--full-output") &&
                 (format === "json" || format === "jsonl"),
@@ -9074,6 +9082,27 @@ async function executeScan(
     const message = `Scan ${result.manifest.scan.status}; available results were retained.`;
     errorOutput.write(`codex-security: ${message}\n`);
     return finishResult(2, message);
+  }
+
+  if (arguments_.sarifPath !== undefined) {
+    try {
+      const exported = await resolveArtifactExportOutput(
+        {
+          scanDir: result.scanDir,
+          format: "sarif",
+          output: arguments_.sarifPath,
+          sourceRoot: repository,
+          pythonPath: arguments_.pythonPath,
+        },
+        repository,
+      );
+      await dependencies.exportFindings(exported);
+      scanData = { ...scanData, sarifPath: exported.output };
+      errorOutput.write(`SARIF: ${diagnosticValue(exported.output)}\n`);
+    } catch (error) {
+      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+      return finishResult(2, errorMessage(error));
+    }
   }
 
   let patchThreshold = arguments_.patch
