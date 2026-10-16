@@ -263,6 +263,37 @@ for (const mode of ['standard', 'deep']) {
   });
 }
 
+for (const [provider, key] of [['openrouter', 'OPENROUTER_API_KEY'], ['fireworks', 'FIREWORKS_API_KEY']]) {
+  for (const mode of ['standard', 'deep']) test(`${provider} ${mode} scans use only the captured provider key`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', provider); app.setInput('model', 'synthetic/model'); app.setInput('mode', mode);
+    Object.assign(process.env, {OPENROUTER_API_KEY:'synthetic-openrouter', FIREWORKS_API_KEY:'synthetic-fireworks',
+      AWS_SESSION_TOKEN:'unrelated-aws', GITHUB_TOKEN:'unrelated-github'});
+    const expectedKey = process.env[key];
+    app.configure({prepare: () => { process.env[key] = 'changed-during-setup'; }});
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
+    assert.equal(result.args[result.args.indexOf('--provider') + 1], provider);
+    assert.equal(result.args[result.args.indexOf('--auth') + 1], 'api-key');
+    assert.equal(result.environment[key], expectedKey);
+    for (const other of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN'])
+      if (other !== key) assert.equal(result.environment[other], undefined);
+  });
+  test(`${provider} requires its own key and keeps dry-run credential-free`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', provider); app.setInput('model', 'synthetic/model');
+    delete process.env[key];
+    const missing = await app.run();
+    assert.equal(missing.exitCode, 1); assert.equal(missing.setups, 0);
+    assert.ok(missing.summary.includes(key));
+    process.env[key] = 'synthetic-provider-key';
+    app.setInput('dry-run', 'true');
+    const dry = await app.run();
+    assert.equal(dry.exitCode, 0); assert.equal(dry.outputs['skip-reason'], 'dry-run');
+    assert.equal(dry.environment[key], undefined); assert.equal(dry.environment.OPENAI_API_KEY, undefined);
+  });
+}
+
 test('Bedrock PR scans retain diff scope and severity failure outputs', async t => {
   const app = await harness(t, 'pr');
   app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('fail-on-severity', 'high');

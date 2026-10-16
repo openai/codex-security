@@ -42,9 +42,8 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
   const maxTimeHours = num('max-time-hours', false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== undefined && mode !== 'deep') throw new Error('max-time-hours requires mode: deep.');
   const dryRun = bool('dry-run', false);
-  const provider = choice('provider', ['openai', 'amazon-bedrock'], 'openai');
+  const provider = choice('provider', ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'], 'openai');
   const model = str('model', provider === 'openai' ? 'gpt-5.6-sol' : '');
-  if (!model) throw new Error('model is required when provider is amazon-bedrock. Use the exact Bedrock model ID your AWS identity can invoke.');
   const cyberAccessProgram = str('cyber-access-program')
     ? choice('cyber-access-program', ['standard', 'daybreak_blue', 'daybreak_red'], 'standard')
     : undefined;
@@ -64,7 +63,7 @@ export function scanArguments(inputs: Inputs, target: {repository: string; diffB
   // with our empty private credential home. Bedrock selects native AWS auth.
   const auth = inputs.dryRun || inputs.provider === 'amazon-bedrock' ? 'auto' : 'api-key';
   const args = ['scan', target.repository, '--auth', auth, '--provider', inputs.provider, '--mode', inputs.mode,
-    `--model=${inputs.model}`, '--effort', inputs.effort, '--headless',
+    ...(inputs.model ? [`--model=${inputs.model}`] : []), '--effort', inputs.effort, '--headless',
     '--output-dir', resultsDirectory, '--format', 'json'];
   // Preserve the pinned CLI's sandbox and automatic approval-review defaults.
   // Forcing approval_policy="never" prevents recovery from hosted Linux sandbox errors.

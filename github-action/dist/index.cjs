@@ -55586,9 +55586,8 @@ function parseInputs(read, workspace) {
   const maxTimeHours = num("max-time-hours", false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== void 0 && mode !== "deep") throw new Error("max-time-hours requires mode: deep.");
   const dryRun = bool("dry-run", false);
-  const provider = choice("provider", ["openai", "amazon-bedrock"], "openai");
+  const provider = choice("provider", ["openai", "openrouter", "fireworks", "amazon-bedrock"], "openai");
   const model = str("model", provider === "openai" ? "gpt-5.6-sol" : "");
-  if (!model) throw new Error("model is required when provider is amazon-bedrock. Use the exact Bedrock model ID your AWS identity can invoke.");
   const cyberAccessProgram = str("cyber-access-program") ? choice("cyber-access-program", ["standard", "daybreak_blue", "daybreak_red"], "standard") : void 0;
   return {
     repository: str("repository", workspace),
@@ -55623,7 +55622,7 @@ function scanArguments(inputs, target, resultsDirectory) {
     inputs.provider,
     "--mode",
     inputs.mode,
-    `--model=${inputs.model}`,
+    ...inputs.model ? [`--model=${inputs.model}`] : [],
     "--effort",
     inputs.effort,
     "--headless",
@@ -55913,8 +55912,16 @@ var AWS_ENVIRONMENT_VARIABLES = [
   "AWS_CONTAINER_AUTHORIZATION_TOKEN",
   "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"
 ];
+var API_KEY_ENVIRONMENT_VARIABLES = {
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  fireworks: "FIREWORKS_API_KEY"
+};
 function scanCredentials(provider, source) {
-  if (provider === "openai") return { provider, apiKey: source.OPENAI_API_KEY || source.CODEX_API_KEY || "" };
+  if (provider !== "amazon-bedrock") return {
+    provider,
+    apiKey: source[API_KEY_ENVIRONMENT_VARIABLES[provider]] || (provider === "openai" ? source.CODEX_API_KEY : void 0) || ""
+  };
   const environment = {};
   for (const name of AWS_ENVIRONMENT_VARIABLES) if (source[name] !== void 0) environment[name] = source[name];
   return { provider, environment };
@@ -55960,12 +55967,13 @@ function runtimeEnvironment(paths, credentials) {
     env.CODEX_MCP_NODE_PATH = (0, import_node_path4.join)(paths.root, "bin", "node");
   }
   if (paths.runnerLibraryPath !== void 0) env.LD_LIBRARY_PATH = paths.runnerLibraryPath;
-  if (credentials?.provider === "openai") {
-    const { apiKey } = credentials;
-    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error("OPENAI_API_KEY must be a nonempty single-line value.");
-    env.OPENAI_API_KEY = apiKey;
-  } else if (credentials?.provider === "amazon-bedrock") {
+  if (credentials?.provider === "amazon-bedrock") {
     Object.assign(env, credentials.environment);
+  } else if (credentials) {
+    const { apiKey } = credentials;
+    const name = API_KEY_ENVIRONMENT_VARIABLES[credentials.provider];
+    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error(`${name} must be a nonempty single-line value.`);
+    env[name] = apiKey;
   }
   return env;
 }
@@ -99306,7 +99314,9 @@ async function runAction(actionRoot, overrides = {}) {
       finalSummary = "The requested diff is empty. No scan ran and no model cost was incurred.";
       info(finalSummary);
     } else {
-      if (!inputs.dryRun && credentials.provider === "openai" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) throw new Error("Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.");
+      if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
+        throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
+      }
       tempRoot = await (0, import_promises9.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
@@ -99326,7 +99336,7 @@ async function runAction(actionRoot, overrides = {}) {
       };
       log2(`Target commit: ${target.scannedSha}.${target.diffBase ? ` Diff: ${target.diffBase}..${target.diffHead}.` : ""}`);
       if (inputs.paths.length) log2(`Paths: ${inputs.paths.join(", ")}.`);
-      log2(`Model: ${inputs.model}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      log2(`Model: ${inputs.model || "(not specified)"}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
       if (inputs.cyberAccessProgram) log2(`Requested Cyber access program: ${inputs.cyberAccessProgram}.`);
       const scanLabel = inputs.dryRun ? "CLI configuration validation" : "Security scan";
       const scanStarted = performance.now();

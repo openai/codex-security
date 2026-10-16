@@ -274,6 +274,26 @@ test('Bedrock credentials reach child processes without unrelated runner credent
   }
 });
 
+test('API providers forward only their own captured key to child processes', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-provider-')));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const paths = {root, home:root, codexHome:root, stateDirectory:root};
+  const source = {OPENAI_API_KEY:'synthetic-openai', CODEX_API_KEY:'synthetic-alias',
+    OPENROUTER_API_KEY:'synthetic-openrouter', FIREWORKS_API_KEY:'synthetic-fireworks',
+    AWS_SESSION_TOKEN:'unrelated-aws', GITHUB_TOKEN:'unrelated-github'};
+  const cases = [['openai', 'OPENAI_API_KEY'], ['openrouter', 'OPENROUTER_API_KEY'], ['fireworks', 'FIREWORKS_API_KEY']] as const;
+  const captured = cases.map(([provider, key]) => ({credentials:scanCredentials(provider, source), key, value:source[key]}));
+  source.OPENROUTER_API_KEY = source.FIREWORKS_API_KEY = 'changed-after-capture';
+  await Promise.all(captured.map(async ({credentials, key, value}) => {
+    const child = await runProcess(process.execPath, ['-e', 'console.log(JSON.stringify(process.env))'],
+      {cwd:root, env:runtimeEnvironment(paths, credentials)});
+    assert.equal(child.exitCode, 0, child.stderr);
+    const actual = JSON.parse(child.stdout);
+    for (const name of Object.keys(source)) assert.equal(actual[name], name === key ? value : undefined);
+    for (const name of Object.keys(source)) assert.equal(runtimeEnvironment(paths)[name], undefined);
+  }));
+});
+
 test('Bedrock credential snapshots stay isolated when the caller changes credentials', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-bedrock-snapshot-')));
   t.after(() => rm(root, {recursive:true, force:true}));

@@ -137,6 +137,7 @@ try {
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testBedrockCredentialsReachWorker("oidc");
+    await testExternalProviderCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
@@ -2605,6 +2606,114 @@ async function testBedrockCredentialsReachWorker(
     for (const [name, value] of previousEnvironment) {
       restoreEnv(name, value);
     }
+  }
+}
+
+async function testExternalProviderCredentialsReachWorker() {
+  for (const [provider, key] of [
+    ["openrouter", "OPENROUTER_API_KEY"],
+    ["fireworks", "FIREWORKS_API_KEY"],
+  ]) {
+    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+      const configPath = path.join(fixture.root, "provider.toml");
+      const deepPath = path.join(fixture.root, "workers.toml");
+      const profile = `scan-${provider}`;
+      const selectedKey = `synthetic-${provider}-scan-key`;
+      const settings = {
+        model_provider: provider,
+        native_profile: profile,
+        environment: { [key]: selectedKey },
+      };
+      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
+      await writeFile(
+        path.join(fixture.root, `${profile}.config.toml`),
+        stringifyToml({
+          model_provider: provider,
+          model_providers: {
+            [provider]: {
+              name: provider,
+              base_url: `https://${provider}.example.test/v1`,
+              wire_api: "responses",
+              env_key: key,
+            },
+          },
+        }),
+      );
+      await writeFile(promptPath, "synthetic provider credential fixture");
+      const environment = {
+        CODEX_HOME: fixture.root,
+        CODEX_SECURITY_CONFIG_PATH: configPath,
+        CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepPath,
+        OPENAI_API_KEY: undefined,
+        CODEX_API_KEY: undefined,
+        OPENROUTER_API_KEY: undefined,
+        FIREWORKS_API_KEY: undefined,
+      };
+      const saved = Object.keys(environment).map(
+        (name) => [name, process.env[name]] as const,
+      );
+      const originalSpawn = childProcess.spawn;
+      const launches: {
+        args: readonly string[];
+        environment: NodeJS.ProcessEnv;
+      }[] = [];
+      try {
+        for (const [name, value] of Object.entries(environment))
+          restoreEnv(name, value);
+        childProcess.spawn = ((
+          command: string,
+          args: readonly string[],
+          options: SpawnOptions,
+        ) => {
+          if (args[0] === "exec")
+            launches.push({ args, environment: { ...options.env } });
+          return originalSpawn(command, args, options);
+        }) as typeof childProcess.spawn;
+        syncBuiltinESMExports();
+        const executor = new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        });
+        for (const kind of ["discovery", "dedup"] as const)
+          for (const resumeThreadId of [undefined, "fixture-provider-resume"]) {
+            launches.length = 0;
+            process.env[key] = "changed-ambient-key";
+            await executor.run(
+              workerRequest(promptPath, workingDirectory, {
+                kind,
+                resumeThreadId,
+              }),
+            );
+            assert.equal(launches.length, 1);
+            const launch = launches[0];
+            assert.equal(launch.environment[key], selectedKey);
+            assert.equal(launch.environment.OPENAI_API_KEY, undefined);
+            assert.equal(launch.environment.CODEX_API_KEY, undefined);
+            assertFlagPair(launch.args, "--profile", profile);
+            assertConfigOverrides(launch.args, {
+              model_provider: provider,
+              "mcp_servers.codex-security.enabled": false,
+            });
+            assert.equal(
+              launch.args.includes("resume"),
+              resumeThreadId !== undefined,
+            );
+            await writeFile(
+              deepPath,
+              stringifyToml({
+                worker_runtime: {
+                  ...settings,
+                  environment: { [key]: "changed-snapshot-key" },
+                },
+              }),
+            );
+          }
+      } finally {
+        childProcess.spawn = originalSpawn;
+        syncBuiltinESMExports();
+        for (const [name, value] of saved) restoreEnv(name, value);
+      }
+    });
   }
 }
 

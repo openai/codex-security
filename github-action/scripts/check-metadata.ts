@@ -17,7 +17,10 @@ assert.equal(defaults.uploadArtifacts, false);
 assert.equal(defaults.verbose, true);
 assert.equal(defaults.provider, 'openai');
 assert.equal(defaults.model, 'gpt-5.6-sol');
-assert.throws(() => parseInputs(name => name === 'provider' ? 'amazon-bedrock' : String(metadata.inputs[name]?.default ?? ''), '/checkout'), /model is required/);
+for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) {
+  const inputs = parseInputs(name => name === 'provider' ? provider : String(metadata.inputs[name]?.default ?? ''), '/checkout');
+  assert.equal(inputs.model, '', 'Non-OpenAI providers must not inherit an OpenAI model default');
+}
 for (const group of [metadata.inputs, metadata.outputs]) for (const value of Object.values(group) as {description: string}[]) assert.ok(value.description);
 const examples = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 let workflowCount = 0;

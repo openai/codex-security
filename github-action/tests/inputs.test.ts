@@ -18,17 +18,21 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--python'));
   assert.ok(!args.includes('--cyber-access-program'));
 });
-test('Bedrock requires an explicit model and selects AWS authentication in both scan modes', () => {
+test('provider and model inputs map directly to scan CLI arguments in both modes', () => {
+  for (const provider of ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'])
   for (const mode of ['standard', 'deep']) for (const dryRun of ['false', 'true']) {
-    const input = parse({provider:'amazon-bedrock', model:'openai.synthetic-model', mode, 'dry-run':dryRun});
+    const input = parse({provider, model:'synthetic/model', mode, 'dry-run':dryRun});
     const args = scanArguments(input, {repository:'/checkout'}, '/results');
-    assert.equal(args[args.indexOf('--provider') + 1], 'amazon-bedrock');
-    assert.equal(args[args.indexOf('--auth') + 1], 'auto');
-    assert.ok(args.includes('--model=openai.synthetic-model'));
+    assert.equal(args[args.indexOf('--provider') + 1], provider);
+    assert.equal(args[args.indexOf('--auth') + 1], provider === 'amazon-bedrock' || dryRun === 'true' ? 'auto' : 'api-key');
+    assert.ok(args.includes('--model=synthetic/model'));
     assert.equal(args.includes('--dry-run'), dryRun === 'true');
   }
   assert.throws(() => parse({provider:'unsupported'}), /provider must be one of/);
-  for (const model of ['', '  ']) assert.throws(() => parse({provider:'amazon-bedrock', model}), /model is required/);
+  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const model of ['', '  ']) {
+    const args = scanArguments(parse({provider, model}), {repository:'/checkout'}, '/results');
+    assert.ok(!args.some(arg => arg.startsWith('--model')), 'Leave missing model validation to the CLI');
+  }
   assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
 });
 test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {

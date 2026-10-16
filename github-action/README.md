@@ -7,8 +7,8 @@ SARIF reports.
 ## Quick start
 
 Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com and an OpenAI API key
-with access to the selected model. OpenAI is the default provider. For Amazon
-Bedrock with AWS credentials, see [Scan with Amazon Bedrock](#scan-with-amazon-bedrock).
+with access to the selected model. OpenAI is the default provider. See
+[Inference providers](#inference-providers) for Bedrock, OpenRouter, and Fireworks.
 
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
@@ -77,11 +77,43 @@ This setup is specific to the Linux runner. Local macOS scans use the built-in
 Seatbelt sandbox and do not need Bubblewrap. See the
 [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
 
+## Inference providers
+
+`provider` and `model` map to `codex-security scan --provider` and `--model`.
+The CLI configures the provider and validates its model requirements. The Action
+uses the same provider names and forwards only the selected provider's credentials:
+
+| `provider` | Step environment |
+| --- | --- |
+| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback |
+| `amazon-bedrock` | AWS credentials and region; see the OIDC example below |
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `fireworks` | `FIREWORKS_API_KEY` |
+
+OpenAI retains the `gpt-5.6-sol` default. Other providers require an explicit
+model ID your credentials can access. For example, replace the scan step in the
+quick start with:
+
+```yaml
+- name: Scan with OpenRouter
+  uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
+  with:
+    provider: openrouter
+    model: ${{ vars.INFERENCE_MODEL_ID }}
+  env:
+    OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+Use `provider: fireworks` and `FIREWORKS_API_KEY` for Fireworks. These providers
+require a reviewed Action revision containing the `provider` input;
+`action-v0.3.0` supports OpenAI only. Installation and dry runs receive no provider
+credentials. For CLI settings beyond the Action's named inputs, use the
+[CLI workflow](../examples/github-actions/README.md).
+
 ## Scan with Amazon Bedrock
 
 Set `provider: amazon-bedrock` and supply the exact Bedrock model ID your AWS
-identity can invoke. No OpenAI API key or Codex login is needed. This requires
-an Action revision with the `provider` input; `action-v0.3.0` supports OpenAI only.
+identity can invoke. No OpenAI API key or Codex login is needed.
 
 This workflow uses GitHub OIDC to assume an AWS role and passes the temporary
 credentials only to the scan step. Configure repository variables `AWS_REGION`,
@@ -436,8 +468,8 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `paths`                | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                                                                                                                |
 | `diff-base`            | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                                                                                                                  |
 | `mode`                 | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                                                                                                                  |
-| `provider`             | `openai`                  | Model provider: openai or amazon-bedrock. Bedrock uses AWS credentials supplied to the step.                                                                                                                                 |
-| `model`                | Unset                     | Model to scan with. Defaults to gpt-5.6-sol for OpenAI; an explicit Bedrock model ID is required for amazon-bedrock. Cost limits require CLI pricing support for the model.                                                  |
+| `provider`             | `openai`                  | Inference provider, matching scan --provider: openai, openrouter, fireworks, or amazon-bedrock. Supply the selected provider's credentials to the step.                                                                      |
+| `model`                | Unset                     | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.                                         |
 | `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
 | `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |

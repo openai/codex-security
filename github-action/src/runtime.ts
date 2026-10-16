@@ -17,12 +17,17 @@ const AWS_ENVIRONMENT_VARIABLES = [
   'AWS_CONTAINER_AUTHORIZATION_TOKEN', 'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE',
 ] as const;
 
-export type ScanCredentials = {provider: 'openai'; apiKey: string}
+export const API_KEY_ENVIRONMENT_VARIABLES = {
+  openai: 'OPENAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', fireworks: 'FIREWORKS_API_KEY',
+} as const;
+
+export type ScanCredentials = {provider: keyof typeof API_KEY_ENVIRONMENT_VARIABLES; apiKey: string}
   | {provider: 'amazon-bedrock'; environment: NodeJS.ProcessEnv};
 
 /** Capture only the selected provider's credentials before asynchronous setup. */
 export function scanCredentials(provider: ScanCredentials['provider'], source: NodeJS.ProcessEnv): ScanCredentials {
-  if (provider === 'openai') return {provider, apiKey: source.OPENAI_API_KEY || source.CODEX_API_KEY || ''};
+  if (provider !== 'amazon-bedrock') return {provider,
+    apiKey: source[API_KEY_ENVIRONMENT_VARIABLES[provider]] || (provider === 'openai' ? source.CODEX_API_KEY : undefined) || ''};
   const environment: NodeJS.ProcessEnv = {};
   for (const name of AWS_ENVIRONMENT_VARIABLES) if (source[name] !== undefined) environment[name] = source[name];
   return {provider, environment};
@@ -71,12 +76,13 @@ export function runtimeEnvironment(paths: Pick<Runtime, 'root' | 'home' | 'codex
     env.CODEX_MCP_NODE_PATH = join(paths.root, 'bin', 'node');
   }
   if (paths.runnerLibraryPath !== undefined) env.LD_LIBRARY_PATH = paths.runnerLibraryPath;
-  if (credentials?.provider === 'openai') {
-    const { apiKey } = credentials;
-    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error('OPENAI_API_KEY must be a nonempty single-line value.');
-    env.OPENAI_API_KEY = apiKey;
-  } else if (credentials?.provider === 'amazon-bedrock') {
+  if (credentials?.provider === 'amazon-bedrock') {
     Object.assign(env, credentials.environment);
+  } else if (credentials) {
+    const { apiKey } = credentials;
+    const name = API_KEY_ENVIRONMENT_VARIABLES[credentials.provider];
+    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error(`${name} must be a nonempty single-line value.`);
+    env[name] = apiKey;
   }
   return env;
 }
