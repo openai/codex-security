@@ -1,22 +1,26 @@
 import type { Readable } from "node:stream";
-import {
-  runHostRecordsProtocol,
-  type RecordsProtocolOutput,
-} from "../host-records-protocol.js";
+import { runHostProtocol } from "../host-protocol.js";
 import { deduplicateRecords, type DeduplicateRecordsInput } from "./records.js";
 
-/** One bidirectional deduplication run. Stdout contains JSON-RPC envelopes only. */
-export function runRecordsProtocol(
+export async function runRecordsProtocol(
   input: Readable,
-  output: RecordsProtocolOutput,
+  output: Parameters<typeof runHostProtocol>[1],
   signal?: AbortSignal,
 ): Promise<number> {
-  return runHostRecordsProtocol(
+  return await runHostProtocol(
     input,
     output,
-    (value, options) =>
-      deduplicateRecords(value as DeduplicateRecordsInput, options),
+    {
+      label: "Deduplication",
+      requestMethod: "review.run",
+      run: (params, execute, signal) =>
+        deduplicateRecords(params as DeduplicateRecordsInput, {
+          signal,
+          reviewRunner: {
+            run: (request) => execute(request.requestId, request),
+          },
+        }),
+    },
     signal,
-    "Deduplication canceled.",
   );
 }

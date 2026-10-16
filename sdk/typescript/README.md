@@ -432,6 +432,9 @@ To validate GitHub code scanning alerts, first import them with
 `importGitHubCodeScanningAlerts()`. See the
 [import guide](docs/cli.md#import-alerts-from-the-cli) for CLI and SDK examples.
 
+For host-managed model execution, use `validateRecords()` or `validate --records`.
+See [host-provided standalone validation](docs/validate-records.md).
+
 ### Generate and verify a patch
 
 `patch()` runs the bundled remediation workflow non-interactively against a

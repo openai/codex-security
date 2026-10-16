@@ -40,7 +40,7 @@ async function fixture() {
 }
 
 test.each([false, true])(
-  "disables cached skill files while preserving effective selection (profile=%s)",
+  "disables cached skill files while preserving effective selection (profile=%j)",
   async (profile) => {
     const { root, home, plugin, blocked } = await fixture();
     const unrelated = {
@@ -117,7 +117,7 @@ test("leaves plugins outside the credential home and absent skills unchanged", a
 });
 
 test.each([false, true])(
-  "preserves malformed native skill settings (profile=%s)",
+  "preserves malformed native skill settings (profile=%j)",
   async (profile) => {
     const { home, plugin } = await fixture();
     for (const skills of [

@@ -415,7 +415,9 @@ def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
     return value
 
 
-def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
+def _require_safe_relative_path(value: object, context: str, *, allow_dot: bool = False) -> str:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{context}: expected a safe repository-relative POSIX path")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -423,8 +425,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
     path = PurePosixPath(value)
     normalized = path.as_posix()
     if (
-        not value.strip()
-        or (normalized == "." and not allow_dot)
+        (normalized == "." and not allow_dot)
         or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
         or "\\" in value
         or "\0" in value
@@ -438,7 +439,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
 
 def _require_portable_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
     normalized = _require_safe_relative_path(value, context, allow_dot=allow_dot)
-    if any(_windows_unsafe_path_component(part) for part in value.split("/")):
+    if not value.strip() or any(_windows_unsafe_path_component(part) for part in value.split("/")):
         raise ContractError(f"{context}: expected a safe scan-relative POSIX path")
     return normalized
 
@@ -961,7 +962,7 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 
 def _validate_location(location: dict[str, Any], context: str) -> None:
-    _require_safe_relative_path(_require_str(location, "path", context), f"{context}.path")
+    _require_safe_relative_path(location.get("path"), f"{context}.path")
     start = location.get("startLine")
     end = location.get("endLine", start)
     if not isinstance(start, int) or start < 1:
@@ -1593,7 +1594,7 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
             _require_str(evidence, "code", evidence_context)
             if evidence_key == "codeEvidence":
                 _require_safe_relative_path(
-                    _require_str(evidence, "path", evidence_context),
+                    evidence.get("path"),
                     f"{evidence_context}.path",
                 )
 

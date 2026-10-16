@@ -104,6 +104,8 @@ import {
   classifySeverityRecords,
   type ClassifySeverityRecordsInput,
 } from "./classify-severity-records.js";
+import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
+import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   classifyScanSeverityInternal,
   classifyScanDirectorySeverityInternal,
@@ -1722,15 +1724,21 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   if (
-    (argv[0] === "dedupe" || argv[0] === "classify-severity") &&
-    argv.includes("--records") &&
+    (((argv[0] === "dedupe" ||
+      argv[0] === "validate" ||
+      argv[0] === "classify-severity") &&
+      argv.includes("--records")) ||
+      (argv[0] === "scan" &&
+        argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
     !argv.includes("--schema")
   ) {
-    if (argv.length !== 2) {
+    if (argv.length !== 2 || (argv[0] === "scan" && argv[1] !== "--host")) {
       errorOutput.write(
-        `codex-security: --records must be used alone with ${argv[0]}.\n`,
+        argv[0] === "scan"
+          ? "codex-security: --host must be used alone with scan.\n"
+          : `codex-security: --records must be used alone with ${argv[0]}.\n`,
       );
       return 2;
     }
@@ -1738,14 +1746,15 @@ export async function main(
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
+      const runProtocol =
+        argv[0] === "scan"
+          ? runHostedScanProtocol
+          : argv[0] === "validate"
+            ? runValidationRecordsProtocol
+            : runRecordsProtocol;
       const code =
-        argv[0] === "dedupe"
-          ? await runRecordsProtocol(
-              dependencies.recordsInput ?? process.stdin,
-              output,
-              controller.signal,
-            )
-          : await runHostRecordsProtocol(
+        argv[0] === "classify-severity"
+          ? await runHostRecordsProtocol(
               dependencies.recordsInput ?? process.stdin,
               output,
               (value, options) =>
@@ -1753,6 +1762,11 @@ export async function main(
                   value as ClassifySeverityRecordsInput,
                   options,
                 ),
+              controller.signal,
+            )
+          : await runProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
               controller.signal,
             );
       exitCode =
@@ -3543,6 +3557,12 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          host: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Run one hosted Standard scan over JSON-RPC stdin/stdout; use alone.",
+            ),
           workflowId: optionValue("--workflow-id")
             .optional()
             .describe(
@@ -3673,6 +3693,8 @@ export async function main(
         ),
       output: scanOutputSchema("SCAN_FAILED"),
       async run({ args, error: incurError, format, options }) {
+        if (options.host)
+          throw new CodexSecurityError("Use scan --host alone.");
         if (format === "md") {
           errorOutput.write(
             "codex-security: Markdown output is not supported for scan results.\n",
@@ -4896,6 +4918,7 @@ export async function main(
       },
     })
     .command("validate", {
+      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       description:
         "Assess candidate security findings using source evidence only.",
       destructive: false,
@@ -4907,6 +4930,12 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
+        records: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run the versioned validation JSON-RPC protocol on stdin/stdout; use alone.",
+          ),
         auth: SKILL_AUTH_OPTION,
         ...SKILL_CONFIG_OPTIONS.shape,
         context: optionValue("--context")
@@ -4930,6 +4959,8 @@ export async function main(
       async run({ options }) {
         let knowledgeBase: PreparedKnowledgeBase | undefined;
         try {
+          if (options.records)
+            throw new CodexSecurityError("Use validate --records alone.");
           if (options.knowledgeBase.length > 0) {
             knowledgeBase = await prepareKnowledgeBase(
               options.knowledgeBase.map((path) =>
