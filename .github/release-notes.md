@@ -58,13 +58,21 @@ custom workflows. Generate the scoped inventory and review every selected file:
 1. For explicit repository scopes, use
    `scripts/generate_rank_input.py make-repo-scope-input --repo <repo_root> --scopes-file <scopes_json> --out <output_jsonl>`
    with your Python interpreter and the script from the installed plugin.
+   The scopes file is a JSON array, such as `["src", "tests"]`; use `["."]`
+   for the whole repository instead of the old default `--scope .`.
+   Output rows contain only `path`, for example `{"path":"src/example.ts"}`.
+   Update your consumer to resolve each path against the repository root and
+   read that file directly. If it requires a `path`/`area` review worklist,
+   convert every row to `{"path":"src/example.ts","area":"repository"}`.
+   This inventory contains no `area` or `preview` fields and cannot be passed
+   directly to `copy-deep-review-input`.
 2. For Git diffs, retain `make-diff-rank-input` with its existing revision or
    local-patch arguments. Copy all candidate rows into the review worklist with
    `scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <input_jsonl> --out <review_jsonl>`.
    On Windows, use the `.cmd` launcher.
 3. Review the entire resulting worklist instead of selecting a ranked subset.
-   `bind-repo-scopes` and the retained helpers keep their existing arguments and
-   worklist formats.
+   `bind-repo-scopes` and the retained diff helpers keep their existing
+   arguments and worklist formats.
 
 See the [scoped review reference](https://github.com/openai/codex-security/blob/npm-v0.4.0/plugins/codex-security/skills/security-scan/references/scan-artifacts-and-ledger.md#scoped-deep-review)
 for commands, scope inputs, and Windows invocation details.
