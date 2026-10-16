@@ -973,7 +973,6 @@ interface ScanArguments extends ResolvedScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   includeFailureResults?: boolean;
-  sarifPath?: string;
 }
 
 interface ScanOutcome {
@@ -3601,9 +3600,6 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Archive existing results; requires --output-dir."),
-          sarif: optionValue("--sarif")
-            .optional()
-            .describe("Export completed scan findings as SARIF 2.1.0 to FILE."),
           ...RUNTIME_OPTION_SCHEMAS,
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
@@ -3728,10 +3724,6 @@ export async function main(
               headless: options.headless,
               dryRun: options.dryRun,
               mock: options.mock,
-              sarifPath:
-                options.sarif === undefined
-                  ? undefined
-                  : resolveCliPath(directory, options.sarif),
               includeFailureResults:
                 argv.includes("--full-output") &&
                 (format === "json" || format === "jsonl"),
@@ -9082,56 +9074,6 @@ async function executeScan(
     const message = `Scan ${result.manifest.scan.status}; available results were retained.`;
     errorOutput.write(`codex-security: ${message}\n`);
     return finishResult(2, message);
-  }
-
-  if (arguments_.sarifPath !== undefined) {
-    const controller = new AbortController();
-    const removeSignals = listenForAbort(dependencies, controller, (signal) =>
-      dependencies.forceExit(signal),
-    );
-    try {
-      const directory = dependencies.currentDirectory();
-      const repositoryPath = resolveCliPath(
-        directory,
-        arguments_.repository ?? directory,
-      );
-      const sourceRoot = await realpath(repositoryPath);
-      const exportArguments: ArtifactExportArguments = {
-        scanDir: result.scanDir,
-        format: "sarif",
-        output: arguments_.sarifPath,
-        sourceRoot,
-        pythonPath: arguments_.pythonPath,
-        signal: controller.signal,
-      };
-      let exported = exportArguments;
-      const protectedRoots = new Set([
-        sourceRoot,
-        ...(await enclosingGitWorktreeRoots(sourceRoot, controller.signal)),
-        ...(await enclosingGitWorktreeRoots(directory, controller.signal)),
-      ]);
-      for (const root of protectedRoots) {
-        exported = await resolveArtifactExportOutput(exportArguments, root);
-      }
-      await dependencies.exportFindings(exported);
-      controller.signal.throwIfAborted();
-      scanData = { ...scanData, sarifPath: exported.output };
-      try {
-        errorOutput.write(`SARIF: ${diagnosticValue(exported.output)}\n`);
-      } catch {}
-    } catch (error) {
-      const signal = controller.signal.reason;
-      const message =
-        signal === "SIGINT"
-          ? "Scan canceled by Ctrl-C."
-          : signal === "SIGTERM"
-            ? "Scan terminated by SIGTERM."
-            : errorMessage(error);
-      errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-      return finishResult(interruptedExitCode(controller.signal) ?? 2, message);
-    } finally {
-      removeSignals();
-    }
   }
 
   let patchThreshold = arguments_.patch

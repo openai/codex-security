@@ -557,19 +557,19 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
-Write SARIF 2.1.0 for GitHub Code Scanning directly from a completed scan:
+`scan --output-dir DIR` selects the saved results directory. SARIF, when
+produced, is saved at `DIR/exports/results.sarif`. To require a SARIF file at a
+custom path, export the completed scan's saved findings:
 
 ```bash
-cs scan . --sarif results.sarif --fail-on-severity high
+cs export /path/to/scan-results --source-root . --output results.sarif
 ```
 
-`--sarif FILE` adds an export at the selected path, preserves normal scan output,
-and also exports when findings cause exit code `1`. Failed or interrupted scans
-and `--dry-run` do not write the requested export; export failures return `2`.
-See the
-[GitHub Code Scanning upload example](docs/cli.md#upload-to-github-code-scanning).
+SARIF is the default export format. `--source-root` adds source-line
+fingerprints; use the checkout unchanged from the scan. Export can be retried
+without running another analysis or authenticating.
 
-Export saved findings or a threat model without starting another analysis:
+Export saved findings or a threat model by scan ID:
 
 ```bash
 cs export --scan SCAN_ID --export-format sarif --output results.sarif

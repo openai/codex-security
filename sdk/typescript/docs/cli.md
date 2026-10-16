@@ -341,7 +341,6 @@ codex-security scan .
 codex-security scan . --path src --path tests
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
-codex-security scan . --sarif results.sarif
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
@@ -359,11 +358,9 @@ Output directories must be empty and outside the scanned directory and enclosing
 Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`).
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
-SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
-Add `--sarif FILE` to also export completed findings to a selected path, relative
-to the current directory. Normal terminal output and the `--json` structure are
-preserved; JSON `sarifPath` then points to the selected file. See
-[exports and CI](#exports-and-ci) for export behavior and GitHub Code Scanning.
+SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`. To require
+SARIF at a custom path, use the offline [export command](#exports-and-ci) after
+completion.
 
 Completed scans exit with `0` by default. Configure `--fail-on-severity high`
 to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
@@ -1380,30 +1377,16 @@ Progress callback failures do not stop matching.
 
 ## Exports and CI
 
-Export SARIF directly from a scan:
-
-```bash
-codex-security scan . --sarif results.sarif --fail-on-severity high
-```
-
-`--sarif FILE` uses the same converter as the offline `export` command, including
-severity, source locations, evidence, and source-line fingerprints. It writes
-after a completed scan, before optional patching, including when findings cause
-exit code `1` for `--fail-on-severity`. Dry runs and failed or interrupted scans
-do not write the requested export. Export failures return `2` and retain the
-completed scan's saved results, so you can retry with `export`.
-
-The destination's parent directory must exist. Existing files at the selected
-destination are replaced on successful export. Omitting `--sarif` leaves the
-scan's usual artifacts and output unchanged.
-
 `export` reads saved results without Codex or credentials. It defaults to the
 current repository's latest completed scan. Choose either a positional result
 directory or `--scan ID`. Findings require sealed results and support
 `--export-format csv|json|sarif` (default SARIF). `--source-root PATH` adds SARIF
-source-line fingerprints.
+source-line fingerprints; use the checkout unchanged from the scan, before
+applying patches. For a required SARIF export, choose an existing destination
+directory; export failures return `2` and can be retried from the saved results.
 
 ```bash
+codex-security export /path/to/scan-results --source-root . --output results.sarif
 codex-security export --scan SCAN_ID --export-format json --output findings.json
 codex-security export --artifact threat-model --output docs/threatmodel.md
 codex-security export /path/to/policy-results --artifact threat-model --output -
@@ -1459,53 +1442,10 @@ codex-security scan . --diff origin/main \
 | `2`           | Invalid input, runtime error, target change, or required-output failure. |
 | `130` / `143` | Interrupt / termination.                                                 |
 
-### Upload to GitHub Code Scanning
-
-After checking out the repository and installing and configuring the CLI, add
-these steps to a GitHub Actions job. The job needs `contents: read`,
-`actions: read`, and `security-events: write` permissions. Code Scanning must be
-enabled for the repository; see
-[GitHub's SARIF upload requirements](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/integrate-with-existing-tools/upload-sarif-file).
-
-```yaml
-- name: Scan and export SARIF
-  id: scan
-  shell: bash
-  env:
-    OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
-  run: |
-    status=0
-    codex-security scan . --headless --fail-on-severity high \
-      --sarif "$RUNNER_TEMP/results.sarif" || status=$?
-    if [[ "$status" == 0 || "$status" == 1 ]]; then
-      node --input-type=module - "$RUNNER_TEMP/results.sarif" "$RUNNER_TEMP/upload.sarif" <<'NODE'
-    import { readFileSync, writeFileSync } from "node:fs";
-    const [, , source, destination] = process.argv;
-    const sarif = JSON.parse(readFileSync(source, "utf8"));
-    for (const run of sarif.runs) delete run.automationDetails;
-    writeFileSync(destination, JSON.stringify(sarif));
-    NODE
-    fi
-    echo "exit-code=$status" >> "$GITHUB_OUTPUT"
-    exit "$status"
-- name: Upload SARIF
-  if: ${{ !cancelled() && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}
-  uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63
-  with:
-    sarif_file: ${{ runner.temp }}/upload.sarif
-    category: codex-security
-```
-
-The upload copy removes the scan's `automationDetails` so the uploader can apply
-the workflow's stable `category`; the original export keeps its scan metadata.
-Use distinct categories, such as `codex-security/full` and `codex-security/diff`,
-for full-repository and diff scans.
-
-The upload runs for completed scans even when findings exceed the severity
-threshold, while the scan step keeps the job failed. Execution failures,
-interruptions, and upload-copy preparation failures skip upload.
-The [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md)
-covers runner setup and a complete managed workflow.
+In automation, export or upload only after scan exit `0` or `1`; skip these
+steps after `2`, `130`, or `143`. Require the export step to succeed before
+uploading a custom SARIF file. Pass the scan's explicit results directory to
+`export` so concurrent scans cannot change which result is selected.
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
 `--json`. Use `validate --output-schema FILE` for a schema-checked JSON assessment.

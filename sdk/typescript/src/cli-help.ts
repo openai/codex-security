@@ -37,7 +37,6 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
-      "sarif",
       "max-cost",
       "show-cost",
       "fail-on-severity",
@@ -93,7 +92,6 @@ const VALUE_LABELS: Record<string, string> = {
   "finding-id": "id",
   "findings-url": "url",
   output: "file",
-  sarif: "file",
   csv: "file",
   json: "file",
   rubric: "file",
