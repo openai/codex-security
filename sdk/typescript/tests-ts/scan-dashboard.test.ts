@@ -1331,20 +1331,19 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("3 findings before deduplication");
     dashboard.finishComponents({
       total: 3,
-      completed: 1,
-      incomplete: 1,
+      completed: 2,
       failed: 1,
       planPath: "/synthetic/plan.json",
       sourceFindingCount: 3,
       findingCount: 2,
       deduplication: {
-        status: "incomplete",
+        status: "failed",
         confirmedGroups: 1,
         uncertainPairs: 0,
       },
     });
-    expect(frame()).toContain("3 findings → 2 groups · matching incomplete");
-    expect(frame()).toContain("partial results");
+    expect(frame()).toContain("3 findings → 2 groups · matching failed");
+    expect(frame()).toContain("Finished with errors");
     expect(timers).toBe(1);
     dashboard.stop();
     expect(timers).toBe(0);

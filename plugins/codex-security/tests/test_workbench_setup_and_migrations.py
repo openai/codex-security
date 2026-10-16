@@ -323,6 +323,22 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 extended-length paths")
+def test_sqlite_snapshot_reads_windows_extended_length_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+    subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), "\\\\?\\" + str(source), str(snapshot)],
+        check=True,
+    )
+    with sqlite3.connect(snapshot) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
 @pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
 def test_sqlite_snapshot_rejects_destination_aliasing_source(
     tmp_path: Path, alias_kind: str

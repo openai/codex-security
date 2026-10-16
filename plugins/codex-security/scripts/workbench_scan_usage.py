@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
@@ -256,7 +257,7 @@ def _discover_rollout_sessions(
     warnings: set[str],
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
-        state_database.as_uri() + "?mode=ro",
+        f"file:{quote(str(state_database), safe='')}?mode=ro",
         uri=True,
         timeout=STATE_DATABASE_TIMEOUT_SECONDS,
     )

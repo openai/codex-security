@@ -112,7 +112,6 @@ export async function testDeepScanContextSnapshots({
                     ...(request.kind === "discovery"
                       ? {
                           coverage: {
-                            completeness: "complete",
                             surfaces: [],
                             explicitExclusions: [],
                             deferred: [],

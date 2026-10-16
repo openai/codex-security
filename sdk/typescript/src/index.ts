@@ -18,6 +18,7 @@ export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners } from "./suggest-owners.js";
 export type {
   OwnerFinding,
+  CodeownerIdentity,
   OwnerIdentity,
   OwnerSuggestion,
   OwnerSuggestions,
@@ -66,6 +67,8 @@ export type {
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,

@@ -1,3 +1,4 @@
+import * as z from "zod/v4";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -41,7 +42,7 @@ const writerApi = await importSource(
   },
 );
 const schemas = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
+  path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
 );
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -70,38 +71,12 @@ try {
 console.log("Codex Security compact artifact foundation tests passed");
 
 async function testSchemaSourceOfTruth() {
-  const common = await readJson(
-    import.meta.dirname,
-    "../../schemas/definitions/artifact-common.schema.json",
-  );
-  const fixtureDocument = {
-    $id: "codex-security://schemas/tools/artifact-foundation-fixture.schema.json",
-    $defs: {
-      request: {
-        type: "object",
-        properties: {
-          path: { $ref: common.$id + "#/$defs/repositoryPath" },
-          candidateId: { $ref: common.$id + "#/$defs/candidateId" },
-        },
-        required: ["path", "candidateId"],
-        additionalProperties: false,
-      },
-    },
-  };
-  const bundled = schemas.bundleArtifactSchema(
-    [common, fixtureDocument],
-    fixtureDocument.$id,
-    "request",
-  );
-  assert.equal(JSON.stringify(bundled).includes("$ref"), false);
-  assert.equal(bundled.properties.path.type, "string");
-  assert.equal(bundled.properties.candidateId.type, "string");
-
-  const validator = schemas.loadArtifactZodSchema(
-    [common, fixtureDocument],
-    fixtureDocument.$id,
-    "request",
-  );
+  const common =
+    schemas.artifactSchemaDocuments["definitions/artifact-common"].$defs;
+  const validator = z.strictObject({
+    path: common.repositoryPath,
+    candidateId: common.candidateId,
+  });
   for (const repositoryPath of [
     "src/index.ts",
     "./src/index.ts",
@@ -145,19 +120,6 @@ async function testSchemaSourceOfTruth() {
       candidateId,
     );
   }
-  assert.throws(
-    () => schemas.bundleArtifactSchema([common], "missing", "request"),
-    /Unknown Codex Security schema document/,
-  );
-  assert.throws(
-    () =>
-      schemas.bundleArtifactSchema(
-        [common, common],
-        common.$id,
-        "repositoryPath",
-      ),
-    /Duplicate Codex Security schema document/,
-  );
 }
 
 async function testScanContext() {

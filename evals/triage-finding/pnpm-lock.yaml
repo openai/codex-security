@@ -8,7 +8,7 @@ overrides:
   '@openai/codex': 0.162.1
   '@openai/codex-sdk': 0.162.1
   '@openai/codex-security@0.1.31>smol-toml': 1.9.0
-  '@opencode-ai/sdk': 1.18.34
+  '@opencode-ai/sdk': 1.18.35
   ibm-cloud-sdk-core@5.6.0>axios: 1.20.0
   get-uri@8.0.1>basic-ftp: 6.2.1
   simple-git@3.36.0>@simple-git/args-pathspec: 1.0.4
@@ -26,8 +26,8 @@ importers:
         specifier: 0.162.1
         version: 0.162.1
       '@opencode-ai/sdk':
-        specifier: 1.18.34
-        version: 1.18.34
+        specifier: 1.18.35
+        version: 1.18.35
       promptfoo:
         specifier: 0.123.1
         version: 0.123.1(patch_hash=9b31e07e280074178b325d59241d9bfd2cd4a94238bfc5fc9bc07daf43f4d7a8)(@aws-sdk/credential-provider-node@3.972.83)(@aws-sdk/credential-providers@3.1136.0)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(@types/json-schema@7.0.15)(@types/node@25.9.1)(better-sqlite3@12.10.0)(graphql@17.0.2)(pg@8.23.0)(playwright-core@1.63.0)(socks@2.8.10)
@@ -1053,8 +1053,8 @@ packages:
     resolution: {integrity: sha512-lZsAJeqWdrWna3/qiv3Xc3pdNyB0TcwHraqEX8oudlUPQqcdnccWm+xCPK4RUB5G8XVGcsrV67VFIVmyiFymGw==}
     engines: {node: '>=18.x'}
 
-  '@modelcontextprotocol/sdk@1.32.0':
-    resolution: {integrity: sha512-8BviX/hK4Gd2eL1KdTwm0gfl4d3wdoErW0Jd00h6nomUAtk6IJk5vwQJc6kfWtJTzN5OEV/lgIiJKI8fiDGAlA==}
+  '@modelcontextprotocol/sdk@1.32.1':
+    resolution: {integrity: sha512-2DdE+SJDtzLEEWzY1ZjY7Q+VcPhcV1KisD3zI4u0XZyktsjHum1mwbMI+JaulUBi2OZk+KJAi2uPXzxichPkdw==}
     engines: {node: '>=18'}
     peerDependencies:
       '@cfworker/json-schema': ^4.1.1
@@ -1402,8 +1402,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opencode-ai/sdk@1.18.34':
-    resolution: {integrity: sha512-R9QWUpcngtdQ6FCixz7NC6n1WsSho6CEuRUzYHz/CzZcp3miSklDzXkm0oDwXVCnuEu+ANoeM0f6RDp51kOMzQ==}
+  '@opencode-ai/sdk@1.18.35':
+    resolution: {integrity: sha512-cp3IFKwnqgeUbflrrwz/WmG/dALVyM2k0LA1aqCvWe58Tu4utNTNw+BwZzQEML1HxDaLrIB+Fc4Ztb8S16Ijcw==}
 
   '@opentelemetry/api-logs@0.222.0':
     resolution: {integrity: sha512-9mb1If+IF6u0ZVXkHQ6ogEae5HwA6ajIVUgpSDQyRASxft6BSXHvBvPooRle3yFN/fKnCdSOnuu0OC3PLcF6+g==}
@@ -4325,10 +4325,10 @@ snapshots:
   '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.263':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.263(@anthropic-ai/sdk@0.124.0(zod@4.6.5))(@modelcontextprotocol/sdk@1.32.0(@cfworker/json-schema@4.1.1)(zod@4.6.5))(zod@4.6.5)':
+  '@anthropic-ai/claude-agent-sdk@0.3.263(@anthropic-ai/sdk@0.124.0(zod@4.6.5))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(zod@4.6.5)':
     dependencies:
       '@anthropic-ai/sdk': 0.124.0(zod@4.6.5)
-      '@modelcontextprotocol/sdk': 1.32.0(@cfworker/json-schema@4.1.1)(zod@4.6.5)
+      '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5)
       zod: 4.6.5
     optionalDependencies:
       '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.263
@@ -5592,7 +5592,7 @@ snapshots:
       - graphql
     optional: true
 
-  '@modelcontextprotocol/sdk@1.32.0(@cfworker/json-schema@4.1.1)(zod@4.6.5)':
+  '@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5)':
     dependencies:
       '@hono/node-server': 2.1.1(hono@4.13.10)
       ajv: 8.20.0
@@ -5829,7 +5829,7 @@ snapshots:
       debug: 4.4.3
       openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.83)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.5)
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.32.0(@cfworker/json-schema@4.1.1)(zod@4.6.5)
+      '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5)
       zod: 4.6.5
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -5951,7 +5951,7 @@ snapshots:
   '@openai/codex@0.162.1-win32-x64':
     optional: true
 
-  '@opencode-ai/sdk@1.18.34':
+  '@opencode-ai/sdk@1.18.35':
     dependencies:
       cross-spawn: 7.0.6
 
@@ -8398,7 +8398,7 @@ snapshots:
       ws: 8.21.3
       zod: 4.6.5
     optionalDependencies:
-      '@anthropic-ai/claude-agent-sdk': 0.3.263(@anthropic-ai/sdk@0.124.0(zod@4.6.5))(@modelcontextprotocol/sdk@1.32.0(@cfworker/json-schema@4.1.1)(zod@4.6.5))(zod@4.6.5)
+      '@anthropic-ai/claude-agent-sdk': 0.3.263(@anthropic-ai/sdk@0.124.0(zod@4.6.5))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5))(zod@4.6.5)
       '@aws-sdk/client-bedrock-agent-runtime': 3.1126.0
       '@aws-sdk/client-bedrock-runtime': 3.1126.0
       '@aws-sdk/client-s3': 3.1126.0
@@ -8415,11 +8415,11 @@ snapshots:
       '@huggingface/transformers': 4.3.0(@types/node@25.9.1)
       '@ibm-cloud/watsonx-ai': 1.7.16
       '@langfuse/client': 5.11.0(@opentelemetry/api@1.9.1)
-      '@modelcontextprotocol/sdk': 1.32.0(@cfworker/json-schema@4.1.1)(zod@4.6.5)
+      '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5)
       '@openai/agents': 0.11.8(@aws-sdk/credential-provider-node@3.972.83)(@cfworker/json-schema@4.1.1)(@smithy/hash-node@4.5.2)(@smithy/signature-v4@5.7.3)(ws@8.21.3)(zod@4.6.5)
       '@openai/codex-sdk': 0.162.1
       '@openai/codex-security': 0.1.31(@types/node@25.9.1)(graphql@17.0.2)
-      '@opencode-ai/sdk': 1.18.34
+      '@opencode-ai/sdk': 1.18.35
       '@playwright/browser-chromium': 1.63.0
       '@rollup/rollup-linux-x64-gnu': 4.63.1
       '@slack/web-api': 8.1.1

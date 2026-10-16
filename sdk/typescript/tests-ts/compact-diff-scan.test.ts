@@ -550,13 +550,13 @@ describe("compact diff scan", () => {
           findings: [
             {
               ...finding,
-              root_cause: {
+              rootCause: {
+                summary: "An archive entry controls the output path.",
                 evidenceRefs: ["missing-root-cause-evidence"],
               },
             },
           ],
           coverage: {
-            completeness: "complete",
             surfaces: [{ label: "Changed files", disposition: "rejected" }],
             explicitExclusions: [],
             deferred: [],
@@ -566,7 +566,7 @@ describe("compact diff scan", () => {
       });
       expect(invalidRootCauseReference["isError"]).toBe(true);
       expect(JSON.stringify(invalidRootCauseReference)).toContain(
-        "root_cause.evidenceRefs",
+        "rootCause.evidenceRefs",
       );
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -588,7 +588,6 @@ describe("compact diff scan", () => {
           },
         ],
         coverage: {
-          completeness: "complete",
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -613,18 +612,6 @@ describe("compact diff scan", () => {
             extensions: {
               candidateId: "candidate-singleton",
               reportId: "DSS-144-A",
-            },
-          },
-          {
-            ...finding,
-            code_evidence: [
-              {
-                code: "value = 2",
-                id: "legacy-source",
-              },
-            ],
-            attackPath: {
-              dataflow: { evidence_refs: ["legacy-source"] },
             },
           },
           {
@@ -673,7 +660,6 @@ describe("compact diff scan", () => {
         ],
         threatModel,
         coverage: {
-          completeness: "complete",
           surfaces: [
             {
               label: "Changed files",
@@ -701,7 +687,7 @@ describe("compact diff scan", () => {
           findings: JsonObject[];
         }
       ).findings.map((draftFinding) => draftFinding["identity"]);
-      expect(canonicalDraftIdentities).toHaveLength(9);
+      expect(canonicalDraftIdentities).toHaveLength(8);
       await call("complete_codex_security_scan", {
         scanId,
         handoffClaimToken,
@@ -733,7 +719,6 @@ describe("compact diff scan", () => {
       expect(completedIdentities).toEqual(canonicalDraftIdentities);
       expect(completedIdentities).toEqual([
         { anchor: "candidate-singleton", instance: "dss-144-a" },
-        { anchor: "unsafe-archive-extraction" },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
         { anchor: "candidate-cross-rule", instance: "second-report" },
@@ -745,15 +730,6 @@ describe("compact diff scan", () => {
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
         { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
       ]);
-      const legacyFinding = (
-        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
-      )[1];
-      expect(legacyFinding?.["code_evidence"]).toEqual([
-        { code: "value = 2", id: "legacy-source" },
-      ]);
-      expect(legacyFinding?.["attackPath"]).toEqual({
-        dataflow: { evidence_refs: ["legacy-source"] },
-      });
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
           "threatModel"

@@ -23195,7 +23195,7 @@ var require_package = __commonJS({
   "node_modules/@actions/artifact/package.json"(exports2, module2) {
     module2.exports = {
       name: "@actions/artifact",
-      version: "6.2.1",
+      version: "6.3.1",
       preview: true,
       description: "Actions artifact lib",
       keywords: [
@@ -23242,26 +23242,27 @@ var require_package = __commonJS({
         url: "https://github.com/actions/toolkit/issues"
       },
       dependencies: {
-        "@actions/core": "^3.0.0",
-        "@actions/github": "^9.0.0",
-        "@actions/http-client": "^4.0.0",
-        "@azure/storage-blob": "^12.30.0",
+        "@actions/core": "^3.0.1",
+        "@actions/github": "^9.1.1",
+        "@actions/http-client": "^4.0.1",
+        "@azure/storage-blob": "^12.31.0",
         "@octokit/core": "^7.0.6",
         "@octokit/plugin-request-log": "^6.0.0",
-        "@octokit/plugin-retry": "^8.0.0",
-        "@octokit/request": "^10.0.7",
+        "@octokit/plugin-retry": "^8.1.0",
+        "@octokit/request": "^10.0.8",
         "@octokit/request-error": "^7.1.0",
-        "@protobuf-ts/plugin": "^2.2.3-alpha.1",
-        "@protobuf-ts/runtime": "^2.9.4",
+        "@protobuf-ts/runtime": "^2.11.1",
+        "@protobuf-ts/runtime-rpc": "^2.11.1",
         archiver: "^7.0.1",
         "jwt-decode": "^4.0.0",
         "unzip-stream": "^0.3.1"
       },
       devDependencies: {
+        "@protobuf-ts/plugin": "^2.11.1",
         "@types/archiver": "^7.0.0",
         "@types/unzip-stream": "^0.3.4",
-        typedoc: "^0.28.16",
-        "typedoc-plugin-markdown": "^4.9.0",
+        typedoc: "^0.28.19",
+        "typedoc-plugin-markdown": "^4.11.0",
         typescript: "^5.9.3"
       },
       overrides: {
@@ -56163,18 +56164,11 @@ async function analyzeResults(options) {
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
-  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0) {
+  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0 || options.exitCode !== 0 && options.exitCode !== 1) {
     result.errors.push("CLI did not complete successfully. See the CLI diagnostics.");
-  } else if (value.coverage.completeness === "partial" && (options.exitCode === 0 || options.exitCode === 2)) {
-    result.scanStatus = "incomplete";
-  } else if (value.coverage.completeness === "complete" && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else {
     result.scanStatus = "completed";
     result.policyStatus = options.exitCode === 1 ? "failed" : "passed";
-  } else result.errors.push(value.coverage.completeness === "unknown" ? "CLI could not determine scan coverage. See the CLI diagnostics." : "CLI did not complete successfully. See the CLI diagnostics.");
-  if (value.coverage.completeness !== "complete") {
-    for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === "string") result.errors.push(`Deferred work: ${item.reason}`);
-    for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === "needs_follow_up" && typeof item.label === "string")
-      result.errors.push(`Needs follow-up: ${item.label}`);
   }
   result.errors.push(...warnings);
   const sarifPath = (0, import_node_path5.join)(options.resultsDirectory, "exports/results.sarif");
@@ -58178,8 +58172,9 @@ var __awaiter6 = function(thisArg, _arguments, P, generator) {
 var ArtifactHttpClient = class {
   constructor(userAgent2, maxAttempts, baseRetryIntervalMilliseconds, retryMultiplier) {
     this.maxAttempts = 5;
-    this.baseRetryIntervalMilliseconds = 3e3;
+    this.baseRetryIntervalMilliseconds = 8e3;
     this.retryMultiplier = 1.5;
+    this.retryTimeoutMilliseconds = 12e4;
     const token = getRuntimeToken();
     this.baseUrl = getResultsServiceUrl();
     if (maxAttempts) {
@@ -58219,11 +58214,16 @@ var ArtifactHttpClient = class {
       let attempt = 0;
       let errorMessage = "";
       let rawBody = "";
+      let totalRetryWaitMilliseconds = 0;
       while (attempt < this.maxAttempts) {
         let isRetryable = false;
+        let retryAfterSeconds;
         try {
           const response = yield operation();
           const statusCode = response.message.statusCode;
+          if (statusCode === HttpCodes.TooManyRequests) {
+            retryAfterSeconds = this.getRetryAfterSeconds(response);
+          }
           rawBody = yield response.readBody();
           debug(`[Response] - ${response.message.statusCode}`);
           debug(`Headers: ${JSON.stringify(response.message.headers, null, 2)}`);
@@ -58260,9 +58260,13 @@ var ArtifactHttpClient = class {
         if (attempt + 1 === this.maxAttempts) {
           throw new Error(`Failed to make request after ${this.maxAttempts} attempts: ${errorMessage}`);
         }
-        const retryTimeMilliseconds = this.getExponentialRetryTimeMilliseconds(attempt);
+        const retryTimeMilliseconds = retryAfterSeconds !== void 0 ? retryAfterSeconds * 1e3 : this.getExponentialRetryTimeMilliseconds(attempt);
+        if (totalRetryWaitMilliseconds + retryTimeMilliseconds > this.retryTimeoutMilliseconds) {
+          throw new Error(`Retry wait of ${retryTimeMilliseconds} ms would exceed the maximum total retry wait of ${this.retryTimeoutMilliseconds} ms: ${errorMessage}`);
+        }
         info(`Attempt ${attempt + 1} of ${this.maxAttempts} failed with error: ${errorMessage}. Retrying request in ${retryTimeMilliseconds} ms...`);
         yield this.sleep(retryTimeMilliseconds);
+        totalRetryWaitMilliseconds += retryTimeMilliseconds;
         attempt++;
       }
       throw new Error(`Request failed`);
@@ -58284,6 +58288,17 @@ var ArtifactHttpClient = class {
       HttpCodes.TooManyRequests
     ];
     return retryableStatusCodes.includes(statusCode);
+  }
+  // Only positive integer seconds are supported, not HTTP-date values.
+  getRetryAfterSeconds(response) {
+    var _a;
+    const header = response.message.headers["retry-after"];
+    const value = (_a = Array.isArray(header) ? header[0] : header) === null || _a === void 0 ? void 0 : _a.trim();
+    if (value === void 0 || !/^\d+$/.test(value)) {
+      return void 0;
+    }
+    const parsed = parseInt(value, 10);
+    return !isNaN(parsed) && parsed > 0 ? parsed : void 0;
   }
   sleep(milliseconds) {
     return __awaiter6(this, void 0, void 0, function* () {
@@ -99120,8 +99135,7 @@ function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
 }
 function resultTitle(result, inputs) {
-  if (result.scanStatus === "incomplete") return result.reportStatus === "failed" ? "Scan coverage is partial, and required reporting failed." : "Scan coverage is partial. Available findings are provisional.";
-  if (result.scanStatus !== "completed") return "Scan could not complete. Available findings are provisional.";
+  if (result.scanStatus !== "completed") return "Scan could not complete.";
   if (result.reportStatus === "failed") return "Scan completed, but required reporting failed.";
   if (result.policyStatus === "failed") return "Scan completed. Findings meet the configured failure threshold.";
   if (inputs.failOnSeverity === "none") return "Scan completed. Findings are reported without failing the job.";
@@ -99136,13 +99150,12 @@ function resultSummary(result, inputs, target) {
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
     `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
-    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Valid partial scans warn without evaluating this policy. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
+    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus === "incomplete") parts.push("Partial coverage alone does not fail the job. The findings policy was not evaluated; review the deferred work before treating the security review as complete.");
-  if (result.scanStatus !== "completed") parts.push("**Findings below are provisional. This is not a completed scan.**");
+  if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
@@ -99157,7 +99170,7 @@ function resultSummary(result, inputs, target) {
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {
-    const message = plain(`${result.scanStatus === "completed" ? "" : "Provisional finding: "}${finding.summary}`, 4e3);
+    const message = plain(finding.summary, 4e3);
     const props = {
       title: plain(`${finding.severity.toUpperCase()}: ${finding.title}`, 200),
       file: finding.path,
@@ -99326,12 +99339,12 @@ async function runAction(actionRoot, overrides = {}) {
           scannedSha: target.scannedSha,
           exitCode: execution.exitCode,
           executionFailed: interrupted || !!checkoutError,
-          publishable: target.publishable && !interrupted && !checkoutError
+          publishable: target.publishable
         });
         if (result.paths.jsonPath && !result.paths.sarifPath)
           warning("SARIF report is unavailable; scan results and other reports are still available.");
         if (checkoutError) result.errors.unshift(checkoutError);
-        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit. Available findings are provisional.");
+        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit.");
         let reportsValidated = false;
         try {
           const reports = await collectReports(result);
@@ -99348,15 +99361,13 @@ async function runAction(actionRoot, overrides = {}) {
         }
         outputs(result, target, execution.exitCode);
         info(`Scan: ${result.scanStatus}; findings policy: ${result.policyStatus}; report: ${result.reportStatus}; SARIF upload ready: ${result.sarifUploadReady}.`);
-        info(`${result.scanStatus === "completed" ? "Findings" : "Provisional findings"}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
+        info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
         finalSummary = resultSummary(result, inputs, target);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== "failed" && (result.scanStatus === "incomplete" || result.scanStatus === "completed" && result.policyStatus === "passed");
+        success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === "incomplete")
-          warning("Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.");
       }
     }
   } catch (error2) {

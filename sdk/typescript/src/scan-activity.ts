@@ -242,17 +242,30 @@ function sessionProse(
   kind: "reasoning" | "message",
   value: unknown,
 ): ScanActivity | null {
-  if (!Array.isArray(value)) return null;
-  const text = value
+  return proseActivity(
+    id,
+    kind,
+    "completed",
+    sessionContentText(value, ["summary_text", "output_text"], " "),
+  );
+}
+
+/** @internal */
+export function sessionContentText(
+  content: unknown,
+  types: readonly string[] = ["output_text"],
+  separator = "\n",
+): string {
+  if (!Array.isArray(content)) return "";
+  return content
     .filter(
       (item): item is Record<string, unknown> & { text: string } =>
         isRecord(item) &&
-        (item["type"] === "summary_text" || item["type"] === "output_text") &&
+        types.some((type) => item["type"] === type) &&
         typeof item["text"] === "string",
     )
-    .map((item) => item["text"])
-    .join(" ");
-  return proseActivity(id, kind, "completed", text);
+    .map((item) => item.text)
+    .join(separator);
 }
 
 function proseActivity(
