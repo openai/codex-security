@@ -184,3 +184,72 @@ test("does not relabel Supply Chain or Secrets findings as SAST", () => {
     expect(output.excluded[0]!.reason).toContain("separate qualification");
   }
 });
+
+test("accepts the native Semgrep PRO SARIF producer name", () => {
+  const input = semgrepSarif();
+  input.runs[0]!.tool.driver.name = "Semgrep PRO";
+  const output = normalizeSemgrepSarif(input);
+  expect(output.findings).toHaveLength(1);
+  expect(output.excluded).toEqual([]);
+});
+
+test.each([
+  ["secrets", undefined],
+  ["secrets", null],
+  ["sca", undefined],
+  ["sca", null],
+] as const)(
+  "excludes explicit %s product without validator metadata (%s)",
+  (product, validation) => {
+    const input: any = semgrepJson();
+    input.results[0].extra.metadata = { product };
+    input.results[0].extra.validation_state = validation;
+    const output = normalizeSemgrepFindings(input);
+    expect(output.findings).toEqual([]);
+    expect(output.excluded[0]!.reason).toContain("supports Semgrep SAST");
+  },
+);
+
+test("accepts an explicit SAST product marker", () => {
+  const input: any = semgrepJson();
+  input.results[0].extra.metadata = { product: "sast" };
+  expect(normalizeSemgrepFindings(input).findings).toHaveLength(1);
+});
+
+test.each(["error", "warning", "note", undefined])(
+  "rejects native SARIF scan notifications even with executionSuccessful=true (%s)",
+  (level) => {
+    const input: any = semgrepSarif();
+    input.runs[0].invocations = [
+      {
+        executionSuccessful: true,
+        toolExecutionNotifications: [
+          { level, message: { text: "A source file could not be analyzed" } },
+        ],
+      },
+    ];
+    expect(() => normalizeSemgrepSarif(input)).toThrow(
+      "scan error notifications",
+    );
+  },
+);
+
+test("large scan inventories and timing tables do not exclude a small finding", () => {
+  const input: any = semgrepJson();
+  const paths = Array.from(
+    { length: 10000 },
+    (_, index) => `path-inventory-entry-${index}/ordinary-source-file.ts`,
+  );
+  input.paths = { scanned: paths };
+  input.time = { targets: paths.map((path) => ({ path, parse_time: 0.001 })) };
+  const output = normalizeSemgrepFindings(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({
+    result: input.results[0],
+  });
+  expect(
+    JSON.stringify(output.findings[0]!.evidence.source_data),
+  ).not.toContain("path-inventory-entry-");
+  expect(input.paths.scanned).toHaveLength(10000);
+});

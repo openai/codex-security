@@ -91,7 +91,10 @@ the upload. Semgrep requires a Cloud version that accepts the `semgrep` provider
 - Prefer JSON for original severity. Semgrep SARIF combines Critical and High
   into diagnostic `error`, which this mapper displays as High. Both representations
   retain the complete selected source evidence.
-- JSON scan errors and unsuccessful SARIF invocations are rejected. Ambiguous
+- Scan-wide JSON path inventories and timing tables are omitted from individual
+  findings; the selected raw result and remaining report metadata are retained.
+- JSON scan errors, unsuccessful SARIF invocations, and SARIF scan-error
+  notifications are rejected. Ambiguous
   duplicate identities and invalid records are excluded before publication.
 - Original source suppressions and ignored status stay separate from Cloud
   lifecycle state and Codex assessment. This adapter does not launch a scan,

@@ -150,13 +150,19 @@ export function normalizeSemgrepFindings(
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  const { results, ...context } = document;
+  const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
     array(results, "Semgrep results"),
     (value) => {
       const result = record(value, "Semgrep result");
       const extra = record(result["extra"], "Semgrep extra");
-      if (extra["sca_info"] != null || extra["validation_state"] != null)
+      const metadata = record(extra["metadata"] ?? {}, "Semgrep metadata");
+      const product = metadata["product"];
+      if (
+        (product != null && product !== "sast") ||
+        extra["sca_info"] != null ||
+        extra["validation_state"] != null
+      )
         throw new Error(
           "This adapter supports Semgrep SAST; Supply Chain and Secrets reports need separate qualification.",
         );
@@ -230,7 +236,7 @@ export function normalizeSemgrepSarif(
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
     if (
-      !["Semgrep", "Semgrep OSS", "Semgrep Pro"].includes(
+      !["Semgrep", "Semgrep OSS", "Semgrep PRO", "Semgrep Pro"].includes(
         requiredText(driver["name"], "SARIF producer"),
       )
     )
@@ -241,11 +247,16 @@ export function normalizeSemgrepSarif(
       run["invocations"] ?? [],
       "Semgrep invocations",
     )) {
-      if (
-        record(invocation, "Semgrep invocation")["executionSuccessful"] ===
-        false
-      )
+      const details = record(invocation, "Semgrep invocation");
+      if (details["executionSuccessful"] === false)
         throw new Error("Semgrep SARIF contains an unsuccessful invocation.");
+      if (
+        array(
+          details["toolExecutionNotifications"] ?? [],
+          "Semgrep scan notifications",
+        ).length
+      )
+        throw new Error("Semgrep SARIF contains scan error notifications.");
     }
     const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
       record(r, "Semgrep rule"),
