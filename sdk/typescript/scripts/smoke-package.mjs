@@ -805,6 +805,14 @@ try {
     [join(packageRoot, "scripts", "smoke-hosted-package.mjs"), installedRoot],
     { cwd: consumer },
   );
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "smoke-hosted-remediation.mjs"),
+      installedRoot,
+    ],
+    { cwd: consumer },
+  );
   const selectedPlugin = join(consumer, "compatibility-selected-plugin");
   await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
     recursive: true,
