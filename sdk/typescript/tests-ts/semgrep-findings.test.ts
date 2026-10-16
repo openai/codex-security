@@ -157,7 +157,8 @@ test("requires source identity and rejects conflicting SARIF repository provenan
 });
 
 test("gated CE fingerprint placeholders use independent location identities", () => {
-  const input = semgrepSarif();
+  const input: any = semgrepSarif();
+  delete input.runs[0].tool.driver.rules;
   const first = input.runs[0]!.results[0]!;
   first.fingerprints["matchBasedId/v1"] = "requires login";
   const second = structuredClone(first);
@@ -185,13 +186,57 @@ test("does not relabel Supply Chain or Secrets findings as SAST", () => {
   }
 });
 
-test("accepts the native Semgrep PRO SARIF producer name", () => {
-  const input = semgrepSarif();
-  input.runs[0]!.tool.driver.name = "Semgrep PRO";
-  const output = normalizeSemgrepSarif(input);
-  expect(output.findings).toHaveLength(1);
-  expect(output.excluded).toEqual([]);
-});
+test.each(["Semgrep PRO", "semgrep"])(
+  "accepts the native %s SARIF producer name",
+  (producer) => {
+    const input = semgrepSarif();
+    input.runs[0]!.tool.driver.name = producer;
+    const output = normalizeSemgrepSarif(input);
+    expect(output.findings).toHaveLength(1);
+    expect(output.excluded).toEqual([]);
+  },
+);
+
+test.each(["omitted", "empty"])(
+  "accepts CE results with %s rule descriptors",
+  (descriptors) => {
+    const input: any = semgrepSarif();
+    const run = input.runs[0];
+    if (descriptors === "omitted") delete run.tool.driver.rules;
+    else run.tool.driver.rules = [];
+    run.results[0].fingerprints["matchBasedId/v1"] = "requires login";
+    run.results[0].level = "warning";
+    const known = normalizeSemgrepSarif(input);
+    expect(known.excluded).toEqual([]);
+    expect(known.findings).toHaveLength(1);
+    expect(known.findings[0]!.evidence.severity).toBe("medium");
+    expect(known.findings[0]!.evidence.source_data).not.toHaveProperty("rule");
+    delete run.results[0].level;
+    const unknown = normalizeSemgrepSarif(input);
+    expect(unknown.excluded).toEqual([]);
+    expect(unknown.findings[0]!.evidence.severity).toBe("unknown");
+    expect(unknown.findings[0]!.source_finding_id).toBe(
+      known.findings[0]!.source_finding_id,
+    );
+  },
+);
+
+test.each([
+  { ruleIndex: 0 },
+  { ruleIndex: -1 },
+  { rule: { index: 0 } },
+  { rule: { guid: "synthetic-rule-guid" } },
+])(
+  "rejects unresolved references when CE descriptors are absent (%p)",
+  (reference) => {
+    const input: any = semgrepSarif();
+    delete input.runs[0].tool.driver.rules;
+    Object.assign(input.runs[0].results[0], reference);
+    const output = normalizeSemgrepSarif(input);
+    expect(output.findings).toEqual([]);
+    expect(output.excluded).toHaveLength(1);
+  },
+);
 
 test.each([
   ["secrets", undefined],

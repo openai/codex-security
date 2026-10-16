@@ -237,8 +237,8 @@ export function normalizeSemgrepSarif(
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
     if (
-      !["Semgrep", "Semgrep OSS", "Semgrep PRO", "Semgrep Pro"].includes(
-        requiredText(driver["name"], "SARIF producer"),
+      !["semgrep", "semgrep oss", "semgrep pro"].includes(
+        requiredText(driver["name"], "SARIF producer").toLowerCase(),
       )
     )
       throw new Error("Expected a Semgrep SARIF producer.");
@@ -292,14 +292,15 @@ export function normalizeSemgrepSarif(
         );
       const ruleId = requiredText(result["ruleId"], "Semgrep ruleId");
       const matches = rules.filter((r) => r["id"] === ruleId);
-      if (matches.length !== 1)
+      if (matches.length > 1 || (rules.length > 0 && matches.length !== 1))
         throw new Error(
           "Semgrep result must reference exactly one rule in its run.",
         );
-      const rule = matches[0]!;
+      const rule = matches[0];
+      const ruleIndex = rule === undefined ? undefined : rules.indexOf(rule);
       if (
         result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== rules.indexOf(rule)
+        result["ruleIndex"] !== ruleIndex
       )
         throw new Error("Semgrep ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
@@ -307,9 +308,8 @@ export function normalizeSemgrepSarif(
         if (
           ref["toolComponent"] !== undefined ||
           (ref["id"] !== undefined && ref["id"] !== ruleId) ||
-          (ref["index"] !== undefined &&
-            ref["index"] !== rules.indexOf(rule)) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule["guid"])
+          (ref["index"] !== undefined && ref["index"] !== ruleIndex) ||
+          (ref["guid"] !== undefined && ref["guid"] !== rule?.["guid"])
         )
           throw new Error("Inconsistent or external Semgrep rule reference.");
       }
@@ -334,7 +334,7 @@ export function normalizeSemgrepSarif(
         throw new Error("Semgrep source range ends before it starts.");
       const message = record(result["message"], "Semgrep message");
       const configuration = record(
-        rule["defaultConfiguration"] ?? {},
+        rule?.["defaultConfiguration"] ?? {},
         "Rule configuration",
       );
       const level = text(result["level"]) ?? text(configuration["level"]);
@@ -374,7 +374,11 @@ export function normalizeSemgrepSarif(
                 ? "suppressed"
                 : null,
           },
-          source_data: structuredClone({ ...context, rule, result }),
+          source_data: structuredClone({
+            ...context,
+            ...(rule ? { rule } : {}),
+            result,
+          }),
         }),
       };
     },
