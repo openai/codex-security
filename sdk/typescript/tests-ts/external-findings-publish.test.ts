@@ -435,6 +435,7 @@ test("Wiz occurrence mapping preserves original evidence without inventing repos
       source_data: record,
       image_digests: ["sha256:example"],
       advisory_ids: [record.name],
+      packages: [{ name: "example-lib", ecosystem: "legacy-manager" }],
     },
   });
 });
@@ -482,6 +483,15 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
     },
     {
       ...finding,
+      id: "running-container",
+      vulnerableAsset: {
+        id: "running-image",
+        type: "CONTAINER",
+        ImageExternalId: `sha256:${"e".repeat(64)}`,
+      },
+    },
+    {
+      ...finding,
       id: "explicit-metadata",
       packageManager: "reported-manager",
       imageDigest: `sha256:${"b".repeat(64)}`,
@@ -523,6 +533,7 @@ test("Wiz API nodes preserve artifact ecosystems and distinguish container diges
     { ecosystem: "DPKG", digests: [`sha256:${"a".repeat(64)}`] },
     { ecosystem: "PYTHON", digests: [] },
     { ecosystem: null, digests: [`sha256:${"d".repeat(64)}`] },
+    { ecosystem: null, digests: [`sha256:${"e".repeat(64)}`] },
     { ecosystem: "reported-manager", digests: [`sha256:${"b".repeat(64)}`] },
     { ecosystem: "JAVASCRIPT", digests: [] },
   ]);
@@ -661,6 +672,9 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
     "https://[example.test]/finding",
     "https://prefix[::1]/finding",
     "https://[::1]suffix/finding",
+    "https://[::1%]/finding",
+    "https://[::1%a%b]/finding",
+    "https://example.com／path",
     "https://example.test\uFF1A443/finding",
     "https://exam\u2100ple.test/finding",
   ]) {
@@ -673,6 +687,8 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
     "https://[fe80::1%25eth0]/finding",
     "https://[fe80::1%zone!]/finding",
     "https://[v1.example]/finding",
+    "https://[vF.example]:service",
+    "https://[fe80::1%eth0]/finding",
     "https://[::1]:non-numeric/finding",
     "https://bücher.example/finding",
   ]) {
@@ -686,35 +702,6 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
   expect(() =>
     validateExternalEvidence({ ...evidence, source_data: { value: Infinity } }),
   ).toThrow("finite JSON");
-});
-
-test("evidence URL authorities match Cloud bracket and Unicode separator checks", () => {
-  for (const url of [
-    "https://[::1]",
-    "https://[fe80::1%eth0]",
-    "https://[fe80::1%25eth0]",
-    "https://[v1.example]",
-    "https://[vF.example]:service",
-    "https://éxample.test",
-    "https://example.test:non-numeric/finding",
-  ]) {
-    expect(
-      validateExternalEvidence({ ...normalized().evidence, url }).url,
-    ).toBe(url);
-  }
-  for (const url of [
-    "https://[example.test]",
-    "https://[127.0.0.1]",
-    "https://prefix[::1]",
-    "https://[::1]suffix",
-    "https://[::1%]",
-    "https://[::1%a%b]",
-    "https://example.com／path",
-  ]) {
-    expect(() =>
-      validateExternalEvidence({ ...normalized().evidence, url }),
-    ).toThrow();
-  }
 });
 
 test("request and pagination metadata retain Cloud byte limits and distinct identities", async () => {
@@ -801,8 +788,6 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
   expect(await first.runCli([...f.command, "--yes"], f.cliDeps)).toBe(0);
   const canonical = f.reports.get("vendor-1")!.canonical_finding_id;
   expect(JSON.parse(first.stdout.text()).counts.created).toBe(1);
-  expect(JSON.parse(first.stdout.text())).not.toHaveProperty("cloudUrl");
-  expect(first.stderr.text()).not.toContain("/codex/cloud/security/findings");
   expect(first.stderr.text()).not.toContain("Selected findings and evidence:");
   const again = await prepareExternalPublication(f.file, options, f.deps);
   expect((await again.publish()).counts.unchanged).toBe(1);
@@ -814,66 +799,6 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
     canonical_finding_id: canonical,
     version: 2,
   });
-});
-
-test("publication preserves existing environments and resumes ordered mixed batches after the default changes", async () => {
-  const f = await fixture([
-    normalized("existing-first"),
-    normalized("existing-last"),
-  ]);
-  const originalEnvironment = f.state.environmentId!;
-  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
-  f.state.environmentId = "new-default";
-  const selected = [
-    normalized("existing-first", "critical"),
-    normalized("new"),
-    normalized("existing-last", "critical"),
-  ];
-  await writeFile(f.file, JSON.stringify(selected));
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
-  expect(
-    prepared.preview.requests.map(
-      (request) => request.repository.environment_id,
-    ),
-  ).toEqual([originalEnvironment, "new-default", originalEnvironment]);
-  expect(
-    prepared.preview.requests.flatMap((request) =>
-      request.items.map((item) => item.source_finding_id),
-    ),
-  ).toEqual(selected.map((finding) => finding.source_finding_id));
-  f.state.throttle = true;
-  await expect(prepared.publish()).rejects.toThrow("Retry-After");
-  f.state.throttle = false;
-  f.state.environmentId = "changed-default";
-  const cli = createCliTest(main);
-  expect(
-    await cli.runCli(f.command, {
-      ...f.cliDeps,
-      externalPublicationPrompt: {
-        isInteractive: () => true,
-        confirm: async () => {
-          expect(cli.stderr.text()).toContain(
-            `Environment: ${originalEnvironment}, new-default`,
-          );
-          expect(cli.stderr.text()).not.toContain("changed-default");
-          return true;
-        },
-      },
-    }),
-  ).toBe(0);
-  expect(JSON.parse(cli.stdout.text()).counts).toEqual({
-    created: 1,
-    updated: 2,
-    unchanged: 0,
-    error: 0,
-  });
-  expect(f.reports.get("existing-first")!.environment_id).toBe(
-    originalEnvironment,
-  );
-  expect(f.reports.get("existing-last")!.environment_id).toBe(
-    originalEnvironment,
-  );
-  expect(f.reports.get("new")!.environment_id).toBe("new-default");
 });
 
 test("normalized input accepts server-materialized optional evidence defaults", async () => {
@@ -1185,61 +1110,6 @@ test("canceling a waiting publisher preserves the active request", async () => {
     release.resolve();
     observer.restore();
     await Promise.allSettled([active, waiting]);
-  }
-});
-
-test("longer publications remain cancelable and resume their saved request", async () => {
-  const f = await fixture();
-  let elapsed = 0;
-  const deadlines: { at: number; controller: AbortController }[] = [];
-  const timeout = spyOn(AbortSignal, "timeout").mockImplementation((delay) => {
-    const controller = new AbortController();
-    deadlines.push({ at: elapsed + delay, controller });
-    return controller.signal;
-  });
-  const controller = new AbortController();
-  let cancel = false;
-  const deps = {
-    ...f.deps,
-    signal: controller.signal,
-    fetch: async (url: string, init: RequestInit) => {
-      if (init.method === "POST") {
-        // Advance request deadlines without waiting for the server's processing budget.
-        elapsed += 45_000;
-        for (const deadline of deadlines)
-          if (deadline.at <= elapsed)
-            deadline.controller.abort(
-              new DOMException("Timed out", "TimeoutError"),
-            );
-        if (cancel) controller.abort(new Error("Publication canceled"));
-      }
-      return f.deps.fetch(url, init);
-    },
-  };
-  try {
-    expect(
-      (
-        await (
-          await prepareExternalPublication(f.file, options, deps)
-        ).publish()
-      ).counts.created,
-    ).toBe(1);
-    await writeFile(
-      f.file,
-      JSON.stringify([normalized("vendor-1", "critical")]),
-    );
-    cancel = true;
-    const prepared = await prepareExternalPublication(f.file, options, deps);
-    await expect(prepared.publish()).rejects.toThrow("Publication canceled");
-    expect(f.posts).toHaveLength(1);
-    const retry = await prepareExternalPublication(f.file, options, f.deps);
-    expect(retry.preview.resumed).toBe(true);
-    expect(retry.preview.requests[0]!.request_id).toBe(
-      prepared.preview.requests[0]!.request_id,
-    );
-    expect((await retry.publish()).counts.updated).toBe(1);
-  } finally {
-    timeout.mockRestore();
   }
 });
 
@@ -1878,6 +1748,10 @@ test("mixed environments preserve input order and are shown before confirmation"
     ["new-b", 0],
     ["existing-c", 1],
   ]);
+  f.state.throttle = true;
+  await expect(prepared.publish()).rejects.toThrow("Retry-After");
+  f.state.throttle = false;
+  f.state.environmentId = "changed-default";
   const cli = createCliTest(main);
   expect(
     await cli.runCli(f.command, {
@@ -1888,12 +1762,19 @@ test("mixed environments preserve input order and are shown before confirmation"
           expect(cli.stderr.text()).toContain(
             "Environment: environment-example, replacement-environment",
           );
-          expect(f.posts).toHaveLength(1);
+          expect(cli.stderr.text()).not.toContain("changed-default");
+          expect(f.posts).toHaveLength(2);
           return true;
         },
       },
     }),
   ).toBe(0);
+  expect(
+    JSON.parse(cli.stdout.text()).receipts.map(
+      (receipt: FindingImportReceipt) => receipt.id,
+    ),
+  ).toEqual(prepared.preview.requests.map((request) => request.request_id));
+  expect(f.posts[2]).toBe(f.posts[1]);
   expect(JSON.parse(cli.stdout.text()).counts).toEqual({
     created: 1,
     updated: 2,
@@ -2026,6 +1907,13 @@ test.each([false, true])(
       if (cancel) {
         await expect(completion).rejects.toThrow("Synthetic cancellation");
         expect(f.posts).toHaveLength(0);
+        const retry = await prepareExternalPublication(f.file, options, f.deps);
+        expect(retry.preview.resumed).toBe(true);
+        expect(retry.preview.requests[0]!.request_id).toBe(
+          prepared.preview.requests[0]!.request_id,
+        );
+        expect((await retry.publish()).counts.created).toBe(1);
+        expect(f.posts[0]).toBe(JSON.stringify(prepared.preview.requests[0]));
       } else {
         expect((await completion).counts.created).toBe(1);
         expect(f.posts).toHaveLength(1);

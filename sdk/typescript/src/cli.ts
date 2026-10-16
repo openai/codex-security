@@ -1797,7 +1797,7 @@ export async function main(
   let renderedOutput: string | undefined;
   let structuredError = false;
   let failedResultOutput:
-    { format: "json" | "jsonl"; message: string } | undefined;
+    { format: "json" | "jsonl"; code?: string; message: string } | undefined;
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   const finishScan = (
@@ -3276,7 +3276,7 @@ export async function main(
         format !== "json" &&
         format !== "jsonl"
       ) {
-        publicationStructuredError = true;
+        structuredError = true;
         exitCode = 2;
         return incurError({
           code: "INVALID_ARGUMENTS",
@@ -3364,7 +3364,7 @@ export async function main(
         if (!structured) showPreview();
         if (options.dryRun) {
           if (humanSummary)
-            renderedPublication = "Dry run complete. No findings uploaded.\n";
+            renderedOutput = "Dry run complete. No findings uploaded.\n";
           return { ...preview, dryRun: true };
         }
         if (!options.yes) {
@@ -3383,14 +3383,14 @@ export async function main(
               controller.signal,
             ))
           ) {
-            if (humanSummary) renderedPublication = "No findings published.\n";
+            if (humanSummary) renderedOutput = "No findings published.\n";
             return { published: false, preview };
           }
         }
         const result = await prepared.publish();
         if (result.status === "partial") exitCode = 1;
         if (humanSummary)
-          renderedPublication = renderExternalPublicationSummary(result);
+          renderedOutput = renderExternalPublicationSummary(result);
         else if (!structured)
           errorOutput.write(renderExternalPublicationSummary(result));
         return { ...result };
@@ -3399,7 +3399,7 @@ export async function main(
           argv.includes("--full-output") &&
           (format === "json" || format === "jsonl")
         )
-          failedFullOutput = {
+          failedResultOutput = {
             format,
             code: "IMPORT_FAILED",
             message: diagnosticValue(error),
@@ -3410,9 +3410,7 @@ export async function main(
         );
         if (error instanceof ExternalPublicationError) {
           if (humanSummary)
-            renderedPublication = renderExternalPublicationSummary(
-              error.result,
-            );
+            renderedOutput = renderExternalPublicationSummary(error.result);
           return { ...error.result };
         }
         return structured
@@ -6462,7 +6460,7 @@ export async function main(
             ...envelope,
             ok: false,
             error: {
-              code: "SCAN_FAILED",
+              code: failedResultOutput.code ?? "SCAN_FAILED",
               message: failedResultOutput.message,
             },
           },

@@ -607,6 +607,12 @@ export async function prepareExternalPublication(
         throw new CodexSecurityError(
           "Configure an authorized Cloud environment for this repository before importing findings.",
         );
+      const repository = {
+        id: destination.id,
+        repo_connector_id: destination.repo_connector_id,
+        environment_id: environmentId,
+        reset_marker: destination.reset_marker,
+      };
       const item = {
         client_id: `item-${index + 1}`,
         source_finding_id: finding.source_finding_id,
@@ -624,12 +630,7 @@ export async function prepareExternalPublication(
         requests.push(validateImportRequest(current));
         current = undefined;
       }
-      current ??= {
-        request_id: randomUUID(),
-        repository: { ...repository, environment_id: environmentId },
-        source,
-        items: [],
-      };
+      current ??= { request_id: randomUUID(), repository, source, items: [] };
       current.items.push(item);
     }
     if (current) requests.push(validateImportRequest(current));
