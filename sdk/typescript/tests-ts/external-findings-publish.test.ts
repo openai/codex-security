@@ -2718,3 +2718,44 @@ test("normalized SDK publication rejects nonfinite raw evidence without JSON coe
   expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
 });
+
+test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input = snykSarif();
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "snyk" as const,
+    sourceKey: "organization/project/main",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  const second = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(second.counts.unchanged).toBe(1);
+  input.runs[0]!.results[0]!.message.text = "Updated source evidence";
+  await writeFile(f.file, JSON.stringify(input));
+  const third = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(third.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.version).toBe(2);
+});
+
+test("Snyk CLI dry run selects its adapter without writing an import", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const f = await fixture(snykSarif());
+  const command = [...f.command, "--dry-run"];
+  command[command.indexOf("--provider") + 1] = "snyk";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});

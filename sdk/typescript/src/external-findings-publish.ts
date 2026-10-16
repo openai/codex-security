@@ -17,6 +17,7 @@ import {
 } from "./runtime.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
+import { readSnykFindings } from "./snyk-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -48,7 +49,7 @@ function cloudRepositoryUrlKey(value: string): string {
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {
   repository: string;
-  provider: "wiz" | "github";
+  provider: "wiz" | "github" | "snyk";
   sourceKey: string;
 }
 
@@ -279,6 +280,12 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  if (options.provider === "snyk")
+    return prepareNormalizedExternalPublication(
+      await readSnykFindings(path),
+      options,
+      dependencies,
+    );
   if (options.provider === "github")
     return prepareNormalizedExternalPublication(
       await readGitHubFindings(path),
@@ -346,7 +353,9 @@ async function preparePublicationInput(
     throw new CodexSecurityError(
       options.provider === "wiz"
         ? "The source key must contain 1–512 UTF-8 bytes. Use a stable Wiz tenant/finding namespace, such as TENANT_ID/vulnerability-finding, across exports."
-        : "The source key must contain 1–512 UTF-8 bytes. Use a stable GitHub host/repository/finding namespace across imports.",
+        : options.provider === "snyk"
+          ? "The source key must contain 1–512 UTF-8 bytes. Use a stable Snyk organization/project/branch namespace across exports."
+          : "The source key must contain 1–512 UTF-8 bytes. Use a stable GitHub host/repository/finding namespace across imports.",
     );
   }
   progress({ phase: "reading", completed: 0 });
