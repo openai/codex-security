@@ -1524,6 +1524,10 @@ The token needs code-scanning read access; access failures reject the import.
 
 ## Validate and patch findings
 
+Hosts that manage their own model execution can use `codex-security validate --records`.
+This mode exchanges a review over JSON-RPC and checks the returned answer against a caller-provided schema.
+See [host-provided standalone validation](validate-records.md) for the protocol and execution requirements.
+
 `validate` assesses candidates from local source evidence without building the
 target, executing application code, running tests or PoCs, or contacting services.
 It uses a read-only sandbox. Standard, Deep, and diff scans retain their existing
