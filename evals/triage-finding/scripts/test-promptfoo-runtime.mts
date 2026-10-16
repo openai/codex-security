@@ -103,7 +103,7 @@ try {
 for (const name of [
   "promptfooconfig.yaml",
   "promptfooconfig.calibration.yaml",
-  "sastbench/promptfooconfig.sastbench.yaml",
+  "promptfooconfig.sastbench.yaml",
 ]) {
   const suite = parse(fs.readFileSync(path.join(evalRoot, name), "utf8"));
   const providerPath = path.resolve(evalRoot, suite.providers[0].$ref);
@@ -126,7 +126,7 @@ for (const name of [
   assert.equal(config.cli_env?.CODEX_MCP_NODE_PATH, undefined);
   assert.equal(config.sandbox_mode, undefined);
   assert.equal(config.network_access_enabled, undefined);
-  if (name !== "sastbench/promptfooconfig.sastbench.yaml") {
+  if (name !== "promptfooconfig.sastbench.yaml") {
     for (const proxy of [
       "HTTP_PROXY",
       "HTTPS_PROXY",

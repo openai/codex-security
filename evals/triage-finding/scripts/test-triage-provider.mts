@@ -1273,7 +1273,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
           path.join(
             evalRoot,
             suite === "SAST"
-              ? "sastbench/promptfooconfig.sastbench.yaml"
+              ? "promptfooconfig.sastbench.yaml"
               : "promptfooconfig.calibration.yaml",
           ),
           "utf8",

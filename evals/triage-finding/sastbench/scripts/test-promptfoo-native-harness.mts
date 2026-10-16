@@ -9,11 +9,15 @@ import { parse } from "yaml";
 
 const sastbenchRoot = path.resolve(import.meta.dirname, "..");
 const evalRoot = path.resolve(sastbenchRoot, "..");
-const config = parse(
+const entryConfig = parse(
   fs.readFileSync(
     path.join(sastbenchRoot, "promptfooconfig.sastbench.yaml"),
     "utf8",
   ),
+);
+assert.equal(entryConfig.$ref, "./promptfooconfig.sastbench.yaml");
+const config = parse(
+  fs.readFileSync(path.resolve(evalRoot, entryConfig.$ref), "utf8"),
 );
 const sampleConfig = parse(
   fs.readFileSync(
@@ -73,7 +77,7 @@ assert.equal(
   derivedMetrics.get("strict_accuracy"),
   "(strict_tp + strict_tn) / max(positive_cases + negative_cases, 1)",
 );
-assert.equal(sampleConfig.$ref, "./sastbench/promptfooconfig.sastbench.yaml");
+assert.equal(sampleConfig.$ref, entryConfig.$ref);
 assert.equal(
   sampleConfig.tests,
   "file://./scripts/sastbench-lib.mts:generateSampleTests",
