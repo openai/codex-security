@@ -1374,6 +1374,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_CLI_PATH",
     "CODEX_MCP_NODE_PATH",
     "CODEX_HOME",
+    "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1861,6 +1862,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+              process.env.CODEX_SECURITY_STATE_DIR = path.join(
+                fixture.root,
+                `state-${index}`,
+              );
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
               process.env.CODEX_SECURITY_KNOWLEDGE_BASE =
@@ -1995,6 +2000,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
+            assert.equal(
+              invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
+              path.join(fixture.root, `state-${index}`),
+            );
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.mcpNodePath, nodePaths[index]);
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
@@ -2233,6 +2242,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
+            );
+            assert.equal(
+              launch.environment!.CODEX_SECURITY_STATE_DIR,
+              path.join(
+                fixture.root,
+                `state-${workerConfigurations.indexOf(selectedProvider)}`,
+              ),
             );
             assert.equal(
               preflight.providerKey,
