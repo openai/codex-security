@@ -9085,6 +9085,10 @@ async function executeScan(
   }
 
   if (arguments_.sarifPath !== undefined) {
+    const controller = new AbortController();
+    const removeSignals = listenForAbort(dependencies, controller, (signal) =>
+      dependencies.forceExit(signal),
+    );
     try {
       const directory = dependencies.currentDirectory();
       const repositoryPath = resolveCliPath(
@@ -9098,25 +9102,36 @@ async function executeScan(
         output: arguments_.sarifPath,
         sourceRoot,
         pythonPath: arguments_.pythonPath,
+        signal: controller.signal,
       };
       let exported = exportArguments;
       const protectedRoots = new Set([
-        directory,
         repositoryPath,
         sourceRoot,
-        ...(await enclosingGitWorktreeRoots(sourceRoot)),
+        ...(await enclosingGitWorktreeRoots(sourceRoot, controller.signal)),
+        ...(await enclosingGitWorktreeRoots(directory, controller.signal)),
       ]);
       for (const root of protectedRoots) {
         exported = await resolveArtifactExportOutput(exportArguments, root);
       }
       await dependencies.exportFindings(exported);
+      controller.signal.throwIfAborted();
       scanData = { ...scanData, sarifPath: exported.output };
       try {
         errorOutput.write(`SARIF: ${diagnosticValue(exported.output)}\n`);
       } catch {}
     } catch (error) {
-      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-      return finishResult(2, errorMessage(error));
+      const signal = controller.signal.reason;
+      const message =
+        signal === "SIGINT"
+          ? "Scan canceled by Ctrl-C."
+          : signal === "SIGTERM"
+            ? "Scan terminated by SIGTERM."
+            : errorMessage(error);
+      errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
+      return finishResult(interruptedExitCode(controller.signal) ?? 2, message);
+    } finally {
+      removeSignals();
     }
   }
 

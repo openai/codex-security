@@ -102,6 +102,7 @@ test.each([
       output,
       sourceRoot: repository,
       pythonPath,
+      signal: expect.any(AbortSignal),
     });
     expect(JSON.parse(stdout.text())).toEqual(
       JSON.parse(JSON.stringify({ ...result.toJSON(), sarifPath: output })),
@@ -146,7 +147,8 @@ test("does not export when --sarif is omitted", async () => {
 test("keeps normal output on stderr when exporting SARIF", async () => {
   const { directory, repository, result } = await completedScan();
   const output = join(directory, "results.sarif");
-  const deps = dependencies({ currentDirectory: repository, result });
+  const signals = new FakeSignals();
+  const deps = dependencies({ currentDirectory: repository, result, signals });
   deps.exportFindings = runArtifactExport;
   const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -157,6 +159,8 @@ test("keeps normal output on stderr when exporting SARIF", async () => {
   expect(stdout.text()).toBe("");
   expect(stderr.text()).toContain(`SARIF: ${output}\n`);
   expect(JSON.parse(await readFile(output, "utf8")).version).toBe("2.1.0");
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
 });
 
 test("preserves a successful export when its progress notice fails", async () => {
@@ -194,7 +198,8 @@ test("preserves a successful export when its progress notice fails", async () =>
 
 test("preserves completed scan data when SARIF export fails", async () => {
   const { directory, repository, result } = await completedScan();
-  const deps = dependencies({ currentDirectory: repository, result });
+  const signals = new FakeSignals();
+  const deps = dependencies({ currentDirectory: repository, result, signals });
   const message = "EACCES: synthetic SARIF output denied";
   deps.exportFindings = async () => {
     throw new Error(message);
@@ -221,10 +226,63 @@ test("preserves completed scan data when SARIF export fails", async () => {
   });
   expect(stderr.text()).toContain(message);
   expect(stderr.text()).not.toContain("SARIF:");
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   expect(JSON.parse(await readFile(result.manifestPath, "utf8"))).toEqual(
     result.manifest,
   );
 });
+
+test.each([
+  ["SIGINT", 130, "rejects"],
+  ["SIGINT", 130, "resolves"],
+  ["SIGTERM", 143, "rejects"],
+  ["SIGTERM", 143, "resolves"],
+] as const)(
+  "retains completed scan data after %s (exit %i) when the exporter %s",
+  async (interruption, exitCode, completion) => {
+    const { directory, repository, result } = await completedScan();
+    const output = join(directory, "results.sarif");
+    await writeFile(output, "previous export\n");
+    const signals = new FakeSignals();
+    const deps = dependencies({
+      currentDirectory: repository,
+      result,
+      signals,
+    });
+    const exporter = mock<typeof deps.exportFindings>(async ({ signal }) => {
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal?.aborted).toBe(false);
+      signals.emit(interruption);
+      expect(signal?.aborted).toBe(true);
+      expect(signal?.reason).toBe(interruption);
+      if (completion === "rejects") signal?.throwIfAborted();
+      return undefined;
+    });
+    deps.exportFindings = exporter;
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", ".", "--sarif", output, "--json", "--full-output"],
+        deps,
+      ),
+    ).toBe(exitCode);
+    expect(exporter).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: { code: "SCAN_FAILED" },
+      data: JSON.parse(JSON.stringify(result.toJSON())),
+    });
+    expect(stderr.text()).not.toContain("SARIF:");
+    expect(await readFile(output, "utf8")).toBe("previous export\n");
+    expect(JSON.parse(await readFile(result.manifestPath, "utf8"))).toEqual(
+      result.manifest,
+    );
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+  },
+);
 
 test.each(["dry-run", "failed", "canceled", "SIGINT"] as const)(
   "does not export a %s scan",
@@ -279,6 +337,49 @@ test("rejects a SARIF output path that would overwrite a scan artifact", async (
   expect(await readFile(result.findingsPath)).toEqual(before);
 });
 
+test.each([false, true])(
+  "protects caller-owned output aliases only for Git worktrees: %j",
+  async (gitCaller) => {
+    const { directory, repository, result } = await completedScan();
+    const caller = join(directory, "caller");
+    const reports = join(directory, "reports");
+    const output = join(reports, "results.sarif");
+    await mkdir(caller);
+    await mkdir(reports);
+    await writeFile(output, "previous export\n");
+    if (gitCaller) {
+      const initialized = await runCommand("git", ["init", "--quiet", caller]);
+      expect(initialized.status, initialized.stderr).toBe(0);
+    }
+    await symlink(
+      reports,
+      join(caller, "reports"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const deps = dependencies({ currentDirectory: caller, result });
+    const exporter = mock(runArtifactExport);
+    deps.exportFindings = exporter;
+    const { stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", repository, "--sarif", join("reports", "results.sarif")],
+        deps,
+      ),
+      stderr.text(),
+    ).toBe(gitCaller ? 2 : 0);
+    if (gitCaller) {
+      expect(exporter).not.toHaveBeenCalled();
+      expect(stderr.text()).toContain("cannot traverse a repository symlink");
+      expect(await readFile(output, "utf8")).toBe("previous export\n");
+    } else {
+      expect(exporter).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(await readFile(output, "utf8")).version).toBe("2.1.0");
+      expect(stderr.text()).toContain(`SARIF: ${output}\n`);
+    }
+  },
+);
+
 test.each([
   "canonical",
   "alias",
@@ -296,7 +397,7 @@ test.each([
     const output = join(outside, "results.sarif");
     await mkdir(outside);
     await mkdir(launchDirectory);
-    if (pathKind.startsWith("external-")) {
+    if (pathKind === "child-directory" || pathKind.startsWith("external-")) {
       const initialized = await runCommand("git", [
         "init",
         "--quiet",
