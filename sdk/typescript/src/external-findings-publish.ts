@@ -18,6 +18,7 @@ import {
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSnykFindings } from "./snyk-findings.js";
+import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readEndorFindings } from "./endor-findings.js";
 import type {
   ExternalFindings,
@@ -50,7 +51,8 @@ function cloudRepositoryUrlKey(value: string): string {
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {
   repository: string;
-  provider: "wiz" | "github" | "snyk" | "endor";
+  provider: "wiz" | "github" | "snyk" | "endor" | "semgrep";
+  sourceRepositoryUrl?: string;
   sourceKey: string;
 }
 
@@ -281,6 +283,14 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  if (options.provider === "semgrep")
+    return prepareNormalizedExternalPublication(
+      await readSemgrepFindings(path, {
+        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+      }),
+      options,
+      dependencies,
+    );
   if (options.provider === "endor")
     return prepareNormalizedExternalPublication(
       await readEndorFindings(path),
