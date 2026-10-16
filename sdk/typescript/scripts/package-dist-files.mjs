@@ -69,6 +69,7 @@ const distModules = [
   "security-policy",
   "security-policy-cli",
   "standalone-validation-prompt",
+  "validation-records",
   "suggest-owners",
   "scan-sessions",
   "server/api",
