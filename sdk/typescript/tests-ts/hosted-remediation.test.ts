@@ -1,5 +1,3 @@
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,37 +6,30 @@ import {
   runHostedRemediation,
   runHostedRemediationProtocol,
   type HostedRemediationInput,
-  type RemediationExecutionRequest,
-  type RemediationExecutionResult,
   type RemediationExecutor,
   type FindingVerification,
-  type FindingVerificationCheck,
 } from "../src/index.js";
-import { parseFindingVerifications } from "../src/remediation.js";
+import {
+  parseFindingPatch,
+  parseFindingVerifications,
+} from "../src/remediation.js";
 import { capture } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { writeSource } from "./support/shell.js";
+import { parseJsonLines } from "./support/json.js";
+import { rejecting } from "./support/errors.js";
+import {
+  exerciseRemediationProtocol,
+  passedChecks,
+  remediationInput,
+  remediationReceipt as receipt,
+} from "./support/hosted-remediation.mjs";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "hosted-remediation-",
 );
 afterEach(cleanup);
-
-const passedChecks: FindingVerificationCheck[] = [
-  {
-    name: "Authorization regression tests",
-    status: "passed",
-    command: "bun test tests/authorization.test.ts",
-    evidence:
-      "The original unauthorized request is rejected and the legitimate request succeeds.",
-  },
-  {
-    name: "Static assessment of equivalent authorization paths",
-    status: "passed",
-    evidence: "All handlers in guard.ts use the shared authorization check.",
-  },
-];
 
 async function fixture(
   operation: HostedRemediationInput["operation"] = "patch",
@@ -49,63 +40,19 @@ async function fixture(
   git(repository, "init", "-q");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "fixture");
-  return {
-    version: 1,
+  return remediationInput(
+    { repository, revision: git(repository, "rev-parse", "HEAD") },
     operation,
-    repository,
-    revision: git(repository, "rev-parse", "HEAD"),
-    finding: {
-      id: "finding-1",
-      context:
-        "Original authorization boundary and legitimate request evidence.",
-    },
-    instructions: "Preserve the shared authorization helper.",
-    validationInstructions: "Run the focused authorization checks.",
-    model: "fixture-model",
-    reasoningEffort: "high",
-    identity: { runId: "run-1", attemptId: "attempt-1", buildId: "fixture" },
-  };
+  );
 }
 
-function receipt(
-  request: Pick<
-    RemediationExecutionRequest,
-    "requestId" | "operation" | "findingId"
-  >,
-  overrides: Partial<RemediationExecutionResult> = {},
-): RemediationExecutionResult {
-  return {
-    requestId: request.requestId,
-    status: "completed",
-    sessionId: "host-session",
-    usage: { input_tokens: 100, output_tokens: 25 },
-    finalResponse: JSON.stringify(
-      request.operation === "patch"
-        ? {
-            patches: [
-              {
-                occurrenceId: request.findingId,
-                status: "verified",
-                files: ["guard.ts"],
-                verification:
-                  "Original request rejected; legitimate control passed.",
-              },
-            ],
-          }
-        : {
-            results: [
-              {
-                id: request.findingId,
-                status: "fixed",
-                evidence:
-                  "Original request rejected; legitimate control passed.",
-                checks: passedChecks,
-              },
-            ],
-          },
-    ),
-    ...overrides,
-  };
+function runResponse(input: HostedRemediationInput, response: unknown) {
+  return runHostedRemediation(input, {
+    executor: {
+      run: async (request) =>
+        receipt(request, { finalResponse: JSON.stringify(response) }),
+    },
+  });
 }
 
 test.each(["patch", "verify"] as const)(
@@ -177,14 +124,7 @@ test.each(["verified", "no_change", "blocked", "failed"] as const)(
       verification: "Current source and legitimate behavior checked.",
       reason: "Relevant test tooling is unavailable.",
     };
-    const result = await runHostedRemediation(input, {
-      executor: {
-        run: async (request) =>
-          receipt(request, {
-            finalResponse: JSON.stringify({ patches: [patch] }),
-          }),
-      },
-    });
+    const result = await runResponse(input, { patches: [patch] });
     expect(result.status).toBe("completed");
     expect(result.patch).toEqual(patch);
     expect(result.verification).toBeUndefined();
@@ -213,14 +153,7 @@ test.each(["fixed", "still_vulnerable", "inconclusive"] as const)(
               },
             ],
     };
-    const result = await runHostedRemediation(input, {
-      executor: {
-        run: async (request) =>
-          receipt(request, {
-            finalResponse: JSON.stringify({ results: [verification] }),
-          }),
-      },
-    });
+    const result = await runResponse(input, { results: [verification] });
     expect(result.status).toBe("completed");
     expect(result.verification).toEqual(verification);
     expect(result.patch).toBeUndefined();
@@ -236,16 +169,9 @@ test("static evidence remains distinct from commands when no runtime check is re
       "The constant deny rule rejects every unauthorized call while the existing authorized branch remains unchanged.",
     checks: [passedChecks[1]!],
   };
-  const result = await runHostedRemediation(
+  const result = await runResponse(
     { ...input, validationInstructions: undefined },
-    {
-      executor: {
-        run: async (request) =>
-          receipt(request, {
-            finalResponse: JSON.stringify({ results: [verification] }),
-          }),
-      },
-    },
+    { results: [verification] },
   );
   expect(result.status).toBe("completed");
   expect(result.verification).toEqual(verification);
@@ -273,10 +199,19 @@ test.each([
   "not JSON",
   JSON.stringify({ results: [] }),
   JSON.stringify({
-    results: [{ id: "other", status: "fixed", evidence: "Checked" }],
+    results: [
+      {
+        id: "other",
+        status: "fixed",
+        evidence: "Checked",
+        checks: passedChecks,
+      },
+    ],
   }),
   JSON.stringify({
-    results: [{ id: "finding-1", status: "fixed", evidence: " " }],
+    results: [
+      { id: "finding-1", status: "fixed", evidence: " ", checks: passedChecks },
+    ],
   }),
   ...[
     undefined,
@@ -304,22 +239,11 @@ test.each([
       ],
     }),
   ),
-])(
-  "invalid verification preserves the execution receipt: %s",
-  async (finalResponse) => {
-    const input = await fixture("verify");
-    const result = await runHostedRemediation(input, {
-      executor: { run: async (request) => receipt(request, { finalResponse }) },
-    });
-    expect(result.status).toBe("failed");
-    expect(result.error?.code).toBe("INVALID_RESULT");
-    expect(result.verification).toBeUndefined();
-    expect(result.execution).toMatchObject({
-      sessionId: "host-session",
-      finalResponse,
-    });
-  },
-);
+])("hosted verification rejects invalid results: %s", (response) => {
+  expect(() =>
+    parseFindingVerifications(response, ["finding-1"], { requireChecks: true }),
+  ).toThrow();
+});
 
 test.each([
   { status: "verified", verification: undefined },
@@ -331,29 +255,38 @@ test.each([
     occurrenceId: "another-finding",
     verification: "Checked",
   },
-])("invalid patch outcome %p retains the execution receipt", async (patch) => {
-  const input = await fixture();
-  const result = await runHostedRemediation(input, {
-    executor: {
-      run: async (request) =>
-        receipt(request, {
-          finalResponse: JSON.stringify({
-            patches: [{ occurrenceId: input.finding.id, files: [], ...patch }],
-          }),
-        }),
-    },
-  });
-  expect(result.status).toBe("failed");
-  expect(result.error?.code).toBe("INVALID_RESULT");
-  expect(result.patch).toBeUndefined();
-  expect(result.execution?.sessionId).toBe("host-session");
+])("patch parsing rejects invalid outcome %p", (patch) => {
+  expect(() =>
+    parseFindingPatch(
+      JSON.stringify({
+        patches: [{ occurrenceId: "finding-1", files: [], ...patch }],
+      }),
+      "finding-1",
+    ),
+  ).toThrow();
 });
+
+test.each(["patch", "verify"] as const)(
+  "invalid %s results preserve the execution receipt",
+  async (operation) => {
+    const finalResponse = "invalid JSON";
+    const result = await runHostedRemediation(await fixture(operation), {
+      executor: { run: async (request) => receipt(request, { finalResponse }) },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.error?.code).toBe("INVALID_RESULT");
+    expect(result.patch).toBeUndefined();
+    expect(result.verification).toBeUndefined();
+    expect(result.execution).toMatchObject({
+      sessionId: "host-session",
+      finalResponse,
+    });
+  },
+);
 
 test("a changed HEAD fails before execution, and cannot be accepted afterward", async () => {
   const input = await fixture();
-  const never = mock<RemediationExecutor["run"]>(async () => {
-    throw new Error("Must not execute");
-  });
+  const never = mock(rejecting("Must not execute"));
   await expect(
     runHostedRemediation(
       { ...input, revision: "0".repeat(40) },
@@ -415,11 +348,7 @@ test("malformed protocol input returns one error without dispatch", async () => 
       "\n",
   );
   expect(await completed).toBe(2);
-  const messages = output
-    .text()
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const messages = parseJsonLines(output.text());
   expect(messages).toHaveLength(1);
   expect(messages[0].error.code).toBe(-32602);
   input.destroy();
@@ -436,67 +365,8 @@ test.each([
     const entrypoint = pathToFileURL(
       join(import.meta.dirname, "../src/index.ts"),
     ).href;
-    const child = spawn(
-      process.execPath,
-      [
-        "-e",
-        `import(${JSON.stringify(entrypoint)}).then(async ({runHostedRemediationProtocol}) => { process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout); });`,
-      ],
-      { stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const closed = new Promise<number | null>((resolve, reject) => {
-      child.on("exit", resolve);
-      child.on("error", reject);
+    await exerciseRemediationProtocol(process.execPath, entrypoint, input, {
+      cancel,
     });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    const send = (value: object) =>
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...value }) + "\n");
-    let execution: RemediationExecutionRequest | undefined;
-    const messages: any[] = [];
-    try {
-      send({ id: "run", method: "run", params: input });
-      for await (const line of createInterface({ input: child.stdout })) {
-        const message = JSON.parse(line);
-        messages.push(message);
-        if (message.method === "execution.run") {
-          expect(execution).toBeUndefined();
-          execution = message.params;
-          send({
-            method: "execution.progress",
-            params: {
-              requestId: execution!.requestId,
-              event: { type: "activity", description: "Check" },
-            },
-          });
-          if (cancel) send({ method: "cancel", params: { id: "run" } });
-          else send({ id: message.id, result: receipt(execution!) });
-        } else if (message.method === "execution.cancel") {
-          expect(message.params.requestId).toBe(execution?.requestId);
-          send({
-            id: execution!.requestId,
-            result: receipt(execution!, { status: "canceled" }),
-          });
-        }
-      }
-      expect(await closed, stderr).toBe(cancel ? 1 : 0);
-      expect(messages.at(-1)).toMatchObject({
-        id: "run",
-        result: {
-          status: cancel ? "canceled" : "completed",
-          execution: {
-            sessionId: "host-session",
-            usage: { input_tokens: 100, output_tokens: 25 },
-          },
-        },
-      });
-      expect(
-        messages.some((message) => message.method === "remediation.progress"),
-      ).toBe(true);
-    } finally {
-      child.kill();
-    }
   },
 );

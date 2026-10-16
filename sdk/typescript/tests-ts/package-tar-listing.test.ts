@@ -83,6 +83,7 @@ function packageTar({
     "package/docs/dedupe-records.md",
     "package/docs/hosted-scans.md",
     "package/docs/validate-records.md",
+    "package/docs/hosted-remediation.md",
     "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/LICENSE",
