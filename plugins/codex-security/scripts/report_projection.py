@@ -29,7 +29,7 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
+    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
         part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)

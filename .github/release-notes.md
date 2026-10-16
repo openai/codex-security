@@ -17,6 +17,7 @@
 - correct underreported token totals in Codex Security scans ([#1657](https://github.com/openai/codex-security/pull/1657))
 - support hosted Standard scan execution ([#1559](https://github.com/openai/codex-security/pull/1559))
 - normalize invalid code evidence line ranges ([#1656](https://github.com/openai/codex-security/pull/1656))
+- prefix tilde fences and parenthesized list markers ([#1604](https://github.com/openai/codex-security/pull/1604))
 
 <!-- release-section: highlights:end -->
 
