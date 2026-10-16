@@ -4185,7 +4185,25 @@ describe("CodexSecurity orchestration", () => {
                       {},
                       { parent: "thread-1" },
                     );
-                    await observed.promise;
+                    // The fake stream has no executor transport to keep the
+                    // event loop alive while the tracker polls its new worker.
+                    const timeout = setTimeout(
+                      () =>
+                        observed.reject(
+                          new Error(
+                            "Timed out waiting for worker observation.",
+                          ),
+                        ),
+                      Number(
+                        process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ??
+                          "30000",
+                      ),
+                    );
+                    try {
+                      await observed.promise;
+                    } finally {
+                      clearTimeout(timeout);
+                    }
                   }
                 }
               }
@@ -4209,6 +4227,7 @@ describe("CodexSecurity orchestration", () => {
         expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
         expect(errors).toEqual(failure === "none" ? [] : ["onWorkerEvent"]);
       } finally {
+        observed.resolve();
         await client.close();
       }
     },

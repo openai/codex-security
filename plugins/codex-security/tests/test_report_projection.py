@@ -678,7 +678,7 @@ def test_projection_escapes_markdown_link_syntax_in_finding_title() -> None:
     assert "[Parser ](https://example.com) [boundary](" not in markdown
 
 
-def test_projection_normalizes_target_and_scope_paths() -> None:
+def test_projection_normalizes_target_and_quotes_scope_control_characters() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"]["displayName"] = "repo\n## Injected target heading"
     manifest["scan"]["scope"]["includePaths"] = ["src\n## Injected path heading"]
@@ -689,7 +689,46 @@ def test_projection_normalizes_target_and_scope_paths() -> None:
     assert "\n## Injected target heading" not in markdown
     assert "\n## Injected path heading" not in markdown
     assert "# Security Review: repo ## Injected target heading" in markdown
-    assert "- Included paths: src ## Injected path heading" in markdown
+    assert '- Included paths: `"src\\n## Injected path heading"`' in markdown
+
+
+@pytest.mark.parametrize(
+    ("path", "marker"),
+    [
+        (" ", "`"),
+        ("  ", "`"),
+        (" service ", "`"),
+        ("a,b.ts", "`"),
+        ("a  b", "`"),
+        (" a`b ", "``"),
+        ("a``b,c", "```"),
+    ],
+)
+def test_projection_preserves_ambiguous_literal_paths(path: str, marker: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = [path]
+    coverage["excludePaths"] = [path]
+    findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+    findings["findings"][0]["codeEvidence"] = [
+        {"id": "source", "label": "Source", "path": path, "startLine": 1, "code": "source()"}
+    ]
+    findings["findings"][0]["rootCause"] = {"evidenceRefs": ["source"]}
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert f'- Included paths: {marker}"{path}"{marker}' in markdown
+    assert f'- Excluded paths: {marker}"{path}"{marker}' in markdown
+    assert f'| Affected lines | {marker}"{path}"{marker}:1 |' in markdown
+    assert f'{marker}"{path}":1{marker}' in markdown
+
+
+def test_projection_distinguishes_repeated_spaces_from_ordinary_path_spacing() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["a  b", "a b", " ", "  "]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"a  b"`, a b, `" "`, `"  "`' in markdown
 
 
 def test_projection_includes_exact_target_identity() -> None:

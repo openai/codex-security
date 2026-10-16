@@ -82,7 +82,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
     @skipIf(os.name == "nt", "POSIX source filenames")
     def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
         source_root = self.scan_dir / "source"
-        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md"):
+        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md", " ", "\u00a0"):
             with self.subTest(name=name):
                 source = source_root / name
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -2317,6 +2317,43 @@ The extraction root is not enforced.
         self.assertEqual(
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
+
+    def test_preserves_literal_whitespace_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0"):
+            with self.subTest(path=path):
+                self.manifest["scan"]["scope"]["includePaths"] = [path]
+                self.coverage["includePaths"] = [path]
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Repository-relative evidence.",
+                    }
+                ]
+                self.write_scan()
+                manifest, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(manifest["scan"]["scope"]["includePaths"], [path])
+                self.assertEqual(coverage["includePaths"], [path])
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
+                self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+                if path.isascii():
+                    self.assertIn(
+                        f'- Included paths: `"{path}"`',
+                        (self.scan_dir / "report.md").read_text(encoding="utf-8"),
+                    )
+
+    def test_rejects_whitespace_only_artifact_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0"):
+            with self.subTest(path=path), self.assertRaises(FINALIZER.ContractError):
+                FINALIZER._require_portable_relative_path(path, "artifact")
 
     def test_rejects_missing_coverage_receipt(self) -> None:
         self.coverage["surfaces"][0]["receiptRefs"] = ["artifacts/02_discovery/work_ledger.jsonl"]
