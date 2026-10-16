@@ -13,6 +13,7 @@
 - bump taiki-e/install-action from 2.87.26 to 2.87.27 ([#1669](https://github.com/openai/codex-security/pull/1669))
 - remove obsolete JSON Schema loading path ([#1663](https://github.com/openai/codex-security/pull/1663))
 - share DiffTarget state validation ([#1667](https://github.com/openai/codex-security/pull/1667))
+- import Zod directly for schema consumers ([#1664](https://github.com/openai/codex-security/pull/1664))
 
 <!-- release-section: highlights:end -->
 

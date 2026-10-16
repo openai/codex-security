@@ -1,7 +1,7 @@
 import { lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { z } from "incur";
+import { z } from "zod";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   runReadOnlyCodex,
