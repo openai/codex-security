@@ -1541,13 +1541,55 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      for (const operation of ["preflight", "run"] as const) {
-        await expect(client[operation](repository)).rejects.toThrow(
+      for (const auth of ["api-key", "chatgpt"] as const) {
+        await expect(client.preflight(repository, { auth })).rejects.toThrow(
           `Set ${apiKey} to run a scan through ${name}.`,
         );
       }
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto", "api-key", "chatgpt"] as const) {
+          await expect(client.run(repository, { mode, auth })).rejects.toThrow(
+            `Set ${apiKey} to run a scan through ${name}.`,
+          );
+        }
+      }
       expect(prepareRuntime).not.toHaveBeenCalled();
       await client.close();
+    },
+  );
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "preflights %s with auto authentication without credentials or runtime startup",
+    async (_name, provider, apiKey, model, providerConfig) => {
+      const { repository } = await repositoryDirectories();
+      const prepareRuntime = mock(rejecting("runtime must not start"));
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model,
+            model_provider: provider,
+            model_providers: { [provider]: providerConfig },
+          },
+        },
+        { environment: {}, prepareRuntime },
+      );
+
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto"] as const) {
+          await expect(
+            client.preflight(repository, { mode, auth }),
+          ).resolves.toMatchObject({
+            mode,
+            modelProvider: provider,
+            authentication: {
+              method: "api_key",
+              source: apiKey,
+              verified: false,
+            },
+          });
+        }
+      }
+      expect(prepareRuntime).not.toHaveBeenCalled();
     },
   );
 

@@ -1166,6 +1166,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         hasCommandAuth(configuration),
+        true,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -4971,6 +4972,7 @@ export function scanAuthentication(
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
   modelProvider?: unknown,
   commandAuth = false,
+  preflight = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -5000,6 +5002,9 @@ export function scanAuthentication(
   const key = environmentApiKeyEntry(environment, modelProvider);
   if (key === null && isExternalModelProvider(modelProvider)) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    if (preflight && auth === "auto") {
+      return { method: "api_key", source: provider.env_key, verified: false };
+    }
     throw new AuthenticationRequiredError(
       `Set ${provider.env_key} to run a scan through ${provider.name}.`,
     );
