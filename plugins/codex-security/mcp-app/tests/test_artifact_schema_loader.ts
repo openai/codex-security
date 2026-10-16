@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import * as z from "zod/v4";
 import { importSource } from "./import-module.ts";
 
-const { bundleArtifactSchema, loadArtifactZodSchema } = await importSource(
+const { projectArtifactToolSchema } = await importSource(
   join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
 );
 
@@ -47,10 +48,10 @@ const document = {
       ],
     },
   },
-};
+} satisfies z.core.JSONSchema.JSONSchema;
 
-const original = bundleArtifactSchema([document], document.$id, "input");
-const validator = loadArtifactZodSchema([document], document.$id, "input");
+const original = structuredClone(document.$defs.input);
+const validator = projectArtifactToolSchema(z.fromJSONSchema(original));
 const advertised = validator.toJSONSchema({ io: "input" });
 assert.equal(original.properties.scope.properties.includePaths, false);
 assert.equal(
