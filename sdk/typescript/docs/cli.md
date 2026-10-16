@@ -359,13 +359,11 @@ Output directories must be empty and outside the scanned directory and enclosing
 Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`).
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
-Add `--sarif FILE` to export completed findings as SARIF 2.1.0 at the selected
-path, relative to the current directory. There is no default export destination.
-This preserves normal terminal output and the `--json` structure, with `sarifPath`
-pointing to the selected file. `--dry-run` does not
-write SARIF, and failed or interrupted scans do not export. A completed scan
-still exports before returning `1` for `--fail-on-severity`; export failures
-return `2`. See [exports and CI](#exports-and-ci) for GitHub Code Scanning.
+SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
+Add `--sarif FILE` to also export completed findings to a selected path, relative
+to the current directory. Normal terminal output and the `--json` structure are
+preserved; JSON `sarifPath` then points to the selected file. See
+[exports and CI](#exports-and-ci) for export behavior and GitHub Code Scanning.
 
 Completed scans exit with `0` by default. Configure `--fail-on-severity high`
 to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
@@ -1390,8 +1388,14 @@ codex-security scan . --sarif results.sarif --fail-on-severity high
 
 `--sarif FILE` uses the same converter as the offline `export` command, including
 severity, source locations, evidence, and source-line fingerprints. It writes
-after a successful scan, before optional patching. Existing files at the selected
-destination are replaced on successful export.
+after a completed scan, before optional patching, including when findings cause
+exit code `1` for `--fail-on-severity`. Dry runs and failed or interrupted scans
+do not write the requested export. Export failures return `2` and retain the
+completed scan's saved results, so you can retry with `export`.
+
+The destination's parent directory must exist. Existing files at the selected
+destination are replaced on successful export. Omitting `--sarif` leaves the
+scan's usual artifacts and output unchanged.
 
 `export` reads saved results without Codex or credentials. It defaults to the
 current repository's latest completed scan. Choose either a positional result

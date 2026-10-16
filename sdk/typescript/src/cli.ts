@@ -9106,7 +9106,6 @@ async function executeScan(
       };
       let exported = exportArguments;
       const protectedRoots = new Set([
-        repositoryPath,
         sourceRoot,
         ...(await enclosingGitWorktreeRoots(sourceRoot, controller.signal)),
         ...(await enclosingGitWorktreeRoots(directory, controller.signal)),

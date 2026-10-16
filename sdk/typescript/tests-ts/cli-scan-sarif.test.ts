@@ -163,6 +163,72 @@ test("keeps normal output on stderr when exporting SARIF", async () => {
   expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
 });
 
+test.each([false, true])(
+  "exports SARIF before patching and skips patches after an export failure: %j",
+  async (exportFails) => {
+    const { directory, repository, result } = await completedScan();
+    const output = join(directory, "results.sarif");
+    const finding = result.findings.findings[0]!;
+    let patchCalls = 0;
+    let exportedSarif = "";
+    const deps = dependencies({
+      currentDirectory: repository,
+      result,
+      onCodex: async (_args, streams) => {
+        patchCalls += 1;
+        exportedSarif = await readFile(output, "utf8");
+        expect(JSON.parse(exportedSarif).runs[0].results).toHaveLength(1);
+        await writeFile(join(repository, "src", "extract.py"), "patched\n");
+        streams?.stdout.write(
+          JSON.stringify({
+            patches: [
+              {
+                occurrenceId: finding.occurrenceId,
+                status: "verified",
+                files: ["src/extract.py"],
+                verification: "Synthetic patch verified.",
+              },
+            ],
+          }),
+        );
+        return 0;
+      },
+    });
+    const exporter = mock<typeof deps.exportFindings>(async (arguments_) => {
+      if (exportFails) throw new Error("Synthetic export failure");
+      return runArtifactExport(arguments_);
+    });
+    deps.exportFindings = exporter;
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        [
+          "scan",
+          ".",
+          "--sarif",
+          output,
+          "--patch",
+          "--patch-severity",
+          "high",
+          "--json",
+        ],
+        deps,
+      ),
+      stderr.text(),
+    ).toBe(exportFails ? 2 : 0);
+    expect(exporter).toHaveBeenCalledTimes(1);
+    expect(patchCalls).toBe(exportFails ? 0 : 1);
+    if (!exportFails) {
+      expect(await readFile(output, "utf8")).toBe(exportedSarif);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        sarifPath: output,
+        patches: [{ occurrenceId: finding.occurrenceId, status: "verified" }],
+      });
+    }
+  },
+);
+
 test("preserves a successful export when its progress notice fails", async () => {
   const { directory, repository, result } = await completedScan();
   const output = join(directory, "results.sarif");

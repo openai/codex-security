@@ -18,6 +18,7 @@ import {
   runWorkbench,
 } from "./runtime.js";
 
+// Bun's promise-based realpath can return drive-relative Windows roots.
 const nativeRealpath = promisify(callbackRealpath.native);
 
 export type ArtifactOutput = Pick<NodeJS.WriteStream, "write">;
@@ -265,67 +266,49 @@ export async function resolveArtifactExportOutput(
     const canonicalCurrent = await realpath(currentDirectory).catch(
       () => currentDirectory,
     );
-    let outputRoot = currentDirectory;
-    let canonicalOutputRoot = canonicalCurrent;
-    let outputFromCurrent = relative(outputRoot, arguments_.output);
-    if (isOutsidePath(outputFromCurrent)) {
-      for (
-        let directory = dirname(arguments_.output);
-        ;
-        directory = dirname(directory)
-      ) {
-        const canonicalDirectory = await nativeRealpath(directory).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return undefined;
-            throw error;
-          },
+    let traversedSymlink = false;
+    let expectedOutput: string | undefined;
+    for (
+      let directory = dirname(arguments_.output);
+      ;
+      directory = dirname(directory)
+    ) {
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      const canonicalDirectory =
+        relative(currentDirectory, directory) === ""
+          ? canonicalCurrent
+          : metadata === undefined
+            ? undefined
+            : await nativeRealpath(directory);
+      if (canonicalDirectory !== undefined) {
+        expectedOutput ??= resolve(
+          canonicalDirectory,
+          relative(directory, arguments_.output),
         );
         if (
-          canonicalDirectory !== undefined &&
-          !isOutsidePath(relative(canonicalCurrent, canonicalDirectory))
+          !isOutsidePath(relative(canonicalCurrent, canonicalDirectory)) &&
+          (traversedSymlink ||
+            isOutsidePath(relative(canonicalCurrent, outputPath)) ||
+            relative(expectedOutput, outputPath) !== "")
         ) {
-          outputRoot = directory;
-          canonicalOutputRoot = canonicalDirectory;
-          outputFromCurrent = relative(outputRoot, arguments_.output);
-        }
-        if (dirname(directory) === directory) break;
-      }
-    }
-    if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
-      let existingParent: string | undefined;
-      for (
-        let directory = dirname(arguments_.output);
-        relative(outputRoot, directory) !== "";
-        directory = dirname(directory)
-      ) {
-        const metadata = await lstat(directory).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return undefined;
-            throw error;
-          },
-        );
-        if (metadata?.isSymbolicLink()) {
           throw new CodexSecurityError(
             "The export output path cannot traverse a repository symlink.",
           );
         }
-        if (metadata !== undefined) existingParent ??= directory;
       }
-      const expectedOutput =
-        existingParent === undefined
-          ? resolve(canonicalOutputRoot, outputFromCurrent)
-          : resolve(
-              await realpath(existingParent),
-              relative(existingParent, arguments_.output),
-            );
+      // An external alias may select the repository, but links below it are
+      // repository-owned. Check ancestors before counting the current link.
+      traversedSymlink ||= metadata?.isSymbolicLink() ?? false;
       if (
-        isOutsidePath(relative(canonicalCurrent, outputPath)) ||
-        relative(expectedOutput, outputPath) !== ""
-      ) {
-        throw new CodexSecurityError(
-          "The export output path cannot traverse a repository symlink.",
-        );
-      }
+        relative(currentDirectory, directory) === "" ||
+        dirname(directory) === directory
+      )
+        break;
     }
   }
   return { ...arguments_, scanDir: canonicalScan, output: outputPath };
