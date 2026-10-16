@@ -39,7 +39,9 @@ Python uses `hashlib.sha256(text.encode("utf-8")).hexdigest()`.
 The CLI recomputes both hashes before requesting any review. Rubric revisions are
 positive safe integers; record revisions are nonnegative safe integers. Duplicate
 canonical IDs and invalid records reject the entire input before host work.
-The implementation snapshots caller input before awaiting model execution.
+The implementation snapshots caller input before awaiting model execution and
+preserves the validated report JSON text verbatim in the model prompt, including
+numeric evidence that JavaScript cannot represent exactly.
 
 ## Host execution contract
 

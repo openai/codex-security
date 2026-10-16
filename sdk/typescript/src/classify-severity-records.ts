@@ -134,7 +134,7 @@ export async function classifySeverityRecords(
   if (sha256(data.rubric.markdown) !== data.rubric.sha256)
     throw new Error("Rubric SHA-256 does not match its exact UTF-8 Markdown.");
   const ids = new Set<string>();
-  const reports = data.records.map((record) => {
+  for (const record of data.records) {
     if (ids.has(record.id))
       throw new Error("Canonical record IDs must be unique.");
     ids.add(record.id);
@@ -145,37 +145,31 @@ export async function classifySeverityRecords(
       throw new Error(
         "The report findingId must equal its canonical record ID.",
       );
-    return report;
-  });
+  }
   const binding: RecordsResultBinding = {
     version: 1,
     rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
   };
   const assessments: CanonicalSeverityAssessment[] = [];
-  for (const [index, record] of data.records.entries()) {
+  for (const record of data.records) {
     options.signal?.throwIfAborted();
     let response: unknown;
     try {
-      response = await abortable(
-        () =>
-          options.reviewRunner.run(
-            {
-              requestId: randomUUID(),
-              stage: "severity-classification",
-              model: data.model,
-              effort: data.effort,
-              trustedInstructions: severityReviewInstructions,
-              prompt: JSON.stringify({
-                rubric: [data.rubric.markdown],
-                knowledgeBase: null,
-                finding: reports[index],
-              }),
-              schema: z.toJSONSchema(severityDecisionSchema),
-            },
-            { signal: options.signal },
-          ),
-        options.signal,
-      );
+      response = await abortable(() => {
+        options.signal?.throwIfAborted();
+        return options.reviewRunner.run(
+          {
+            requestId: randomUUID(),
+            stage: "severity-classification",
+            model: data.model,
+            effort: data.effort,
+            trustedInstructions: severityReviewInstructions,
+            prompt: `{"rubric":${JSON.stringify([data.rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
+            schema: z.toJSONSchema(severityDecisionSchema),
+          },
+          { signal: options.signal },
+        );
+      }, options.signal);
     } catch (error) {
       options.signal?.throwIfAborted();
       return {

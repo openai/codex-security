@@ -55,6 +55,7 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
         expect(request.effort).toBe("high");
         expect(request.trustedInstructions).toContain("Do not use tools");
         expect(request.schema).toHaveProperty("required");
+        expect(request.prompt).toContain(original.records[0]!.findingJson);
         expect(JSON.parse(request.prompt).finding.severity.level).toBe("low");
         return answer(request);
       },
@@ -339,5 +340,22 @@ test("empty records probe version 1 without host execution", async () => {
     rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
     assessments: [],
   });
+  expect(calls).toBe(0);
+});
+
+test("immediate SDK cancellation never starts a queued host review", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const result = classifySeverityRecords(input(), {
+    signal: controller.signal,
+    reviewRunner: {
+      async run(request) {
+        calls++;
+        return answer(request);
+      },
+    },
+  });
+  controller.abort(new Error("Stopped before review"));
+  await expect(result).rejects.toThrow("Stopped before review");
   expect(calls).toBe(0);
 });
