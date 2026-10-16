@@ -334,7 +334,7 @@ try {
     [
       ...npm.args,
       "install",
-      "--prefer-offline",
+      "--prefer-online",
       "--include=optional",
       "--ignore-scripts",
       "--package-lock=false",
