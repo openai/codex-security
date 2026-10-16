@@ -11,6 +11,11 @@ import { beforeAll } from "./triage-provider.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const runner = path.join(import.meta.dirname, "run-promptfoo.mts");
+function providerConfig(name: string) {
+  return parse(
+    fs.readFileSync(path.join(evalRoot, "providers", `${name}.yaml`), "utf8"),
+  );
+}
 const extensions = [
   `file://${path.join(import.meta.dirname, "triage-provider.mts")}:beforeAll`,
 ];
@@ -57,7 +62,7 @@ function invoke(args: string[], environment: NodeJS.ProcessEnv) {
 }
 
 test(
-  "runtime extension preserves native credential precedence and wraps providers once",
+  "preloaded runtime preserves native credentials and legacy hooks wrap once",
   { skip: process.platform === "win32" },
   async (t) => {
     const root = fs.realpathSync(
@@ -80,6 +85,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
 `,
       { mode: 0o755 },
     );
+    await import("./initialize-provider.mts");
     const { loadApiProvider } = await import("promptfoo");
     const cases = [
       {
@@ -113,13 +119,16 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
       },
     ];
     for (const entry of cases) {
-      const load = () =>
+      const load = (runtime = false) =>
         loadApiProvider("openai:codex-sdk:gpt-5.5", {
           basePath: root,
           env: entry.env,
           options: {
             env: entry.providerEnv,
             config: {
+              cli_config: runtime
+                ? { default_permissions: "triage_runtime_only" }
+                : undefined,
               working_dir: root,
               codex_path_override: fakeCodex,
               skip_git_repo_check: true,
@@ -131,13 +140,19 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
           },
         });
       const native = await load();
-      const adapted = await load();
+      const adapted = await load(true);
       try {
+        const preloaded = await adapted.callApi("synthetic");
         const context = { suite: { providers: [adapted] } };
         beforeAll(context);
         beforeAll(context);
         const original = await native.callApi("synthetic");
         const result = await adapted.callApi("synthetic");
+        assert.equal(preloaded.error, undefined);
+        assert.deepEqual(
+          JSON.parse(String(preloaded.output)),
+          JSON.parse(String(result.output)),
+        );
         assert.equal(original.error, undefined);
         assert.equal(result.error, undefined);
         const originalOutput = JSON.parse(String(original.output));
@@ -213,25 +228,17 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       PROMPTFOO_DISABLE_UPDATE: "1",
     };
     const configPath = path.join(root, "config.json");
-    const provider = parse(
-      fs.readFileSync(path.join(evalRoot, "promptfooconfig.yaml"), "utf8"),
-    ).providers[0];
+    const provider = providerConfig("triage");
     provider.config.codex_path_override = fakeCodex;
     fs.writeFileSync(
       configPath,
       JSON.stringify({
-        extensions,
         providers: [provider],
         prompts: ["hello"],
         tests: [{ assert: [{ type: "equals", value: "ok" }] }],
       }),
     );
-    const calibration = parse(
-      fs.readFileSync(
-        path.join(evalRoot, "promptfooconfig.calibration.yaml"),
-        "utf8",
-      ),
-    ).providers[0];
+    const calibration = providerConfig("calibration");
     calibration.id = provider.id;
     calibration.config.codex_path_override = fakeCodex;
     const customNode = path.join(root, "custom-node", "bin", "node");
@@ -278,7 +285,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     fs.writeFileSync(
       calibrationConfig,
       JSON.stringify({
-        extensions,
         defaultTest: {
           options: {
             transformVars: `file://${path.join(import.meta.dirname, "runtime-vars.mts")}`,
@@ -366,7 +372,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     fs.writeFileSync(
       templatedConfig,
       JSON.stringify({
-        extensions,
         providers: [
           {
             ...provider,
@@ -1138,9 +1143,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
   },
 );
 
-for (const suite of ["SAST", "calibration"] as const) {
+for (const [suite, legacy] of [
+  ["SAST", false],
+  ["calibration", false],
+  ["SAST", true],
+] as const) {
   test(
-    `${suite} provider survives persisted retry, resume, and viewer replay`,
+    `${suite}${legacy ? " legacy hook" : ""} provider survives persisted retry, resume, and viewer replay`,
     { skip: process.platform === "win32", timeout: 120000 },
     async (t) => {
       const root = fs.realpathSync(
@@ -1193,9 +1202,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
           "utf8",
         ),
       );
-      const provider = template.providers[0];
+      const provider = providerConfig(
+        suite === "SAST" ? "sastbench" : "calibration",
+      );
       provider.config.codex_path_override = fakeCodex;
-      // Keep the real YAML provider reference and its original configuration directory.
+      const providerFile = path.join(root, "provider.json");
+      fs.writeFileSync(providerFile, JSON.stringify(provider));
+      // Resolve suite hooks relative to their original configuration directory.
       const configPath = path.join(
         evalRoot,
         suite === "SAST" ? "sastbench" : ".",
@@ -1205,8 +1218,10 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       fs.writeFileSync(
         configPath,
         JSON.stringify({
-          extensions: template.extensions,
-          providers: [provider],
+          extensions: legacy
+            ? [...extensions, ...(template.extensions ?? [])]
+            : template.extensions,
+          providers: [legacy ? provider : `file://${providerFile}`],
           prompts: ["hello"],
           defaultTest:
             suite === "calibration"
@@ -1284,10 +1299,20 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         )
         .get();
       assert.ok(stored && typeof stored.config === "string");
-      assert.equal(JSON.parse(stored.config).providers[0].id, provider.id);
+      if (legacy) {
+        assert.equal(JSON.parse(stored.config).providers[0].id, provider.id);
+      } else {
+        assert.equal(
+          JSON.parse(stored.config).providers[0],
+          `file://${providerFile}`,
+        );
+      }
       assert.deepEqual(
         JSON.parse(stored.config).extensions,
-        template.extensions.map((extension: string) =>
+        (legacy
+          ? [...extensions, ...(template.extensions ?? [])]
+          : (template.extensions ?? [])
+        ).map((extension: string) =>
           extension.replace(
             "{{env.TRIAGE_PROVIDER_PATH}}",
             path.join(import.meta.dirname, "triage-provider.mts"),
