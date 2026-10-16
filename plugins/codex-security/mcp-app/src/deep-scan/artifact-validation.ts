@@ -1,10 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
+import { dirname, relative, sep } from "node:path";
+import type { JsonObject } from "../types.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
   parsePersistedScanDraft,
-  parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
+  validateFindingSemantics,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import {
@@ -15,6 +19,9 @@ import {
 import type { DeepScanArtifacts } from "./artifacts.js";
 
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
+);
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -26,26 +33,58 @@ export interface ReducerArtifactValidation {
   result: DeepReductionInput;
 }
 
-/**
- * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
- */
-export function parseDeepReduction(
-  input: Record<string, unknown>,
-  persisted = false,
-): DeepReductionInput {
-  const standard = {
-    ...input,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
+/** Reduction combines findings; it does not complete the source workers' review. */
+export function aggregateDiscoveryCoverage(
+  artifacts: DeepScanArtifacts,
+  discoveries: { id: string; resultPath: string; result: ScanDraftInput }[],
+): ScanDraftInput["coverage"] {
+  const coverage: ScanDraftInput["coverage"] = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
   };
-  const { coverage: _coverage, ...parsed } = persisted
-    ? parsePersistedScanDraft(standard)
-    : parseScanDraft(standard as unknown as ScanDraftInput);
+  for (const worker of discoveries) {
+    const source = structuredClone(worker.result.coverage);
+    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
+      .split(sep)
+      .join("/");
+    const scopedId = (id: string) => `${worker.id}/${id}`;
+    for (const field of [
+      "surfaces",
+      "explicitExclusions",
+      "deferred",
+    ] as const) {
+      for (const [index, row] of (source[field] as JsonObject[]).entries()) {
+        const retained: JsonObject = { ...row, workerId: worker.id };
+        // Independent reviews reuse local IDs. Preserve their links without
+        // allowing one worker's disposition to stand in for another's work.
+        retained.id = scopedId(
+          typeof row.id === "string" ? row.id : String(index),
+        );
+        if (Array.isArray(row.surfaceIds)) {
+          retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
+        }
+        if (Array.isArray(row.receiptRefs)) {
+          retained.receiptRefs = (row.receiptRefs as string[]).map(
+            (ref) => `${prefix}/${ref}`,
+          );
+        }
+        (coverage[field] as JsonObject[]).push(retained);
+      }
+    }
+    for (const question of source.openQuestions ?? []) {
+      (coverage.openQuestions ??= []).push({
+        ...(typeof question === "string" ? { question } : question),
+        workerId: worker.id,
+      });
+    }
+  }
+  return coverage;
+}
+
+export function parseDeepReduction(input: unknown): DeepReductionInput {
+  const parsed = deepReductionInputSchema.parse(input);
+  validateFindingSemantics(parsed.findings);
   return parsed;
 }
 
@@ -94,7 +133,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
   );
   if (result.complete === false)
     throw new Error(
@@ -108,7 +147,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      (value) => parseDeepReduction(value, true),
+      parseDeepReduction,
     );
   }
 

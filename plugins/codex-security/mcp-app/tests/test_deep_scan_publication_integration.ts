@@ -67,7 +67,6 @@ const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
 const coverage: ScanDraftInput["coverage"] = {
-  completeness: "complete",
   surfaces: [],
   explicitExclusions: [],
   deferred: [],
@@ -570,10 +569,7 @@ for (const claimed of [false, true]) {
     );
     await rm(report, { recursive: true });
     const interrupted = await snapshot(run);
-    assert.equal(
-      JSON.parse(interrupted.files["coverage.json"]).completeness,
-      "partial",
-    );
+
     assertToolError(
       await call(
         "record_codex_security_scan_draft",
@@ -659,7 +655,6 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
     findings: [],
     coverage: {
       ...coverage,
-      completeness: "partial",
       deferred: [
         {
           id: "interleaved-progress",
@@ -854,7 +849,6 @@ function partial(run: DeepScanRunState, candidateId: string): ScanDraftInput {
     findings: [],
     coverage: {
       ...coverage,
-      completeness: "partial",
       deferred: [
         {
           candidateId,

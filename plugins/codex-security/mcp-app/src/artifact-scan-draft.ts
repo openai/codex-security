@@ -1,16 +1,10 @@
-import { normalizePersistedFindingDetails } from "./finding-normalization.js";
 import type { JsonObject } from "./types.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type * as z from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
-import scanManifestDocument from "../../schemas/scan-manifest.schema.json";
-import coverageDocument from "../../schemas/coverage.schema.json";
-import findingsDocument from "../../schemas/findings.schema.json";
+import * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
@@ -21,17 +15,17 @@ import {
   replaceArtifactJson,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import {
-  loadArtifactZodSchema,
-  projectArtifactToolSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
   draftDefinitions.scanDraftInput,
 );
+// File-authored scan IDs are host-owned; their finding fields use the same contract.
+const fileScanDraftInputSchema = scanDraftInputSchema.extend({
+  scanId: z.string().min(1),
+});
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
 export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
 type DraftCoverage = ScanDraftInput["coverage"];
@@ -69,75 +63,6 @@ interface SavedScanDraft {
   head?: boolean;
   attempt?: string;
 }
-
-// Canonical persisted JSON contracts remain authoritative for saved artifacts.
-// Live compact tools continue to use the native Zod contracts above.
-const canonicalScanDraftInputSchema = loadArtifactZodSchema(
-  [
-    commonSchema,
-    {
-      ...scanDraftDocument,
-      $defs: {
-        ...scanManifestDocument.$defs,
-        ...findingsDocument.$defs,
-        ...scanDraftDocument.$defs,
-        scanDraftInput: {
-          ...scanDraftDocument.$defs.scanDraftInput,
-          properties: {
-            ...scanDraftDocument.$defs.scanDraftInput.properties,
-            scanId: scanManifestDocument.properties.scan.properties.id,
-          },
-        },
-        scope: {
-          ...scanDraftDocument.$defs.scope,
-          properties:
-            scanManifestDocument.properties.scan.properties.scope.properties,
-        },
-        threatModel:
-          scanManifestDocument.properties.scan.properties.threatModel,
-        finding: {
-          ...scanDraftDocument.$defs.finding,
-          properties: findingsDocument.properties.findings.items.properties,
-        },
-        coverage: {
-          ...scanDraftDocument.$defs.coverage,
-          properties: {
-            ...coverageDocument.properties,
-            surfaces: {
-              ...coverageDocument.properties.surfaces,
-              items: {
-                ...coverageDocument.properties.surfaces.items,
-                required: scanDraftDocument.$defs.surface.required,
-              },
-            },
-            deferred: {
-              ...coverageDocument.properties.deferred,
-              items: {
-                ...coverageDocument.properties.deferred.items,
-                required:
-                  scanDraftDocument.$defs.coverage.properties.deferred.items
-                    .required,
-              },
-            },
-            // String questions are normalized by the finalizer after admission.
-            openQuestions: {
-              ...coverageDocument.properties.openQuestions,
-              items: {
-                anyOf: [
-                  scanDraftDocument.$defs.coverage.properties.openQuestions
-                    .items.anyOf[0],
-                  coverageDocument.properties.openQuestions.items,
-                ],
-              },
-            },
-          },
-        },
-      },
-    },
-  ] as SchemaDocument[],
-  scanDraftDocument.$id,
-  "scanDraftInput",
-) as z.ZodType<ScanDraftInput>;
 
 /** Stage a parent draft, then publish it under the workbench completion lock. */
 export async function recordCodexSecurityScanDraftViaWorkbench(
@@ -1709,7 +1634,6 @@ function preserveScanCoverage(
     )
       Object.assign(result, { [field]: values });
   }
-  if (coverageHasOutstandingWork(result)) result.completeness = "partial";
   return result;
 }
 
@@ -1842,7 +1766,7 @@ function safeRelativePath(value: string, context: string): string {
   return normalized;
 }
 
-/** Admit canonical fields while retaining shared audit semantics and path safety. */
+/** Admit file-authored drafts through the current contract after removing host fields. */
 export function parseCanonicalScanDraft(input: {
   scanId?: string;
   manifest: JsonObject;
@@ -1876,7 +1800,7 @@ export function parseCanonicalScanDraft(input: {
 function parseCanonicalCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
-  const parsed = parsePersistedCheckpoint(input, canonicalScanDraftInputSchema);
+  const parsed = parsePersistedCheckpoint(input);
   for (const [index, finding] of parsed.findings.entries()) {
     for (const field of ["locations", "codeEvidence"] as const) {
       for (const [locationIndex, location] of (
@@ -1893,7 +1817,7 @@ function parseCanonicalCheckpoint(
 }
 
 export function parseScanDraft(input: unknown): ScanDraftInput {
-  const parsed = parseSemanticScanDraft(input, scanDraftInputSchema);
+  const parsed = parsePersistedScanDraft(input);
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred) {
@@ -1911,41 +1835,27 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-function parseSemanticScanDraft(
+export function parseCurrentFindings(
   input: unknown,
-  schema: z.ZodType<ScanDraftInput>,
+): ScanDraftInput["findings"] {
+  const findings = draftDefinitions.finding.array().parse(input);
+  validateFindingSemantics(findings);
+  return findings;
+}
+
+/** Validate current draft fields without assigning workbench-owned identities. */
+export function parsePersistedScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
 ): ScanDraftInput {
   const parsed = schema.parse(input);
-  validateFindingSemantics(
-    parsed.findings,
-    schema !== canonicalScanDraftInputSchema,
-  );
-  validateCoverageSemantics(parsed.coverage);
+  validateFindingSemantics(parsed.findings);
+  delete parsed.coverage.completeness;
   return parsed;
-}
-
-/** Validate saved drafts before reconciling interrupted writes and older findings. */
-export function parsePersistedScanDraft(
-  input: Record<string, unknown>,
-): ScanDraftInput {
-  return parsePersistedDraft(structuredClone(input), scanDraftInputSchema);
-}
-
-function parsePersistedDraft(
-  compatible: Record<string, unknown>,
-  schema: z.ZodType<ScanDraftInput>,
-): ScanDraftInput {
-  if (Array.isArray(compatible.findings)) {
-    for (const finding of compatible.findings) {
-      if (isObject(finding)) normalizePersistedFindingDetails(finding, "draft");
-    }
-  }
-  return parseSemanticScanDraft(compatible, schema);
 }
 
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
-  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible.scope)) {
@@ -1974,7 +1884,7 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedDraft(compatible, schema);
+  return parsePersistedScanDraft(compatible, fileScanDraftInputSchema);
 }
 
 function requireBoundScan(
@@ -2342,10 +2252,7 @@ function inventoryStrategy(
   return "repository";
 }
 
-function validateFindingSemantics(
-  findings: JsonObject[],
-  enforceLegacyEvidenceBounds: boolean,
-): void {
+export function validateFindingSemantics(findings: JsonObject[]): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity as JsonObject;
     if (
@@ -2371,47 +2278,35 @@ function validateFindingSemantics(
     }
 
     const evidenceIds = new Set<string>();
-    for (const [evidenceName, evidenceCatalog] of [
-      ["codeEvidence", finding.codeEvidence],
-      ["code_evidence", finding.code_evidence],
-    ] as const) {
-      for (const [evidenceIndex, evidence] of (
-        (evidenceCatalog as JsonObject[] | undefined) ?? []
-      ).entries()) {
-        const id = evidence.id as string;
-        if (evidenceIds.has(id)) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].id ` +
-              `duplicates ${id}.`,
-          );
-        }
-        evidenceIds.add(id);
-        if (
-          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
-          typeof evidence.endLine === "number" &&
-          evidence.endLine < (evidence.startLine as number)
-        ) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].endLine ` +
-              "must not precede startLine.",
-          );
-        }
+    for (const [evidenceIndex, evidence] of (
+      (finding.codeEvidence as JsonObject[] | undefined) ?? []
+    ).entries()) {
+      const id = evidence.id as string;
+      if (evidenceIds.has(id)) {
+        throw new Error(
+          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].id ` +
+            `duplicates ${id}.`,
+        );
+      }
+      evidenceIds.add(id);
+      if (
+        typeof evidence.endLine === "number" &&
+        evidence.endLine < (evidence.startLine as number)
+      ) {
+        throw new Error(
+          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].endLine ` +
+            "must not precede startLine.",
+        );
       }
     }
 
     const referencedSections: Array<[string, unknown]> = [
       ["rootCause", finding.rootCause],
-      ["root_cause", finding.root_cause],
       ["validation", finding.validation],
       ["attackPath", finding.attackPath],
     ];
     if (isObject(finding.attackPath)) {
-      for (const sectionName of [
-        "dataFlow",
-        "dataflow",
-        "data_flow",
-        "reachability",
-      ]) {
+      for (const sectionName of ["dataflow", "reachability"]) {
         referencedSections.push([
           `attackPath.${sectionName}`,
           finding.attackPath[sectionName],
@@ -2420,38 +2315,18 @@ function validateFindingSemantics(
     }
     for (const [sectionName, section] of referencedSections) {
       if (!isObject(section)) continue;
-      for (const referencesName of ["evidenceRefs", "evidence_refs"]) {
-        const references = section[referencesName];
-        if (references === undefined) continue;
-        if (
-          !Array.isArray(references) ||
-          references.some((reference) => !evidenceIds.has(reference))
-        ) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${sectionName}.${referencesName} ` +
-              "must refer to that finding's existing code-evidence IDs.",
-          );
-        }
+      const references = section.evidenceRefs;
+      if (references === undefined) continue;
+      if (
+        !Array.isArray(references) ||
+        references.some((reference) => !evidenceIds.has(reference))
+      ) {
+        throw new Error(
+          `scan draft: findings[${findingIndex}].${sectionName}.evidenceRefs ` +
+            "must refer to that finding's existing code-evidence IDs.",
+        );
       }
     }
-  }
-}
-
-function validateCoverageSemantics(coverage: JsonObject): void {
-  if (coverage.completeness !== "complete") return;
-  if ((coverage.deferred as unknown[]).length > 0) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain deferred work.",
-    );
-  }
-  if (
-    (coverage.surfaces as JsonObject[]).some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  ) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain needs_follow_up surfaces.",
-    );
   }
 }
 
@@ -2494,6 +2369,6 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[\u0300-\u036f]/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9._/-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
+    .replace(/^[^a-z0-9]+|-+$/gu, "");
   return identifier || fallback;
 }

@@ -69,7 +69,6 @@ try {
   };
 
   const coverage = {
-    completeness: "complete",
     surfaces: [
       {
         id: "surface_archive-extraction",
@@ -149,7 +148,7 @@ try {
     findings: [],
     coverage: {
       ...coverage,
-      completeness: "partial",
+
       surfaces,
       deferred: [deferred],
     },
@@ -209,7 +208,6 @@ try {
       findings: [interruptedFinding],
       coverage: {
         ...coverage,
-        completeness: "partial",
         deferred: [
           {
             candidateId: "interrupted-review",
@@ -368,7 +366,6 @@ try {
     complete: false,
     coverage: {
       ...coverage,
-      completeness: "partial",
       surfaces: [
         {
           id: "surface-archive",
@@ -401,7 +398,6 @@ try {
     { id: "surface-archive", disposition: "reported" },
   ]);
   assert.deepEqual(progressedCoverage.openQuestions ?? [], []);
-  assert.equal(progressedCoverage.completeness, "complete");
 
   const renamedProgressContext = await createWorkerContext(
     "renamed-coverage-progress-worker",
@@ -452,7 +448,6 @@ try {
     resolvedProgress.coverage.surfaces,
     resolvedCoverage.surfaces,
   );
-  assert.equal(resolvedProgress.coverage.completeness, "complete");
 
   await saveScanDraftCheckpoint(
     renamedProgressContext,
@@ -461,7 +456,6 @@ try {
       complete: false,
       coverage: {
         ...resolvedCoverage,
-        completeness: "partial",
         surfaces: [...resolvedCoverage.surfaces, ...staleSurfaces],
       },
     },
@@ -474,7 +468,6 @@ try {
   });
   const finalProgress = await readJson(renamedProgressRoot, "result.json");
   assert.deepEqual(finalProgress.coverage.surfaces, resolvedCoverage.surfaces);
-  assert.equal(finalProgress.coverage.completeness, "complete");
 
   const anchorContext = await createWorkerContext(
     "anchor-is-not-candidate-worker",
@@ -564,7 +557,6 @@ try {
   ];
   const pendingCoverage = {
     ...coverage,
-    completeness: "partial",
     deferred: [closeout, unresolved, ...pendingCandidates],
   };
   await recordCodexSecurityScanDraft(unresolvedContext, {
@@ -586,7 +578,7 @@ try {
   };
   await recordCodexSecurityScanDraft(unresolvedContext, closingDraft);
   const retained = await readJson(unresolvedRoot, "coverage.json");
-  assert.equal(retained.completeness, "partial");
+
   assert.deepEqual(
     retained.deferred
       .map(
@@ -675,7 +667,6 @@ try {
       findings: [interruptedFinding],
       coverage: {
         ...coverage,
-        completeness: "partial",
         deferred: [
           {
             candidateId: "interrupted-parent-review",
@@ -746,7 +737,6 @@ try {
     findings: [obsoleteFinding],
     coverage: {
       ...coverage,
-      completeness: "partial",
       surfaces: [
         {
           label: "Old upload handler",
@@ -782,10 +772,7 @@ try {
     (await readJson(deepParentRoot, "scan-manifest.json")).scan.complete,
     false,
   );
-  assert.equal(
-    (await readJson(deepParentRoot, "coverage.json")).completeness,
-    "partial",
-  );
+
   const savedDeepCheckpoints = await Promise.all(
     (await readdir(path.join(deepParentRoot, "checkpoints"))).map(
       async (name) => [
@@ -811,7 +798,7 @@ try {
     acceptedDeepFindings.findings[0].provenance,
     finding.provenance,
   );
-  assert.equal(acceptedDeepCoverage.completeness, "complete");
+
   assert.deepEqual(acceptedDeepCoverage.deferred, []);
   assert.deepEqual(
     acceptedDeepCoverage.surfaces,
@@ -892,7 +879,7 @@ try {
   await recordCodexSecurityWorkerScanDraft(pendingContext, workerInput);
   const resolved = await readJson(pendingRoot, "result.json");
   assert.deepEqual(resolved.coverage.deferred, []);
-  assert.equal(resolved.coverage.completeness, "complete");
+
   assert.deepEqual(resolved.findings[0].provenance.originalCandidates, [
     candidate,
   ]);
@@ -925,7 +912,7 @@ try {
     ...workerInput,
     complete: false,
     findings: [literalUndefinedFinding],
-    coverage: { ...coverage, completeness: "partial", surfaces: [] },
+    coverage: { ...coverage, surfaces: [] },
   });
   const undefinedCandidateResult = await readJson(
     undefinedCandidateRoot,
@@ -985,19 +972,28 @@ try {
     /scanId does not match/,
   );
   await assert.rejects(readFile(workerResultPath), { code: "ENOENT" });
-  await assert.rejects(
-    recordCodexSecurityWorkerScanDraft(workerContext, {
+  const limitedWorkerContext = await createWorkerContext("limited-review");
+  const limitedWorker = await recordCodexSecurityWorkerScanDraft(
+    limitedWorkerContext,
+    {
       ...workerInput,
       coverage: {
         ...coverage,
+        explicitExclusions: [
+          { pattern: "vendor/**", reason: "Third-party source." },
+        ],
         deferred: [
           { reason: "The archive upload runtime remains unavailable." },
         ],
       },
-    }),
-    /complete coverage cannot contain deferred/,
+    },
   );
-  await assert.rejects(readFile(workerResultPath), { code: "ENOENT" });
+
+  assert.equal((limitedWorker.coverage.deferred as unknown[]).length, 1);
+  assert.equal(
+    (limitedWorker.coverage.explicitExclusions as unknown[]).length,
+    1,
+  );
   assert.deepEqual(
     await recordCodexSecurityWorkerScanDraft(workerContext, workerInput),
     {
@@ -1121,7 +1117,6 @@ try {
   };
   const semanticCoverage = {
     ...coverage,
-    completeness: "partial",
     deferred: [
       {
         candidateId: "candidate-deferred-archive",
@@ -1202,7 +1197,6 @@ try {
     },
   ];
   const reasonOnlyInput = coverageInput({
-    completeness: "partial",
     deferred: reasonOnlyDeferred,
   });
 
@@ -1237,26 +1231,33 @@ try {
       findingInput({ codeEvidence: [incompleteCodeEvidence] }),
     ],
     [
-      "legacy code evidence must be an array",
-      findingInput({ code_evidence: null }),
+      "new writes reject legacy code-evidence fields",
+      findingInput({ code_evidence: [{ id: "legacy", code: "source()" }] }),
     ],
+    ...[
+      { root_cause: "Legacy root cause" },
+      { rootCause: { summary: "Current root cause", evidence_refs: [] } },
+      { validation: { evidence_refs: [] } },
+      { attackPath: { dataFlow: "Legacy flow" } },
+      { attackPath: { data_flow: "Legacy flow" } },
+      { attackPath: { evidence_refs: [] } },
+      { attackPath: { dataflow: { evidence_refs: [] } } },
+      { attackPath: { reachability: { evidence_refs: [] } } },
+    ].map((fields): [string, unknown] => [
+      "new writes reject legacy aliases instead of silently accepting them",
+      findingInput(fields),
+    ]),
     [
-      "legacy root-cause code must be text",
-      findingInput({ root_cause: { code: ["not text"] } }),
-    ],
-    [
-      "legacy root-cause language must be text",
-      findingInput({ root_cause: { language: 42 } }),
-    ],
-    [
-      "canonical root-cause code must be text",
+      "new root-cause snippets belong in codeEvidence",
       findingInput({
-        rootCause: { summary: "Root cause.", code: ["not text"] },
+        rootCause: { summary: "Root cause.", code: "source()" },
       }),
     ],
     [
-      "canonical root-cause language must be text",
-      findingInput({ rootCause: { summary: "Root cause.", language: 42 } }),
+      "new root-cause snippet language belongs in codeEvidence",
+      findingInput({
+        rootCause: { summary: "Root cause.", language: "python" },
+      }),
     ],
     [
       "coverage surfaces must use canonical labels and dispositions",
@@ -1267,28 +1268,24 @@ try {
     [
       "reason-only deferred coverage rejects a missing reason",
       coverageInput({
-        completeness: "partial",
         deferred: [{ paths: ["src/extract.py"] }],
       }),
     ],
     [
       "reason-only deferred coverage rejects a whitespace-only reason",
       coverageInput({
-        completeness: "partial",
         deferred: [{ reason: "  \t\n  " }],
       }),
     ],
     [
       "explicit deferred identities do not bypass the required reason",
       coverageInput({
-        completeness: "partial",
         deferred: [{ id: "deferred-explicit-archive" }],
       }),
     ],
     [
       "deferred candidate identities must not contain only whitespace",
       coverageInput({
-        completeness: "partial",
         deferred: [
           {
             candidateId: "   ",
@@ -1371,7 +1368,6 @@ try {
     rejectedDraftInputs.push([
       `deferred candidate identities reject ${description}`,
       coverageInput({
-        completeness: "partial",
         deferred: [
           { candidateId, reason: "The candidate identity must remain safe." },
         ],
@@ -1380,7 +1376,6 @@ try {
     rejectedDraftInputs.push([
       `explicit deferred identities do not bypass invalid candidate ${description}`,
       coverageInput({
-        completeness: "partial",
         deferred: [
           {
             id: "deferred-explicit-archive",
@@ -1553,7 +1548,7 @@ try {
           finding.taxonomy,
         );
         assert.deepEqual(staged.manifest.scan.threatModel, input.threatModel);
-        assert.equal(staged.coverage.completeness, "complete");
+
         throw new Error(
           "The scan stopped before the staged draft was published.",
         );
@@ -1615,7 +1610,6 @@ try {
     complete: false,
     coverage: {
       ...coverage,
-      completeness: "partial",
       surfaces: [
         {
           id: "surface-archive",
@@ -1793,7 +1787,6 @@ try {
     findings: [],
     coverage: {
       ...coverage,
-      completeness: "partial",
       surfaces: [],
       deferred: [demotedCandidate],
     },
@@ -1981,7 +1974,7 @@ try {
 
   await recordCodexSecurityScanDraft(context, semanticInput);
   const normalizedSemanticCoverage = await readJson(root, "coverage.json");
-  assert.equal(normalizedSemanticCoverage.completeness, "partial");
+
   assert.deepEqual(normalizedSemanticCoverage.deferred, [
     {
       ...semanticCoverage.deferred[0],
@@ -2076,7 +2069,6 @@ try {
   await recordFreshScanDraft(
     context,
     coverageInput({
-      completeness: "partial",
       deferred: [collidingWithExplicit, collidingWithCandidate],
     }),
   );
@@ -2097,7 +2089,7 @@ try {
   ];
   await recordFreshScanDraft(
     context,
-    coverageInput({ completeness: "partial", deferred: reservedDeferred }),
+    coverageInput({ deferred: reservedDeferred }),
   );
   assert.deepEqual(
     (await readJson(root, "coverage.json")).deferred,
@@ -2543,25 +2535,6 @@ try {
   assert.deepEqual(evidencedOutput.provenance, finding.provenance);
   assert.deepEqual(evidencedOutput.extensions, finding.extensions);
 
-  const legacyEvidencedFinding = {
-    ...finding,
-    code_evidence: [completeCodeEvidence],
-    attackPath: {
-      dataflow: { evidence_refs: [completeCodeEvidence.id] },
-    },
-  };
-  await recordFreshScanDraft(context, {
-    ...input,
-    findings: [legacyEvidencedFinding],
-  });
-  const legacyEvidencedOutput = (await readJson(root, "findings.json"))
-    .findings[0];
-  assert.deepEqual(legacyEvidencedOutput.code_evidence, [completeCodeEvidence]);
-  assert.deepEqual(
-    legacyEvidencedOutput.attackPath,
-    legacyEvidencedFinding.attackPath,
-  );
-
   await recordFreshScanDraft(
     context,
     findingInput({ taxonomy: { category: "path-traversal", cwe: [] } }),
@@ -2724,60 +2697,39 @@ try {
   );
   await rejectsDraft(
     findingInput({
-      code_evidence: [completeCodeEvidence, completeCodeEvidence],
+      codeEvidence: [completeCodeEvidence, completeCodeEvidence],
     }),
-    /code_evidence\[1\]\.id duplicates/,
+    /codeEvidence\[1\]\.id duplicates/,
   );
-  await rejectsDraft(
-    findingInput({
-      codeEvidence: [completeCodeEvidence],
-      code_evidence: [completeCodeEvidence],
-    }),
-    /code_evidence\[0\]\.id duplicates/,
-  );
-  await rejectsDraft(
-    coverageInput({
-      deferred: [{ id: "deferred-upload", reason: "Runtime unavailable." }],
-    }),
-    /complete coverage cannot contain deferred/,
-  );
-  await rejectsDraft(
-    coverageInput({
-      deferred: [
-        {
-          candidateId: "candidate-deferred-archive",
-          reason: "The upload runtime was unavailable.",
-        },
-      ],
-    }),
-    /complete coverage cannot contain deferred/,
-  );
-  await rejectsDraft(
-    coverageInput({
-      deferred: [{ reason: "The upload runtime was unavailable." }],
-    }),
-    /complete coverage cannot contain deferred/,
-  );
+  for (const legacy of [undefined, "complete", "partial", "unknown"]) {
+    const parsed = draftApi.parseScanDraft(
+      coverageInput({
+        ...(legacy === undefined ? {} : { completeness: legacy }),
+        deferred: [{ id: "deferred-upload", reason: "Runtime unavailable." }],
+        surfaces: [{ label: "Uploads", disposition: "needs_follow_up" }],
+        explicitExclusions: [
+          { pattern: "vendor/**", reason: "Third-party source." },
+        ],
+      }),
+    );
+    assert.equal(parsed.coverage.completeness, undefined);
+    assert.equal(parsed.coverage.deferred.length, 1);
+    assert.equal(parsed.coverage.surfaces[0].disposition, "needs_follow_up");
+    assert.equal(parsed.coverage.explicitExclusions.length, 1);
+  }
   assert.deepEqual(await snapshotScanDraft(root), originalDraft);
-  await rejectsDraft(
-    coverageInput({
-      surfaces: [{ label: "Uploads", disposition: "needs_follow_up" }],
-    }),
-    /complete coverage cannot contain needs_follow_up/,
-  );
   await rejectsDraft(
     findingInput({ validation: { evidenceRefs: ["missing-evidence"] } }),
     /evidenceRefs must refer/,
   );
   await rejectsDraft(
     findingInput({
-      root_cause: { evidenceRefs: ["missing-root-cause-evidence"] },
+      rootCause: {
+        summary: "Current root cause",
+        evidenceRefs: ["missing-root-cause-evidence"],
+      },
     }),
-    /root_cause\.evidenceRefs must refer/,
-  );
-  await rejectsDraft(
-    findingInput({ root_cause: { summary: ["not a string"] } }),
-    /root_cause/,
+    /rootCause\.evidenceRefs must refer/,
   );
   await rejectsDraft(
     findingInput({
@@ -2786,12 +2738,6 @@ try {
       },
     }),
     /attackPath\.dataflow\.evidenceRefs must refer/,
-  );
-  await rejectsDraft(
-    findingInput({
-      validation: { evidence_refs: ["missing-validation-evidence"] },
-    }),
-    /validation\.evidence_refs must refer/,
   );
   await assert.rejects(
     recordCodexSecurityScanDraft(context, {
@@ -2827,7 +2773,6 @@ try {
 
   const duplicateSurfaceCoverage = {
     ...coverage,
-    completeness: "partial",
     surfaces: [
       {
         id: "surface-web-ui",
@@ -2897,7 +2842,6 @@ try {
   assert.deepEqual(duplicateSurfaceCoverage, originalDuplicateSurfaceCoverage);
 
   const partialCoverage = {
-    completeness: "partial",
     surfaces: [
       {
         label: "Archive extraction",
@@ -2928,7 +2872,7 @@ try {
     status: "draft_written",
   });
   const repairedCoverage = await readJson(root, "coverage.json");
-  assert.equal(repairedCoverage.completeness, "partial");
+
   assert.deepEqual(repairedCoverage.deferred, partialCoverage.deferred);
   assert.equal(repairedCoverage.surfaces[0].disposition, "needs_follow_up");
   assert.deepEqual(

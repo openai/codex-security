@@ -21,9 +21,10 @@ The corresponding JSON schemas are generated compatibility resources. Canonical 
 After editing the contracts, run `node plugins/codex-security/mcp-app/scripts/generate-artifact-schemas.mjs`.
 The MCP `typecheck` command checks that the generated resources are current. SDK model generation remains based on the canonical JSON exports.
 
-`pnpm --dir sdk/typescript run generate:models` also copies shared finding
-normalization and workbench argument encoding from the plugin source into the
-SDK. Edit the plugin helper, then regenerate its SDK copy.
+`pnpm --dir sdk/typescript run generate:models` also copies workbench argument
+encoding and executable path handling from the plugin source into the SDK. Edit the
+plugin helper, then regenerate its SDK copy. Historical finding normalization is
+maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin

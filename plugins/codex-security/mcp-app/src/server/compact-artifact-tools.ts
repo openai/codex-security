@@ -69,7 +69,7 @@ const semanticFindingGuidance =
   " Findings require severity:{level}, confidence:{level,rationale}, taxonomy:{category,cwe:[]}, locations:[{path,startLine,endLine?}], and provenance:{source}, alongside ruleId,title,summary,remediation. Use repository-relative paths. Each codeEvidence entry needs id,label,path,startLine,code,explanation. Omit host-owned findingId,occurrenceId,fingerprints and scope.includePaths/excludePaths.";
 
 const semanticCoverageGuidance =
-  ' Coverage shape: {completeness:"partial"|"complete"|"unknown",surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Omit host-owned coverage documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.';
+  " Coverage shape: {surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Exclusions and unresolved review questions do not prevent a terminal result. Omit host-owned coverage documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.";
 
 function signalFromRequestContext(
   requestContext: unknown,
@@ -87,7 +87,7 @@ export function registerCompactArtifactTools(
   /** Prepare diff inventories and read existing diff or Deep inventories. */
   registerCompactTool(server, {
     name: "prepare_codex_security_review_items",
-    title: "Prepare Codex Security Review Items",
+    title: "Prepare Codex Security Local Review Items",
     description: "Generate the changed-file inventory for a diff scan.",
     inputSchema: prepareReviewItemsInputSchema,
     readOnly: false,
@@ -100,7 +100,7 @@ export function registerCompactArtifactTools(
 
   registerCompactTool(server, {
     name: "list_codex_security_review_items",
-    title: "List Codex Security Review Items",
+    title: "List Codex Security Local Review Items",
     description: "Read one page of the diff or Deep scan discovery inventory.",
     inputSchema: reviewItemsReaderInputSchema,
     readOnly: true,
@@ -115,7 +115,7 @@ export function registerCompactArtifactTools(
   /** Record diff candidates and read existing diff or Deep candidates. */
   registerCompactTool(server, {
     name: "record_codex_security_discovery_candidates",
-    title: "Record Codex Security Discovery Candidates",
+    title: "Record Codex Security Local Discovery Candidates",
     description: "Normalize and replace the selected diff scan's candidates.",
     inputSchema: workbenchDiscoveryCandidatesInputSchema,
     readOnly: false,
@@ -129,7 +129,7 @@ export function registerCompactArtifactTools(
 
   registerCompactTool(server, {
     name: "list_codex_security_candidates",
-    title: "List Codex Security Candidates",
+    title: "List Codex Security Local Candidates",
     description: "Read one page of diff or Deep scan discovery candidates.",
     inputSchema: workbenchListCodexSecurityCandidatesInputSchema,
     readOnly: true,
@@ -144,7 +144,7 @@ export function registerCompactArtifactTools(
   /** Record centralized validation results for a diff or Deep scan. */
   registerCompactTool(server, {
     name: "record_codex_security_candidate_validations",
-    title: "Record Codex Security Candidate Validations",
+    title: "Record Codex Security Local Candidate Validations",
     description: "Record the diff or Deep scan candidate validation results.",
     inputSchema: candidateValidationsInputSchema,
     readOnly: false,
@@ -159,7 +159,7 @@ export function registerCompactArtifactTools(
   /** Record centralized attack-path results for a diff or Deep scan. */
   registerCompactTool(server, {
     name: "record_candidate_attack_paths",
-    title: "Record Codex Security Candidate Attack Paths",
+    title: "Record Codex Security Local Candidate Attack Paths",
     description: "Record the diff or Deep scan candidate attack-path results.",
     inputSchema: candidateAttackPathsInputSchema,
     readOnly: false,
@@ -174,9 +174,9 @@ export function registerCompactArtifactTools(
   /** Register draft construction and read-only completed scan retrieval. */
   registerCompactTool(server, {
     name: "record_codex_security_scan_draft",
-    title: "Record Codex Security Scan Draft",
+    title: "Record Codex Security Local Scan Draft",
     description:
-      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
+      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
       semanticFindingGuidance +
       semanticCoverageGuidance,
     inputSchema: scanDraftInputSchema,
@@ -193,7 +193,7 @@ export function registerCompactArtifactTools(
 
   registerCompactTool(server, {
     name: "get_codex_security_completed_scan",
-    title: "Get Completed Codex Security Scan",
+    title: "Get Completed Codex Security Local Scan",
     description:
       "Read the selected scan's existing completed, sealed canonical documents.",
     inputSchema: completedScanInputSchema,
@@ -207,7 +207,7 @@ export function registerCompactArtifactTools(
   });
   registerCompactTool(server, {
     name: "save_codex_security_artifact",
-    title: "Save Codex Security Artifact",
+    title: "Save Codex Security Local Artifact",
     description:
       "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ (or threatmodel.md for a standalone model) and either exact text content or a sourcePath inside the returned temporary directory. Scan threatmodel.md is host-generated from semantic drafts; canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
     inputSchema: saveArtifactInputSchema,
@@ -222,7 +222,7 @@ export function registerCompactArtifactTools(
   });
   registerCompactTool(server, {
     name: "read_codex_security_artifact",
-    title: "Read Codex Security Artifact",
+    title: "Read Codex Security Local Artifact",
     description:
       "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it. A scan's host-generated model is threatmodel.md; standalone legacy threat_model.md remains readable.",
     inputSchema: readArtifactInputSchema,
@@ -273,7 +273,7 @@ export function registerCompactWorkerArtifactTools(
   if (context.layout === "worker") {
     registerCompactTool(server, {
       name: "record_codex_security_scan_draft",
-      title: "Record Codex Security Scan Draft",
+      title: "Record Codex Security Local Scan Draft",
       description:
         "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs." +
         semanticFindingGuidance +
@@ -295,7 +295,7 @@ export function registerCompactWorkerArtifactTools(
   server.registerTool(
     "get_codex_security_deep_reducer_inputs",
     {
-      title: "Get Codex Security Deep Reducer Inputs",
+      title: "Get Codex Security Local Deep Reducer Inputs",
       description:
         "Read a byte-budgeted JSON fragment of the assigned findings and previous aggregate. " +
         "Continue with nextCursor until absent; concatenate json fragments before parsing. " +
@@ -313,7 +313,7 @@ export function registerCompactWorkerArtifactTools(
 
   registerCompactTool(server, {
     name: "record_codex_security_deep_reduction",
-    title: "Record Codex Security Deep Reduction",
+    title: "Record Codex Security Local Deep Reduction",
     description:
       "Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies." +
       semanticFindingGuidance,

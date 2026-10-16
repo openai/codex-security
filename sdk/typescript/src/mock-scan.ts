@@ -231,7 +231,6 @@ export async function writeMockScanDraft(
     },
     "findings.json": { findings: mockFindings(scanId) },
     "coverage.json": {
-      completeness: "complete",
       inventoryStrategy:
         target.kind === "paths"
           ? "scoped_path"

@@ -10,8 +10,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "=3.14.1", default-features = false, features = ["napi8"] }
-napi-derive = "=3.6.11"
+napi = { version = "=3.14.2", default-features = false, features = ["napi8"] }
+napi-derive = "=3.6.12"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.190"

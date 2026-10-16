@@ -39,7 +39,6 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
     coverage = {
         "mode": "repository",
         "inventoryStrategy": "repository",
-        "completeness": "complete",
         "includePaths": ["src/"],
         "excludePaths": [],
         "surfaces": [],
@@ -751,10 +750,7 @@ def test_projection_omits_informational_findings() -> None:
 
     assert "| Reportable findings | 0 |" in markdown
     assert "### No findings" in markdown
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
+    assert "No findings were reported." in markdown
     assert "Parser \\| boundary" not in markdown
 
 
@@ -762,7 +758,6 @@ def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["status"] = "failed"
     findings["findings"] = []
-    coverage["completeness"] = "partial"
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
@@ -773,50 +768,17 @@ def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:
 @pytest.mark.parametrize(
     "reason",
     [
-        (
-            "Validation was deferred because the scan reached its cost limit: "
-            "parser accepts untrusted input. Evidence: request data reaches a SQL query."
-        ),
         "Validation was deferred because the scan reached its cost limit.",
-    ],
-)
-def test_projection_explains_unvalidated_findings_after_cost_limit(reason: str) -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"] = []
-    coverage["completeness"] = "partial"
-    coverage["deferred"] = [
-        {"id": "candidate-parser", "reason": reason, "paths": ["src/parser.py"]}
-    ]
-
-    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
-
-    assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
-    assert (
-        "No findings were validated before the scan reached its cost limit. "
-        "Review the deferred candidates in Open Questions And Follow Up."
-    ) in markdown
-    assert "No reportable findings survived" not in markdown
-    assert "## Open Questions And Follow Up" in markdown
-    assert reason in markdown
-    assert "Review deferred unit candidate-parser" in markdown
-    assert "Paths: src/parser.py." in markdown
-
-
-@pytest.mark.parametrize(
-    "reason",
-    [
+        (
+            "The configured discovery time limit elapsed before any source review completed. "
+            "Saved findings and pending review were preserved without a completed reduction."
+        ),
         "The parser runtime could not be inspected in this environment.",
-        "The retry budget was exhausted before parser validation could finish.",
-        "The runtime resource budget prevented the optional check.",
-        "An upstream service reached its own cost limit during validation.",
-        "Validation was deferred because the scan reached its cost limit unexpectedly.",
     ],
 )
-def test_projection_preserves_no_findings_text_for_other_partial_coverage(reason: str) -> None:
+def test_projection_preserves_follow_up_without_classifying_its_reason(reason: str) -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"] = []
-    coverage["completeness"] = "partial"
     coverage["deferred"] = [
         {
             "id": "candidate-parser",
@@ -825,67 +787,13 @@ def test_projection_preserves_no_findings_text_for_other_partial_coverage(reason
         }
     ]
 
-    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
-
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
-    assert "No findings were validated before" not in markdown
-
-
-def test_projection_explains_timeout_before_source_review() -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"] = []
-    coverage["completeness"] = "partial"
-    coverage["deferred"] = [
-        {
-            "id": "source-review",
-            "reason": (
-                "The configured discovery time limit elapsed before any source review completed."
-            ),
-        }
-    ]
-
-    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
-
-    assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
-    assert (
-        "No source review completed before the configured time limit. "
-        "No vulnerability conclusion can be drawn."
-    ) in markdown
-    assert "No reportable findings survived" not in markdown
-    assert "## Open Questions And Follow Up" in markdown
-
-
-@pytest.mark.parametrize(
-    ("completeness", "reason"),
-    [
-        (
-            "complete",
-            "The configured discovery time limit elapsed before any source review completed.",
-        ),
-        (
-            "partial",
-            "The configured discovery time limit elapsed during source review.",
-        ),
-        ("partial", "Validation was deferred because a separate cost limit was reached."),
-    ],
-)
-def test_projection_preserves_other_no_findings_results(completeness: str, reason: str) -> None:
-    manifest, findings, coverage = canonical_documents()
-    findings["findings"] = []
-    coverage["completeness"] = completeness
-    coverage["deferred"] = [{"id": "source-review", "reason": reason}]
-
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
-    assert "No source review completed" not in markdown
+    assert "No findings were reported." in markdown
+    assert "## Open Questions And Follow Up" in markdown
+    assert reason in markdown
+    assert "Review deferred unit candidate-parser" in markdown
+    assert "Paths: src/parser.py." in markdown
 
 
 def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
@@ -899,7 +807,7 @@ def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
 
 def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     manifest, findings, coverage = canonical_documents()
-    coverage["completeness"] = "partial"
+
     coverage["openQuestions"] = [{"question": "Is production authentication enabled?"}]
     coverage["deferred"] = [
         {

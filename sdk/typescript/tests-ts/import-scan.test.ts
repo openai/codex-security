@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
+import { parseImportedFindings } from "../src/findings-import.js";
 import { importScan, type ImportScanOptions } from "../src/import-scan.js";
 import type { FindingsDocument } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
@@ -242,7 +243,7 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.sealedAt).toBeTruthy();
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
-    expect(result.coverage.completeness).toBe("unknown");
+    expect(result.coverage).not.toHaveProperty("completeness");
     expect(result.coverage.surfaces).toMatchObject([
       { disposition: "reported" },
     ]);
@@ -311,7 +312,6 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.status).toBe("completed");
     expect(result.findings.findings).toEqual([]);
     expect(result.coverage).toMatchObject({
-      completeness: "unknown",
       surfaces: [],
     });
     const sourceRef = `artifacts/import/source.${format}`;
@@ -542,6 +542,62 @@ test("reimporting the retained source preserves finding identities with new scan
     (await storedScans(context)).map((scan) => scan.occurrence_count),
   ).toEqual([2, 2]);
 });
+
+const evidence = {
+  id: "source",
+  label: "Imported source",
+  path: "src/extract.ts",
+  startLine: 41,
+  code: "extract(entry)",
+  explanation: "The entry reaches archive extraction.",
+};
+for (const dryRun of [false, true]) {
+  test.each([
+    ["legacy root cause", { root_cause: "Legacy root cause detail." }],
+    [
+      "dangling evidence reference",
+      {
+        rootCause: {
+          summary: "Archive entry extraction.",
+          evidenceRefs: ["missing"],
+        },
+      },
+    ],
+    ["duplicate evidence ID", { codeEvidence: [evidence, evidence] }],
+  ] as const)(
+    `rejects %s before import persistence (dryRun: ${dryRun})`,
+    async (_name, details) => {
+      const context = await fixture("json");
+      const document = JSON.parse(context.source) as FindingsDocument;
+      Object.assign(document.findings[0]!, details);
+      const source = JSON.stringify(document);
+      await writeFile(context.options.sourcePath, source);
+      // Historical report readers still accept the supplied artifact.
+      expect(
+        await parseImportedFindings(source, "json", PLUGIN_ROOT),
+      ).toHaveLength(2);
+      const persist = mock(runWorkbench);
+      const resolvePython = mock(context.dependencies.resolvePluginPython);
+      const outputDir = join(context.root, "output");
+      await expect(
+        importScan(
+          { ...context.options, dryRun, outputDir },
+          {
+            ...context.dependencies,
+            runWorkbench: persist,
+            resolvePluginPython: resolvePython,
+          },
+        ),
+      ).rejects.toThrow("current scan-draft finding");
+      expect(persist).not.toHaveBeenCalled();
+      expect(resolvePython).not.toHaveBeenCalled();
+      for (const directory of [context.stateDirectory, outputDir]) {
+        await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+    },
+  );
+}
 
 test("dry run validates source rows without creating database state or invoking the workbench", async () => {
   const context = await fixture();

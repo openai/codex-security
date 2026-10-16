@@ -514,12 +514,11 @@ describe("CLI workbench", () => {
           "--include-matching-inputs",
         ],
         {
-          comparable: true,
           matchingCached: true,
           matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
-        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { summary: { persisting: 1, resolved: 1 } },
       ],
       [
         [
@@ -542,12 +541,11 @@ describe("CLI workbench", () => {
           "--include-matching-inputs",
         ],
         {
-          comparable: true,
           matchingCached: true,
           matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
-        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { summary: { persisting: 1, resolved: 1 } },
       ],
     ];
     for (const [argv, expected, response, output] of cases) {

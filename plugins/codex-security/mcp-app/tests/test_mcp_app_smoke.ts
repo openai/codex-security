@@ -1013,7 +1013,7 @@ async function writeCompletedContract(
     schemaVersion: "1.0",
     scanId,
     mode: "repository",
-    completeness: "complete",
+
     inventoryStrategy: "repository",
     includePaths: ["."],
     excludePaths: [],
@@ -1055,6 +1055,8 @@ try {
     elicitation: { form: {} },
   });
   assertNoError(initialized);
+  assert.equal(initialized.result.serverInfo.name, "codex-security");
+  assert.equal(initialized.result.serverInfo.title, "Codex Security Local");
   assert.equal(initialized.result.capabilities.resources, undefined);
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
@@ -1844,6 +1846,8 @@ try {
     "open",
     "closed",
   ]);
+  assert.equal(launcher.title, "Open Codex Security Local");
+  assert.equal(start.title, "Start Codex Security Local Scan");
   assert.deepEqual(launcher.inputSchema.properties.mode.enum, [
     "diff",
     "standard",

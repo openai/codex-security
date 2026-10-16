@@ -55,6 +55,7 @@ const {
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
 } = await importModule({
@@ -116,7 +117,8 @@ try {
   await testLargeScopeTransport();
   await testOpenAiCredentialsReachWorker();
   await testWorkerCancellation();
-  await testNullUsageCompletion();
+  testUsageLimitClassification();
+  await testWorkerTerminalEvents();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
@@ -3853,7 +3855,31 @@ async function testWorkerCancellation() {
   }
 }
 
-async function testNullUsageCompletion() {
+function testUsageLimitClassification() {
+  for (const message of [
+    "Quota exceeded. Check your plan and billing details.",
+    "Your workspace is out of credits. Add credits to continue.",
+    "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+    "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+    "You’ve hit your usage limit. Try again later.",
+    "You’ve hit your usage limit for the selected model. Switch to another model to continue.",
+  ]) {
+    const error = codexWorkerTurnError(message);
+    assert.ok(error instanceof DeepScanNonRetryableError);
+    assert.equal(error.message, message);
+  }
+  for (const message of [
+    "429 Too Many Requests",
+    "Command failed: Quota exceeded. Check your plan and billing details.",
+  ]) {
+    const error = codexWorkerTurnError(message);
+    assert.equal(error.name, "Error");
+    assert.equal(error.message, message);
+  }
+}
+
+async function testWorkerTerminalEvents() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
   const originalSpawn = childProcess.spawn;
@@ -3874,20 +3900,55 @@ async function testNullUsageCompletion() {
   process.env.CODEX_CLI_PATH = process.execPath;
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
-    await writeFile(promptPath, "NULL_USAGE\n");
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-        const result = await new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind,
-          promptPath,
-          workingDirectory: fixture.root,
-          subagents: 0,
-          resumeThreadId,
-          signal: new AbortController().signal,
-        });
-        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+    const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    for (const event of [
+      undefined,
+      { type: "turn.failed", error: { message: quotaMessage } },
+      { type: "turn.failed", error: { message: "429 Too Many Requests" } },
+      { type: "error", message: quotaMessage },
+      {
+        type: "item.completed",
+        item: { id: "quota-text", type: "agent_message", text: quotaMessage },
+      },
+    ] as const) {
+      await writeFile(
+        promptPath,
+        event
+          ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`
+          : "NULL_USAGE\n",
+      );
+      for (const kind of ["discovery", "dedup"] as const) {
+        for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+          const onNonRetryableError = mock.fn();
+          const execution = new CodexSdkWorkerExecutor({
+            parentSandbox: trustedParentSandbox,
+          }).run({
+            kind,
+            promptPath,
+            workingDirectory: fixture.root,
+            subagents: 0,
+            resumeThreadId,
+            signal: new AbortController().signal,
+            onNonRetryableError,
+          });
+          if (event?.type === "turn.failed") {
+            const isQuota = event.error.message === quotaMessage;
+            await assert.rejects(execution, {
+              name: isQuota ? "DeepScanNonRetryableError" : "Error",
+              message: event.error.message,
+            });
+            assert.deepEqual(
+              onNonRetryableError.mock.calls.map(
+                ({ arguments: [error] }) => error.message,
+              ),
+              isQuota ? [quotaMessage] : [],
+            );
+            continue;
+          }
+          const result = await execution;
+          assert.equal(onNonRetryableError.mock.callCount(), 0);
+          assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+        }
       }
     }
   } finally {

@@ -22,11 +22,11 @@ do not count.
 
 Every location must cite a fixture file and an in-bounds line range. Each
 non-supporting location must match an exposure classified by that finding's
-taxonomy. The grader rejects unrelated locations and incomplete coverage.
-Deferred work, surfaces needing follow-up, or exclusions that match fixture
-files make coverage incomplete. Exclusions outside the generated repository
-are allowed. Supporting locations, including the production `expected_control`
-role, may cite benign context but cannot satisfy recall. Known credential-use
+taxonomy. The grader rejects unrelated locations. Scope notes, exclusions,
+deferred work, and follow-up questions remain in the saved result but do not
+change the grade: final findings must independently satisfy every positive case.
+Supporting locations, including the production `expected_control` role, may
+cite benign context but cannot satisfy recall. Known credential-use
 sites may be cited as sinks; they cannot replace the exposed source location.
 
 Each finding must also include nonempty `codeEvidence`. Every snippet must cite

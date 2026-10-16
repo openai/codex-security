@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   runCustomValidation,
   type CustomValidationResult,
@@ -109,7 +109,6 @@ async function publishDraft(
       ),
     },
     coverage: {
-      completeness: coverage.completeness,
       inventoryStrategy: coverage.inventoryStrategy,
       surfaces: coverage.surfaces,
       explicitExclusions: coverage.explicitExclusions,
@@ -275,7 +274,7 @@ describe("custom validation", () => {
       "not_applicable",
       "needs_follow_up",
     ]);
-    expect(coverage.completeness).toBe("partial");
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage.surfaces[0]!.receiptRefs).toContain(
       "artifacts/custom-validation/proof.txt",
     );
@@ -326,82 +325,27 @@ describe("custom validation", () => {
     ).rejects.toThrow("unsealed custom-validation draft");
   });
 
-  test("validates persisted findings with empty optional dataflow details", async () => {
-    const f = await fixture(3);
-    for (const [index, finding] of f.findings.findings.entries()) {
-      finding.attackPath = {
-        dataflow: {
-          source: "Synthetic request input",
-          sink: index < 2 ? "" : "Synthetic output operation",
-        },
-      };
-    }
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const run = mock(async () => {
-      const candidates = await json<{
-        candidates: Array<{ finding: unknown }>;
-      }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
-      expect(candidates.candidates).toHaveLength(3);
-      expect(candidates.candidates[0]!.finding).toHaveProperty(
-        "attackPath.dataflow",
-        { source: "Synthetic request input" },
-      );
-      return JSON.stringify(result("reportable", "reportable", "reportable"));
-    });
-    await runCustomValidation({
-      ...f,
-      run,
-    });
-    expect(run).toHaveBeenCalled();
-    const saved = await json<FindingsDocument>(
-      join(f.scanDir, "findings.json"),
-    );
-    expect(saved.findings).toHaveLength(3);
-    for (const [index, finding] of saved.findings.entries()) {
-      expect(finding.validation).toMatchObject({
-        counterEvidence: [],
-        limitations: [],
-      });
-      expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
-      expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
-      expect(finding.attackPath).toEqual({
-        dataflow: {
-          source: "Synthetic request input",
-          ...(index < 2 ? {} : { sink: "Synthetic output operation" }),
-        },
-      });
-    }
-  });
-
-  test("retains original optional details when custom validation fails", async () => {
-    const f = await fixture();
-    f.findings.findings[0]!.attackPath = { dataflow: { sink: "" } };
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: rejecting("Synthetic validation failure"),
-      }),
-    ).rejects.toThrow("Synthetic validation failure");
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  });
-
-  test("identifies an invalid provisional finding and field before validation", async () => {
-    const f = await fixture(2);
-    f.findings.findings[1]!.title = "";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: unexpectedValidation,
-      }),
-    ).rejects.toThrow(/findings\[1\].*title/);
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  });
+  test.each([
+    ["empty title", { title: "" }],
+    ["empty optional detail", { attackPath: { dataflow: { sink: "" } } }],
+    ["legacy field", { root_cause: "Synthetic legacy detail." }],
+  ])(
+    "rejects %s before validation without changing the draft",
+    async (_name, fields) => {
+      const f = await fixture(2);
+      Object.assign(f.findings.findings[1]!, fields);
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      await expect(
+        runCustomValidation({
+          ...f,
+          run: unexpectedValidation,
+        }),
+      ).rejects.toThrow(/valid provisional finding set.*findings\[1\]/);
+      expect(
+        await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+      ).toEqual(f.findings);
+    },
+  );
 
   test("identifies invalid provisional coverage before validation", async () => {
     const f = await fixture();
@@ -612,18 +556,12 @@ describe("custom validation", () => {
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
                       await draft(scanDir, scanId, 0, diff);
-                      const earlyCoverage = await json<CoverageDocument>(
-                        join(scanDir, "coverage.json"),
-                      );
-                      earlyCoverage.completeness = "partial";
-                      await save(join(scanDir, "coverage.json"), earlyCoverage);
                       await publishDraft(scanDir, scanId, workbench, false);
                       await draft(scanDir, scanId, count, diff);
                       if (scenario === "unfinished-source") {
                         const coverage = await json<CoverageDocument>(
                           join(scanDir, "coverage.json"),
                         );
-                        coverage.completeness = "partial";
                         coverage.deferred = [
                           {
                             id: "unfinished-source",
@@ -773,9 +711,12 @@ describe("custom validation", () => {
             status: "complete",
           });
           expect(
-            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
-              .completeness,
-          ).toBe("partial");
+            await json<CoverageDocument>(join(scanDir, "coverage.json")),
+          ).toMatchObject({
+            deferred: expect.arrayContaining([
+              expect.objectContaining({ id: "unfinished-source" }),
+            ]),
+          });
           return;
         }
         if (scenario === "incomplete") {
@@ -877,7 +818,7 @@ describe("custom validation", () => {
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("security_scan` capability preflight");
     expect(standard).toContain("use it for the same early model checkpoint");
-    expect(standard).toContain("retain the model in an early partial");
+    expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");

@@ -75,7 +75,6 @@ async function generate() {
       'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
-      'export type CoverageCompleteness = CoverageDocument["completeness"];',
       'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',
@@ -88,19 +87,17 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const shared = ["finding-normalization", "workbench-arguments"].map(
-    (name) => [
-      `${name}.ts`,
-      `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
-        readFileSync(
-          join(
-            packageRoot,
-            `../../plugins/codex-security/mcp-app/src/${name}.ts`,
-          ),
-          "utf8",
+  const shared = ["workbench-arguments", "executable-path"].map((name) => [
+    `${name}.ts`,
+    `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+      readFileSync(
+        join(
+          packageRoot,
+          `../../plugins/codex-security/mcp-app/src/${name}.ts`,
         ),
-    ],
-  );
+        "utf8",
+      ),
+  ]);
   for (const [name, content] of [["models.ts", models], ...shared]) {
     const output = join(packageRoot, "src", name);
     if (process.argv.includes("--check")) {

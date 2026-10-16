@@ -29,7 +29,6 @@ import {
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
-import type { CoverageDocument } from "./models.js";
 import {
   readKnowledgeBaseSnapshot,
   type KnowledgeBaseSnapshot,
@@ -65,14 +64,12 @@ const WINDOWS_DEVICE_PATH_NAME =
 type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
 interface MultiscanReceipt extends MultiscanTask {
-  status: "completed" | "completed_with_incomplete_coverage" | "failed";
+  status: "completed" | "failed";
   attempt: number;
   outputDir: string;
   threatModelPath?: string;
-  coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
-  warning?: string;
   warnings?: string[];
   policyFailed?: boolean;
   knowledgeBaseFailure?: true;
@@ -104,7 +101,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
     prompts: ScanPromptSettings & {
       knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
     },
-  ): Promise<Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined>;
+  ): Promise<Pick<ScanResult, "manifest" | "cost" | "findings"> | undefined>;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
@@ -117,8 +114,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
   signal?: AbortSignal;
   onProgress?(event: {
     repository: string;
-    status:
-      "started" | "completed" | "completed_with_incomplete_coverage" | "failed";
+    status: "started" | "completed" | "failed";
     attempt: number;
     error?: string;
     warning?: string;
@@ -128,7 +124,6 @@ export interface MultiscanOptions extends ScanPromptSettings {
 export interface MultiscanResult {
   total: number;
   completed: number;
-  incomplete: number;
   failed: number;
   skipped: number;
   resultsPath: string;
@@ -261,7 +256,6 @@ async function runCampaign(
   );
   const pending: MultiscanTask[] = [];
   let completed = 0;
-  let incomplete = 0;
   let policyFailed = false;
   const warnings: NonNullable<MultiscanResult["warnings"]> = [];
   const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
@@ -310,46 +304,31 @@ async function runCampaign(
         for (const warning of receipt.warnings) {
           notifyProgress(options, {
             repository: task.id,
-            status: receipt.status,
+            status: "completed",
             attempt: receipt.attempt,
             warning,
           });
         }
       }
-      if (receipt.status === "completed") {
+      if (
+        receipt.status === "completed" ||
+        (await legacyCompletedReceipt({
+          ...receipt,
+          outputDir: artifactOutput,
+        }))
+      ) {
         policyFailed ||= receipt.policyFailed === true;
         completed += 1;
-        continue;
-      }
-      const coverage =
-        receipt.status === "completed_with_incomplete_coverage"
-          ? (receipt.coverage ?? "unknown")
-          : await legacyIncompleteCoverage({
-              ...receipt,
-              outputDir: artifactOutput,
-            });
-      if (coverage !== undefined) {
-        policyFailed ||= receipt.policyFailed === true;
-        incomplete += 1;
-        notifyProgress(options, {
-          repository: task.id,
-          status: "completed_with_incomplete_coverage",
-          attempt: receipt.attempt,
-          warning:
-            receipt.warning ??
-            `Scan coverage is ${coverage}; results may be incomplete.`,
-        });
         continue;
       }
     }
     pending.push(task);
   }
-  const skipped = completed + incomplete + untouched;
+  const skipped = completed + untouched;
   let failed = 0;
   const summarize = (): MultiscanResult => ({
     total: tasks.length,
     completed,
-    incomplete,
     failed,
     skipped,
     resultsPath: ledger,
@@ -391,10 +370,8 @@ async function runCampaign(
         let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
-        let warning: string | undefined;
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
-        let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
@@ -403,7 +380,7 @@ async function runCampaign(
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            | (Pick<ScanResult, "coverage" | "cost" | "findings"> &
+            | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
                 Partial<Pick<ScanResult, "threatModelPath">>)
             | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
@@ -533,15 +510,8 @@ async function runCampaign(
               meetsSeverity(finding, failureSeverity),
             );
           }
-          coverage = result.coverage.completeness;
-          if (coverage !== "complete") {
-            if (!(await hasArtifacts(scanDir))) {
-              throw new Error(
-                "Multiscan scan output is missing required artifacts.",
-              );
-            }
-            warning = `Scan coverage is ${coverage}; results may be incomplete.`;
-          }
+          if (result.manifest.scan.status !== "completed")
+            throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
           if (error instanceof ScanCostLimitExceededError) {
@@ -557,12 +527,7 @@ async function runCampaign(
             await rm(checkout, { recursive: true, force: true });
           }
         }
-        const status =
-          failure !== undefined
-            ? "failed"
-            : warning === undefined
-              ? "completed"
-              : "completed_with_incomplete_coverage";
+        const status = failure !== undefined ? "failed" : "completed";
         if (threatModelPath === undefined)
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
@@ -577,11 +542,9 @@ async function runCampaign(
             attempt,
             outputDir: scanDir,
             ...(threatModelPath === null ? {} : { threatModelPath }),
-            ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
-            ...(warning === undefined ? {} : { warning }),
             ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
             policyFailed: attemptPolicyFailed,
           })}\n`,
@@ -598,15 +561,13 @@ async function runCampaign(
           attempt,
           status,
           ...(failure === undefined ? {} : { error: failure }),
-          ...(warning === undefined ? {} : { warning }),
         });
         if (failure === undefined) {
           policyFailed ||= attemptPolicyFailed === true;
           if (runWarnings.length > 0) {
             warnings.push({ repository: task.id, warnings: runWarnings });
           }
-          if (warning === undefined) completed += 1;
-          else incomplete += 1;
+          completed += 1;
           break;
         }
         if (exhaustedBudget || attemptedResume || requiresRecovery) {
@@ -1013,7 +974,10 @@ async function readReceipts(
   }
   const receipts = new Map<string, MultiscanHistory>();
   for (const line of lines.filter(Boolean)) {
-    const receipt = JSON.parse(line) as MultiscanReceipt;
+    const saved = JSON.parse(line);
+    if (saved.status === "completed_with_incomplete_coverage")
+      saved.status = "completed";
+    const receipt = saved as MultiscanReceipt;
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
     receipts.set(id, {
@@ -1037,25 +1001,22 @@ async function hasArtifacts(path: string): Promise<boolean> {
   }
 }
 
-async function legacyIncompleteCoverage(
+async function legacyCompletedReceipt(
   receipt: MultiscanReceipt,
-): Promise<Exclude<CoverageDocument["completeness"], "complete"> | undefined> {
+): Promise<boolean> {
   if (
     receipt.status !== "failed" ||
     receipt.error !== "Multiscan repository coverage is incomplete."
   ) {
-    return undefined;
+    return false;
   }
   try {
-    const coverage = JSON.parse(
-      await readFile(join(receipt.outputDir, "coverage.json"), "utf8"),
-    ) as { completeness?: unknown };
-    return coverage.completeness === "partial" ||
-      coverage.completeness === "unknown"
-      ? coverage.completeness
-      : undefined;
+    const manifest = JSON.parse(
+      await readFile(join(receipt.outputDir, "scan-manifest.json"), "utf8"),
+    );
+    return manifest.scan?.status === "completed";
   } catch {
-    return undefined;
+    return false;
   }
 }
 

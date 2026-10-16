@@ -27,16 +27,27 @@ const {
   confidence,
   location,
   codeEvidence,
-  legacyCodeEvidence,
   findingAssessment,
-  textOrSummary,
-  findingReachability,
+  textOrSummary: sourceTextOrSummary,
+  findingReachability: sourceFindingReachability,
   findingValidation,
   findingAttackPath,
 } = findingDetailSchemas(text, text, line);
+const legacyCodeEvidence = z.looseObject({ id: text, code: text });
+const textOrSummary = z.union([
+  text,
+  sourceTextOrSummary.options[1].extend({ evidence_refs: textList.optional() }),
+]);
+const findingReachability = z.union([
+  text,
+  sourceFindingReachability.options[1].extend({
+    evidence_refs: textList.optional(),
+  }),
+]);
 // The flattened string-or-array contract needs inline items, not an array-only reference.
 const validation = findingValidation.extend({
   evidence: z.union([text, z.array(text)]).optional(),
+  evidence_refs: textList.optional(),
 });
 for (const schema of [findingAssessment, textOrSummary, findingReachability])
   typeArray(schema, ["string", "object"]);
@@ -49,8 +60,13 @@ const assessment = typeArray(findingAttackPath.shape.impact.unwrap(), [
   "null",
 ]);
 const attackPath = findingAttackPath.extend({
+  dataFlow: textOrSummary.optional(),
+  data_flow: textOrSummary.optional(),
+  dataflow: textOrSummary.optional(),
+  evidence_refs: textList.optional(),
   impact: assessment.optional(),
   likelihood: assessment.optional(),
+  reachability: findingReachability.optional(),
 });
 const rootCause = z.looseObject({
   summary: text,
@@ -225,85 +241,59 @@ const scanManifest = z.looseObject({
     }),
 });
 
-const coverageDocument = z
-  .looseObject({
-    documentType: z.literal("codex-security.coverage"),
-    schemaVersion: z.literal("1.0"),
-    scanId: text,
-    mode: z.enum([
-      "repository",
-      "scoped_path",
-      "diff",
-      "commit",
-      "branch_diff",
-      "working_tree",
-      "deep_repository",
-    ]),
-    completeness: z.enum(["complete", "partial", "unknown"]),
-    inventoryStrategy: z.enum([
-      "repository",
-      "scoped_path",
-      "diff",
-      "directory",
-      "custom",
-    ]),
-    includePaths: strings,
-    excludePaths: strings,
-    surfaces: z.array(
-      z.looseObject({
-        id: text,
-        label: text,
-        disposition: surfaceDispositionSchema,
-        receiptRefs: z.array(
-          pattern("^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$").min(1),
-        ),
-        riskArea: text.optional(),
-        notes: text.optional(),
-      }),
-    ),
-    explicitExclusions: z.array(z.looseObject({ pattern: text, reason: text })),
-    deferred: z.array(
-      z.looseObject({
-        id: text,
-        reason: text,
-        paths: textList.optional(),
-        surfaceIds: textList.optional(),
-      }),
-    ),
-    resolvedDeferred: z
-      .array(z.strictObject({ id: text, reason: text }))
-      .describe(
-        "Completed generic review tasks, with their saved IDs and completion reasons.",
-      )
-      .optional(),
-    openQuestions: z
-      .array(z.looseObject({ question: text, followUpPrompt: text.optional() }))
-      .optional(),
-  })
-  .meta({
-    allOf: [
-      {
-        if: {
-          properties: { completeness: { const: "complete" } },
-          required: ["completeness"],
-        },
-        then: {
-          properties: {
-            deferred: { contains: {}, minContains: 0, maxContains: 0 },
-            surfaces: {
-              contains: {
-                type: "object",
-                required: ["disposition"],
-                properties: { disposition: { const: "needs_follow_up" } },
-              },
-              minContains: 0,
-              maxContains: 0,
-            },
-          },
-        },
-      },
-    ],
-  });
+const coverageDocument = z.looseObject({
+  documentType: z.literal("codex-security.coverage"),
+  schemaVersion: z.literal("1.0"),
+  scanId: text,
+  mode: z.enum([
+    "repository",
+    "scoped_path",
+    "diff",
+    "commit",
+    "branch_diff",
+    "working_tree",
+    "deep_repository",
+  ]),
+  inventoryStrategy: z.enum([
+    "repository",
+    "scoped_path",
+    "diff",
+    "directory",
+    "custom",
+  ]),
+  includePaths: strings,
+  excludePaths: strings,
+  surfaces: z.array(
+    z.looseObject({
+      id: text,
+      label: text,
+      disposition: surfaceDispositionSchema,
+      receiptRefs: z.array(
+        pattern("^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$").min(1),
+      ),
+      riskArea: text.optional(),
+      notes: text.optional(),
+    }),
+  ),
+  explicitExclusions: z.array(z.looseObject({ pattern: text, reason: text })),
+  deferred: z.array(
+    z.looseObject({
+      id: text,
+      reason: text,
+      paths: textList.optional(),
+      surfaceIds: textList.optional(),
+    }),
+  ),
+  resolvedDeferred: z
+    .array(z.strictObject({ id: text, reason: text }))
+    .describe(
+      "Completed generic review tasks, with their saved IDs and completion reasons.",
+    )
+    .optional(),
+  openQuestions: z
+    .array(z.looseObject({ question: text, followUpPrompt: text.optional() }))
+    .optional(),
+});
 
 export const canonicalSchemaDocuments = {
   "patch-risk-assessment": {

@@ -39,6 +39,17 @@ for (const fields of [
   },
   { rootCause: "", root_cause: null, code_evidence: null },
   { validation: { status: null, evidence: [" "] } },
+  { validation: { evidence_refs: ["legacy evidence"] } },
+  { code_evidence: [{ id: "legacy", code: "example()" }] },
+  {
+    attackPath: {
+      dataFlow: { evidence_refs: ["legacy evidence"] },
+      data_flow: { evidence_refs: ["legacy evidence"] },
+      dataflow: { evidence_refs: ["legacy evidence"] },
+      reachability: { evidence_refs: ["legacy evidence"] },
+      evidence_refs: ["legacy evidence"],
+    },
+  },
   { attackPath: { dataflow: { extra: true }, impact: { why: " " } } },
   { provenance: { source: " ", sourceFindingIds: [1, 1] } },
 ])
@@ -129,25 +140,20 @@ for (const path of ["findings.json", "coverage.json"]) {
   assert.equal(manifest.validate(document), false);
 }
 const coverage = canonical.coverage;
-for (const completeness of ["complete", "partial", "unknown"]) {
-  for (const fields of [
-    { deferred: [{ id: "task", reason: "Review remains." }] },
-    {
-      surfaces: [
-        {
-          id: "surface",
-          label: "Source",
-          disposition: "needs_follow_up",
-          receiptRefs: [],
-        },
-      ],
-    },
-  ])
-    assert.equal(
-      coverage.validate({ ...coverage.example, completeness, ...fields }),
-      completeness !== "complete",
-    );
-}
+for (const fields of [
+  { deferred: [{ id: "task", reason: "Review remains." }] },
+  {
+    surfaces: [
+      {
+        id: "surface",
+        label: "Source",
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      },
+    ],
+  },
+])
+  assert.equal(coverage.validate({ ...coverage.example, ...fields }), true);
 
 // Shared named definitions remain available to consumers that extract fragments.
 assert.deepEqual(Object.keys(findingSchema.$defs).sort(), [

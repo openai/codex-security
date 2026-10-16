@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { CodexSecurityConfig } from "./config.js";
 import { loadContract, sameCheckedFileDevice } from "./contract.js";
 import {
@@ -25,6 +26,7 @@ import {
 } from "./findings-import.js";
 import { ScanResult } from "./result.js";
 import {
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityStateDirectory,
   expandHome,
@@ -141,6 +143,29 @@ export async function importScan(
       options.format,
       pluginRoot,
     );
+    const helper = (
+      await import(
+        pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
+      )
+    ).default;
+    try {
+      helper.parseCurrentFindings(
+        findings.map((finding) => {
+          // Import assigns new identities and retains source metadata as provenance.
+          const { findingId, occurrenceId, fingerprints, writeup, ...content } =
+            finding;
+          return {
+            ...content,
+            provenance: { source: `${options.format}_import` },
+          };
+        }),
+      );
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Imported findings do not match the current scan-draft finding contract: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
     signal?.throwIfAborted();
     await validateOutputDir(options.outputDir, options.archiveExisting);
     if (options.dryRun) {
@@ -264,7 +289,6 @@ export async function importScan(
       },
       "findings.json": { findings: bound },
       "coverage.json": {
-        completeness: "unknown",
         inventoryStrategy: "custom",
         surfaces: findings.length
           ? [

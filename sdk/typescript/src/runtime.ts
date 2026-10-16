@@ -1,7 +1,14 @@
+import { executablePathForSpawn } from "./executable-path.js";
+export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import {
+  execFile as execFileCallback,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -40,7 +47,6 @@ import {
   relative,
   resolve,
   sep,
-  win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -75,6 +81,12 @@ import {
 } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
+
+export type StartCodex = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
+) => ChildProcessWithoutNullStreams;
 
 export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
@@ -633,10 +645,7 @@ export function inspectWindowsCredentialAcl(
   };
 }
 
-function windowsSecurityDescriptorRule(value: string): {
-  rule: string;
-  rest: string;
-} {
+function windowsSecurityDescriptorRule(value: string) {
   let depth = 0;
   let quoted = false;
   let escaped = false;
@@ -2522,7 +2531,7 @@ export async function createMarketplace(
     const marketplace = join(codexHome, "sdk-marketplace");
     const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
     await copyPluginTree(root, pluginDestination, signal);
-    const projection = await legacyPluginProjection(pluginDestination, signal);
+    const projection = await pluginRuntimeProjection(pluginDestination, signal);
     for (const [path, file] of projection?.files ?? []) {
       const destination = join(pluginDestination, path);
       await mkdir(dirname(destination), { recursive: true });
@@ -2572,15 +2581,15 @@ async function writeMarketplaceManifest(
   }
 }
 
-type LegacyPluginProjection = {
+type PluginRuntimeProjection = {
   root: string;
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
-async function legacyPluginProjection(
+async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
-): Promise<LegacyPluginProjection | undefined> {
+): Promise<PluginRuntimeProjection | undefined> {
   const path = join(root, ".mcp.json");
   // Keep the source link checks ahead of any configuration read.
   if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
@@ -2594,14 +2603,12 @@ async function legacyPluginProjection(
   if (
     !isRecord(server) ||
     (server["command"] !== "./scripts/launch_codex_security_mcp" &&
-      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
-      !isLegacyNodeMcpServer(server))
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd")
   ) {
     return;
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  const directNode = isLegacyNodeMcpServer(server);
   if (
     !Array.isArray(environment) ||
     !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
@@ -2611,67 +2618,35 @@ async function legacyPluginProjection(
       "CODEX_SECURITY_PLUGIN_ROOT",
     ];
   }
-  const files: LegacyPluginProjection["files"] = new Map();
-  if (directNode) {
-    const args = [...(server["args"] as string[])];
-    args[args.findIndex(isLegacyNodeMcpEntry)] =
-      "./mcp/codex_security_sdk_bridge.mjs";
-    server["args"] = args;
-    files.set("mcp/codex_security_sdk_bridge.mjs", {
-      contents: Buffer.from(
-        'import { runMain } from "node:module";\n' +
-          'import { dirname, join } from "node:path";\n' +
-          'import { fileURLToPath } from "node:url";\n' +
-          "const root = process.env.CODEX_SECURITY_PLUGIN_ROOT;\n" +
-          'process.argv[1] = root ? join(root, "mcp", "server.mjs") : join(dirname(fileURLToPath(import.meta.url)), "server.mjs");\n' +
-          "runMain(process.argv[1]);\n",
-      ),
-      mode: 0o644,
-    });
-  } else {
-    server["command"] =
-      server["command"] === "./scripts/launch_codex_security_mcp.cmd"
-        ? "./scripts/launch_codex_security_mcp_sdk.cmd"
-        : "./scripts/launch_codex_security_mcp_sdk";
-    files.set("scripts/launch_codex_security_mcp_sdk", {
-      contents: Buffer.from(
-        "#!/bin/sh\n" +
-          'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
-          '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
-          "fi\n" +
-          'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
-      ),
-      mode: 0o755,
-    });
-    files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
-      contents: Buffer.from(
-        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
-          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
-          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
-          "exit /b\r\n:codex_security_sdk_original\r\n" +
-          '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
-      ),
-      mode: 0o755,
-    });
-  }
+  const files: PluginRuntimeProjection["files"] = new Map();
+  server["command"] =
+    server["command"] === "./scripts/launch_codex_security_mcp.cmd"
+      ? "./scripts/launch_codex_security_mcp_sdk.cmd"
+      : "./scripts/launch_codex_security_mcp_sdk";
+  files.set("scripts/launch_codex_security_mcp_sdk", {
+    contents: Buffer.from(
+      "#!/bin/sh\n" +
+        'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+        '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+        "fi\n" +
+        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+    ),
+    mode: 0o755,
+  });
+  files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
+    contents: Buffer.from(
+      "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+        "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+        '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+        "exit /b\r\n:codex_security_sdk_original\r\n" +
+        '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
+    ),
+    mode: 0o755,
+  });
   files.set(".mcp.json", {
     contents: Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`),
   });
   return { root, files };
-}
-
-function isLegacyNodeMcpEntry(argument: unknown): boolean {
-  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
-}
-
-function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
-  const command = server["command"];
-  return (
-    typeof command === "string" &&
-    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
-    Array.isArray(server["args"]) &&
-    server["args"].some(isLegacyNodeMcpEntry)
-  );
 }
 
 export function resolveCodexCommand(
@@ -2727,16 +2702,6 @@ export async function codexExecutableReadPaths(
   ];
 }
 
-export function executablePathForSpawn(command: string): string {
-  if (process.platform !== "win32" || !win32.isAbsolute(command))
-    return command;
-  // Root-relative paths still depend on the child's drive and working directory.
-  const root = win32.parse(command).root;
-  return root === "\\" || root === "/"
-    ? command
-    : win32.toNamespacedPath(command);
-}
-
 export async function bootstrapPlugin(
   codexHome: string,
   pluginRoot: string,
@@ -2754,7 +2719,7 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal).catch(
+  const projection = await pluginRuntimeProjection(root, options.signal).catch(
     (error: unknown) => {
       if (options.signal?.aborted) throw error;
       throw new LocalPluginBootstrapError(errorMessage(error), {
@@ -2930,7 +2895,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
-  projection?: LegacyPluginProjection,
+  projection?: PluginRuntimeProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 

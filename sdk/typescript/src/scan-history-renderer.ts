@@ -23,6 +23,7 @@ const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   reopened: { color: 31, icon: "↻" },
   new: { color: 31, icon: "+" },
   persisting: { color: 33, icon: "●" },
+  not_observed: { color: 36, icon: "○" },
   not_rescanned: { color: 36, icon: "○" },
   unknown: { color: 35, icon: "?" },
 };
@@ -408,12 +409,6 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
-    if (coverage !== "complete") {
-      lines.push(
-        `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
-      );
-    }
     const findings = (result["findings"] as JsonObject[]).map((entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===
