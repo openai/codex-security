@@ -38,19 +38,26 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
-  test.skipIf(process.platform === "win32")(
-    "does not execute Python discovered inside a separate SARIF source root",
-    async () => {
+  test
+    .skipIf(process.platform === "win32")
+    .each(["PATH", "PYTHON", "configured"] as const)(
+    "does not execute Python in input directories when selected via %s",
+    async (selection) => {
       const root = await mkdtemp(
         join(tmpdir(), "codex-security-export-python-"),
       );
-      const repository = join(root, "repository");
       const caller = join(root, "caller");
+      const repository =
+        selection === "PATH" ? join(root, "repository") : join(caller, "src");
       const scanDir = join(root, "scan");
-      const executable = join(repository, "python3");
+      const executable = join(
+        selection === "PATH" ? repository : join(caller, "tools"),
+        "python3",
+      );
       try {
-        await mkdir(repository);
         await mkdir(caller);
+        await mkdir(repository);
+        await mkdir(dirname(executable), { recursive: true });
         await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
           recursive: true,
         });
@@ -68,6 +75,7 @@ describe("offline artifact export", () => {
               process.stdout.write(await runArtifactExport({
                 scanDir: process.argv[2],
                 sourceRoot: process.argv[3],
+                pythonPath: process.argv[4] || undefined,
                 format: "sarif",
                 output: "-",
               }));
@@ -77,23 +85,33 @@ describe("offline artifact export", () => {
             ),
             scanDir,
             repository,
+            selection === "configured" ? executable : "",
           ],
           {
             cwd: caller,
             encoding: "utf8",
             env: {
               ...process.env,
-              PATH: [repository, dirname(PYTHON), process.env["PATH"]].join(
-                delimiter,
-              ),
-              PYTHON: "",
+              PATH: [
+                dirname(executable),
+                dirname(PYTHON),
+                process.env["PATH"],
+              ].join(delimiter),
+              PYTHON: selection === "PYTHON" ? executable : "",
               XDG_CACHE_HOME: join(root, "cache"),
             },
           },
         );
         expect(await stat(`${executable}.probed`).catch(() => null)).toBeNull();
-        expect(child.status, child.stderr).toBe(0);
-        expect(JSON.parse(child.stdout).version).toBe("2.1.0");
+        if (selection === "PATH") {
+          expect(child.status, child.stderr).toBe(0);
+          expect(JSON.parse(child.stdout).version).toBe("2.1.0");
+        } else {
+          expect(child.status).not.toBe(0);
+          expect(child.stderr).toContain(
+            "interpreter is unavailable or unusable",
+          );
+        }
       } finally {
         await rm(root, { recursive: true, force: true });
       }

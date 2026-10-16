@@ -10,6 +10,7 @@ import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import {
+  type PluginPythonOptions,
   bundledPluginRoot,
   codexSecurityStateDirectory,
   expandHome,
@@ -66,7 +67,7 @@ export interface ArtifactExportResult {
 
 interface HelperOptions {
   pythonPath?: string;
-  protectedRoot?: string;
+  protectedRoot?: PluginPythonOptions["protectedRoot"];
   pluginRoot?: string;
   signal?: AbortSignal;
   output?: ArtifactOutput;
@@ -209,7 +210,10 @@ export async function runArtifactExport(
     ],
     {
       pythonPath: arguments_.pythonPath,
-      protectedRoot: arguments_.sourceRoot,
+      protectedRoot:
+        arguments_.sourceRoot === undefined
+          ? undefined
+          : [process.cwd(), arguments_.sourceRoot],
       signal: arguments_.signal,
       failureMessage:
         artifact === "findings"
