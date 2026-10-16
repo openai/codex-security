@@ -1,7 +1,14 @@
+import { executablePathForSpawn } from "./executable-path.js";
+export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import {
+  execFile as execFileCallback,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -40,7 +47,6 @@ import {
   relative,
   resolve,
   sep,
-  win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -75,6 +81,12 @@ import {
 } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
+
+export type StartCodex = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
+) => ChildProcessWithoutNullStreams;
 
 export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
@@ -633,10 +645,7 @@ export function inspectWindowsCredentialAcl(
   };
 }
 
-function windowsSecurityDescriptorRule(value: string): {
-  rule: string;
-  rest: string;
-} {
+function windowsSecurityDescriptorRule(value: string) {
   let depth = 0;
   let quoted = false;
   let escaped = false;
@@ -2691,16 +2700,6 @@ export async function codexExecutableReadPaths(
     executable,
     await realpath(resolveBundledCodexExecutable(packageJson)),
   ];
-}
-
-export function executablePathForSpawn(command: string): string {
-  if (process.platform !== "win32" || !win32.isAbsolute(command))
-    return command;
-  // Root-relative paths still depend on the child's drive and working directory.
-  const root = win32.parse(command).root;
-  return root === "\\" || root === "/"
-    ? command
-    : win32.toNamespacedPath(command);
 }
 
 export async function bootstrapPlugin(

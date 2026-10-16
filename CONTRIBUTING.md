@@ -23,8 +23,9 @@ run `node plugins/codex-security/mcp-app/scripts/generate-artifact-schemas.mjs`.
 The MCP `typecheck` command checks that the generated resources are current.
 
 `pnpm --dir sdk/typescript run generate:models` also copies workbench argument
-encoding from the plugin source into the SDK. Edit the plugin helper, then
-regenerate its SDK copy. Historical finding normalization is maintained in the SDK.
+encoding and executable path handling from the plugin source into the SDK. Edit the
+plugin helper, then regenerate its SDK copy. Historical finding normalization is
+maintained in the SDK.
 `pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
