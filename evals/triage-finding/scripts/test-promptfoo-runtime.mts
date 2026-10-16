@@ -106,10 +106,7 @@ for (const name of [
   "sastbench/promptfooconfig.sastbench.yaml",
 ]) {
   const suite = parse(fs.readFileSync(path.join(evalRoot, name), "utf8"));
-  const providerPath = suite.providers[0].replace(
-    "file://{{env.TRIAGE_PROVIDER_CONFIG_ROOT}}",
-    path.join(evalRoot, "providers"),
-  );
+  const providerPath = path.resolve(evalRoot, suite.providers[0].$ref);
   const { id, config } = parse(fs.readFileSync(providerPath, "utf8"));
   assert.match(id, /^openai:codex-sdk:/);
   assert.deepEqual(

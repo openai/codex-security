@@ -25,7 +25,7 @@ pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
 ```
 
-The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. Separate YAML files under `providers/` retain the native Codex provider IDs and each suite's settings. The runner uses Node's `--import` to preload the runtime adapter into the Promptfoo child process, so it can bind the staged runtime during evaluation, retry, resume, and viewer replay without a Promptfoo patch. Native provider loading preserves authentication precedence.
+The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. Separate YAML files under `providers/` retain the native Codex provider IDs and each suite's settings. The suite's `$ref` entries expand these settings into saved evaluation snapshots, so later edits to the provider files do not change an existing run's retry, resume, or replay settings. The runner uses Node's `--import` to preload the runtime adapter into the Promptfoo child process, so it can bind the staged runtime during evaluation, retry, resume, and viewer replay without a Promptfoo patch. Native provider loading preserves authentication precedence.
 
 The adapter depends on bundled Codex classes and internal methods in the pinned Promptfoo provider. The provider tests cover those methods, executable selection, authentication, and per-case settings. Replay does not restore grading metadata, so grading hooks remain disabled.
 

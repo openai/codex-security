@@ -75,6 +75,7 @@ const explicitProviders = new WeakSet<ApiProvider>();
 function usesTriageRuntime(provider: CodexProvider) {
   return (
     explicitProviders.has(provider) ||
+    provider.config?.working_dir === undefined ||
     provider.config?.cli_config?.default_permissions ===
       "triage_runtime_only" ||
     provider.config?.cli_config?.default_permissions ===

@@ -25,10 +25,7 @@ const packageJson = JSON.parse(
   fs.readFileSync(path.join(evalRoot, "package.json"), "utf8"),
 );
 
-const providerPath = config.providers[0].replace(
-  "file://{{env.TRIAGE_PROVIDER_CONFIG_ROOT}}",
-  path.join(evalRoot, "providers"),
-);
+const providerPath = path.resolve(evalRoot, config.providers[0].$ref);
 const provider = parse(fs.readFileSync(providerPath, "utf8"));
 assert.match(provider.id, /^openai:codex-sdk:/);
 assert.deepEqual(provider.config.additional_directories, [

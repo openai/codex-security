@@ -5,7 +5,7 @@ prompts:
   - file://./prompts/triage-request.txt
 
 providers:
-  - file://{{env.TRIAGE_PROVIDER_CONFIG_ROOT}}/triage.yaml
+  - $ref: ./providers/triage.yaml
 
 evaluateOptions:
   maxConcurrency: 1
