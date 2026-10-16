@@ -5,6 +5,26 @@ export type {
 } from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
 export {
+  runHostedRemediation,
+  HostedRemediationInputSchema,
+  HostedRemediationPreparationError,
+} from "./hosted-remediation.js";
+export type {
+  HostedRemediationInput,
+  HostedRemediationOptions,
+  HostedRemediationResult,
+  RemediationExecutor,
+  RemediationExecutionRequest,
+  RemediationExecutionResult,
+  RemediationExecutionEvent,
+} from "./hosted-remediation.js";
+export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
+export type {
+  FindingPatch,
+  FindingVerification,
+  FindingVerificationCheck,
+} from "./remediation.js";
+export {
   runHostedScan,
   HostedScanInputSchema,
   HostedScanPreparationError,

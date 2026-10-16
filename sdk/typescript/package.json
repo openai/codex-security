@@ -46,7 +46,8 @@
     "docs/findings-service.md",
     "docs/dedupe-records.md",
     "docs/hosted-scans.md",
-    "docs/validate-records.md"
+    "docs/validate-records.md",
+    "docs/hosted-remediation.md"
   ],
   "publishConfig": {
     "access": "public",
