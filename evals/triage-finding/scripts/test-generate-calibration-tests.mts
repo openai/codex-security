@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
-import { createRequire } from "node:module";
 import runtimeVars from "./runtime-vars.mts";
 import path from "node:path";
+import { parse } from "yaml";
 import { findingInput, variantCaseId } from "./generate-calibration-tests.mts";
 import type { CalibrationCase } from "../types.ts";
 import { plannedJobs } from "./hydrate-calibration-repos.mts";
@@ -18,8 +18,6 @@ const generator = path.join(
   "generate-calibration-tests.mts",
 );
 const dataset = path.join(evalDir, "datasets", "triage-calibration-seed.json");
-const require = createRequire(import.meta.url);
-const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 const trackedTests = path.join(evalDir, "tests", "calibration-oss.yaml");
 
 const tmpDir = fs.realpathSync(
