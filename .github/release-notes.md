@@ -7,6 +7,7 @@
 - update @linear/sdk to 97.1.0 ([#1653](https://github.com/openai/codex-security/pull/1653))
 - retire obsolete ranking helpers ([#1607](https://github.com/openai/codex-security/pull/1607))
 - share executable and process helpers ([#1581](https://github.com/openai/codex-security/pull/1581))
+- reuse npm downloads across lockfile updates ([#1659](https://github.com/openai/codex-security/pull/1659))
 
 <!-- release-section: highlights:end -->
 

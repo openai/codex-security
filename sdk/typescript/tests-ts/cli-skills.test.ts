@@ -158,7 +158,7 @@ describe("CLI skill commands", () => {
   );
 
   test.each([0, 2])(
-    "combines inline, file, and directory context and cleans up after exit %s",
+    "combines inline, file, and directory context and cleans up after exit %d",
     async (status) => {
       const directory = await temporaryDirectory("validation-context-");
       await mkdir(join(directory, "context", "nested"), { recursive: true });
