@@ -508,7 +508,7 @@ export function createCodexSecurityServer(): McpServer {
   const server = new McpServer(
     {
       name: "codex-security",
-      title: "Codex Security Local",
+      title: "Codex Security",
       version: MCP_APP_VERSION,
     },
     {
@@ -546,7 +546,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "get_codex_security_daybreak_access",
     {
-      title: "Check Codex Security Local Daybreak Access",
+      title: "Check Codex Security Daybreak Access",
       description:
         "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
       inputSchema: z.strictObject({}),
@@ -613,7 +613,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "start_codex_security_standard_scan",
     {
-      title: "Start or Join Codex Security Local Standard Scan",
+      title: "Start or Join Codex Security Standard Scan",
       description:
         "Headless and CLI only. Start or rejoin a Standard security scan. Do not use for desktop scans, Review changes, Deep Scan, or an existing SDK-owned scan. Use the returned authoritative scanId, scanDir, and handoffClaimToken throughout preflight, reporting, and completion.",
       inputSchema: startHeadlessStandardScanSchema,
@@ -683,7 +683,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "start_codex_security_prompt_only_scan",
     {
-      title: "Start Codex Security Local Prompt-Only Scan",
+      title: "Start Codex Security Prompt-Only Scan",
       description:
         "Start or rejoin a Standard or diff Codex Security scan from its owning conversation. Use the returned authoritative scanId and scanDir. Standard and diff scans save progress checkpoints before their final semantic draft; the workbench writes the unsealed canonical artifacts. Complete the same scan once. Deep Scan uses start_codex_security_deep_scan instead.",
       inputSchema: startPromptOnlyScanSchema,
@@ -727,7 +727,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "request_codex_security_user_input",
     {
-      title: "Request Codex Security Local User Input",
+      title: "Request Codex Security User Input",
       description:
         "Fallback for interactive Codex Security workflows when the host-native request_user_input tool is unavailable. Presents one to three non-sensitive multiple-choice questions through standard MCP form elicitation and waits for the user's response. Never call this tool in headless, automation, or other non-interactive sessions.",
       inputSchema: requestUserInputSchema,
@@ -773,7 +773,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "open_codex_security_workspace",
     {
-      title: "Open Codex Security Local",
+      title: "Open Codex Security",
       description:
         "App-only. Create a native Codex Security workspace with the target and requested standard, diff, or deep mode, or reopen one owned by this thread by passing only sessionId. Scope is inside targetPath; use '.' or omit scope for the whole target.",
       inputSchema: openSchema,
@@ -823,7 +823,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "inspect_codex_security_target",
     {
-      title: "Inspect Codex Security Local Target",
+      title: "Inspect Codex Security Target",
       description:
         "App-only. Validate a local target directory and derive its display and Git metadata without saving setup.",
       inputSchema: targetInspectionSchema,
@@ -844,7 +844,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "inspect_codex_security_setup",
     {
-      title: "Validate Codex Security Local Setup",
+      title: "Validate Codex Security Setup",
       description:
         "App-only. Resolve and validate the complete local target, scope, mode, and exact Git change set without saving setup.",
       inputSchema: setupInspectionSchema,
@@ -871,7 +871,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "submit_codex_security_setup",
     {
-      title: "Save Codex Security Local Setup",
+      title: "Save Codex Security Setup",
       description:
         "App-only. Validate and save bounded target, scope, mode, and optional context selections.",
       inputSchema: submissionSchema,
@@ -911,7 +911,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "start_codex_security_scan",
     {
-      title: "Start Codex Security Local Scan",
+      title: "Start Codex Security Scan",
       description:
         "App-only. Create a scan record and its local artifact directory before Codex analysis begins.",
       inputSchema: startScanSchema,
@@ -935,7 +935,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "start_codex_security_deep_scan",
     {
-      title: "Start or Join Codex Security Local Deep Scan",
+      title: "Start or Join Codex Security Deep Scan",
       description:
         "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the canonical parent scan-manifest.json. Call complete_codex_security_scan once.",
       inputSchema: startDeepScanSchema,
@@ -1104,7 +1104,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "cancel_codex_security_scan",
     {
-      title: "Cancel Codex Security Local Scan",
+      title: "Cancel Codex Security Scan",
       description:
         "Stop a running scan from its owning Codex thread, prevent further progress or completion updates, and cancel any active deterministic Deep Scan SDK workers.",
       inputSchema: scanSchema,
@@ -1125,7 +1125,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "cancel_codex_security_scan_from_app",
     {
-      title: "Cancel Codex Security Local Scan From App",
+      title: "Cancel Codex Security Scan From App",
       description:
         "App-only. Stop a running scan from the native Codex Security workbench, prevent further progress or completion updates, and cancel any active deterministic Deep Scan SDK workers.",
       inputSchema: scanSchema,
@@ -1138,7 +1138,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "recover_codex_security_scan_results",
     {
-      title: "Recover Codex Security Local Scan Results",
+      title: "Recover Codex Security Scan Results",
       description:
         "App-only. Explicitly validate and republish retained checkpoints for one stopped scan, updating its artifacts, finding index, and counts.",
       inputSchema: scanSchema,
@@ -1157,7 +1157,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "get_codex_security_scan",
     {
-      title: "Get Codex Security Local Scan",
+      title: "Get Codex Security Scan",
       description:
         "App-only. Read plugin-owned scan state for native Security monitoring without claiming a pending Codex handoff.",
       inputSchema: scanReadSchema,
@@ -1179,7 +1179,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "list_codex_security_scans",
     {
-      title: "List Codex Security Local Scans",
+      title: "List Codex Security Scans",
       description:
         "App-only. Read persisted plugin-owned scan summaries for native Security navigation.",
       inputSchema: scanListSchema,
@@ -1204,7 +1204,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "list_codex_security_global_findings",
     {
-      title: "List Codex Security Local Global Findings",
+      title: "List Codex Security Global Findings",
       description:
         "App-only. Read the latest plugin-owned finding occurrence for each stable repository target and finding identity.",
       inputSchema: globalFindingsPageSchema,
@@ -1229,7 +1229,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "list_codex_security_repositories",
     {
-      title: "List Codex Security Local Repositories",
+      title: "List Codex Security Repositories",
       description:
         "App-only. Read plugin-owned repository summaries and their latest scan state.",
       inputSchema: repositoryListSchema,
@@ -1253,7 +1253,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "get_codex_security_scan_context",
     {
-      title: "Get Codex Security Local Scan Context",
+      title: "Get Codex Security Scan Context",
       description:
         "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. Validated legacy finding details may be migrated.",
       inputSchema: scanContextSchema,
@@ -1313,7 +1313,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "rename_codex_security_scan",
     {
-      title: "Rename Codex Security Local Scan",
+      title: "Rename Codex Security Scan",
       description: "App-only. Change the display name of a saved scan.",
       inputSchema: { ...scanSchema, name: z.string() },
       annotations: writingAnnotations,
@@ -1356,7 +1356,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "update_codex_security_scan_context",
     {
-      title: "Update Codex Security Local Scan Context",
+      title: "Update Codex Security Scan Context",
       description:
         "Replace the context for a running scan. The next phase uses the new value; workers in the current phase keep their original context.",
       inputSchema: scanContextUpdateSchema,
@@ -1382,7 +1382,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "update_codex_security_scan_context_from_app",
     {
-      title: "Update Codex Security Local Scan Context From App",
+      title: "Update Codex Security Scan Context From App",
       description:
         "App-only. Replace the context for the running scan attached to this workspace.",
       inputSchema: appScanContextUpdateSchema,
@@ -1410,7 +1410,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "update_codex_security_scan_progress",
     {
-      title: "Update Codex Security Local Scan Progress",
+      title: "Update Codex Security Scan Progress",
       description:
         "Record a meaningful live scan phase or coverage milestone in the Codex Security workbench.",
       inputSchema: progressSchema,
@@ -1525,7 +1525,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "complete_codex_security_scan",
     {
-      title: "Complete Codex Security Local Scan",
+      title: "Complete Codex Security Scan",
       description:
         "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
@@ -1562,7 +1562,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "finalize_codex_security_scan_usage",
     {
-      title: "Finalize Codex Security Local Scan Usage",
+      title: "Finalize Codex Security Scan Usage",
       description:
         "App-only. Record final measured usage after the scan's completion turn has finished. Pass the exact thread and turn returned in usage.completion; do not call while that turn is running.",
       inputSchema: {
@@ -1591,7 +1591,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "fail_codex_security_scan",
     {
-      title: "Fail Codex Security Local Scan",
+      title: "Fail Codex Security Scan",
       description:
         "Permanently mark a launched Codex Security scan as failed only after a confirmed unrecoverable blocker. For explicit user cancellation, use cancel_codex_security_scan instead. This terminal action cannot be resumed; incomplete or otherwise resumable work must remain running.",
       inputSchema: failSchema,
@@ -1620,7 +1620,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "set_codex_security_finding_triage",
     {
-      title: "Update Codex Security Local Finding Status",
+      title: "Update Codex Security Finding Status",
       description:
         "App-only. Persist a completed finding's local open or closed triage status. Closed findings require one bounded close reason; reopening clears it.",
       inputSchema: findingTriageSchema,
@@ -1645,7 +1645,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "request_codex_security_finding_remediation",
     {
-      title: "Request Codex Security Local Finding Remediation",
+      title: "Request Codex Security Finding Remediation",
       description:
         "App-only. Queue a completed finding for Codex remediation before sending the host a generate or regenerate request.",
       inputSchema: findingRemediationClaimSchema,
@@ -1668,7 +1668,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "request_codex_security_finding_remediation_action",
     {
-      title: "Request Codex Security Local Finding Remediation Action",
+      title: "Request Codex Security Finding Remediation Action",
       description:
         "App-only. Durably claim an apply or verify handoff before asking Codex to perform the local working-tree operation.",
       inputSchema: findingRemediationActionRequestSchema,
@@ -1693,7 +1693,7 @@ export function createCodexSecurityServer(): McpServer {
   for (const { name, title, description, annotations, command, message } of [
     {
       name: "claim_codex_security_finding_remediation_resend",
-      title: "Claim Codex Security Local Finding Remediation Resend",
+      title: "Claim Codex Security Finding Remediation Resend",
       description:
         "App-only. Atomically take ownership of an unowned or stale remediation host request before resending it.",
       annotations: writingAnnotations,
@@ -1702,7 +1702,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     {
       name: "release_codex_security_finding_remediation_claim",
-      title: "Release Codex Security Local Finding Remediation Claim",
+      title: "Release Codex Security Finding Remediation Claim",
       description:
         "App-only. Release a locally owned remediation host request after message delivery fails.",
       annotations: writingAnnotations,
@@ -1711,7 +1711,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     {
       name: "cancel_codex_security_finding_remediation_request",
-      title: "Cancel Codex Security Local Finding Remediation Request",
+      title: "Cancel Codex Security Finding Remediation Request",
       description:
         "App-only. Roll back an owned remediation request after the user declines its host follow-up.",
       annotations: destructiveAnnotations,
@@ -1720,7 +1720,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     {
       name: "mark_codex_security_finding_remediation_delivered",
-      title: "Mark Codex Security Local Finding Remediation Delivered",
+      title: "Mark Codex Security Finding Remediation Delivered",
       description:
         "App-only. Seal host-message delivery ownership before Codex starts a remediation worker.",
       annotations: writingAnnotations,
@@ -1757,7 +1757,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "set_codex_security_finding_remediation",
     {
-      title: "Update Codex Security Local Finding Remediation",
+      title: "Update Codex Security Finding Remediation",
       description:
         "Persist the bounded local remediation workflow state for a completed finding. The UI may mark a request as queued; Codex records generated, applied, verifying, verified, or failed states after performing the corresponding work.",
       inputSchema: findingRemediationSchema,
@@ -1801,7 +1801,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "export_codex_security_findings",
     {
-      title: "Export Codex Security Local Artifacts",
+      title: "Export Codex Security Artifacts",
       description:
         "App-only. Export retained local findings as JSON, SARIF, or CSV, or the saved threat model as Markdown without running another analysis. Findings require completed or preserved stopped results; threat models may be provisional. Defaults to findings in CSV, or Markdown when artifact is threat-model. Exported copies remain in the scan's exports directory, except canonical findings JSON.",
       inputSchema: findingsExportSchema,
@@ -1827,7 +1827,7 @@ export function createCodexSecurityServer(): McpServer {
   server.registerTool(
     "list_codex_security_findings",
     {
-      title: "List Codex Security Local Findings",
+      title: "List Codex Security Findings",
       description:
         "App-only. Load one bounded page of indexed findings for a completed local scan, migrating validated legacy finding details when needed.",
       inputSchema: findingsPageSchema,

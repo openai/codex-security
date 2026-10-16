@@ -19,6 +19,7 @@
 - normalize invalid code evidence line ranges ([#1656](https://github.com/openai/codex-security/pull/1656))
 - prefix tilde fences and parenthesized list markers ([#1604](https://github.com/openai/codex-security/pull/1604))
 - preserve outcomes when checkout cleanup fails ([#1433](https://github.com/openai/codex-security/pull/1433))
+- restore Codex Security display name ([#1681](https://github.com/openai/codex-security/pull/1681))
 
 <!-- release-section: highlights:end -->
 
