@@ -1162,7 +1162,41 @@ def complete_scan(
             cost_json,
             prepare_only=prepare_only,
             thread_id=getattr(args, "thread_id", None),
+            turn_id=getattr(args, "turn_id", None),
         )
+
+
+def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    with scan_completion_lock(scan_id):
+        scan = require_scan(connection, scan_id)
+        stored = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
+        usage = stored.get("usage", {})
+        completion = usage.get("completion")
+        if scan["status"] != "complete" or not completion:
+            raise SystemExit("The scan has no pending completion usage.")
+        if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
+            raise SystemExit("The scan usage belongs to a different completion turn.")
+        if not completion["finalized"]:
+            usage = scan_usage.collect_scan_usage(
+                connection,
+                scan,
+                thread_id=args.thread_id,
+                completed_turn_id=args.turn_id,
+            )
+            if usage["coverage"] == "unavailable":
+                return scan_context(connection, scan_id)
+            if args.turn_status != "completed":
+                if usage["coverage"] == "complete":
+                    usage["coverage"] = "partial"
+                usage["warnings"] = [*usage.get("warnings", []), f"scan_turn_{args.turn_status}"]
+            usage["completion"] = {**completion, "finalized": True}
+            cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
+                )
+        return scan_context(connection, scan_id)
 
 
 def complete_budget_exhausted_scan(
@@ -1454,6 +1488,7 @@ def complete_scan_locked(
     *,
     prepare_only: bool = False,
     thread_id: str | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1610,6 +1645,18 @@ def complete_scan_locked(
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
+        if thread_id is not None and turn_id is not None:
+            measured_usage["completion"] = {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "finalized": False,
+            }
+            if measured_usage["coverage"] == "complete":
+                measured_usage["coverage"] = "partial"
+            measured_usage["warnings"] = [
+                *measured_usage.get("warnings", []),
+                "turn_in_progress",
+            ]
         cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
@@ -3386,6 +3433,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "register-cli-scan": partial(register_cli_scan, before_archive=before_archive),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
+            "finalize-scan-usage": finalize_scan_usage,
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
             "list-findings": list_findings,

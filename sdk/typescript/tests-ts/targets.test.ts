@@ -658,6 +658,24 @@ describe("scan target normalization", () => {
     ).rejects.toThrow("cannot specify a head");
   });
 
+  test("revalidates a forged diff head after resolving the base", async () => {
+    const repo = await repository();
+    let headReads = 0;
+    const forged: DiffTarget = Object.assign(
+      Object.create(DiffTarget.prototype),
+      { kind: "refs", base: "HEAD" },
+    );
+    Object.defineProperty(forged, "head", {
+      get: () => (++headReads <= 2 ? "HEAD" : undefined),
+    });
+
+    const normalized = normalizeTarget(repo, forged);
+    await expect(normalized).rejects.toThrow(InvalidTargetError);
+    await expect(normalized).rejects.toThrow(
+      "Git diff refs must include a non-empty head ref.",
+    );
+  });
+
   test("honors cancellation before repository and Git validation", async () => {
     const repo = await repository();
     const controller = new AbortController();

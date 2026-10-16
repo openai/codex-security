@@ -1,10 +1,19 @@
 import { isRecord } from "./record.js";
-import { isSafeNonNegativeInteger } from "./value.js";
+import { z } from "zod";
 
-export interface DeepScanProgress {
-  completed: number;
-  active: number;
-  maximum: number;
+const progressSchema = z
+  .object({
+    completed: z.int().nonnegative(),
+    active: z.int().nonnegative(),
+    maximum: z.int().positive(),
+    consolidating: z.boolean().optional(),
+  })
+  .transform(({ consolidating, ...counts }) => ({
+    ...counts,
+    ...(consolidating === undefined ? {} : { consolidating }),
+  }));
+
+export interface DeepScanProgress extends z.output<typeof progressSchema> {
   /** Whether the coordinator is reducing results or has finished. */
   consolidating?: boolean;
 }
@@ -89,23 +98,8 @@ export function deepScanProgressFromWorkbench(
   if (!isRecord(progress)) return null;
   const independentReviews = progress["independentReviews"];
   if (independentReviews === undefined) return null;
-  if (isRecord(independentReviews)) {
-    const { completed, active, maximum, consolidating } = independentReviews;
-    if (
-      isSafeNonNegativeInteger(completed) &&
-      isSafeNonNegativeInteger(active) &&
-      isSafeNonNegativeInteger(maximum) &&
-      maximum > 0 &&
-      (consolidating === undefined || typeof consolidating === "boolean")
-    ) {
-      return {
-        completed,
-        active,
-        maximum,
-        ...(typeof consolidating === "boolean" ? { consolidating } : {}),
-      };
-    }
-  }
+  const parsed = progressSchema.safeParse(independentReviews);
+  if (parsed.success) return parsed.data;
   throw new Error(
     "Codex Security workbench returned invalid Deep Scan progress.",
   );

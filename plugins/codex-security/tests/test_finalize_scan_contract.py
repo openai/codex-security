@@ -82,7 +82,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
     @skipIf(os.name == "nt", "POSIX source filenames")
     def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
         source_root = self.scan_dir / "source"
-        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md"):
+        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md", " ", "\u00a0"):
             with self.subTest(name=name):
                 source = source_root / name
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -1603,6 +1603,26 @@ The extraction root is not enforced.
         self.assertIn(r"archive entry -\> filesystem write", report)
 
     @pytest.mark.cross_platform
+    def test_finalize_renders_embedded_evidence_with_null_end_line(self) -> None:
+        self.findings["findings"][0]["validation"] = {
+            "codeEvidence": [
+                {
+                    "label": "Source control",
+                    "path": "src/evidence.py",
+                    "startLine": 37,
+                    "endLine": None,
+                    "code": "handle(request)",
+                }
+            ]
+        }
+        self.write_scan()
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:37`\n", report)
+
+    @pytest.mark.cross_platform
     def test_report_projection_preserves_data_flow_aliases_and_scalar_reachability(self) -> None:
         for data_flow_key in ("dataFlow", "data_flow", "dataflow"):
             with self.subTest(data_flow_key=data_flow_key):
@@ -1750,6 +1770,26 @@ The extraction root is not enforced.
         findings["findings"][0]["root_cause"] = ""
         with self.preserving_sealed_findings(findings):
             pass
+
+    @pytest.mark.cross_platform
+    def test_sealed_rerun_renders_legacy_evidence_with_reversed_bounds(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        finding = findings["findings"][0]
+        finding["code_evidence"] = [
+            {
+                "id": "legacy-source",
+                "label": "Source control",
+                "location": {"path": "src/evidence.py", "startLine": 48, "endLine": 47},
+                "code": "handle(request)",
+            }
+        ]
+        finding["validation"] = {"evidenceRefs": ["legacy-source"]}
+        with self.preserving_sealed_findings(findings):
+            pass
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:48`\n", report)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:
@@ -2317,6 +2357,43 @@ The extraction root is not enforced.
         self.assertEqual(
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
+
+    def test_preserves_literal_whitespace_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0"):
+            with self.subTest(path=path):
+                self.manifest["scan"]["scope"]["includePaths"] = [path]
+                self.coverage["includePaths"] = [path]
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Repository-relative evidence.",
+                    }
+                ]
+                self.write_scan()
+                manifest, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(manifest["scan"]["scope"]["includePaths"], [path])
+                self.assertEqual(coverage["includePaths"], [path])
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
+                self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+                if path.isascii():
+                    self.assertIn(
+                        f'- Included paths: `"{path}"`',
+                        (self.scan_dir / "report.md").read_text(encoding="utf-8"),
+                    )
+
+    def test_rejects_whitespace_only_artifact_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0"):
+            with self.subTest(path=path), self.assertRaises(FINALIZER.ContractError):
+                FINALIZER._require_portable_relative_path(path, "artifact")
 
     def test_rejects_missing_coverage_receipt(self) -> None:
         self.coverage["surfaces"][0]["receiptRefs"] = ["artifacts/02_discovery/work_ledger.jsonl"]

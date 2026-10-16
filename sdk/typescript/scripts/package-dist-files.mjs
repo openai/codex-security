@@ -1,5 +1,9 @@
 const distModules = [
   "api",
+  "scan-executor",
+  "host-protocol",
+  "hosted-scan",
+  "hosted-scan-protocol",
   "artifact-export",
   "auth",
   "bulk-scan-discovery",
