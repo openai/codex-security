@@ -17,7 +17,8 @@ type CodexProvider = ApiProvider & {
   getCodexInstanceForTurn(
     environment: NodeJS.ProcessEnv,
     config: ProviderOptions["config"],
-    apiKey?: string,
+    apiKey: string | undefined,
+    cleanupGeneration: number,
   ): Promise<{
     activeInstance: { exec: { executablePath: string; pathDirs: string[] } };
   }>;
@@ -26,6 +27,8 @@ type CodexProvider = ApiProvider & {
     context: Parameters<ApiProvider["callApi"]>[1],
     options: Parameters<ApiProvider["callApi"]>[2],
     config: ProviderOptions["config"],
+    inIsolatedWorkspace: boolean,
+    cleanupGeneration: number,
   ): ReturnType<ApiProvider["callApi"]>;
 };
 
@@ -79,8 +82,18 @@ export function beforeAll({ suite }: { suite: { providers: ApiProvider[] } }) {
     )
       continue;
     const getInstance = provider.getCodexInstanceForTurn.bind(provider);
-    provider.getCodexInstanceForTurn = async (environment, config, apiKey) => {
-      const instance = await getInstance(environment, config, apiKey);
+    provider.getCodexInstanceForTurn = async (
+      environment,
+      config,
+      apiKey,
+      cleanupGeneration,
+    ) => {
+      const instance = await getInstance(
+        environment,
+        config,
+        apiKey,
+        cleanupGeneration,
+      );
       // The pinned provider exposes its selected SDK executor before creating
       // thread options. Extend this call's config without changing selection
       // or the SDK's bundled-tool PATH handling.
@@ -120,7 +133,13 @@ export function beforeAll({ suite }: { suite: { providers: ApiProvider[] } }) {
     const callApiInternal = provider.callApiInternal.bind(provider);
     // The pinned Codex provider merges prompt overrides and renders case
     // variables before this call. Keep that upstream behavior for each case.
-    provider.callApiInternal = (prompt, context, options, config) => {
+    provider.callApiInternal = (
+      prompt,
+      context,
+      options,
+      config,
+      ...lifecycle
+    ) => {
       const runtimeRoot = process.env.TRIAGE_RUNTIME_ROOT;
       if (!runtimeRoot) {
         throw new Error(
@@ -147,16 +166,22 @@ export function beforeAll({ suite }: { suite: { providers: ApiProvider[] } }) {
         process.platform === "win32"
           ? realpathSync(nodeCommand)
           : realpathSync.native(nodeCommand);
-      return callApiInternal(prompt, context, options, {
-        ...config,
-        working_dir: runtimeRoot,
-        cli_env: { ...config.cli_env, CODEX_MCP_NODE_PATH: nodeCommand },
-        additional_directories: [
-          ...(config.additional_directories ?? []),
-          path.dirname(nodePath),
-          path.dirname(nodeCommand),
-        ],
-      });
+      return callApiInternal(
+        prompt,
+        context,
+        options,
+        {
+          ...config,
+          working_dir: runtimeRoot,
+          cli_env: { ...config.cli_env, CODEX_MCP_NODE_PATH: nodeCommand },
+          additional_directories: [
+            ...(config.additional_directories ?? []),
+            path.dirname(nodePath),
+            path.dirname(nodeCommand),
+          ],
+        },
+        ...lifecycle,
+      );
     };
     wrappedProviders.add(provider);
   }
