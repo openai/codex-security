@@ -13,7 +13,6 @@ overrides:
   "@opencode-ai/sdk": "$@opencode-ai/sdk"
   "ibm-cloud-sdk-core@5.6.0>axios": 1.20.0
   "get-uri@8.0.1>basic-ftp": 6.2.1
-  "promptfoo@0.123.1>simple-git": 4.0.2
   "socks@2.8.10>ip-address": 10.7.2
 
 allowBuilds:
@@ -26,4 +25,4 @@ allowBuilds:
   sharp: false
 
 patchedDependencies:
-  promptfoo@0.123.1: patches/promptfoo@0.123.1.patch
+  promptfoo@0.124.1: patches/promptfoo@0.124.1.patch

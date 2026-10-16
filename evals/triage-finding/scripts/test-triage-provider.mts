@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { parse } from "yaml";
 import { beforeAll } from "./triage-provider.mts";
-const require = createRequire(import.meta.url);
-const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const runner = path.join(import.meta.dirname, "run-promptfoo.mts");

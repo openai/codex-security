@@ -128,7 +128,7 @@ assert.ok(
       "Read and follow plugins/codex-security/skills/triage-finding/SKILL.md",
     ),
 );
-// Load the real scanner so the patched package must link against its Git dependency.
+// Load the installed scanner so its Git imports are checked at runtime.
 const promptfooDist = path.join(evalRoot, "node_modules/promptfoo/dist/src");
 const scanner = fs
   .readdirSync(promptfooDist)

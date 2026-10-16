@@ -167,7 +167,7 @@ try {
         },
       },
     );
-    assert.match(version, /0\.123\.1/);
+    assert.equal(version.trim(), packageJson.dependencies.promptfoo);
   }
 } finally {
   fs.rmSync(dispatchRoot, { recursive: true, force: true });
