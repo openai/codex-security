@@ -951,46 +951,82 @@ Supply the validation prompt again when rerunning.
 
 ## Publish findings to Cloud
 
-Preview selected completed scans before uploading:
+Publish a completed full-repository SCM scan to an existing authorized Cloud
+environment:
 
 ```bash
-codex-security publish scan --to cloud --dry-run --json
-codex-security publish scan --scan SCAN_ID_A --scan SCAN_ID_B \
-  --to cloud --dry-run --json
+codex-security publish scan --scan SCAN_ID --to cloud --dry-run --json
+codex-security publish scan --scan SCAN_ID --to cloud --cloud-environment ENV_ID
+codex-security publish scan /path/to/completed-scan --to cloud --cloud-environment ENV_ID
 ```
 
-The interactive picker starts with nothing selected; press Space to select and
-Enter to submit. Find IDs with `scans list --json`. Select by full ID, unique
-prefix of at least eight characters, or `latest` for the current repository.
-Local sealed artifacts are required. Dry runs need no login or network access.
+Find saved IDs with `scans list --json`. Select by full ID, a unique prefix of at
+least eight characters, or `latest` for the current repository. Saved scans are
+checked against the completed workbench record, resolved artifact directory, and
+repository provenance captured at scan start, even when publishing from another
+directory. This verifies scan consistency; it does not select the Cloud destination.
+Publication does not create environments.
 
-Uploads require ChatGPT credentials saved to a file. Set
-`cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in again.
-Cloud publication rejects automatic/keyring storage even when `auth.json` exists,
-because that file may be stale or belong to another account.
+For both saved scans and external directories, choose the repository and
+environment independently of the captured origin or manifest. In a terminal,
+the CLI offers authorized repository/environment pairs. Outside a terminal,
+`--cloud-environment ENV_ID` is sufficient only when
+that environment has one authorized repository; a multi-repository environment
+requires interactive selection. The manifest must match the chosen repository.
+A directory cannot claim saved-scan status by copying a scan identifier.
 
-Use a positional scan directory or repeated `--scan-dir PATH` for artifacts
-outside history. Each must contain one completed sealed scan, not a bulk-run
-directory or `results.jsonl`. Do not mix directories with `--scan`.
-Cloud also accepts exported CSV:
+Without a scan selector, choose an environment first, then select matching local
+scans. Press Space to select scans and Enter to submit. Noninteractive publication
+requires an explicit scan ID or directory and an unambiguous environment. Repeat
+`--scan` for several saved scans, or `--scan-dir PATH` for several directories.
+Each directory must contain one completed sealed scan, not a bulk-run directory.
+Do not mix directories with `--scan`.
 
-```bash
-codex-security publish scan --to cloud --csv /path/outside/repository/findings.csv
-```
+Only full-repository SCM scans are eligible. Diff/scoped scans, directory
+snapshots, and CSV imports are unsupported. Tracked local modifications require
+the saved base commit and snapshot identity. Older scans without frozen repository
+provenance require a new scan; the CLI does not infer their origin from the current
+checkout. New scans capture the first configured origin URL without transport-only
+`insteadOf` rewrites. Configure a canonical repository URL rather than a local
+SSH alias or shorthand.
 
-CSV cannot combine with scan selectors. Use the
-[CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv)
-or `export --export-format csv` output.
+With an explicit scan selector, `--dry-run` validates eligibility and artifact
+size limits, then returns local findings without credentials or network calls.
+Interactive environment discovery requires Cloud access. Uploads require ChatGPT
+file credentials: set `cli_auth_credentials_store = "file"` in Codex `config.toml`,
+then sign in again. Automatic/keyring storage is unsupported even if `auth.json`
+exists, because that file may be stale or belong to another account.
 
-One scan returns a receipt directly. Multiple scans return `results`, `failed`,
-and `notAttempted` arrays. Uploads run sequentially and continue after individual
-failures, returning `2` if any fail. Cancellation returns results so far with
-`130` (Ctrl-C) or `143` (SIGTERM), unless every upload was already confirmed.
+Publication retains the original `findings.json`, sealed manifest, coverage, and
+supported report. Zero findings is valid. Each artifact is limited to 64 MiB and
+the combined publication to 128 MiB by the Cloud import protocol. Both limits are
+checked before credentials or network access for an explicit scan.
 
-Save receipts: Cloud does not store them in local history. IDs are Cloud finding
-IDs in request order. Uploads are not retried automatically. A missing receipt
-can still mean the upload succeeded; check Cloud before retrying and do not
-resend a confirmed upload.
+A successful command returns `publication.upload_status: accepted`, confirming
+that the original artifacts are retained. Publication does not create Cloud
+findings or make the scan visible in Cloud scan history. `findingCount` is the
+local artifact count; `findingIds` is empty. The receipt's `imported_scan_id`
+identifies the stored publication, and `source_scan_id` identifies the local scan.
+
+`publication.status_url` is an authenticated machine API path relative to the
+Cloud origin used for publication, not a browser link. It requires the same
+ChatGPT account context as publication. To refresh the receipt or resume an
+interrupted upload, repeat the original publication command. Identical scan
+content returns the same publication and skips verified uploads. If finalization
+was interrupted, repeating the command resumes it. A `finalizing` receipt means
+artifact retention is still unconfirmed; the command reports an error until
+Cloud confirms acceptance.
+
+Unaccepted upload objects have a seven-day lifetime. An interrupted finalization
+may need the same local artifacts again; repeating publication repairs an explicit
+artifact-retention failure using the original checksums and sizes. Accepted
+artifacts follow normal scan retention. This version requires native Cloud import
+support and does not fall back to the legacy findings proxy.
+
+One scan returns its receipt directly. Multiple scans return `results`, `failed`,
+and `notAttempted`. Uploads run sequentially and continue after individual failures,
+returning `2` if any fail. Cancellation stops new requests and preserves confirmed
+results with `130` (Ctrl-C) or `143` (SIGTERM).
 
 ## Publish completed scans to Linear
 

@@ -84,6 +84,11 @@
               "type": "string",
               "pattern": "^(?![^:/?#]+://[^/?#]*@)[^?#]+$"
             },
+            "repositoryPath": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Scan target path relative to the SCM repository root, captured at scan start; a full repository target is a dot."
+            },
             "revision": {
               "type": "string"
             },

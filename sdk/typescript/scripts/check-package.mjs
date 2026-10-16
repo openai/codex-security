@@ -108,6 +108,7 @@ function validatePackagePaths(entries) {
     "package/dist/index.d.ts",
     "package/dist/cli.js",
     "package/schemas/project-config.schema.json",
+    "package/schemas/cloud-import-v1.schema.json",
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
 

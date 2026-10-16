@@ -115,7 +115,9 @@ from workbench_target import (
     require_remediation_target,
     require_scan_target_identity,
     restore_directory_junctions,
+    saved_repository_provenance,
     scan_target_warning,
+    verify_repository_provenance,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -521,6 +523,8 @@ def workbench_completion_binding(
         "targetId": target_contract["targetId"],
         "displayName": target_contract["displayName"],
     }
+    provenance = saved_repository_provenance(scan)
+    target.update(provenance or {})
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
@@ -546,6 +550,7 @@ def workbench_completion_binding(
         "allowedTargetKinds": target_contract["allowedKinds"],
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
+        "repositoryProvenanceRecorded": provenance is not None,
     }
     return scan_history.preserve_sealed_completion(binding, manifest)
 
@@ -565,6 +570,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
         raise SystemExit("scan-manifest.json targetId must match the workbench target.")
     if target.get("displayName") != expected_target["displayName"]:
         raise SystemExit("scan-manifest.json target displayName must match the workbench target.")
+    verify_repository_provenance(scan, target)
     if target.get("kind") not in expected_target["allowedKinds"]:
         raise SystemExit("scan-manifest.json target kind must match the workbench target.")
     if (
@@ -2847,6 +2853,7 @@ def scan_result(
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
         "targetRevision": scan["target_revision"],
+        "repositoryProvenance": saved_repository_provenance(scan),
         "targetSummary": scan["target_summary"],
         "updatedAt": max(
             scan["updated_at"],

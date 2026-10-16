@@ -82,6 +82,7 @@ function packageTar({
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
     "package/schemas/project-config.schema.json",
+    "package/schemas/cloud-import-v1.schema.json",
     "package/LICENSE",
     ...executablePaths,
     ...packageDistFiles,
