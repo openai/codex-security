@@ -15,15 +15,17 @@ afterEach(cleanup);
 
 let moduleSource: string;
 beforeAll(async () => {
-  const built = await Bun.build({
-    entrypoints: [
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    [
+      "build",
       fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
+      "--target=node",
+      "--format=esm",
     ],
-    target: "node",
-    format: "esm",
-  });
-  expect(built.success).toBe(true);
-  moduleSource = await built.outputs[0]!.text();
+    { encoding: "utf8" },
+  );
+  moduleSource = stdout;
 });
 
 test.each(["native", "without zstd"])(
