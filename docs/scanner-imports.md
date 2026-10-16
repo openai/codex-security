@@ -60,3 +60,5 @@ Imports replace the complete source snapshot for an existing UUID. Preview befor
 switching between JSON and SARIF, since the two exports contain different evidence.
 Synthetic QA covers both formats and 500-record exports; live tenant verification
 is separate.
+
+Endor list responses with a continuation cursor or token are rejected. Finish fetching the export or provide an explicitly selected array; a single unfinished page is not a complete import. Fractional timestamps are rounded down to Cloud epoch seconds while their original precision remains in source evidence.

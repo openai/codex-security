@@ -150,3 +150,54 @@ test("500 findings with distinct UUIDs survive a reordered second export", () =>
     first.findings.map((f) => f.source_finding_id).sort(),
   );
 });
+
+test.each(["2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00.123456789Z"])(
+  "fractional Endor timestamps retain precise source evidence (%s)",
+  (timestamp) => {
+    const finding = endorFinding();
+    finding.meta.update_time = timestamp;
+    for (const input of [
+      finding,
+      [finding],
+      { list: { objects: [finding], response: { next_page_token: 0 } } },
+    ]) {
+      const result = normalizeEndorFindings(input);
+      expect(result.excluded).toEqual([]);
+      expect(result.findings[0]!.evidence.source_updated_at).toBe(1767225600);
+      expect(result.findings[0]!.evidence.source_data).toMatchObject({
+        meta: { update_time: timestamp },
+      });
+    }
+  },
+);
+
+test.each([1, "1", "opaque-next-page", -1, true])(
+  "rejects unfinished or invalid Endor page tokens (%s)",
+  (next_page_token) => {
+    expect(() =>
+      normalizeEndorFindings({
+        list: { objects: [endorFinding()], response: { next_page_token } },
+      }),
+    ).toThrow("another page");
+  },
+);
+
+test("rejects Endor cursor pages while accepting complete exports and selected arrays", () => {
+  const finding = endorFinding();
+  expect(() =>
+    normalizeEndorFindings({
+      list: { objects: [finding], response: { next_page_id: "next-finding" } },
+    }),
+  ).toThrow("another page");
+  for (const next_page_token of [undefined, null, 0, "0", ""]) {
+    expect(
+      normalizeEndorFindings({
+        list: {
+          objects: [finding],
+          response: { next_page_token, next_page_id: "" },
+        },
+      }).findings,
+    ).toHaveLength(1);
+  }
+  expect(normalizeEndorFindings([finding]).findings).toHaveLength(1);
+});

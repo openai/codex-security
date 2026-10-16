@@ -16,15 +16,25 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
   const root = Array.isArray(input) ? null : record(input, "Endor report");
   if (root?.["version"] === "2.1.0" && root["runs"] !== undefined)
     return normalizeEndorSarif(root);
-  const values =
-    root?.["list"] !== undefined
-      ? array(
-          record(root["list"], "Endor list")["objects"] ?? [],
-          "Endor list.objects",
-        )
-      : Array.isArray(input)
-        ? input
-        : [input];
+  const list =
+    root?.["list"] === undefined ? null : record(root["list"], "Endor list");
+  if (list) {
+    const response = record(list["response"] ?? {}, "Endor list response");
+    const token = response["next_page_token"];
+    if (
+      text(response["next_page_id"]) ||
+      (token != null && token !== 0 && token !== "0" && token !== "")
+    ) {
+      throw new Error(
+        "The Endor list response has another page. Supply a complete export or an explicitly selected array.",
+      );
+    }
+  }
+  const values = list
+    ? array(list["objects"] ?? [], "Endor list.objects")
+    : Array.isArray(input)
+      ? input
+      : [input];
   return normalizeRecords(
     values,
     (value) => {
@@ -93,7 +103,7 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
           branch:
             context["type"] === "CONTEXT_TYPE_REF" ? text(context["id"]) : null,
           source_updated_at:
-            updated === null ? null : Date.parse(updated) / 1000,
+            updated === null ? null : Math.floor(Date.parse(updated) / 1000),
           advisory_ids: [
             ...new Set([...(advisory ? [advisory] : []), ...aliases]),
           ],
