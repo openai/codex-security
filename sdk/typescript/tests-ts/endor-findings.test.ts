@@ -172,7 +172,7 @@ test.each(["2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00.123456789Z"])(
 );
 
 test.each([1, "1", "opaque-next-page", -1, true])(
-  "rejects unfinished or invalid Endor page tokens (%s)",
+  "rejects unfinished or invalid Endor page tokens (%p)",
   (next_page_token) => {
     expect(() =>
       normalizeEndorFindings({
