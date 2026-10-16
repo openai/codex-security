@@ -111,6 +111,30 @@ function progressMessage(
   };
 }
 
+function nativeUsageRecord(
+  threadId: string,
+  responseId: string,
+  usage: Record<string, number>,
+  total: Record<string, number> = usage,
+): Record<string, unknown> {
+  return {
+    type: "token_usage_record",
+    payload: {
+      thread_id: threadId,
+      response_id: responseId,
+      usage: tokenUsage(usage),
+      thread_token_usage: tokenUsage(total),
+    },
+  };
+}
+
+function legacyUsageRecord(usage: Record<string, number>) {
+  return {
+    type: "event_msg",
+    payload: { type: "token_count", info: { total_token_usage: usage } },
+  };
+}
+
 test.each([
   [
     "prefers the spawned parent over legacy parent fields",
@@ -490,6 +514,205 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test("keeps receipt cache-write detail when an equal legacy counter omits it", async () => {
+    const home = await codexHome();
+    const usage = {
+      ...ownedSdkUsage,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 12,
+    };
+    const path = await writeSession(home, scanThreadId, ownedSdkUsage);
+    await appendFile(
+      path,
+      jsonLines([
+        nativeUsageRecord(scanThreadId, "response-1", usage),
+        legacyUsageRecord(ownedSdkUsage),
+      ]) + "\n",
+    );
+    const tracker = costTracker(home);
+    tracker.start(scanThreadId);
+    expect((await tracker.stop(ownedSdkUsage)).cost).toMatchObject({
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 12,
+      outputTokens: 10,
+    });
+  });
+
+  test("counts compaction receipts before stale counters and deduplicates responses", async () => {
+    const home = await codexHome();
+    const original = { ...ownedSdkUsage };
+    const compact = { ...ownedSdkUsage, input_tokens: 40, output_tokens: 3 };
+    const compactTotal = {
+      ...ownedSdkUsage,
+      input_tokens: 140,
+      output_tokens: 13,
+    };
+    const path = await writeSession(home, scanThreadId, original);
+    await appendFile(
+      path,
+      jsonLines([nativeUsageRecord(scanThreadId, "response-1", original)]) +
+        "\n",
+    );
+    const budget = new AbortController();
+    const maxCostUsd = 0.000355;
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6.1-sol",
+      maxCostUsd,
+      onCost: ({ estimatedUsd }) => {
+        if (estimatedUsd > maxCostUsd) budget.abort();
+      },
+    });
+    tracker.start(scanThreadId);
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.0003);
+    expect(budget.signal.aborted).toBe(false);
+
+    const compaction = nativeUsageRecord(
+      scanThreadId,
+      "response-compaction",
+      compact,
+      compactTotal,
+    );
+    await appendFile(
+      path,
+      jsonLines([
+        compaction,
+        { type: "compacted", payload: { message: "Compacted context." } },
+        legacyUsageRecord(original),
+      ]) + "\n",
+    );
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00041);
+    expect(budget.signal.aborted).toBe(true);
+
+    const final = { ...ownedSdkUsage, input_tokens: 170, output_tokens: 15 };
+    const stale = { ...ownedSdkUsage, input_tokens: 130, output_tokens: 12 };
+    await appendFile(
+      path,
+      jsonLines([
+        compaction,
+        nativeUsageRecord(
+          scanThreadId,
+          "response-2",
+          { ...ownedSdkUsage, input_tokens: 30, output_tokens: 2 },
+          final,
+        ),
+        legacyUsageRecord(stale),
+      ]) + "\n",
+    );
+    expect((await tracker.stop(stale)).usage).toMatchObject({
+      input_tokens: 170,
+      output_tokens: 15,
+      total_tokens: 185,
+    });
+  });
+
+  test("keeps native receipts scoped to the owned fork across resumed turns", async () => {
+    const home = await codexHome();
+    const inherited = {
+      ...ownedSdkUsage,
+      input_tokens: 1_000,
+      output_tokens: 100,
+    };
+    const parent = await writeSession(home, scanThreadId, inherited);
+    await appendFile(
+      parent,
+      jsonLines([
+        nativeUsageRecord(scanThreadId, "parent-response", inherited),
+      ]) + "\n",
+    );
+    const child = await writeSession(home, childUuid7Thread, ownedSdkUsage, {
+      parent: scanThreadId,
+    });
+    const rollout = ownershipRollout([lowerUuid7Turn]);
+    rollout.splice(
+      3,
+      0,
+      nativeUsageRecord(scanThreadId, "parent-response", inherited),
+    );
+    rollout.push(
+      nativeUsageRecord(childUuid7Thread, "child-response", ownedSdkUsage),
+      nativeUsageRecord(scanThreadId, "foreign-response", inherited),
+    );
+    await writeFile(child, jsonLines(rollout) + "\n");
+    const tracker = costTracker(home, { onSessionEvent: () => {} });
+    tracker.start(scanThreadId);
+    expect((await tracker.refresh()).usage).toMatchObject({
+      input_tokens: 1_100,
+      output_tokens: 110,
+    });
+    const compact = { ...ownedSdkUsage, input_tokens: 40, output_tokens: 3 };
+    const compactTotal = {
+      ...ownedSdkUsage,
+      input_tokens: 140,
+      output_tokens: 13,
+    };
+    const compaction = nativeUsageRecord(
+      childUuid7Thread,
+      "child-compact",
+      compact,
+      compactTotal,
+    );
+    await appendFile(child, jsonLines([compaction, compaction]) + "\n");
+    expect((await tracker.stop(inherited)).usage).toMatchObject({
+      input_tokens: 1_140,
+      output_tokens: 113,
+    });
+
+    await appendFile(
+      child,
+      jsonLines([
+        {
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "019f9e4d-b3bb-7000-8000-000000000004",
+          },
+        },
+        nativeUsageRecord(
+          childUuid7Thread,
+          "resumed-response",
+          { ...ownedSdkUsage, input_tokens: 60, output_tokens: 6 },
+          { ...ownedSdkUsage, input_tokens: 200, output_tokens: 19 },
+        ),
+      ]) + "\n",
+    );
+    const resumed = costTracker(home);
+    resumed.start(scanThreadId);
+    expect((await resumed.stop(inherited)).usage).toMatchObject({
+      input_tokens: 1_200,
+      output_tokens: 119,
+    });
+  });
+
+  test.each([1_000, 1_100])(
+    "reconciles a native resumed total with a final SDK receipt of %p input tokens",
+    async (finalInput) => {
+      const home = await codexHome();
+      const path = await writeSession(home, scanThreadId, {
+        ...ownedSdkUsage,
+        input_tokens: 1_000,
+      });
+      await appendFile(
+        path,
+        jsonLines([
+          nativeUsageRecord(
+            scanThreadId,
+            "resumed-response",
+            { ...ownedSdkUsage, input_tokens: 20, output_tokens: 2 },
+            { ...ownedSdkUsage, input_tokens: 1_020, output_tokens: 12 },
+          ),
+        ]) + "\n",
+      );
+      const tracker = costTracker(home);
+      tracker.start(scanThreadId);
+      expect(
+        (await tracker.stop({ ...ownedSdkUsage, input_tokens: finalInput }))
+          .cost?.inputTokens,
+      ).toBe(Math.max(1_020, finalInput));
+    },
+  );
+
   test.each([
     [undefined, undefined],
     [0, 0],

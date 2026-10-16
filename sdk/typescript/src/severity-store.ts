@@ -2,7 +2,6 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   severityClassificationSchema,
-  type SeverityAssessment,
   type SeverityClassification,
   type SeverityClassificationCheckpoint,
 } from "./classify-severity.js";
@@ -46,10 +45,10 @@ export class SeverityStore {
         });
         return reprocess
           ? []
-          : matchingAssessments(
+          : matchingClassification(
               response["assessments"] as JsonObject[],
               result,
-            );
+            ).assessments;
       },
       save: async (finding, assessment, result) => {
         await this.run("severity-classification", {
@@ -80,16 +79,14 @@ export class SeverityStore {
     }
     const saved = await this.run("read-severity-classification", { scanId });
     if (saved["scanId"] === undefined) return undefined;
-    const result: SeverityClassification = {
-      schemaVersion: 1,
-      assessedAt: saved["assessedAt"] as string,
-      rubricSha256: saved["rubricSha256"] as string | null,
-      knowledgeBaseSha256: saved["knowledgeBaseSha256"] as string | null,
-      assessments: [],
-    };
-    result.assessments = matchingAssessments(
+    const result = matchingClassification(
       saved["assessments"] as JsonObject[],
-      result,
+      {
+        schemaVersion: 1,
+        assessedAt: saved["assessedAt"] as string,
+        rubricSha256: saved["rubricSha256"] as string | null,
+        knowledgeBaseSha256: saved["knowledgeBaseSha256"] as string | null,
+      },
     );
     const findingIds = saved["findingIds"] as string[];
     if (result.assessments.length !== findingIds.length) {
@@ -131,10 +128,10 @@ export class SeverityStore {
   }
 }
 
-function matchingAssessments(
+function matchingClassification(
   stored: JsonObject[],
-  result: SeverityClassification,
-): SeverityAssessment[] {
+  result: Omit<SeverityClassification, "assessments">,
+): SeverityClassification {
   return severityClassificationSchema.parse({
     ...result,
     assessments: stored
@@ -151,5 +148,5 @@ function matchingAssessments(
           ...assessment
         }) => assessment,
       ),
-  }).assessments;
+  });
 }

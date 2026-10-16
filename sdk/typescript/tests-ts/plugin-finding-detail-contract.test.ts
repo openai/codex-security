@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import Ajv, { type ValidateFunction } from "ajv";
+import type { ValidateFunction } from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { readJson as readJsonFile } from "./support/json.js";
@@ -157,7 +157,7 @@ describe("bundled plugin finding detail contracts", () => {
       );
       expect(tool).toBeDefined();
 
-      const validator = new Ajv({ strict: false });
+      const validator = new Ajv2020({ strict: false });
       validator.addFormat("uuid", /^[0-9a-f-]{36}$/iu);
       const validate = validator.compile(tool!["inputSchema"] as JsonObject);
 

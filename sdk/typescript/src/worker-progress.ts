@@ -1,32 +1,38 @@
 import { isRecord } from "./record.js";
 import { isSafeNonNegativeInteger, parseJson } from "./value.js";
+import { z } from "zod";
 
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
 const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
-const WORKER_PHASES = new Set([
+const workerPhaseSchema = z.enum([
   "ranking",
   "file_review",
   "validation",
   "attack_path",
 ]);
 
-export type ScanWorkerPhase =
-  "ranking" | "file_review" | "validation" | "attack_path";
+export type ScanWorkerPhase = z.infer<typeof workerPhaseSchema>;
 
-export type ScanPhase =
-  | "preflight"
-  | "threat_model"
-  | "discovery"
-  | "validation"
-  | "attack_path"
-  | "reporting";
+const scanPhaseSchema = z.enum([
+  "preflight",
+  "threat_model",
+  "discovery",
+  "validation",
+  "attack_path",
+  "reporting",
+]);
+export type ScanPhase = z.infer<typeof scanPhaseSchema>;
 
-export interface ScanProgress {
-  phase: ScanPhase;
-  filesCompleted: number;
-  filesTotal: number;
-}
+const count = z.number().int().nonnegative();
+const scanProgressSchema = z
+  .object({ phase: scanPhaseSchema, filesCompleted: count, filesTotal: count })
+  .refine(({ filesCompleted, filesTotal }) => filesCompleted <= filesTotal);
+const dispatchSchema = z
+  .object({ phase: workerPhaseSchema, planned: count, started: count })
+  .refine(({ started, planned }) => started <= planned);
+
+export interface ScanProgress extends z.infer<typeof scanProgressSchema> {}
 
 export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
   return {
@@ -48,12 +54,7 @@ export type ScanWorkerStatus =
       delegation: "available" | "unavailable" | "unknown";
       configuredSlots: number | null;
     }
-  | {
-      kind: "dispatch";
-      phase: ScanWorkerPhase;
-      planned: number;
-      started: number;
-    };
+  | ({ kind: "dispatch" } & z.infer<typeof dispatchSchema>);
 
 export function workerStatusFromEvent(
   event: Readonly<Record<string, unknown>>,
@@ -118,21 +119,10 @@ function linesOutsideFences(text: string): string[] {
 }
 
 function scanProgressFromMarker(marker: string): ScanProgress | null {
-  const payload = parseJson(() => marker.slice(SCAN_PROGRESS_PREFIX.length));
-  if (
-    !isRecord(payload) ||
-    !isScanPhase(payload["phase"]) ||
-    !isSafeNonNegativeInteger(payload["filesCompleted"]) ||
-    !isSafeNonNegativeInteger(payload["filesTotal"]) ||
-    payload["filesCompleted"] > payload["filesTotal"]
-  ) {
-    return null;
-  }
-  return {
-    phase: payload["phase"],
-    filesCompleted: payload["filesCompleted"],
-    filesTotal: payload["filesTotal"],
-  };
+  const parsed = scanProgressSchema.safeParse(
+    parseJson(() => marker.slice(SCAN_PROGRESS_PREFIX.length)),
+  );
+  return parsed.success ? parsed.data : null;
 }
 
 function preflightStatus(
@@ -195,32 +185,8 @@ function dispatchStatus(
   );
   const marker = markers[0];
   if (markers.length !== 1 || marker === undefined) return null;
-  const payload = parseJson(() => marker.slice(WORKER_STATUS_PREFIX.length));
-  if (
-    !isRecord(payload) ||
-    typeof payload["phase"] !== "string" ||
-    !WORKER_PHASES.has(payload["phase"]) ||
-    !isSafeNonNegativeInteger(payload["planned"]) ||
-    !isSafeNonNegativeInteger(payload["started"]) ||
-    payload["started"] > payload["planned"]
-  ) {
-    return null;
-  }
-  return {
-    kind: "dispatch",
-    phase: payload["phase"] as ScanWorkerPhase,
-    planned: payload["planned"],
-    started: payload["started"],
-  };
-}
-
-function isScanPhase(value: unknown): value is ScanPhase {
-  return (
-    value === "preflight" ||
-    value === "threat_model" ||
-    value === "discovery" ||
-    value === "validation" ||
-    value === "attack_path" ||
-    value === "reporting"
+  const parsed = dispatchSchema.safeParse(
+    parseJson(() => marker.slice(WORKER_STATUS_PREFIX.length)),
   );
+  return parsed.success ? { kind: "dispatch", ...parsed.data } : null;
 }

@@ -4,6 +4,22 @@ export type {
   ArtifactExportResult,
 } from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
+export {
+  runHostedScan,
+  HostedScanInputSchema,
+  HostedScanPreparationError,
+} from "./hosted-scan.js";
+export type {
+  HostedScanInput,
+  HostedScanOptions,
+  HostedScanResult,
+} from "./hosted-scan.js";
+export type {
+  ScanExecutor,
+  ScanExecutionRequest,
+  ScanExecutionResult,
+  ScanExecutionEvent,
+} from "./scan-executor.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
   ResolvedProjectConfig,
@@ -18,6 +34,7 @@ export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners } from "./suggest-owners.js";
 export type {
   OwnerFinding,
+  CodeownerIdentity,
   OwnerIdentity,
   OwnerSuggestion,
   OwnerSuggestions,
@@ -66,6 +83,8 @@ export type {
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,

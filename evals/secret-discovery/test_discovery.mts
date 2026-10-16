@@ -7,7 +7,6 @@ import { parse } from "../../sdk/typescript/node_modules/smol-toml/dist/index.js
 import { createFixture } from "./fixtures.mts";
 import type {
   CodeEvidence,
-  Coverage,
   SourceLocation,
   Finding,
   Result,
@@ -51,7 +50,12 @@ interface TestFinding extends Finding {
 }
 interface TestResult extends Result {
   findings: TestFinding[];
-  coverage: Required<Coverage>;
+  coverage: {
+    surfaces: Record<string, unknown>[];
+    explicitExclusions: { pattern: string; reason: string }[];
+    deferred: unknown[];
+    openQuestions: string[];
+  };
   resolved_questions?: TestFinding[];
 }
 function retainedResult(fixture: ReturnType<typeof createFixture>): TestResult {
@@ -67,7 +71,6 @@ function retainedResult(fixture: ReturnType<typeof createFixture>): TestResult {
       ],
     })),
     coverage: {
-      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -789,220 +792,21 @@ test("accepts public-key context alongside credential evidence", () => {
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
-test("incomplete coverage cannot pass even with all positive findings", () => {
+test("scope notes neither fail correct findings nor compensate for missing findings", () => {
   const { fixture, result } = retainedFixture();
-  result.coverage.completeness = "partial";
+  Object.assign(result.coverage, {
+    completeness: "partial",
+    explicitExclusions: [
+      { pattern: ".", reason: "Review focused on reported exposures." },
+    ],
+    deferred: [{ reason: "Runtime confirmation was unavailable." }],
+    surfaces: [{ label: "Runtime", disposition: "needs_follow_up" }],
+    openQuestions: ["Have the embedded credentials expired?"],
+  });
+  assert.equal(gradeResult(result, fixture).passed, true);
+  result.findings.pop();
   assert.equal(gradeResult(result, fixture).passed, false);
 });
-
-for (const [name, mutate] of [
-  [
-    "deferred work",
-    (coverage: Required<Coverage>) => {
-      coverage.deferred.push({
-        reason: "source review remains unfinished",
-        paths: ["README.md"],
-      });
-    },
-  ],
-  [
-    "surface needing follow-up",
-    (coverage: Required<Coverage>) => {
-      coverage.surfaces.push({
-        label: "configuration",
-        disposition: "needs_follow_up",
-        notes: "source review remains unfinished",
-      });
-    },
-  ],
-] as const) {
-  test(`complete coverage cannot pass with ${name}`, () => {
-    const { fixture, result } = retainedFixture();
-    mutate(result.coverage);
-    const report = gradeResult(result, fixture);
-    assert.equal(report.recall, 1);
-    assert.equal(report.passed, false);
-    assert.deepEqual(report.errors, ["incomplete coverage"]);
-  });
-}
-
-test("complete coverage permits reviewed surfaces and nonblocking questions", () => {
-  const { fixture, result } = retainedFixture();
-  result.coverage.surfaces.push({
-    label: "configuration",
-    disposition: "reported",
-    notes: "source review complete",
-  });
-  result.coverage.openQuestions.push("Have the embedded credentials expired?");
-  assert.equal(gradeResult(result, fixture).passed, true);
-});
-
-for (const pattern of [
-  "src/client.py",
-  "src/runtime_config.py",
-  "./README.md",
-  "**/test_*.py",
-  "config/.*",
-  "src",
-  "config/",
-  ".",
-  "/tmp/generated-repo/src/client.py",
-  "/tmp/generated-repo/**/*.py",
-  "/tmp/generated-repo/config/",
-  "/",
-]) {
-  test(`complete coverage cannot exclude fixture path ${pattern}`, () => {
-    const { fixture, result } = retainedFixture();
-    result.coverage.explicitExclusions.push({
-      pattern,
-      reason: "Not reviewed",
-    });
-    const report = gradeResult(result, fixture, "/tmp/generated-repo");
-    assert.equal(report.recall, 1);
-    assert.equal(report.passed, false);
-    assert.deepEqual(report.errors, ["incomplete coverage"]);
-  });
-}
-
-test("complete coverage permits exclusions outside the generated fixture", () => {
-  const { fixture, result } = retainedFixture();
-  result.coverage.explicitExclusions.push(
-    { pattern: "node_modules/**", reason: "No dependencies in fixture" },
-    { pattern: "https://delivery.example.test/**", reason: "Offline review" },
-    { pattern: "/tmp/external/**", reason: "Outside fixture" },
-    {
-      pattern: "/tmp/generated-repository/src/client.py",
-      reason: "Different repository",
-    },
-  );
-  assert.equal(
-    gradeResult(result, fixture, "/tmp/generated-repo").passed,
-    true,
-  );
-});
-
-for (const repo of [
-  String.raw`C:\Temp\repository`,
-  "C:/Temp/repository",
-  String.raw`\\server\share\repository`,
-  "//server/share/repository",
-]) {
-  test(`coverage matches Windows exclusions for ${repo}`, () => {
-    const fixture = createFixture();
-    const slashRepo = repo.replaceAll("\\", "/");
-    for (const pattern of [
-      `${slashRepo}/src/client.py`,
-      `${slashRepo}/src/client.py`.replaceAll("/", "\\"),
-      `${slashRepo}/**/*.py`,
-      `${slashRepo}/SRC/**/*.PY`,
-      "SRC/**/*.PY",
-      `${slashRepo}/config/`,
-      String.raw`src\client.py`,
-    ]) {
-      const result = retainedResult(fixture);
-      result.coverage.explicitExclusions.push({
-        pattern,
-        reason: "Not reviewed",
-      });
-      const report = gradeResult(result, fixture, repo);
-      assert.equal(report.recall, 1);
-      assert.equal(report.passed, false, pattern);
-      assert.deepEqual(report.errors, ["incomplete coverage"]);
-    }
-    const external = retainedResult(fixture);
-    external.coverage.explicitExclusions.push(
-      {
-        pattern: `${slashRepo}-external/src/client.py`,
-        reason: "Outside fixture",
-      },
-      {
-        pattern: String.raw`D:\Other\repository\**`,
-        reason: "Different drive",
-      },
-    );
-    assert.equal(gradeResult(external, fixture, repo).passed, true);
-  });
-}
-
-test("POSIX exclusion globs remain case-sensitive", () => {
-  const { fixture, result } = retainedFixture();
-  result.coverage.explicitExclusions.push({
-    pattern: "SRC/**/*.PY",
-    reason: "Outside fixture",
-  });
-  assert.equal(gradeResult(result, fixture, "/tmp/repository").passed, true);
-});
-
-test("Windows drive casing does not hide an in-scope exclusion", () => {
-  const { fixture, result } = retainedFixture();
-  result.coverage.explicitExclusions.push({
-    pattern: "c:/Temp/repository/src/client.py",
-    reason: "Not reviewed",
-  });
-  const report = gradeResult(result, fixture, String.raw`C:\Temp\repository`);
-  assert.equal(report.passed, false);
-  assert.deepEqual(report.errors, ["incomplete coverage"]);
-});
-
-for (const [repo, prefix, ancestor] of [
-  ["/tmp/repository[fixture]", "/tmp/repository[fixture]", "/"],
-  [
-    String.raw`C:\Temp\repository[fixture]`,
-    "c:/Temp/repository[fixture]",
-    "c:/",
-  ],
-  [
-    String.raw`\\server\share\repository[fixture]`,
-    "//server/share/repository[fixture]",
-    "//server/share/",
-  ],
-  [
-    "/tmp/user[fixture]/repository",
-    "/tmp/user[fixture]/repository",
-    "/tmp/user[fixture]",
-  ],
-  [
-    String.raw`C:\Temp\user[fixture]\repository`,
-    "c:/Temp/user[fixture]/repository",
-    "c:/Temp/user[fixture]",
-  ],
-  [
-    String.raw`\\server\share\user[fixture]\repository`,
-    "//server/share/user[fixture]/repository",
-    "//server/share/user[fixture]",
-  ],
-] as const) {
-  test(`absolute exclusions treat the repository prefix literally for ${repo}`, () => {
-    const fixture = createFixture();
-    for (const pattern of [
-      `${prefix}/src/client.py`,
-      `${prefix}/**/*.py`,
-      `${prefix}/config/`,
-      prefix,
-      ancestor,
-    ]) {
-      const result = retainedResult(fixture);
-      result.coverage.explicitExclusions.push({
-        pattern,
-        reason: "Not reviewed",
-      });
-      const report = gradeResult(result, fixture, repo);
-      assert.equal(report.passed, false, pattern);
-      assert.deepEqual(report.errors, ["incomplete coverage"]);
-    }
-    for (const pattern of [
-      `${prefix}-external/src/client.py`,
-      `${prefix.replace("[fixture]", "fixture")}/**/*.py`,
-    ]) {
-      const result = retainedResult(fixture);
-      result.coverage.explicitExclusions.push({
-        pattern,
-        reason: "Different repository",
-      });
-      assert.equal(gradeResult(result, fixture, repo).passed, true, pattern);
-    }
-  });
-}
 
 test("stages production prompt unchanged and no labels; grades only the final SDK response", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "source-audit-test-"));
@@ -1061,7 +865,7 @@ test("stages production prompt unchanged and no labels; grades only the final SD
                   type: "agent_message",
                   text: JSON.stringify({
                     findings: [],
-                    coverage: { completeness: "complete" },
+                    coverage: {},
                   }),
                 },
               };

@@ -28,12 +28,7 @@ export interface ScanCost {
   };
 }
 
-interface TokenPrices {
-  input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  output: number;
-}
+type TokenPrices = ReturnType<typeof usdPerMillionTokens>;
 
 type ModelPricing = readonly [
   input: number,
@@ -123,10 +118,7 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
     "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
   };
 
-function usdPerMillionTokens(
-  pricing: ModelPricing,
-  unitsPerUsd: number,
-): TokenPrices {
+function usdPerMillionTokens(pricing: ModelPricing, unitsPerUsd: number) {
   const [input, cacheRead, cacheWrite, output] = pricing;
   const unitsPerMillion = unitsPerUsd / 1_000_000;
   return {

@@ -65,6 +65,53 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test("retains only native skill path and enabled settings for fallback workers", () => {
+    const rootSkill = join(
+      tmpdir(),
+      "owned cache",
+      "security-scan",
+      "SKILL.md",
+    );
+    const selectedSkill = join(tmpdir(), "other skill", "SKILL.md");
+    const input: JsonObject = {
+      skills: {
+        config: [
+          { path: rootSkill, enabled: false, token: "SYNTHETIC_ENTRY_SECRET" },
+        ],
+        auth: "SYNTHETIC_ROOT_SECRET",
+      },
+      profile: "selected",
+      profiles: {
+        selected: {
+          skills: {
+            config: [
+              {
+                path: selectedSkill,
+                enabled: true,
+                extra: "SYNTHETIC_PROFILE_SECRET",
+              },
+            ],
+            private: "SYNTHETIC_TABLE_SECRET",
+          },
+        },
+      },
+    };
+    const before = structuredClone(input);
+    expect(scanPreflightCodexConfig(input)).toEqual({
+      skills: { config: [{ path: rootSkill, enabled: false }] },
+      profile: "selected",
+      profiles: {
+        selected: {
+          skills: { config: [{ path: selectedSkill, enabled: true }] },
+        },
+      },
+    });
+    expect(input).toEqual(before);
+    expect(scanPreflightCodexConfig({ skills: { config: [] } })).toEqual({
+      skills: { config: [] },
+    });
+  });
+
   test.each([
     ["model", { model: null }, true],
     ["reasoning effort", { model_reasoning_effort: null }, true],
