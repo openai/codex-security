@@ -1681,6 +1681,16 @@ export class CodexSecurity {
         ...(knowledgeBase?.protectedRoots ?? []),
       ]) {
         git = await inspectTrustedExecutable("git", git.environment, root);
+        if (this.#dependencies.hostedScan !== undefined) {
+          // Match the hosted MCP launchers' PATH-based tool lookups.
+          for (const command of process.platform === "win32"
+            ? ["node"]
+            : ["dirname", "node"]) {
+            git.environment = (
+              await inspectTrustedExecutable(command, git.environment, root)
+            ).environment;
+          }
+        }
       }
       checkOpen();
       const scanOutputRoot =
@@ -3117,7 +3127,9 @@ export class CodexSecurity {
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
       const environment = {
-        ...session.runtime.environment,
+        ...definedEnvironment(
+          environmentWithGit(session.runtime.environment, git),
+        ),
         ...runtimePaths,
       };
       const model = scanModelConfiguration(session.effectiveConfig);

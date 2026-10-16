@@ -2,9 +2,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, stat, symlink } from "node:fs/promises";
+import { readFile, realpath, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import {
   normalizeHostedScope,
@@ -333,6 +333,56 @@ test.each(sealedScopes)(
       expect(artifactPaths).toContain(artifact.path);
   },
 );
+
+test("hosted execution preserves inspected runtime tool paths", async () => {
+  const input = await fixture(["tools/placeholder.ts"]);
+  const repositoryTools = await realpath(join(input.repository, "tools"));
+  const linkedTools = join(await temporaryDirectory(), "linked-tools");
+  const trustedTools = await realpath(dirname(process.execPath));
+  await symlink(
+    repositoryTools,
+    linkedTools,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const executableAliases: string[] = [];
+  for (const name of process.platform === "win32"
+    ? ["node.exe"]
+    : ["dirname", "node"]) {
+    const directory = await temporaryDirectory();
+    await symlink(
+      join(repositoryTools, "placeholder.ts"),
+      join(directory, name),
+      "file",
+    );
+    executableAliases.push(await realpath(directory));
+  }
+  const previousPath = process.env["PATH"];
+  const executor = draftExecutor();
+  try {
+    process.env["PATH"] = [
+      repositoryTools,
+      linkedTools,
+      ...executableAliases,
+      trustedTools,
+      previousPath ?? "",
+    ].join(delimiter);
+    const result = await runHostedScan(input, { executor });
+    expect(result.status).toBe("completed");
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    const environment = executor.run.mock.calls[0]![0].runtime.environment;
+    const paths = environment["PATH"]!.split(delimiter);
+    expect(paths).not.toContain(repositoryTools);
+    expect(paths).not.toContain(linkedTools);
+    for (const directory of executableAliases)
+      expect(paths).not.toContain(directory);
+    expect(paths).toContain(trustedTools);
+    expect(isAbsolute(environment["CODEX_SECURITY_GIT"] ?? "")).toBe(true);
+    expect(isAbsolute(environment["PYTHON"] ?? "")).toBe(true);
+  } finally {
+    if (previousPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = previousPath;
+  }
+});
 
 test.skipIf(process.platform === "win32")(
   "missing whitespace paths never fall back to a trimmed sibling or repository",
