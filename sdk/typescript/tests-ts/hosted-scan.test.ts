@@ -17,6 +17,7 @@ import { runHostedScanProtocol } from "../src/hosted-scan-protocol.js";
 import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
+import * as hostedScan from "../src/hosted-scan.js";
 import {
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
@@ -954,18 +955,26 @@ test.each(["cancel", "disconnect", "signal"])(
     const input = new PassThrough();
     const controller = new AbortController();
     const { output, writing, release } = blockedOutput();
-    const finished = runHostedScanProtocol(input, output, controller.signal);
-    send(input, { id: "run", method: "run", params });
-    await writing;
-    if (action === "cancel")
-      send(input, { method: "cancel", params: { id: "run" } });
-    else if (action === "signal") controller.abort();
-    else input.end();
-    expect(await finished).toBe(2);
-    expect(output.destroyed).toBe(true);
-    release();
-    input.destroy();
-    output.destroy();
+    const run = spyOn(hostedScan, "runHostedScan");
+    try {
+      const finished = runHostedScanProtocol(input, output, controller.signal);
+      send(input, { id: "run", method: "run", params });
+      await writing;
+      if (action === "cancel")
+        send(input, { method: "cancel", params: { id: "run" } });
+      else if (action === "signal") controller.abort();
+      else input.end();
+      expect(await finished).toBe(2);
+      expect(output.destroyed).toBe(true);
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      input.destroy();
+      output.destroy();
+      // Transport cancellation can finish before the scan closes its client.
+      await Promise.allSettled(run.mock.results.map(({ value }) => value));
+      run.mockRestore();
+    }
   },
 );
 
