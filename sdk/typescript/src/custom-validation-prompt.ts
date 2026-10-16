@@ -11,7 +11,7 @@ const SOURCES = {
   "references/core-scan.md":
     "caa48f845e7edf4768140a7244d92637175df6f8e26a7660109a20f0dbe21546",
   "skills/security-scan/SKILL.md":
-    "93a23fd5e8fd505282fca51432dd981ffee85dd99e438d31fcba6ba8c1860f15",
+    "d4ffd10197ea6b30d71d8c93ebec69db336d5fd30e78bb59d9d555f73e03a971",
   "skills/security-diff-scan/SKILL.md":
     "e0ddfea9e46ec5389a6634630aa518273b0b4bc68efac09441adf549bab8d253",
 } as const;
@@ -76,7 +76,7 @@ export async function customDiscoveryPrompt(
       "## Discovery workflow",
       `1. ${step(skill, 1)}`,
       "2. Perform the embedded core discovery workflow below. Do not reload the ordinary core-scan.md or top-level security-scan skill.",
-      `3. ${step(skill, 3).slice(step(skill, 3).indexOf("For an SDK-owned scan with a bound semantic draft tool,"))}`,
+      "3. Preserve the threat model in an early unsealed checkpoint before continuing discovery. Use record_codex_security_scan_draft with complete: false when the bound tool is available, and retain the model in later drafts. Follow the custom-validation handoff below for the final discovery output.",
       `4. ${HANDOFF}`,
       "## Embedded core discovery workflow",
       discovery,

@@ -11,6 +11,7 @@ import { main } from "../src/cli.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { dependencies, fakeSecurity } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import { publishScanDraft } from "./support/scan-draft.js";
 
 type FindingsDocument = {
   findings: Array<{
@@ -64,6 +65,7 @@ async function workbench(
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
   recipeFromStdin = false,
+  customValidation = false,
 ) {
   const root = await temporaryDirectory();
   const python =
@@ -126,6 +128,7 @@ async function startDraftScan(
     mode: "standard",
     repository: target,
     target: { kind: "repository", paths: [] },
+    ...(customValidation ? { validationMode: "custom" } : {}),
   });
   const registration = await workbench(
     fixture,
@@ -172,7 +175,16 @@ async function startDraftScan(
     await writeJson(path, document);
   }
   await writeFile(join(scanDir, "report.md"), "# Draft report\n");
+  if (!customValidation)
+    await publishScanDraft(scanDir, fixture.scanId, (args) =>
+      workbench(fixture, args),
+    );
   return fixture;
+}
+
+// Custom validation still writes canonical files; its recovery contract remains supported.
+function startFileAuthoredScan() {
+  return startDraftScan("directory", false, true);
 }
 
 async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
@@ -407,6 +419,9 @@ describe("scan publication and artifact recovery", () => {
       return finding;
     });
     await writeJson(findingsPath, document);
+    await publishScanDraft(fixture.scanDir, fixture.scanId, (args) =>
+      workbench(fixture, args),
+    );
     await completeScan(fixture);
 
     const page = await workbench(fixture, [
@@ -699,7 +714,7 @@ describe("scan publication and artifact recovery", () => {
   });
 
   test("preserves missing-writeup warnings across prepared scan completion", async () => {
-    const fixture = await startDraftScan();
+    const fixture = await startFileAuthoredScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
     document.findings[0]!.writeup = {
@@ -739,7 +754,7 @@ describe("scan publication and artifact recovery", () => {
   });
 
   test("rejects malformed findings without changing the draft and accepts a corrected retry", async () => {
-    const fixture = await startDraftScan();
+    const fixture = await startFileAuthoredScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
     const valid = structuredClone(document);
@@ -771,7 +786,7 @@ describe("scan publication and artifact recovery", () => {
   });
 
   test("keeps verified coverage receipts and records invalid references", async () => {
-    const fixture = await startDraftScan();
+    const fixture = await startFileAuthoredScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
     const receipt = "artifacts/02_discovery/work_ledger.jsonl";
@@ -813,7 +828,7 @@ describe("scan publication and artifact recovery", () => {
   });
 
   test("recovers malformed coverage collections", async () => {
-    const fixture = await startDraftScan();
+    const fixture = await startFileAuthoredScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
     document.surfaces = { id: "not-an-array" };
@@ -839,7 +854,7 @@ describe("scan publication and artifact recovery", () => {
       { portfolioPath: "../outside.md" },
       { portfolioPath: "hardening/hardening.md" },
     ]) {
-      const fixture = await startDraftScan();
+      const fixture = await startFileAuthoredScan();
       const path = join(fixture.scanDir, "scan-manifest.json");
       const manifest = await readJson<{
         scan: { hardening?: unknown };
@@ -863,7 +878,7 @@ describe("scan publication and artifact recovery", () => {
   });
 
   test("refuses to repair scan-wide coverage contract violations", async () => {
-    const fixture = await startDraftScan();
+    const fixture = await startFileAuthoredScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
     document.inventoryStrategy = "";
@@ -877,7 +892,7 @@ describe("scan publication and artifact recovery", () => {
   test.each(["complete-scan", "prepare-scan-completion"] as const)(
     "keeps a repairable %s contract failure resumable",
     async (command) => {
-      const fixture = await startDraftScan();
+      const fixture = await startFileAuthoredScan();
       const path = join(fixture.scanDir, "coverage.json");
       const document = await readJson<CoverageDocument>(path);
       const validInventoryStrategy = document.inventoryStrategy;

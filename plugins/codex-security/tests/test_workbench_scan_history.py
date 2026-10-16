@@ -19,6 +19,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    publish_scan_draft,
     resume_deep_scan,
     run_workbench,
     scan_command,
@@ -267,6 +268,8 @@ def create_cli_scan(
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
         ]
         coverage_path.write_text(json.dumps(coverage))
+    if mode == "standard" and recipe["target"]["kind"] in {"repository", "paths"}:
+        publish_scan_draft(state_dir, scan_dir, launched["scanId"])
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
     completion = ["complete-scan", "--scan-id", launched["scanId"]]
     if cost is not None:
@@ -462,6 +465,7 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
         target_kind="git_revision",
         target_revision=revision,
     )
+    publish_scan_draft(state_dir, scan_dir, launched["scanId"])
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
 
     readme.write_text("replacement source\n")

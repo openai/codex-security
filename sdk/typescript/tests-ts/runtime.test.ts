@@ -1,5 +1,6 @@
 import { runNodePython } from "./support/python-probe.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
+import { publishScanDraft } from "./support/scan-draft.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
@@ -98,7 +99,11 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScanFixture,
+  loadBundledRuntime,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -5611,11 +5616,6 @@ describe("runtime directories and plugin Python boundary", () => {
     async (_description, present) => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
-      const requiredDrafts = [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -5641,9 +5641,6 @@ describe("runtime directories and plugin Python boundary", () => {
           ),
         ),
       );
-      const missing = requiredDrafts.filter(
-        (filename) => !present.some((candidate) => candidate === filename),
-      );
 
       await expect(
         runWorkbench(workbenchOptions, [
@@ -5651,11 +5648,7 @@ describe("runtime directories and plugin Python boundary", () => {
           "--scan-id",
           String(registration["scanId"]),
         ]),
-      ).rejects.toThrow(
-        `Scan agent did not create required draft artifacts: ${missing.join(
-          ", ",
-        )}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
-      );
+      ).rejects.toThrow("accepted final structured draft");
       expect((await readdir(scanDir)).sort()).toEqual([...present].sort());
       const stored = await runWorkbench(workbenchOptions, [
         "get-scan",
@@ -5688,6 +5681,27 @@ describe("runtime directories and plugin Python boundary", () => {
       workbenchOptions,
       scanRegistrationArguments(repository, scanDir),
     );
+    const scanId = String(registration["scanId"]);
+    await copyCompletedScanFixture(scanDir);
+    for (const name of [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+    ]) {
+      const file = join(scanDir, name);
+      const document = JSON.parse(await readFile(file, "utf8"));
+      if (name === "scan-manifest.json") {
+        document.scan.id = scanId;
+        document.scan.target.kind = "directory_snapshot";
+        delete document.scan.sealedAt;
+        delete document.scan.artifacts;
+      } else document.scanId = scanId;
+      await writeFile(file, JSON.stringify(document));
+    }
+    await publishScanDraft(scanDir, scanId, (args) =>
+      runWorkbench(workbenchOptions, args),
+    );
+    await rm(join(scanDir, "scan-manifest.json"));
     await symlink(
       join(root, "missing-manifest.json"),
       join(scanDir, "scan-manifest.json"),
@@ -5700,7 +5714,7 @@ describe("runtime directories and plugin Python boundary", () => {
         String(registration["scanId"]),
       ]),
     ).rejects.toThrow(
-      "scan-manifest.json: expected a regular file inside the scan directory.",
+      "scan-manifest.json: expected a regular non-symlink file",
     );
     expect(await readlink(join(scanDir, "scan-manifest.json"))).toBe(
       join(root, "missing-manifest.json"),

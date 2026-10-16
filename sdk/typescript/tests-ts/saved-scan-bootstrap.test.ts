@@ -25,6 +25,7 @@ import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.j
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { publishScanDraft } from "./support/scan-draft.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "saved-scan-bootstrap-",
@@ -128,6 +129,9 @@ async function fixture(git = false) {
     );
     coverage.scanId = scanId;
     await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
+    await publishScanDraft(scanDir, scanId, (args) =>
+      runWorkbench(options, args),
+    );
     await runWorkbench(options, ["complete-scan", "--scan-id", scanId]);
     return { scanId, scanDir };
   }

@@ -168,8 +168,13 @@ workbench state.
 Run the plugin stdio server from
 `pluginRoot/scripts/launch_codex_security_mcp --stdio` with the supplied
 environment. The executor needs the target files, plugin skills and registered
-artifacts, and must expose `record_codex_security_scan_draft`. CLI workbench
-finalization follows the turn. Merely returning model text is insufficient.
+artifacts, and must expose `record_codex_security_scan_draft`. Submit the final
+semantic draft with `complete: true` and wait for `draft_written` before ending
+the turn. An earlier `complete: false` checkpoint or handwritten canonical JSON
+does not satisfy completion. The CLI finalizes from the accepted checkpoint,
+regenerating unsealed canonical files if they were malformed or overwritten.
+Correct rejected fields through the same tool for the same scan; retain the
+last accepted checkpoint and report the original error if transport fails.
 Separately provisioned executors must receive the exact frozen runtime/plugin
 build and preserve state; do not interpret plugin schemas as strict Structured
 Outputs schemas.

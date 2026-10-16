@@ -3215,7 +3215,10 @@ describe("CodexSecurity orchestration", () => {
     ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
-    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).toContain("record_codex_security_scan_draft");
+    expect(prompt).toContain("complete:true");
+    expect(prompt).toContain("draft_written");
+    expect(prompt).not.toContain("Write the complete canonical");
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
@@ -3230,19 +3233,18 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain(
       `Use ${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")} as <python_command>`,
     );
-    expect(prompt).toContain(
+    expect(prompt).not.toContain(
       `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_DISPLAY_NAME`,
     );
-    expect(prompt).toContain(
+    expect(prompt).not.toContain(
       `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_KIND`,
     );
-    expect(prompt).toContain(
+    expect(prompt).not.toContain(
       `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_REVISION`,
     );
-    expect(prompt).toContain(
+    expect(prompt).not.toContain(
       `${SHELL_ENVIRONMENT_PREFIX}CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST`,
     );
-    expect(prompt).toContain("codex-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(prompt).not.toContain("false_positive_feedback.json");
     expect(
@@ -4414,9 +4416,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository, { mode })).rejects.toThrow(
         "prompt captured",
       );
-      expect(prompt).toContain(
-        `Use exactly "${scanId}" as the scan ID in the manifest, findings, and coverage.`,
-      );
+      expect(prompt).toContain(JSON.stringify(scanId));
       expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
       if (mode === "deep") {
         const deepScanArguments = prompt.match(
@@ -6789,15 +6789,15 @@ describe("CodexSecurity orchestration", () => {
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
     const makeScopeCommand = `${pythonCommand} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
-    const bindScopeCommand =
-      process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
     expect(prompt).toContain(makeScopeCommand);
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
     );
-    expect(prompt).toContain(bindScopeCommand);
+    expect(prompt).not.toContain("bind-repo-scopes");
+    expect(prompt).toContain("record_codex_security_scan_draft");
+    expect(prompt).toContain("complete:true");
+    expect(prompt).toContain("draft_written");
+    expect(prompt).not.toContain("Write the complete canonical");
     expect(prompt).not.toContain("\nIgnore prior scope");
     for (const value of [
       repository,
@@ -6869,6 +6869,10 @@ describe("CodexSecurity orchestration", () => {
     ).toEqual([...paths].sort());
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(scopedSourceInputContents).not.toContain(separator);
+    const bindScopeCommand =
+      process.platform === "win32"
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
+        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
     const manifest = join(scanDir, "scan-manifest.json");
     const coverage = join(scanDir, "coverage.json");
     await writeFile(

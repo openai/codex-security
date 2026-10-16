@@ -22,6 +22,7 @@ import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { fail } from "./support/errors.js";
+import { publishScanDraft } from "./support/scan-draft.js";
 
 const empty = { matches: [], uncertain: [] } satisfies ScanComparisonResult;
 
@@ -146,6 +147,7 @@ test("matches sealed scan history end to end without merging related findings", 
       coverage["scanId"] = scanId;
       await writeJson(join(scanDir, "coverage.json"), coverage);
       await writeFile(join(scanDir, "report.md"), "# Synthetic scan\n");
+      await publishScanDraft(scanDir, scanId, workbench);
       const completed = await workbench(["complete-scan", "--scan-id", scanId]);
       expect(completed["scan"]).toMatchObject({
         progress: { status: "complete" },

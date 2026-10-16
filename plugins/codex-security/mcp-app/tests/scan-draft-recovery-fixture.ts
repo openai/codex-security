@@ -51,7 +51,7 @@ export async function recordCodexSecurityScanDraft(
         ),
         rawContents,
       );
-      const { complete, scope, threatModel } = draft.manifest.scan;
+      const { complete, scope, threatModel, hardening } = draft.manifest.scan;
       await draftApi.saveScanDraftCheckpoint(
         { ...context, layout: "worker" },
         {
@@ -59,6 +59,7 @@ export async function recordCodexSecurityScanDraft(
           ...(complete === undefined ? {} : { complete }),
           ...(scope === undefined ? {} : { scope }),
           ...(threatModel === undefined ? {} : { threatModel }),
+          ...(hardening === undefined ? {} : { hardening }),
           findings: draft.findings.findings,
           coverage: draft.coverage,
         },

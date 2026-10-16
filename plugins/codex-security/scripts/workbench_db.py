@@ -1514,13 +1514,32 @@ def complete_scan_locked(
 
     add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] is not None else None
+    structured_standard = (
+        scan["mode"] == "standard"
+        and recipe is not None
+        and recipe["target"]["kind"] in {"repository", "paths"}
+        and recipe.get("mock") is not True
+        and recipe.get("validationMode") != "custom"
+        and "import" not in recipe
+    )
+    accepted_parent = None
+    if structured_standard:
+        try:
+            accepted_parent = saved_results.require_accepted_parent_draft(scan_dir, scan_id)
+        except ContractError as exc:
+            raise SystemExit(str(exc)) from exc
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
     current_manifest = None
     if current_manifest_path is not None:
-        current_manifest = read_json_object(current_manifest_path)
+        try:
+            current_manifest = read_json_object(current_manifest_path)
+        except (SystemExit, ValueError):
+            if accepted_parent is None:
+                raise
     already_sealed = (
-        current_manifest_path is not None
+        current_manifest is not None
         and isinstance(current_manifest.get("scan"), dict)
         and (
             current_manifest["scan"].get("sealedAt") is not None
@@ -1528,7 +1547,7 @@ def complete_scan_locked(
         )
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
-    if scan["recipe_json"] is not None:
+    if recipe is not None and accepted_parent is None:
         missing_drafts = []
         for file_name in (
             ARTIFACTS["manifest"],
@@ -1548,7 +1567,9 @@ def complete_scan_locked(
                 "commands and write to the scan directory before retrying."
             )
     merge_parent_draft = (
-        scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
+        scan["mode"] != "deep"
+        and not already_sealed
+        and (accepted_parent is not None or current_manifest_path is not None)
     )
     wrote = False
     try:
@@ -1569,6 +1590,7 @@ def complete_scan_locked(
                     warnings,
                     stopped=False,
                     reason="",
+                    accepted_parent=accepted_parent,
                 )
                 if merge_parent_draft
                 else None

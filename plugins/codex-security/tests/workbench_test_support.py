@@ -64,6 +64,26 @@ def saved_coverage(*, deferred=(), surfaces=()):
     }
 
 
+def publish_scan_draft(state_dir: Path, scan_dir: Path, scan_id: str) -> dict[str, object]:
+    documents = {
+        key: json.loads((scan_dir / name).read_text())
+        for key, name in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    for key in ("sealedAt", "artifacts"):
+        documents["manifest"]["scan"].pop(key, None)
+    drafts = scan_dir / "drafts"
+    drafts.mkdir(exist_ok=True)
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    return run_workbench(
+        state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)
+    )
+
+
 def saved_draft(
     scan_id: str,
     *,

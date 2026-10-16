@@ -1858,6 +1858,8 @@ function parsePersistedCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
+  // The workbench retains this projection metadata in accepted checkpoints.
+  delete compatible.hardening;
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;

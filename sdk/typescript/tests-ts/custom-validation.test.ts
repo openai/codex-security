@@ -817,8 +817,11 @@ describe("custom validation", () => {
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("security_scan` capability preflight");
-    expect(standard).toContain("use it for the same early model checkpoint");
-    expect(standard).toContain("retain the model in an early");
+    expect(standard).toContain("record_codex_security_scan_draft");
+    expect(standard).toContain("complete: false");
+    expect(standard).not.toContain(
+      "Never fall back to writing or editing canonical",
+    );
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");

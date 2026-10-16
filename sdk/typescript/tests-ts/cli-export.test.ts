@@ -1,4 +1,5 @@
 import { scanRegistrationArguments } from "./support/workbench-command.js";
+import { publishScanDraft } from "./support/scan-draft.js";
 import { resolving } from "./support/promises.js";
 import { createHash } from "node:crypto";
 import {
@@ -253,6 +254,7 @@ describe("CLI", () => {
         }
         await writeFile(path, JSON.stringify(document));
       }
+      await publishScanDraft(scanDir, scanId, workbench);
       await workbench(["complete-scan", "--scan-id", scanId]);
       const manifestPath = join(scanDir, "scan-manifest.json");
       const sealedManifest = await readFile(manifestPath);

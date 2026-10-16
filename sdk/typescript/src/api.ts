@@ -4674,6 +4674,7 @@ function scanPrompt(
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
+  const structuredDraft = skillName === "security-scan" && !customValidation;
   return [
     "Use [$codex-security](mcp://codex-security) for this scan's artifact tools.",
     discoveryPrompt ??
@@ -4697,7 +4698,7 @@ function scanPrompt(
     ...(skillName === "security-scan"
       ? [
           "This Standard scan authorizes its independent baseline auditor and focused investigators; use available subagent tools and continue with parent-agent fallback if capacity changes.",
-          "After architecture mapping yields a usable threatModel, call record_codex_security_scan_draft for this already registered scan with complete:false, findings:[], and scope notes, before continuing discovery. Preserve the model in later checkpoints as it changes. This checkpoint does not start or complete a scan; write final canonical files as instructed below.",
+          "After architecture mapping yields a usable threatModel, call record_codex_security_scan_draft for this already registered scan with complete:false, findings:[], and scope notes, before continuing discovery. Preserve the model in later checkpoints as it changes.",
         ]
       : skillName === "deep-security-scan"
         ? []
@@ -4708,13 +4709,17 @@ function scanPrompt(
     `Use ${python} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
-    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
-    `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_ID")} as scan.target.targetId; do not derive a different target ID.`,
-    `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_DISPLAY_NAME")} as scan.target.displayName; do not infer a display name from the Git remote.`,
-    `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_KIND")} as scan.target.kind; do not infer the target kind from the checkout.`,
-    `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} is set, use its exact value as scan.target.revision.`,
-    `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST")} is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.`,
-    'Use exactly "codex-security-plugin" as scan.producer.name.',
+    ...(structuredDraft
+      ? []
+      : [
+          `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
+          `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_ID")} as scan.target.targetId; do not derive a different target ID.`,
+          `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_DISPLAY_NAME")} as scan.target.displayName; do not infer a display name from the Git remote.`,
+          `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_KIND")} as scan.target.kind; do not infer the target kind from the checkout.`,
+          `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} is set, use its exact value as scan.target.revision.`,
+          `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST")} is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.`,
+          'Use exactly "codex-security-plugin" as scan.producer.name.',
+        ]),
     ...(skillName === "security-scan"
       ? [
           'At discovery start, after meaningful completed-review batches, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line using the best established file total and actual fully reviewed file count. Do not create inventories or receipts solely for progress.',
@@ -4741,18 +4746,24 @@ function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    targetInstruction(target, python),
-    ...(skillName === "security-scan" || enforceCostLimit || customValidation
+    targetInstruction(target, python, structuredDraft),
+    ...(structuredDraft
       ? [
-          "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+          "Submit the final result with record_codex_security_scan_draft for this scan using complete:true, semantic findings, coverage, and scope notes. Wait for a successful draft_written response before ending the turn. An earlier complete:false checkpoint is not a final result. Keep genuine unresolved review questions in coverage.deferred; they do not prevent a terminal draft.",
+          "The draft tool derives inventoryStrategy, surface IDs, target metadata, and the canonical scan-manifest.json, findings.json, and coverage.json. Do not write or edit these files yourself, invent host-owned fields, or call a scan completion tool. The SDK workbench owns finalization, report generation, and sealing.",
+          "If the draft tool rejects a submission, correct the reported fields and resubmit through the same tool for the same scan. If the tool or transport remains unavailable, report the exact failure and leave the last accepted checkpoint intact; do not fall back to handwritten canonical files or start another scan.",
         ]
-      : skillName === "deep-security-scan"
+      : enforceCostLimit || customValidation
         ? [
-            "The Deep Scan coordinator already wrote the canonical scan artifacts. Call complete_codex_security_scan exactly once without submitting another semantic draft; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
+            "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]
-        : [
-            "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
-          ]),
+        : skillName === "deep-security-scan"
+          ? [
+              "The Deep Scan coordinator already wrote the canonical scan artifacts. Call complete_codex_security_scan exactly once without submitting another semantic draft; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
+            ]
+          : [
+              "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
+            ]),
     ...(additionalPrompt?.trim()
       ? ["Additional scan instructions:", additionalPrompt]
       : []),
@@ -4765,7 +4776,11 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget, python: string): string {
+function targetInstruction(
+  target: NormalizedTarget,
+  python: string,
+  structuredDraft: boolean,
+): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths") {
@@ -4781,7 +4796,7 @@ function targetInstruction(target: NormalizedTarget, python: string): string {
       process.platform === "win32"
         ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
         : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
-    return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${python} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}. Before finalization, preserve every requested scope with ${bindScopes}. Do not print, evaluate, or modify the target-paths file.`;
+    return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${python} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}. ${structuredDraft ? "The SDK has bound every requested scope; submit semantic drafts for that registered scope." : `Before finalization, preserve every requested scope with ${bindScopes}.`} Do not print, evaluate, or modify the target-paths file.`;
   }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;

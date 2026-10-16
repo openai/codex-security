@@ -20,6 +20,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    publish_scan_draft,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -319,6 +320,7 @@ def test_cli_scan_completes_when_draft_omits_registered_target(
         draft["scan"]["target"] = {}
     manifest_path.write_text(json.dumps(draft))
     (scan_dir / "report.md").unlink()
+    publish_scan_draft(state_dir, scan_dir, scan_id)
 
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
@@ -365,6 +367,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
         draft["scan"]["scope"] = {}
     manifest_path.write_text(json.dumps(draft))
     (scan_dir / "report.md").unlink()
+    publish_scan_draft(state_dir, scan_dir, scan_id)
 
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
@@ -390,6 +393,7 @@ def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: P
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
     write_completed_contract(scan_dir, scan_id, target)
+    publish_scan_draft(state_dir, scan_dir, scan_id)
 
     prepared = scan_command(state_dir, "prepare-scan-completion", scan_id)
 
@@ -427,6 +431,10 @@ def test_sealed_completion_preserves_original_timestamp_text(
     scan_id = register_cli_scan(state_dir, target, scan_dir)["scanId"]
     write_completed_contract(scan_dir, scan_id, target)
     manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["completedAt"] = timestamp
+    manifest_path.write_text(json.dumps(manifest))
+    publish_scan_draft(state_dir, scan_dir, scan_id)
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["completedAt"] = timestamp
     manifest_path.write_text(json.dumps(manifest))
@@ -474,6 +482,7 @@ def test_rejected_prepared_completion_can_be_marked_failed(tmp_path: Path) -> No
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
     write_completed_contract(scan_dir, scan_id, target)
+    publish_scan_draft(state_dir, scan_dir, scan_id)
     scan_command(state_dir, "prepare-scan-completion", scan_id)
     (scan_dir / "findings.json").write_text("corrupted\n")
 
@@ -507,6 +516,7 @@ def test_cli_completion_accepts_sealed_clean_git_revision_without_snapshot_diges
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["target"].pop("snapshotDigest")
     manifest_path.write_text(json.dumps(manifest))
+    publish_scan_draft(state_dir, scan_dir, scan_id)
     _seal_draft(scan_dir, target)
 
     completed = scan_command(state_dir, "complete-scan", scan_id)

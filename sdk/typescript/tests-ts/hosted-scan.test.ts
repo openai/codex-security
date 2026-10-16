@@ -2,10 +2,12 @@ import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, realpath, stat, symlink } from "node:fs/promises";
+import { readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { build } from "esbuild";
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -42,6 +44,25 @@ import { writeSource } from "./support/shell.js";
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
 
+const draftBundle = await build({
+  stdin: {
+    resolveDir: fileURLToPath(
+      new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
+    ),
+    contents: `export * from "./src/artifact-scan-draft.ts";
+      export * from "./src/artifact-context.ts";`,
+  },
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  loader: { ".md": "text" },
+  write: false,
+});
+const draftBundlePath = join(await temporaryDirectory(), "scan-draft.mjs");
+await writeFile(draftBundlePath, draftBundle.outputFiles[0]!.contents);
+const { createScanArtifactContext, recordCodexSecurityScanDraftViaWorkbench } =
+  await import(pathToFileURL(draftBundlePath).href);
+
 async function fixture(
   additionalFiles: readonly string[] = [],
 ): Promise<HostedScanInput> {
@@ -74,7 +95,45 @@ async function fixture(
   };
 }
 
-async function writeDraft(request: ScanExecutionRequest) {
+function semanticDraft(request: ScanExecutionRequest, complete = true) {
+  return {
+    scanId: request.scanId,
+    complete,
+    scope: { summary: "Synthetic scope fixture", runtimeStatus: "not_run" },
+    findings: [],
+    coverage: {
+      surfaces: [
+        { label: "Synthetic scope fixture", disposition: "no_issue_found" },
+      ],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  };
+}
+
+async function writeDraft(
+  request: ScanExecutionRequest,
+  draft: unknown = semanticDraft(request),
+) {
+  const workbench = (args: string[]) =>
+    runWorkbench(
+      {
+        python: pythonExecutable()!,
+        pluginRoot: request.runtime.pluginRoot,
+        environment: request.runtime.environment,
+      },
+      args,
+    );
+  return recordCodexSecurityScanDraftViaWorkbench(
+    await createScanArtifactContext(request.scanId, workbench, {
+      requireRunning: true,
+    }),
+    draft,
+    workbench,
+  );
+}
+
+async function writeHandwrittenDraft(request: ScanExecutionRequest) {
   const directory = request.runtime.outputDirectory;
   const documents = {
     "scan-manifest.json": {
@@ -456,7 +515,7 @@ test.each(["missing", "invalid"] as const)(
       executor: {
         async run(request) {
           if (artifacts === "invalid") {
-            await writeDraft(request);
+            await writeHandwrittenDraft(request);
             writeSource(
               request.runtime.outputDirectory,
               "findings.json",
@@ -479,12 +538,14 @@ test.each(["missing", "invalid"] as const)(
 
 test("sealed coverage with follow-up diagnostics remains completed", async () => {
   const result = await runHostedScan(await fixture(), {
-    executor: draftExecutor(async (request) => {
-      const file = join(request.runtime.outputDirectory, "coverage.json");
-      const coverage = await readJson<any>(file);
-      coverage.surfaces[0].disposition = "needs_follow_up";
-      await writeJson(file, coverage);
-    }),
+    executor: {
+      async run(request) {
+        const draft = semanticDraft(request);
+        draft.coverage.surfaces[0]!.disposition = "needs_follow_up";
+        await writeDraft(request, draft);
+        return receipt(request);
+      },
+    },
   });
   expect(result.status).toBe("completed");
   expect(result.artifacts.map((artifact) => artifact.path)).toContain(
@@ -494,6 +555,138 @@ test("sealed coverage with follow-up diagnostics remains completed", async () =>
     join(result.outputDirectory, "coverage.json"),
   );
   expect(coverage.surfaces[0].disposition).toBe("needs_follow_up");
+});
+
+test.each(["handwritten", "checkpoint"])(
+  "%s output cannot substitute for an accepted terminal draft",
+  async (output) => {
+    const input = await fixture();
+    const executor = {
+      run: mock(async (request: ScanExecutionRequest) => {
+        if (output === "checkpoint")
+          await writeDraft(request, semanticDraft(request, false));
+        // Even superficially valid canonical files must not complete this scan.
+        await writeHandwrittenDraft(request);
+        return receipt(request);
+      }),
+    };
+    const result = await runHostedScan(input, { executor });
+    expect(result.status).toBe("failed");
+    expect(result.artifacts).toEqual([]);
+    expect(result.execution?.status).toBe("completed");
+    expect(executor.run).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("completion regenerates malformed handwritten output from the accepted draft", async () => {
+  const input = await fixture();
+  const result = await runHostedScan(input, {
+    executor: draftExecutor(async (request) => {
+      await writeJson(join(request.runtime.outputDirectory, "coverage.json"), {
+        inventoryStrategy: "scoped_source_input",
+        surfaces: [
+          { label: "Handwritten surface", disposition: "no_issue_found" },
+        ],
+      });
+      writeSource(
+        request.runtime.outputDirectory,
+        "findings.json",
+        "{invalid JSON",
+      );
+    }),
+  });
+  expect(result.status, JSON.stringify(result)).toBe("completed");
+  const coverage = await readJson<any>(
+    join(result.outputDirectory, "coverage.json"),
+  );
+  expect(coverage.inventoryStrategy).toBe("scoped_path");
+  expect(coverage.surfaces).toHaveLength(1);
+  expect(coverage.surfaces[0]).toMatchObject({
+    id: expect.any(String),
+    label: "Synthetic scope fixture",
+  });
+  expect(result.artifacts.map(({ path }) => path)).toContain("report.md");
+});
+
+const finding = {
+  ruleId: "fixture.path-traversal",
+  title: "Synthetic path traversal",
+  summary: "An unchecked path reaches a file write.",
+  severity: { level: "high" },
+  confidence: { level: "high", rationale: "Synthetic source review." },
+  taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+  locations: [{ path: "service-a/index.ts", startLine: 1 }],
+  remediation: "Validate the resolved path before writing.",
+  provenance: { source: "local_plugin", candidateId: "fixture-candidate" },
+};
+
+test("a rejected draft can be corrected in the same execution without losing accepted findings", async () => {
+  const executor = {
+    run: mock(async (request: ScanExecutionRequest) => {
+      await writeDraft(request, {
+        ...semanticDraft(request, false),
+        findings: [finding],
+      });
+      const headPath = join(
+        request.runtime.outputDirectory,
+        "checkpoint-head.json",
+      );
+      const acceptedHead = await readFile(headPath, "utf8");
+      await expect(
+        writeDraft(request, {
+          ...semanticDraft(request),
+          findings: [{ ...finding, severity: { level: "invalid" } }],
+        }),
+      ).rejects.toThrow("severity");
+      expect(await readFile(headPath, "utf8")).toBe(acceptedHead);
+      const accepted = await writeDraft(request);
+      expect(accepted.status).toBe("draft_written");
+      expect(accepted.findingCount).toBe(1);
+      return receipt(request);
+    }),
+  };
+  const result = await runHostedScan(await fixture(), { executor });
+  expect(result.status, JSON.stringify(result)).toBe("completed");
+  expect(executor.run).toHaveBeenCalledTimes(1);
+  const findings = await readJson<any>(
+    join(result.outputDirectory, "findings.json"),
+  );
+  expect(findings.findings).toHaveLength(1);
+  expect(findings.findings[0].title).toBe(finding.title);
+});
+
+test("transport failure preserves an accepted checkpoint and the original diagnostic", async () => {
+  let acceptedHead: string | undefined;
+  const executor = {
+    run: mock(async (request: ScanExecutionRequest) => {
+      await writeDraft(request, {
+        ...semanticDraft(request, false),
+        findings: [finding],
+      });
+      acceptedHead = await readFile(
+        join(request.runtime.outputDirectory, "checkpoint-head.json"),
+        "utf8",
+      );
+      throw new Error("Synthetic draft transport closed");
+    }),
+  };
+  const result = await runHostedScan(await fixture(), { executor });
+  expect(result.status).toBe("acceptance_unknown");
+  expect(result).toMatchObject({
+    error: expect.stringContaining("Synthetic draft transport closed"),
+  });
+  expect(result.artifacts).toEqual([]);
+  expect(executor.run).toHaveBeenCalledTimes(1);
+  expect(
+    await readFile(
+      join(result.outputDirectory, "checkpoint-head.json"),
+      "utf8",
+    ),
+  ).toBe(acceptedHead!);
+  const findings = await readJson<any>(
+    join(result.outputDirectory, "findings.json"),
+  );
+  expect(findings.findings[0].title).toBe(finding.title);
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {

@@ -40,6 +40,28 @@ const findingFor = (candidateId: string) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+test("standard: accepted hardening metadata allows later semantic drafts", async (t) => {
+  const f = await fixture(t, "standard");
+  await mkdir(path.join(f.root, "hardening"));
+  await writeFile(path.join(f.root, "hardening/hardening.md"), "# Hardening\n");
+  const surface = { id: "api", label: "API", disposition: "needs_follow_up" };
+  await f.write(f.draft({ surfaces: [surface] }));
+  const result = await f.write(
+    f.draft(
+      { surfaces: [{ ...surface, disposition: "no_issue_found" }] },
+      true,
+    ),
+  );
+  assert.equal(result.coverage.surfaces.length, 1);
+  assert.equal(result.coverage.surfaces[0].disposition, "no_issue_found");
+  assert.deepEqual(
+    (await readJson(f.root, "scan-manifest.json")).scan.hardening,
+    {
+      portfolioPath: "hardening/hardening.md",
+    },
+  );
+});
+
 for (const source of ["title", "candidateId", "reportId", "ledgerRowId"]) {
   for (const [value, expected] of [
     ["_Unsafe archive_", "unsafe-archive_"],

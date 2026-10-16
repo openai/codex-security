@@ -343,13 +343,35 @@ def _parent_scan_draft(
         "coverage": coverage,
         **{
             key: parent_scan[key]
-            for key in ("scope", "threatModel", "complete")
+            for key in ("scope", "threatModel", "hardening", "complete")
             if key in parent_scan
         },
     }
     if not isinstance(parent["findings"], list):
         raise ContractError("Saved parent draft has no findings array")
     return parent
+
+
+def require_accepted_parent_draft(scan_dir: Path, scan_id: str) -> tuple[dict[str, Any], int]:
+    """Select the published semantic checkpoint before reading mutable projections."""
+    try:
+        head, _, observed = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
+        draft, digest, _ = _read_saved_result(
+            scan_dir, f"checkpoints/{head['checkpoint']}", scan_id
+        )
+        if head["checkpoint"] != f"{digest}.json":
+            raise ContractError("accepted checkpoint digest mismatch")
+    except (ContractError, OSError, ValueError) as exc:
+        raise ContractError(
+            f"The scan has no valid accepted final structured draft ({exc}); submit "
+            "record_codex_security_scan_draft with complete:true before completing it."
+        ) from exc
+    if draft.get("complete") is False:
+        raise ContractError(
+            "The latest accepted scan draft is incomplete; submit "
+            "record_codex_security_scan_draft with complete:true before completing it."
+        )
+    return draft, observed
 
 
 def _read_saved_parent_result(
@@ -908,6 +930,7 @@ def merge_saved_results(
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    accepted_parent: tuple[dict[str, Any], int] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -919,7 +942,17 @@ def merge_saved_results(
     parent_manifest: dict[str, Any] | None = None
     parent_is_canonical = False
     parent_modified = 0
-    if frozen_source_digests is None or allow_frozen_legacy_parent:
+    if accepted_parent is not None:
+        parent = copy.deepcopy(accepted_parent[0])
+        parent_modified = accepted_parent[1]
+        parent_manifest = {
+            "scan": {
+                key: parent[key]
+                for key in ("scope", "threatModel", "hardening", "complete")
+                if key in parent
+            }
+        }
+    elif frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
             # Without an accepted head, file-authored coverage is a full replacement.
@@ -1087,6 +1120,9 @@ def merge_saved_results(
             draft, digest, observed = _read_saved_result(
                 scan_dir, relative, scan_id, kind="dedup" if relative in reducer_paths else None
             )
+            if accepted_parent is not None and worker_id is None and observed > parent_modified:
+                # A publication interrupted before selecting its head is not a final result.
+                continue
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
             source_digests[relative] = digest
@@ -1156,7 +1192,7 @@ def merge_saved_results(
             latest_reducer_key = candidate_key
             latest_reducer = result_path
 
-    if parent_heads:
+    if parent_heads and accepted_parent is None:
         latest_observation = max(observed for observed, _ in parent_heads)
         for observed, parent_path in parent_heads:
             if observed != latest_observation:
