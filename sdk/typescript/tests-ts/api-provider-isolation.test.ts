@@ -1,9 +1,8 @@
 import { codexFactory } from "./support/api-events.js";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { resolveCodexProfile, type JsonObject } from "../src/config.js";
-import * as childProcess from "node:child_process";
+import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -15,6 +14,7 @@ import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
@@ -516,392 +516,164 @@ test("workers preserve native provider inheritance without an explicit selection
   }
 });
 
-const legacyProviders: Array<[string, JsonObject]> = [
-  [
-    "explicit gateway",
+for (const resume of [false, true]) {
+  test.each([
     {
-      model_provider: "openrouter",
-      model_providers: {
-        openrouter: {
-          name: "Synthetic gateway",
-          base_url: "https://gateway.example.test/v1",
-          wire_api: "responses",
-          env_key: "OPENROUTER_API_KEY",
-        },
-      },
+      name: "missing direct engine",
+      capabilities: { workerProviderSnapshot: 4 },
+      isolated: true,
     },
-  ],
-  [
-    "OpenAI with custom definitions",
     {
-      model_provider: "openai",
-      model_providers: {
-        synthetic: {
-          name: "Synthetic",
-          wire_api: "responses",
-          base_url: "https://gateway.example.test/v1",
-          env_key: "SYNTHETIC_OPENAI_API_KEY",
-        },
-      },
+      name: "old worker snapshot",
+      capabilities: { directDeepScanEngine: 1, workerProviderSnapshot: 3 },
+      isolated: true,
     },
-  ],
-  [
-    "profile OpenAI with custom definitions",
     {
-      profile: "selected",
-      profiles: {
-        selected: {
-          model_provider: "openai",
-          model_providers: {
-            synthetic: {
-              name: "Synthetic",
-              wire_api: "responses",
-              base_url: "https://gateway.example.test/v1",
-              env_key: "SYNTHETIC_OPENAI_API_KEY",
-            },
+      name: "missing isolated snapshot",
+      capabilities: { directDeepScanEngine: 1, workerProviderSnapshot: 4 },
+      isolated: false,
+    },
+  ])(
+    `rejects $name before ${resume ? "resuming" : "starting"} Deep Scan`,
+    async ({ capabilities, isolated }) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scan = join(root, "scan");
+      const plugin = join(root, "custom-plugin");
+      const home = join(root, "codex-home");
+      await mkdir(repository);
+      await mkdir(scan, { mode: 0o700 });
+      await mkdir(home, { mode: 0o700 });
+      await cp(PLUGIN_ROOT, plugin, { recursive: true });
+      const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.codexSecurity = capabilities;
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      const runtime = preparedRuntime(home);
+      const createCodex = mock(() => {
+        throw new Error("Model execution must not begin.");
+      });
+      const runWorkbench = mock(async () => {
+        throw new Error("Scan registration or resume must not begin.");
+      });
+      const client = TestClient.withDependencies({
+        prepareRuntime: async () => ({
+          ...runtime,
+          deepScanConfigPath: isolated ? runtime.deepScanConfigPath : undefined,
+          plugin: {
+            ...runtime.plugin,
+            pluginRoot: plugin,
+            installedRoot: plugin,
           },
-        },
-      },
+        }),
+        createCodex,
+        runWorkbench,
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            outputDir: scan,
+            ...(resume ? { resumeScanId: "saved-scan" } : {}),
+          }),
+        ).rejects.toThrow("Update the custom plugin or use the bundled plugin");
+        expect(createCodex).not.toHaveBeenCalled();
+        expect(runWorkbench).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+      }
     },
-  ],
-  [
-    "inherited provider definition",
-    {
-      model_providers: {
-        "amazon-bedrock": {
-          aws: { region: "us-east-1" },
-          base_url: "https://gateway.example.test/v1",
-        },
-      },
-    },
-  ],
-];
-const legacyScanCases: Array<
-  [
-    string,
-    "standard" | "deep",
-    JsonObject,
-    {
-      capability?: true | number;
-      inherited?: string;
-      managed?: string;
-      isolatedConfig?: boolean;
-      rejects?: boolean;
-      reads?: boolean;
-    },
-  ]
-> = [
-  ...legacyProviders.map(
-    ([name, overrides]): (typeof legacyScanCases)[number] => [
-      `deep with incompatible ${name}`,
-      "deep",
-      overrides,
-      { capability: 3, rejects: true },
-    ],
-  ),
-  ["standard", "standard", {}, {}],
-  ["deep", "deep", {}, {}],
-  ["standard with explicit provider", "standard", legacyProviders[0]![1], {}],
-  [
-    "deep with a root endpoint and no private snapshot",
-    "deep",
-    { openai_base_url: "https://endpoint.example.test/v1" },
-    { isolatedConfig: false, rejects: true },
-  ],
-  [
-    "deep with an OpenAI endpoint and readable snapshot",
-    "deep",
-    {
-      model_provider: "openai",
-      openai_base_url: "https://endpoint.example.test/v1",
-    },
-    { capability: true, rejects: true },
-  ],
-  [
-    "deep with a profile endpoint and selector snapshot 2",
-    "deep",
-    {
-      profile: "selected",
-      profiles: {
-        selected: { openai_base_url: "https://endpoint.example.test/v1" },
-      },
-    },
-    { capability: 2, rejects: true },
-  ],
-  [
-    "deep with a profile endpoint override and selector snapshot 3",
-    "deep",
-    {
-      openai_base_url: "https://unused.example.test/v1",
-      profile: "selected",
-      profiles: {
-        selected: {
-          model_provider: "openai",
-          openai_base_url: "https://endpoint.example.test/v1",
-        },
-      },
-    },
-    { capability: 3, rejects: true },
-  ],
-  [
-    "deep with an endpoint fallback and no private snapshot path",
-    "deep",
-    {
-      openai_base_url: "https://endpoint.example.test/v1",
-      profile: "selected",
-      profiles: { selected: { model_provider: "openai" } },
-    },
-    { capability: 4, isolatedConfig: false, rejects: true },
-  ],
-  [
-    "standard with an endpoint and no private snapshot",
-    "standard",
-    { openai_base_url: "https://endpoint.example.test/v1" },
-    { isolatedConfig: false },
-  ],
-  [
-    "deep with an unused profile endpoint",
-    "deep",
-    {
-      profiles: {
-        unused: { openai_base_url: "https://unused.example.test/v1" },
-      },
-    },
-    { isolatedConfig: false },
-  ],
-  [
-    "deep with a root endpoint and runtime snapshot 4",
-    "deep",
-    { openai_base_url: "https://endpoint.example.test/v1" },
-    { capability: 4 },
-  ],
-  [
-    "deep with a profile endpoint and runtime snapshot 4",
-    "deep",
-    {
-      profile: "selected",
-      profiles: {
-        selected: {
-          model_provider: "openai",
-          openai_base_url: "https://endpoint.example.test/v1",
-        },
-      },
-    },
-    { capability: 4 },
-  ],
-  [
-    "deep with explicit OpenAI",
-    "deep",
-    { model_provider: "openai" },
-    { reads: true },
-  ],
-  [
-    "deep with profile-selected OpenAI",
-    "deep",
-    {
-      profile: "selected",
-      profiles: { selected: { model_provider: "openai" } },
-    },
-    { reads: true },
-  ],
-  [
-    "deep with a conflicting native provider",
-    "deep",
-    { model_provider: "openai" },
-    {
-      inherited: "synthetic.system",
-      reads: true,
-      rejects: true,
-    },
-  ],
-  [
-    "deep with the same managed provider",
-    "deep",
-    { model_provider: "openai" },
-    {
-      inherited: "synthetic.system",
-      managed: "synthetic.required",
-      reads: true,
-    },
-  ],
-  ...([true, 2, 3] as const).map(
-    (capability): (typeof legacyScanCases)[number] => [
-      `deep with selector snapshot ${capability}`,
-      "deep",
-      { model_provider: "openai" },
-      {
-        capability,
-        inherited: "synthetic.system",
-      },
-    ],
-  ),
-  [
-    "deep with a resolved profile and readable snapshot",
-    "deep",
-    {
-      profile: "selected.profile",
-      profiles: { "selected.profile": { model_provider: "openai" } },
-    },
-    {
-      capability: true,
-      inherited: "synthetic.system",
-    },
-  ],
-];
-test.each(legacyScanCases)(
-  "checks effective worker compatibility for %s scans",
-  async (_scenario, mode, overrides, native) => {
+  );
+}
+
+test("standard scans do not require Deep Scan plugin capabilities", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const plugin = join(root, "custom-plugin");
+  const home = join(root, "codex-home");
+  await mkdir(repository);
+  await mkdir(home, { mode: 0o700 });
+  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  delete manifest.codexSecurity;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const runtime = preparedRuntime(home);
+  const client = TestClient.withDependencies({
+    prepareRuntime: async () => ({
+      ...runtime,
+      deepScanConfigPath: undefined,
+      plugin: { ...runtime.plugin, pluginRoot: plugin, installedRoot: plugin },
+    }),
+    resolvePluginPython: async () => "/managed/python",
+    createCodex: codexFactory(async () => {
+      throw new Error("standard scan started");
+    }),
+  });
+  try {
+    await expect(
+      client.run(repository, { outputDir: join(root, "scan") }),
+    ).rejects.toThrow("standard scan started");
+  } finally {
+    await client.close();
+  }
+});
+
+test.each(["root", "profile"])(
+  "current Deep workers inherit the %s endpoint",
+  async (selection) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
-    const plugin = join(root, "custom-plugin");
     await mkdir(repository);
     await mkdir(scan, { mode: 0o700 });
-    await cp(PLUGIN_ROOT, plugin, { recursive: true });
-    const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    if (native.capability === undefined) delete manifest.codexSecurity;
-    else manifest.codexSecurity = { workerProviderSnapshot: native.capability };
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    if (native.isolatedConfig === false) {
-      const mcpPath = join(plugin, ".mcp.json");
-      const configuration = JSON.parse(await readFile(mcpPath, "utf8"));
-      const server = configuration.mcpServers["codex-security"];
-      server.env_vars = server.env_vars.filter(
-        (name: string) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-      );
-      await writeFile(mcpPath, JSON.stringify(configuration));
-    }
-    const callsPath = join(root, "config-reads.jsonl");
-    const fakeNative = join(root, "native-config.mjs");
-    await writeFile(
-      fakeNative,
-      `
-      import { appendFileSync, existsSync } from "node:fs";
-      import { join } from "node:path";
-      import { createInterface } from "node:readline";
-      const args = process.argv.slice(2);
-      const selected = args.some((arg) => arg === 'model_provider="openai"') ? "openai" : ${JSON.stringify(native.inherited ?? "openai")};
-      for await (const line of createInterface({ input: process.stdin })) {
-        const request = JSON.parse(line);
-        if (request.id === undefined) continue;
-        if (request.method === "config/read") appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({
-          args, cwd: process.cwd(), params: request.params,
-          home: process.env.CODEX_HOME, key: process.env.CODEX_API_KEY,
-          openai: process.env.OPENAI_API_KEY,
-          lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
-        }) + "\\n");
-        console.log(JSON.stringify({ id: request.id, result: request.method === "config/read"
-          ? { config: { model_provider: ${JSON.stringify(native.managed)} ?? selected } } : {} }));
-      }
-    `,
-    );
-    const command = resolveCodexCommand({});
-    const commandArgs = ["-c", "features.api_key_model_discovery=false"];
-    const originalSpawn = childProcess.spawn;
-    const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
-      ...input: Parameters<typeof originalSpawn>
-    ) => {
-      const [, args, options] = input;
-      return args?.includes("app-server")
-        ? originalSpawn(process.execPath, [fakeNative, ...args], options ?? {})
-        : originalSpawn(...input);
-    }) as typeof originalSpawn);
-    let launched = false;
+    const endpoint = "https://endpoint.example.test/v1";
     const client = new TestClient(
-      { pluginPath: plugin, codexOverrides: overrides },
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides:
+          selection === "root"
+            ? { openai_base_url: endpoint }
+            : {
+                profile: "selected",
+                profiles: {
+                  selected: {
+                    model_provider: "openai",
+                    openai_base_url: endpoint,
+                  },
+                },
+              },
+      },
       {
         environment: {
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "synthetic-openai-key",
-          OPENROUTER_API_KEY: "synthetic-gateway-key",
         },
-        resolveCodexCommand: () => ({ ...command, args: commandArgs }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options) => {
-          launched = true;
-          return codexFactory(async function runStreamed() {
-            const config = parseToml(
+        createCodex: (options) =>
+          codexFactory(async function runStreamed() {
+            expect(options.config?.["openai_base_url"]).toBe(endpoint);
+            const worker = parseToml(
               await readFile(
-                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
                 "utf8",
               ),
             );
             expect(
-              resolveCodexProfile(config as JsonObject)["model_provider"],
-            ).toBe(resolveCodexProfile(overrides)["model_provider"]);
-            const endpoint = resolveCodexProfile(overrides)["openai_base_url"];
-            expect(endpoint).toBe(options.config?.["openai_base_url"]);
-            expect(config).not.toHaveProperty("openai_base_url");
-            if (mode === "deep" && endpoint !== undefined) {
-              const worker = parseToml(
-                await readFile(
-                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-              );
-              expect(
-                (worker["worker_runtime"] as JsonObject)["openai_base_url"],
-              ).toBe(endpoint);
-            }
-            if (native.capability === 2 || native.capability === 3) {
-              const worker = parseToml(
-                await readFile(
-                  options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-              );
-              expect(
-                (worker["worker_runtime"] as JsonObject)["model_provider"],
-              ).toBe("openai");
-            }
-            expect(
-              existsSync(
-                join(
-                  options.env!["CODEX_HOME"]!,
-                  ".codex-security-preflight",
-                  ".codex-security-scan.lock",
-                ),
-              ),
-            ).toBe(false);
-            throw new Error("synthetic compatible scan started");
-          })();
-        },
+              (worker["worker_runtime"] as JsonObject)["openai_base_url"],
+            ).toBe(endpoint);
+            throw new Error("synthetic endpoint inherited");
+          })(),
       },
     );
     try {
-      await expect(client.run(repository, { mode })).rejects.toThrow(
-        native.rejects
-          ? "Update the custom plugin or use the bundled plugin"
-          : "synthetic compatible scan started",
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "synthetic endpoint inherited",
       );
-      expect(launched).toBe(!native.rejects);
-      const calls = existsSync(callsPath)
-        ? (await readFile(callsPath, "utf8"))
-            .trim()
-            .split("\n")
-            .map((line) => JSON.parse(line))
-        : [];
-      expect(calls).toHaveLength(native.reads ? 2 : 0);
-      for (const call of calls) {
-        expect(call.cwd).toBe(scan);
-        expect(call.params).toEqual({ cwd: scan, includeLayers: false });
-        expect(call.home).toBe(join(root, "state", "codex-home"));
-        expect(call.key).toBe("synthetic-openai-key");
-        expect(call.openai).toBeUndefined();
-        expect(call.lockHeld).toBe(true);
-        expect(call.args.slice(0, commandArgs.length)).toEqual(commandArgs);
-        expect(JSON.stringify(call.args)).not.toContain("synthetic-openai-key");
-      }
-      if (native.reads) {
-        expect(calls[0].args).not.toContain('model_provider="openai"');
-        expect(calls[1].args).toContain('model_provider="openai"');
-      }
     } finally {
       await client.close();
-      spawnSpy.mockRestore();
     }
   },
 );

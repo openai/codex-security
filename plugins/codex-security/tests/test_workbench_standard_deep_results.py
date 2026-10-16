@@ -105,7 +105,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert "Model origin: recovered" in model_document
     assert stopped["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
     assert (
@@ -267,7 +267,7 @@ def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> Non
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     finding = standard_finding(tmp_path, scan_id, target)
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
     stopped = get_scan(state_dir, scan_id)["scan"]
@@ -308,7 +308,7 @@ def test_explicit_recovery_rejects_changed_frozen_source(tmp_path: Path) -> None
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     finding = standard_finding(tmp_path, scan_id, target)
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
     manifest_path = scan_dir / "scan-manifest.json"
@@ -451,7 +451,7 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     late_finding["identity"]["anchor"] = "late-checkpoint"
     late_finding["ruleId"] = "late.checkpoint"
     late_finding["title"] = "Late checkpoint finding"
-    late = saved_draft(scan_id, findings=[late_finding], completeness="partial")
+    late = saved_draft(scan_id, findings=[late_finding])
     write_checkpoint(result_path.parent / "checkpoints", late)
 
     manifest_before_failed_recovery = (scan_dir / "scan-manifest.json").read_bytes()
@@ -668,7 +668,7 @@ def test_aggregate_queries_ignore_late_stopped_scan_checkpoints(
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     finding = standard_finding(tmp_path, scan_id, target)
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     fail_deep_scan(state_dir, codex_home, scan_id, deep_status="failed")
     late = copy.deepcopy(checkpoint)
@@ -774,7 +774,8 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     finding = standard_finding(tmp_path, scan_id, target)
-    checkpoint = saved_draft(scan_id, findings=[finding], completeness="partial")
+    finding["severity"]["changeConditions"] = ["Raise if the service becomes internet-reachable."]
+    checkpoint = saved_draft(scan_id, findings=[finding])
     write_checkpoint(result_path.parent / "checkpoints", checkpoint)
     result_path.write_text("{incomplete")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -816,6 +817,9 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     )["scan"]
     assert preserved["findingCount"] == 1
     assert preserved["findings"][0]["locations"][0]["startLine"] != 91
+    assert preserved["findings"][0]["severity"]["changeConditions"] == (
+        "Raise if the service becomes internet-reachable."
+    )
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "canceled"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         warnings = json.loads(
@@ -824,6 +828,8 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
             ).fetchone()[0]
         )
     assert not any("result publication needs follow-up" in warning for warning in warnings)
+    assert "Recovered finding 1: normalized severity change conditions." in warnings
+    assert preserved["warnings"] == warnings
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
@@ -1497,7 +1503,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
     )
     coverage_path = scan_dir / "coverage.json"
     final_coverage = json.loads(coverage_path.read_text())
-    final_coverage["completeness"] = "partial"
+
     final_coverage["openQuestions"] = []
     coverage_path.write_text(json.dumps(final_coverage))
     checkpoint = write_checkpoint(
@@ -1507,7 +1513,6 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
             "complete": False,
             "findings": [],
             "coverage": {
-                "completeness": "partial",
                 "surfaces": [],
                 "explicitExclusions": [],
                 "deferred": [],
@@ -1620,7 +1625,7 @@ def test_recovery_selects_strongest_same_finding_checkpoint(tmp_path: Path) -> N
     checkpoint_dir.mkdir()
     for name, finding in (("0" * 64, weak), ("f" * 64, strong)):
         (checkpoint_dir / f"{name}.json").write_text(
-            json.dumps(saved_draft(scan_id, findings=[finding], completeness="partial"))
+            json.dumps(saved_draft(scan_id, findings=[finding]))
         )
     result_path.write_text("{incomplete")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -1722,7 +1727,6 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
         baseline["identity"]["anchor"],
         later["identity"]["anchor"],
     }
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == ("partial")
 
 
 def test_recovery_does_not_promote_already_retained_historical_finding(
@@ -1997,7 +2001,7 @@ def test_standard_worker_deadline_can_finish_without_any_completed_worker(
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
+
     coverage["surfaces"] = []
     coverage["deferred"] = [
         {
@@ -2079,7 +2083,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     assert completed["warnings"] == [warning]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+
     assert coverage["deferred"] == [
         {
             "id": "scan-cost-limit",
@@ -2166,7 +2170,6 @@ def test_merge_saved_results_deduplicates_open_questions(
     (scan_dir / "coverage.json").write_text(
         json.dumps(
             {
-                "completeness": "partial",
                 "surfaces": [],
                 "explicitExclusions": [],
                 "deferred": [],
@@ -2182,7 +2185,6 @@ def test_merge_saved_results_deduplicates_open_questions(
                 "complete": False,
                 "findings": [],
                 "coverage": {
-                    "completeness": "partial",
                     "surfaces": [],
                     "explicitExclusions": [],
                     "deferred": [],
@@ -2284,7 +2286,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
         candidate["candidateId"],
         "scan-stopped",
     } | ({closure["id"]} if reopened else set())
-    assert recovered["completeness"] == "partial"
+
     assert original.read_bytes() == original_bytes
     if canonical_state == "checkpoint_reopened":
         assert existing_checkpoint.stat().st_mtime_ns == 300
@@ -2334,7 +2336,6 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
                     "complete": True,
                     "coverage": {
                         **draft["coverage"],
-                        "completeness": "complete",
                         "deferred": [],
                         "resolvedDeferred": [
                             {"id": "shared-review", "reason": "Review completed."}
@@ -2363,7 +2364,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
     assert {
         row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
     } == expected
-    assert coverage["completeness"] == "partial"
+
     assert not coverage.get("resolvedDeferred")
 
 
@@ -2373,7 +2374,6 @@ def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_
     scan_id = "closure-reason-recovery"
     closure = {"id": "review-closeout", "reason": "Review and follow-up are complete."}
     coverage = {
-        "completeness": "complete",
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
@@ -2443,7 +2443,6 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
             "complete": True,
             "coverage": {
                 **coverage,
-                "completeness": "complete",
                 "deferred": [],
                 "resolvedDeferred": closures,
             },
@@ -2466,13 +2465,13 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
     )
     assert documents is not None
     prepared = workbench_saved_results._prepare_scan_finalization(
-        scan_dir, completion_binding=binding, completion_warnings=[], draft_documents=documents
+        scan_dir, completion_binding=binding, recover_unsealed=True, draft_documents=documents
     )
     workbench_saved_results._write_prepared_scan_finalization(prepared)
     recovered = json.loads((scan_dir / "coverage.json").read_text())
     assert pending in recovered["deferred"]
     assert not recovered.get("resolvedDeferred")
-    assert recovered["completeness"] == "partial"
+
     assert original.read_bytes() == original_bytes
 
 
@@ -2485,7 +2484,6 @@ def test_recovery_restores_work_reopened_after_parent_closure(
     closure = {"id": "review-closeout", "reason": "Initial review completed."}
     other = {"id": "other-review", "reason": "Separate review completed."}
     coverage = {
-        "completeness": "complete",
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
@@ -2504,7 +2502,6 @@ def test_recovery_restores_work_reopened_after_parent_closure(
             "findings": [],
             "coverage": {
                 **coverage,
-                "completeness": "partial",
                 "deferred": [pending],
                 "resolvedDeferred": [],
             },
@@ -2548,7 +2545,6 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
             **draft,
             "coverage": {
                 **coverage,
-                "completeness": "complete",
                 "deferred": [],
                 "resolvedDeferred": [{"id": pending["id"], "reason": "Review completed."}],
             },
@@ -2566,7 +2562,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
         current = (
             draft
             if layout.endswith("attempt_reopens")
-            else {**draft, "coverage": {**coverage, "completeness": "complete", "deferred": []}}
+            else {**draft, "coverage": {**coverage, "deferred": []}}
         )
         (output / "result.json").write_text(json.dumps(current))
         os.utime(output / "result.json", ns=(300, 300))
@@ -2637,7 +2633,6 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
     scan_id = "worker-head-interruption"
     output = scan_dir / "workers" / "worker-one" / "output"
     coverage = {
-        "completeness": "complete",
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
@@ -2658,7 +2653,6 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
             **draft,
             "coverage": {
                 **coverage,
-                "completeness": "partial",
                 "deferred": [pending],
                 "resolvedDeferred": [],
             },
@@ -2785,7 +2779,7 @@ def test_recovery_applies_surface_update_with_generic_closure(
         remaining = {"id": "other-review", "reason": "Another caller needs review."}
         pending["coverage"]["deferred"].append(remaining)
         closed["coverage"]["deferred"].append(remaining)
-        closed["coverage"]["completeness"] = "partial"
+
     if layout in {"reopened_parent", "worker_idless_reopened"}:
         pending, closed = closed, pending
     output = tmp_path / "worker" if layout.startswith("worker") else tmp_path
@@ -3204,7 +3198,7 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     module, pending, closed, binding = generic_review_recovery
     other = {"id": "other-review", "reason": "Independent review remains."}
     closed["coverage"]["deferred"] = [other]
-    closed["coverage"]["completeness"] = "partial"
+
     pending["coverage"]["resolvedDeferred"] = [
         {"id": "other-review", "reason": "Previously reviewed."}
     ]
@@ -3234,7 +3228,7 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     assert pending["coverage"]["deferred"][0] in replay[2]["deferred"]
     assert old.stat().st_mtime_ns == 100
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
-    assert first[2]["completeness"] == replay[2]["completeness"] == "partial"
+
     assert not replay[2].get("resolvedDeferred")
 
 

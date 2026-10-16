@@ -269,9 +269,19 @@ describe("CodexSecurity policy API", () => {
       await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
 
       const overrides = f.configuration()!.configOverrides!;
-      expect(overrides).toHaveLength(1);
-      expect(parseToml(overrides[0]!)).toEqual({
+      expect(f.configuration()!.config!["default_permissions"]).toBe(
+        "codex_security_policy",
+      );
+      expect(parseToml(overrides.join("\n"))).toEqual({
         permissions: {
+          codex_security_scan: {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [await realpath(f.runtime.codexHome)]: { ".": "deny" },
+              [f.runtime.deepScanConfigPath!]: { ".": "deny" },
+            },
+          },
           codex_security_policy: {
             filesystem: {
               ":minimal": "read",
@@ -914,11 +924,13 @@ describe("CodexSecurity policy API", () => {
         path: scope,
         outputDir: f.outputDir,
       });
-      const overrides = f
-        .configuration()!
-        .configOverrides!.map((override) => parseToml(override));
-      expect(overrides).toHaveLength(1);
-      expect(overrides[0]).toMatchObject({
+      const overrides = parseToml(
+        f.configuration()!.configOverrides!.join("\n"),
+      );
+      expect(f.configuration()!.config!["default_permissions"]).toBe(
+        "codex_security_policy",
+      );
+      expect(overrides).toMatchObject({
         permissions: {
           codex_security_policy: {
             filesystem: { ":minimal": "read", ":workspace_roots": "read" },
@@ -935,7 +947,7 @@ describe("CodexSecurity policy API", () => {
         bareAlternate,
         commonAlternate,
       ]) {
-        expect(overrides[0]).toMatchObject({
+        expect(overrides).toMatchObject({
           permissions: {
             codex_security_policy: { filesystem: { [path]: { ".": "deny" } } },
           },

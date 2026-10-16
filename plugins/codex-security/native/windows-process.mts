@@ -33,9 +33,22 @@ export function spawnWindowsProcess(
   const inherited = options.env ?? process.env;
   const env: NodeJS.ProcessEnv = Object.create(null);
   for (const name in inherited) env[name] = inherited[name];
-  // Target preloads, diagnostics, and certificates must not affect the private shim.
+  // Node forwards parent coverage even when an explicit env omits it.
+  const coverage = process.env["NODE_V8_COVERAGE"];
+  if (
+    coverage &&
+    (!options.env || !Object.hasOwn(options.env, "NODE_V8_COVERAGE"))
+  )
+    env["NODE_V8_COVERAGE"] = coverage;
+  // Target startup settings must not affect the private shim.
   const targetEnvironment: Record<string, string> = {};
-  for (const key of ["NODE_OPTIONS", "NODE_DEBUG", "NODE_EXTRA_CA_CERTS"]) {
+  for (const key of [
+    "NODE_OPTIONS",
+    "NODE_DEBUG",
+    "NODE_DEBUG_NATIVE",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_V8_COVERAGE",
+  ]) {
     // Windows keeps the first lexicographic spelling of a duplicated env key.
     const names = Object.keys(env)
       .filter((name) => name.toUpperCase() === key)
@@ -45,6 +58,8 @@ export function spawnWindowsProcess(
       targetEnvironment[name] = env[name];
     for (const name of names) delete env[name];
   }
+  // An own undefined entry prevents Node from forwarding coverage to the shim again.
+  env["NODE_V8_COVERAGE"] = undefined;
   Object.assign(targetEnvironment, environment);
   const payload = {
     binary,

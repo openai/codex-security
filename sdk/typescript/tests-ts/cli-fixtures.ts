@@ -123,7 +123,7 @@ export const savedRecipe = (
 
 export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
-  completeness: CoverageDocument["completeness"] = "complete",
+  completeness?: "complete" | "partial" | "unknown",
   usage: unknown = null,
 ): ScanResult {
   const manifest = {
@@ -160,7 +160,7 @@ export function fakeResult(
     schemaVersion: "1.0",
     scanId: "scan",
     mode: "repository",
-    completeness,
+    ...(completeness === undefined ? {} : { completeness }),
     inventoryStrategy: "repository",
     includePaths: ["."],
     excludePaths: [],

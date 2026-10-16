@@ -2,15 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "codex-security://schemas/definitions/artifact-common.schema.json",
   "$defs": {
-    "nonEmptyText": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "\\S"
-    },
-    "scanId": {
-      "type": "string",
-      "format": "uuid"
-    },
+    "nonEmptyText": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "scanId": { "type": "string", "format": "uuid" },
     "repositoryPath": {
       "type": "string",
       "minLength": 1,

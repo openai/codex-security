@@ -2859,7 +2859,6 @@ def prepare_failure_capped_deep_scan(
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
     coverage["deferred"].append(
         {"reason": "Deep Scan stopped before completion: reducer retries were exhausted"}
     )
@@ -2867,7 +2866,102 @@ def prepare_failure_capped_deep_scan(
     return state_dir, codex_home, scan_dir, scan_id
 
 
-def test_failure_capped_completion_preserves_partial_results_and_exact_omissions(
+@pytest.mark.parametrize("worker_kind", ["discovery", "dedup"])
+@pytest.mark.parametrize("legacy_succeeded", [False, True], ids=["finish", "legacy-parent"])
+def test_capped_completion_cannot_use_review_notes_to_hide_worker_failures(
+    tmp_path: Path, worker_kind: str, legacy_succeeded: bool
+) -> None:
+    state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
+    worker_id, prompt, artifact_dir, _ = dispatch_discovery_worker(
+        state_dir,
+        codex_home,
+        scan_id=scan_id,
+        scan_dir=scan_dir,
+        name="after-accepted-aggregate",
+        succeed=worker_kind == "dedup",
+    )
+    if worker_kind == "dedup":
+        discovery_id = worker_id
+        worker_id = str(uuid.uuid4())
+        prompt, artifact_dir, _ = worker_paths(scan_dir, "unrecovered-reducer")
+        claim_deep_scan_dedup(
+            state_dir,
+            scan_id,
+            worker_id,
+            str(prompt),
+            str(artifact_dir),
+            "--input-worker-id",
+            discovery_id,
+            environment=deep_environment(codex_home),
+        )
+        upsert_worker(
+            state_dir,
+            codex_home,
+            scan_id=scan_id,
+            worker_id=worker_id,
+            kind="dedup",
+            prompt_path=prompt,
+            artifact_dir=artifact_dir,
+        )
+    upsert_worker(
+        state_dir,
+        codex_home,
+        scan_id=scan_id,
+        worker_id=worker_id,
+        kind=worker_kind,
+        status="failed",
+        prompt_path=prompt,
+        artifact_dir=artifact_dir,
+        error="Worker retries exhausted.",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET max_discovery_runs = discovery_runs_dispatched WHERE scan_id = ?",
+            (scan_id,),
+        )
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    if legacy_succeeded:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+                "terminal_reason = 'capped', manifest_path = ? WHERE scan_id = ?",
+                (str(scan_dir / "scan-manifest.json"), scan_id),
+            )
+        rejected = scan_command(
+            state_dir,
+            "complete-scan",
+            scan_id,
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+    else:
+        rejected = finish_deep_scan(
+            state_dir,
+            scan_id,
+            "capped",
+            str(scan_dir / "scan-manifest.json"),
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+    assert "cannot finish after a worker has failed" in str(rejected["stderr"])
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone() == ("succeeded" if legacy_succeeded else "running",)
+    stopped = fail_scan(
+        state_dir, scan_id, "Worker retries exhausted.", environment=deep_environment(codex_home)
+    )["scan"]
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == 1
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
+
+
+def test_legacy_succeeded_capped_completion_replays_without_rewriting_artifacts(
     tmp_path: Path,
 ) -> None:
     state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
@@ -2876,77 +2970,48 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
         codex_home,
         scan_id=scan_id,
         scan_dir=scan_dir,
-        name="buffered-after-aggregate",
+        name="legacy-omitted",
     )
-    failed_id, failed_prompt, failed_dir, _ = dispatch_discovery_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
-        name="terminal-failure",
-        succeed=False,
-    )
-    upsert_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        worker_id=failed_id,
-        status="failed",
-        prompt_path=failed_prompt,
-        artifact_dir=failed_dir,
-        error="Worker retries exhausted.",
-    )
-    finish_args = (
-        "finish-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--terminal-reason",
-        "capped",
-        "--manifest-path",
-        str(scan_dir / "scan-manifest.json"),
-    )
-
-    without_omission = run_workbench(
-        state_dir, *finish_args, environment=deep_environment(codex_home), check=False
-    )
-    assert "exactly identify all buffered discovery workers" in str(without_omission["stderr"])
-
-    finished = run_workbench(
-        state_dir,
-        *finish_args,
-        "--omitted-worker-id",
-        buffered_id,
-        environment=deep_environment(codex_home),
-    )["deepScan"]
-    assert finished["status"] == "succeeded"
-    assert finished["terminalReason"] == "capped"
-    assert finished["config"]["maxDiscoveryRuns"] == 10
-    assert finished["dispatchedCount"] == 4
-    assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
-        "active": 0,
-        "completed": 3,
-        "maximum": 10,
-        "consolidating": True,
+    manifest_path = str(scan_dir / "scan-manifest.json")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+            "terminal_reason = 'capped', manifest_path = ? WHERE scan_id = ?",
+            (manifest_path, scan_id),
+        )
+    artifacts = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
     }
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
-    assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == failed_id)["status"]
-        == "failed"
-    )
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == buffered_id)["mergeState"]
-        == "buffered"
-    )
-
-    replayed = run_workbench(
+    replayed = finish_deep_scan(
         state_dir,
-        *finish_args,
+        scan_id,
+        "capped",
+        manifest_path,
         "--omitted-worker-id",
         buffered_id,
         environment=deep_environment(codex_home),
     )["deepScan"]
-    assert replayed == finished
+    assert replayed["status"] == "succeeded"
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
+    rejected = finish_deep_scan(
+        state_dir,
+        scan_id,
+        "capped",
+        manifest_path,
+        environment=deep_environment(codex_home),
+        check=False,
+    )
+    assert "terminal state is immutable" in str(rejected["stderr"])
+    publication = scan_command(
+        state_dir,
+        "complete-scan",
+        scan_id,
+        environment=deep_environment(codex_home),
+        check=False,
+    )
+    assert "while discovery output remains buffered" in str(publication["stderr"])
+    assert {name: (scan_dir / name).read_bytes() for name in artifacts} == artifacts
 
 
 def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: Path) -> None:
@@ -2965,7 +3030,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    coverage["completeness"] = "partial"
+
     coverage["surfaces"] = []
     coverage_path.write_text(json.dumps(coverage))
 
@@ -2979,7 +3044,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
         prompt_path=prompt_path,
         artifact_dir=artifact_dir,
     )
-    checkpoint = saved_draft(scan_id, completeness="partial", findings=[provisional])
+    checkpoint = saved_draft(scan_id, findings=[provisional])
     encoded = json.dumps(checkpoint).encode()
     checkpoint_dir = artifact_dir / "checkpoints"
     checkpoint_dir.mkdir()
@@ -3025,7 +3090,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
     )
 
 
-def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Path) -> None:
+def test_capped_completion_does_not_discard_canceled_reducer_inputs(tmp_path: Path) -> None:
     state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
     buffered_id, *_ = dispatch_discovery_worker(
         state_dir,
@@ -3055,6 +3120,11 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET max_discovery_runs = discovery_runs_dispatched WHERE scan_id = ?",
+            (scan_id,),
+        )
     finish_args = (
         "finish-deep-scan",
         "--scan-id",
@@ -3081,36 +3151,52 @@ def test_failure_capped_completion_recovers_canceled_reducer_inputs(tmp_path: Pa
         prompt_path=reducer_prompt,
         artifact_dir=reducer_dir,
     )
-    finished = run_workbench(state_dir, *finish_args, environment=deep_environment(codex_home))[
-        "deepScan"
-    ]
-    assert finished["status"] == "succeeded"
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == reducer_id)["status"]
-        == "canceled"
+    rejected = run_workbench(
+        state_dir, *finish_args, environment=deep_environment(codex_home), check=False
     )
-    assert (
-        next(worker for worker in finished["workers"] if worker["id"] == buffered_id)["mergeState"]
-        == "buffered"
+    assert "while discovery output is merging" in str(rejected["stderr"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone() == ("running",)
+        assert connection.execute(
+            "SELECT merge_state FROM deep_scan_workers WHERE id = ?",
+            (buffered_id,),
+        ).fetchone() == ("merging",)
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', "
+            "terminal_reason = 'capped', manifest_path = ? WHERE scan_id = ?",
+            (str(scan_dir / "scan-manifest.json"), scan_id),
+        )
+    publication = scan_command(
+        state_dir,
+        "complete-scan",
+        scan_id,
+        environment=deep_environment(codex_home),
+        check=False,
     )
+    assert "while discovery output is merging" in str(publication["stderr"])
 
 
-@pytest.mark.parametrize("invalid_case", ["ordinary_partial", "complete", "missing_coverage"])
-def test_failure_capped_completion_rejects_unmarked_or_missing_canonical_coverage(
-    tmp_path: Path, invalid_case: str
+@pytest.mark.parametrize(
+    "stop_note",
+    [
+        "Deep Scan stopped before completion: reducer retries were exhausted",
+        "Some source files were not reviewed.",
+        None,
+    ],
+)
+def test_capped_completion_uses_configured_limits_independently_of_review_notes(
+    tmp_path: Path, stop_note: str | None
 ) -> None:
     state_dir, codex_home, scan_dir, scan_id = prepare_failure_capped_deep_scan(tmp_path)
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
-    if invalid_case == "ordinary_partial":
-        coverage["deferred"] = [{"reason": "Some source files were not reviewed."}]
-    elif invalid_case == "complete":
-        coverage["completeness"] = "complete"
-    else:
-        coverage_path.unlink()
-    if invalid_case != "missing_coverage":
-        coverage_path.write_text(json.dumps(coverage))
-
+    coverage["deferred"] = [{"reason": stop_note}] if stop_note else []
+    coverage_path.write_text(json.dumps(coverage))
     rejected = finish_deep_scan(
         state_dir,
         scan_id,
@@ -3119,14 +3205,11 @@ def test_failure_capped_completion_rejects_unmarked_or_missing_canonical_coverag
         environment=deep_environment(codex_home),
         check=False,
     )
-    assert (
-        "Canonical parent coverage.json must be an existing path"
-        if invalid_case == "missing_coverage"
-        else "cannot finish capped before reaching its configured maximum"
-    ) in str(rejected["stderr"])
+    assert "cannot finish capped before reaching its configured maximum" in str(rejected["stderr"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
-            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
         ).fetchone() == ("running", None)
 
 

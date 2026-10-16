@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { sha256Text as digest } from "./contract.js";
@@ -23,7 +24,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { z } from "incur";
+import { z } from "zod";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt } from "./codex-prompt.js";
 import type { ScanModelConfiguration } from "./config.js";
@@ -137,12 +138,9 @@ const securityPolicyStageSchema = z.strictObject({
   blockedReason: z.string().nullable(),
 });
 
-export interface SecurityPolicyStageResult {
-  markdown: string;
-  questions: string[];
-  reviewNotes: string[];
-  blockedReason: string | null;
-}
+export interface SecurityPolicyStageResult extends z.infer<
+  typeof securityPolicyStageSchema
+> {}
 
 export function securityPolicyStageOutputSchema(): Record<string, unknown> {
   return z.toJSONSchema(securityPolicyStageSchema, {
@@ -693,13 +691,11 @@ export async function resolveSecurityPolicyGuidance(
     process.execPath,
     [
       join(pluginRoot, "mcp", "helpers.mjs"),
-      "resolve-security-md",
-      "--repo",
-      target.repository,
-      "--scope",
-      dirname(target.targetPath),
-      "--out",
-      "-",
+      ...workbenchArgs("resolve-security-md", {
+        repo: target.repository,
+        scope: dirname(target.targetPath),
+        out: "-",
+      }),
     ],
     { encoding: "utf8", maxBuffer: Infinity, env: environment, signal },
   );

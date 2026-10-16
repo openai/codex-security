@@ -15,6 +15,19 @@ packages and releases. Do not edit or commit files in that directory. See the
 [SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
 commands.
 
+Compact artifact contracts are authored in `plugins/codex-security/mcp-app/src/artifact-contracts.ts`,
+with shared finding and threat-model definitions in `finding-detail-schemas.ts` and
+`threat-model-schema.ts`. The JSON files under `schemas/definitions` and `schemas/tools`
+are generated compatibility resources for JSON consumers. After editing the contracts,
+run `node plugins/codex-security/mcp-app/scripts/generate-artifact-schemas.mjs`.
+The MCP `typecheck` command checks that the generated resources are current.
+
+`pnpm --dir sdk/typescript run generate:models` also copies workbench argument
+encoding and executable path handling from the plugin source into the SDK. Edit the
+plugin helper, then regenerate its SDK copy. Historical finding normalization is
+maintained in the SDK.
+`pnpm --dir sdk/typescript run types` checks freshness.
+
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
 source. Deterministic triage checks and the MCP reducer IPC regression remain
 part of normal CI.

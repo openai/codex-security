@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { DeepScanCoordinator } from "./coordinator.js";
-import type { CoordinatorOptions } from "./coordinator.js";
+import type { CoordinatorOptions, ParentScanState } from "./coordinator.js";
 import { isTransientPersistenceError } from "./store.js";
 import type { DeepScanCoordinatorClaim, DeepScanRunState } from "./types.js";
 
@@ -58,10 +58,15 @@ export class DeepScanCoordinatorRegistry {
     scanId: string,
     reason: string,
     persistCancellation: () => Promise<void>,
+    readParentState: () => Promise<ParentScanState>,
   ): Promise<boolean> {
     const coordinator = this.coordinators.get(scanId);
     if (!coordinator) return false;
-    await coordinator.cancelAfterPersistence(reason, persistCancellation);
+    await coordinator.cancelAfterPersistence(
+      reason,
+      persistCancellation,
+      readParentState,
+    );
     return true;
   }
 

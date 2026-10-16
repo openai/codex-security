@@ -88,7 +88,8 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
+      "-B",
       "-c",
       WORKBENCH_PYTHON,
       workbenchScriptPath(),
@@ -98,8 +99,7 @@ async function executeWorkbench(
       windowsHide: true,
       env: process.env,
       encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
+      maxBuffer: Infinity,
       timeout,
     },
   );

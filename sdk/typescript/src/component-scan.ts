@@ -25,7 +25,7 @@ import type { ScanCost, ScanSessionEvent } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import { errorMessage } from "./errors.js";
-import type { CoverageCompleteness, Finding } from "./models.js";
+import type { Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanSettings } from "./scan-settings.js";
@@ -70,11 +70,10 @@ export interface ComponentReceipt {
   id: string;
   name: string;
   paths: string[];
-  status: "pending" | "started" | "completed" | "incomplete" | "failed";
+  status: "pending" | "started" | "completed" | "failed";
   outputDir: string;
   scanId?: string;
   threatModelPath?: string;
-  coverage?: CoverageCompleteness;
   findingCount?: number;
   cost?: Readonly<ScanCost>;
   error?: string;
@@ -104,7 +103,7 @@ interface CombinedFinding {
 }
 
 export interface ComponentDeduplicationSummary {
-  status: "completed" | "incomplete";
+  status: "completed" | "failed";
   confirmedGroups: number;
   uncertainPairs: number;
   error?: string;
@@ -113,7 +112,6 @@ export interface ComponentDeduplicationSummary {
 export interface ComponentScanResult {
   total: number;
   completed: number;
-  incomplete: number;
   failed: number;
   planPath: string;
   summaryPath?: string;
@@ -174,7 +172,6 @@ export async function runComponentScans(
   const base = {
     total: plan.components.length,
     completed: 0,
-    incomplete: 0,
     failed: 0,
     planPath,
   };
@@ -231,13 +228,13 @@ export async function runComponentScans(
               outputDir: receipt.outputDir,
               signal: options.signal,
             });
+            if (result.manifest.scan.status !== "completed")
+              throw new Error(`Component scan ${result.manifest.scan.status}.`);
             results.set(receipt.id, result);
             receipt.scanId = result.manifest.scan.id;
-            receipt.coverage = result.coverage.completeness;
             receipt.findingCount = result.findings.findings.length;
             if (result.cost !== null) receipt.cost = result.cost;
-            receipt.status =
-              receipt.coverage === "complete" ? "completed" : "incomplete";
+            receipt.status = "completed";
             if (result.threatModelPath !== null)
               receipt.threatModelPath = result.threatModelPath;
           } catch (error) {
@@ -272,13 +269,13 @@ export async function runComponentScans(
   const { findings, matches, uncertain, related, error } =
     await deduplicateFindings(receipts, results, { ...options, environment });
   const deduplication: ComponentDeduplicationSummary = {
-    status: error === undefined ? "completed" : "incomplete",
+    status: error === undefined ? "completed" : "failed",
     confirmedGroups: matches.length,
     uncertainPairs: uncertain.length,
     ...(error === undefined ? {} : { error }),
   };
   const retryComponents = receipts
-    .filter(({ status }) => status === "failed" || status === "incomplete")
+    .filter(({ status }) => status === "failed")
     .map(({ name, paths }) => ({ name, paths }));
   const retryPlanPath =
     retryComponents.length === 0
@@ -290,7 +287,6 @@ export async function runComponentScans(
   const summary = {
     ...base,
     completed: receipts.filter(({ status }) => status === "completed").length,
-    incomplete: receipts.filter(({ status }) => status === "incomplete").length,
     failed: receipts.filter(({ status }) => status === "failed").length,
     summaryPath: join(output, "summary.json"),
     findingsPath: join(output, "findings.json"),
@@ -320,12 +316,6 @@ export async function runComponentScans(
     ...summary,
     repository,
     components: receipts,
-    completeness:
-      summary.failed ||
-      summary.incomplete ||
-      deduplication.status === "incomplete"
-        ? "partial"
-        : "complete",
   });
   await writeFile(
     summary.reportPath,
@@ -464,12 +454,9 @@ function renderReport(
   return [
     "# Component scan report",
     "",
-    `${summary.completed} complete, ${summary.incomplete} incomplete, ${summary.failed} failed. ${findings.length} finding groups.`,
-    ...(summary.deduplication?.status === "incomplete"
-      ? [
-          "",
-          `Cross-component matching is incomplete: ${summary.deduplication.error}`,
-        ]
+    `${summary.completed} complete, ${summary.failed} failed. ${findings.length} finding groups.`,
+    ...(summary.deduplication?.status === "failed"
+      ? ["", `Cross-component matching failed: ${summary.deduplication.error}`]
       : []),
     ...(summary.deduplication?.uncertainPairs
       ? [
@@ -481,10 +468,7 @@ function renderReport(
     "Coverage applies only to the selected components. See each scan for exclusions and deferred work.",
     ...(summary.retryPlanPath === undefined
       ? []
-      : [
-          "",
-          "[Retry plan for failed or incomplete components](./retry-components.json)",
-        ]),
+      : ["", "[Retry plan for failed components](./retry-components.json)"]),
     "",
     "## Components",
     "",

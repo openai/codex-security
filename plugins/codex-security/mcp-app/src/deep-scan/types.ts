@@ -32,6 +32,7 @@ export interface DeepScanRunState {
   targetPath: string;
   scope: string;
   includePaths?: string[];
+  filePaths?: string[];
   userContext?: string;
   scanDir: string;
   config: DeepScanConfig;
@@ -123,6 +124,7 @@ export interface CodexWorkerRequest {
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 export interface CodexWorkerResult {

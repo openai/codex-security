@@ -69,7 +69,6 @@ async function run() {
                 },
               },
             })}\n`,
-            { mode: 0o600 },
           );
           result = {};
           break;
@@ -148,7 +147,6 @@ async function run() {
         scanId: env.CODEX_SECURITY_SCAN_ID,
         findings: [],
         coverage: {
-          completeness: "complete",
           surfaces: [],
           explicitExclusions: [],
           deferred: [],

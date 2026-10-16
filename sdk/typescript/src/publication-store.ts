@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { findingEntry } from "./value.js";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -23,12 +24,12 @@ export async function inspectPublicationStore(
     undefined,
     signal,
   );
-  const recorded = result["recorded"];
+  const recorded = publicationRecordsSchema.safeParse(result["recorded"]);
   if (
     !matchesPublication(result, publication) ||
     result["findingCount"] !==
       (publication.sourceFindings ?? publication.issues).length ||
-    !Array.isArray(recorded)
+    !recorded.success
   ) {
     throw invalidPublicationRecords();
   }
@@ -39,8 +40,7 @@ export async function inspectPublicationStore(
     ]),
   );
   const found = new Map<string, PublishedScanIssue>();
-  for (const value of recorded) {
-    const issue = readPublicationRecord(value);
+  for (const issue of recorded.data) {
     if (
       expected.get(issue.findingId) !== issue.occurrenceId ||
       found.has(issue.findingId)
@@ -86,11 +86,11 @@ export async function recordPublishedIssues(
     environment,
     issues,
   );
-  const created = result["created"];
+  const created = publicationRecordsSchema.safeParse(result["created"]);
   if (
     !matchesPublication(result, publication) ||
-    !Array.isArray(created) ||
-    created.length !== issues.length
+    !created.success ||
+    created.data.length !== issues.length
   ) {
     throw invalidPublicationRecords();
   }
@@ -104,9 +104,8 @@ export async function recordPublishedIssues(
     throw invalidPublicationRecords();
   }
 
-  return created.map((value, index) => {
+  return created.data.map((issue, index) => {
     const expectedIssue = ordered[index]!;
-    const issue = readPublicationRecord(value);
     if (
       issue.findingId !== expectedIssue.findingId ||
       issue.occurrenceId !== expectedIssue.occurrenceId ||
@@ -192,24 +191,14 @@ function matchesPublication(
   );
 }
 
-function readPublicationRecord(value: unknown): PublishedScanIssue {
-  if (
-    !isRecord(value) ||
-    typeof value["findingId"] !== "string" ||
-    typeof value["occurrenceId"] !== "string" ||
-    typeof value["issueIdentifier"] !== "string" ||
-    !value["issueIdentifier"].trim() ||
-    (value["url"] !== undefined && typeof value["url"] !== "string")
-  ) {
-    throw invalidPublicationRecords();
-  }
-  return {
-    findingId: value["findingId"],
-    occurrenceId: value["occurrenceId"],
-    issueIdentifier: value["issueIdentifier"],
-    ...(typeof value["url"] === "string" ? { url: value["url"] } : {}),
-  };
-}
+const publicationRecordsSchema = z
+  .object({
+    findingId: z.string(),
+    occurrenceId: z.string(),
+    issueIdentifier: z.string().refine((value) => Boolean(value.trim())),
+    url: z.string().optional(),
+  })
+  .array();
 
 function invalidPublicationRecords(): CodexSecurityError {
   return new CodexSecurityError(

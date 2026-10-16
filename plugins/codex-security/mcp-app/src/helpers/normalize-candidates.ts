@@ -1,3 +1,4 @@
+import { discoveryLocationRoles } from "../discovery-location-roles.js";
 import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
 import { createHash, randomBytes } from "node:crypto";
@@ -22,15 +23,7 @@ import {
 } from "./resolve-security-md";
 import { pathText, widePath } from "../../../native/windows-files.mjs";
 
-const roles = [
-  "entrypoint",
-  "entrypoint/wrapper",
-  "source",
-  "root_control",
-  "sink",
-  "concrete_implementation",
-  "evidence",
-];
+const roles: readonly string[] = discoveryLocationRoles;
 const fields = new Set([
   "candidate_id",
   "cwe_ids",

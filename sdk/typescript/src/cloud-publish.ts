@@ -122,7 +122,6 @@ export async function publishFindingsCsvToCloud(
     schemaVersion: "1.0",
     scanId,
     mode: "repository",
-    completeness: "unknown",
     inventoryStrategy: "custom",
     includePaths: ["."],
     excludePaths: [],
