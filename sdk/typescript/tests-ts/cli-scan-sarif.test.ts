@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, relative, sep } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { runArtifactExport } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
@@ -10,7 +11,7 @@ import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const temporaryDirectories = createTemporaryDirectories(true);
 afterEach(() => temporaryDirectories.cleanup());
 
 test("documents the optional SARIF file without changing presentation formats", async () => {
@@ -51,9 +52,13 @@ async function completedScan() {
   return { directory, repository, result };
 }
 
-test.each(["standard", "deep"] as const)(
-  "exports %s scan findings even when the severity threshold fails",
-  async (mode) => {
+test.each([
+  ["standard", "relative"],
+  ["deep", "relative"],
+  ["standard", "home-relative"],
+] as const)(
+  "exports %s scan findings from a %s repository even when the severity threshold fails",
+  async (mode, repositoryPath) => {
     const { directory, repository, result } = await completedScan();
     const output = join(directory, "results.sarif");
     const pythonPath = await resolvePluginPython();
@@ -66,7 +71,9 @@ test.each(["standard", "deep"] as const)(
       await runCli(
         [
           "scan",
-          "repository",
+          repositoryPath === "home-relative"
+            ? ["~", relative(homedir(), repository)].join(sep)
+            : "repository",
           "--mode",
           mode,
           "--sarif",
@@ -232,3 +239,49 @@ test("rejects a SARIF output path that would overwrite a scan artifact", async (
   expect(exporter).not.toHaveBeenCalled();
   expect(await readFile(result.findingsPath)).toEqual(before);
 });
+
+test.each(["canonical", "alias", "child-directory"] as const)(
+  "rejects repository output symlinks with a %s path",
+  async (pathKind) => {
+    const { directory, repository, result } = await completedScan();
+    const outside = join(directory, "outside");
+    const launchDirectory = join(directory, "launch");
+    const alias = join(directory, "repository-alias");
+    const output = join(outside, "results.sarif");
+    await mkdir(outside);
+    await mkdir(launchDirectory);
+    await writeFile(output, "unchanged\n");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await symlink(repository, alias, linkType);
+    await symlink(outside, join(repository, "reports"), linkType);
+    const deps = dependencies({
+      currentDirectory:
+        pathKind === "child-directory" ? repository : launchDirectory,
+      result,
+    });
+    const exporter = mock(runArtifactExport);
+    deps.exportFindings = exporter;
+    const { stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        [
+          "scan",
+          pathKind === "child-directory" ? "src" : alias,
+          "--sarif",
+          pathKind === "child-directory"
+            ? join("reports", "results.sarif")
+            : join(
+                pathKind === "alias" ? alias : repository,
+                "reports",
+                "results.sarif",
+              ),
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("cannot traverse a repository symlink");
+    expect(exporter).not.toHaveBeenCalled();
+    expect(await readFile(output, "utf8")).toBe("unchanged\n");
+  },
+);

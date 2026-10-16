@@ -9086,16 +9086,23 @@ async function executeScan(
 
   if (arguments_.sarifPath !== undefined) {
     try {
-      const exported = await resolveArtifactExportOutput(
-        {
-          scanDir: result.scanDir,
-          format: "sarif",
-          output: arguments_.sarifPath,
-          sourceRoot: repository,
-          pythonPath: arguments_.pythonPath,
-        },
-        repository,
+      const directory = dependencies.currentDirectory();
+      const repositoryPath = resolveCliPath(
+        directory,
+        arguments_.repository ?? directory,
       );
+      const sourceRoot = await realpath(repositoryPath);
+      const exportArguments: ArtifactExportArguments = {
+        scanDir: result.scanDir,
+        format: "sarif",
+        output: arguments_.sarifPath,
+        sourceRoot,
+        pythonPath: arguments_.pythonPath,
+      };
+      let exported = exportArguments;
+      for (const root of new Set([directory, repositoryPath, sourceRoot])) {
+        exported = await resolveArtifactExportOutput(exportArguments, root);
+      }
       await dependencies.exportFindings(exported);
       scanData = { ...scanData, sarifPath: exported.output };
       errorOutput.write(`SARIF: ${diagnosticValue(exported.output)}\n`);
