@@ -258,6 +258,90 @@ describe("saved scan logs", () => {
     },
   );
 
+  test.each(["2026-08-11T12:03:00.000Z", null, undefined])(
+    "uses the saved log boundary while preserving recorded resumed workers: %p",
+    async (logCompletedAt) => {
+      const home = await temporaryHome();
+      const scanDirectory = join(home, "scans", "resumed");
+      const resumed = [
+        {
+          timestamp: "2026-08-11T12:02:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "resume-turn" },
+        },
+        commandEvent("resumed scan work", "resume-call"),
+      ];
+      const followup = [
+        {
+          timestamp: "2026-08-11T12:04:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "followup-turn" },
+        },
+        commandEvent("post-scan followup", "post-call"),
+      ];
+      await writeSession(
+        home,
+        "parent",
+        [...resumed, ...followup],
+        undefined,
+        "2026-08-11T12:00:00.000Z",
+        scanDirectory,
+      );
+      for (const [threadId, startedAt, directory] of [
+        [
+          "recorded-worker",
+          "2026-08-11T12:02:00.000Z",
+          join(scanDirectory, "artifacts"),
+        ],
+        [
+          "resumed-worker",
+          "2026-08-11T12:02:00.000Z",
+          join(scanDirectory, "artifacts"),
+        ],
+        [
+          "followup-worker",
+          "2026-08-11T12:04:00.000Z",
+          join(scanDirectory, "artifacts"),
+        ],
+        [
+          "unrelated-worker",
+          "2026-08-11T12:02:00.000Z",
+          join(home, "other-scan", "artifacts"),
+        ],
+      ] as const) {
+        await writeSession(home, threadId, [], undefined, startedAt, directory);
+      }
+
+      const result = await readSavedScanLogs(
+        {
+          scanId: "resumed-scan",
+          mode: "deep",
+          scanDir: scanDirectory,
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent", "recorded-worker"],
+          progress: {
+            status: "complete",
+            updatedAt: "2026-08-11T12:01:00.000Z",
+          },
+          updatedAt: "2026-08-11T12:05:00.000Z",
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+
+      const expected =
+        logCompletedAt == null ? [...resumed, ...followup] : resumed;
+      expect(
+        result.events.filter(({ threadId }) => threadId === "parent").slice(1),
+      ).toEqual(expected.map((event) => ({ threadId: "parent", event })));
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        logCompletedAt == null
+          ? ["parent", "recorded-worker"]
+          : ["parent", "recorded-worker", "resumed-worker"],
+      );
+    },
+  );
+
   test("feedback returns an empty log set when no scan threads are recorded", async () => {
     const home = await temporaryHome();
     await writeSession(home, "unrelated", []);
@@ -633,6 +717,22 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(archivedLogs)).toContain("review archived scan");
     expect(JSON.stringify(archivedLogs)).not.toContain("PRIVATE REPLACEMENT");
 
+    for (const logCompletedAt of [null, undefined]) {
+      const legacyLogs = await readSavedScanLogs(
+        {
+          scanId: "archived-scan",
+          mode: "deep",
+          scanDir: archived,
+          continuationThreadId: "archived-parent",
+          executionThreadIds: ["archived-parent"],
+          progress: { status: "complete", updatedAt: completedAt },
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+      expect(legacyLogs).toEqual(archivedLogs);
+    }
+
     const unrelatedRoot = await readScanLogs({
       ...options,
       scanDirectory: join(home, "scans", "unrelated.previous-fixture"),
@@ -654,6 +754,99 @@ describe("saved scan logs", () => {
       ["archived-parent", "archived-worker", "replacement-worker"],
     );
   });
+
+  test.each([
+    ["without a follow-up", "2026-08-11T12:02:00.000Z", null, false],
+    [
+      "with a follow-up",
+      "2026-08-11T12:02:00.000Z",
+      "2026-08-11T12:03:00.000Z",
+      true,
+    ],
+    [
+      "with a follow-up at completion",
+      "2026-08-11T12:03:00.000Z",
+      "2026-08-11T12:03:00.000Z",
+      true,
+    ],
+    ["while running", null, "2026-08-11T12:03:00.000Z", false],
+    ["without completion", undefined, "2026-08-11T12:03:00.000Z", false],
+    ["with invalid completion", "invalid", "2026-08-11T12:03:00.000Z", false],
+    ["without a turn timestamp", "2026-08-11T12:02:00.000Z", undefined, false],
+    [
+      "with an invalid turn timestamp",
+      "2026-08-11T12:02:00.000Z",
+      "invalid",
+      false,
+    ],
+  ] as const)(
+    "preserves the finishing scan turn %s",
+    async (_label, completedAt, followupAt, excludeFollowup) => {
+      const home = await temporaryHome();
+      const scanEvents = [
+        {
+          timestamp: "2026-08-11T12:00:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "scan-turn" },
+        },
+        {
+          timestamp: "2026-08-11T12:01:59.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "mcp__codex_security__complete_codex_security_scan",
+            call_id: "completion-call",
+            arguments: "{}",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "completion-call",
+            output: "Scan completed.",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:02.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "Scan report is ready." },
+        },
+        {
+          timestamp: "2026-08-11T12:02:03.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "scan-turn" },
+        },
+      ];
+      const followup =
+        followupAt === null
+          ? []
+          : [
+              {
+                ...(followupAt === undefined ? {} : { timestamp: followupAt }),
+                type: "event_msg",
+                payload: { type: "task_started", turn_id: "followup-turn" },
+              },
+              commandEvent("post-scan followup", "post-call"),
+            ];
+      await writeSession(home, "parent", [...scanEvents, ...followup]);
+
+      const result = await readScanLogs({
+        scanId: "scan-555",
+        threadId: "parent",
+        codexHome: home,
+        logCompletedAt: completedAt,
+      });
+
+      const expected = excludeFollowup
+        ? scanEvents
+        : [...scanEvents, ...followup];
+      expect(result.events.slice(1)).toEqual(
+        expected.map((event) => ({ threadId: "parent", event })),
+      );
+    },
+  );
 
   test.each([false, true])(
     "does not parse event bodies from unrelated saved sessions (copied: %p)",
