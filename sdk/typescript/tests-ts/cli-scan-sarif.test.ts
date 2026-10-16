@@ -6,9 +6,15 @@ import { runArtifactExport } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
 import { ScanResult } from "../src/index.js";
 import { resolvePluginPython } from "../src/runtime.js";
-import { dependencies, fakeResult, FakeSignals } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  fakeResult,
+  FakeSignals,
+} from "./cli-fixtures.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
+import { runCommand } from "./support/shell.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const temporaryDirectories = createTemporaryDirectories(true);
@@ -153,6 +159,39 @@ test("keeps normal output on stderr when exporting SARIF", async () => {
   expect(JSON.parse(await readFile(output, "utf8")).version).toBe("2.1.0");
 });
 
+test("preserves a successful export when its progress notice fails", async () => {
+  const { directory, repository, result } = await completedScan();
+  const output = join(directory, "results.sarif");
+  const deps = dependencies({ currentDirectory: repository, result });
+  const exporter = mock(deps.exportFindings);
+  deps.exportFindings = exporter;
+  const stdout = capture();
+  const stderr = capture();
+  let noticeAttempted = false;
+
+  expect(
+    await main(
+      ["scan", ".", "--sarif", output, "--json"],
+      stdout.stream,
+      {
+        ...stderr.stream,
+        write(chunk: string | Uint8Array) {
+          if (chunk.toString().startsWith("SARIF:")) {
+            noticeAttempted = true;
+            throw new Error("Synthetic progress output failure");
+          }
+          return stderr.stream.write(chunk);
+        },
+      },
+      deps,
+    ),
+    stderr.text(),
+  ).toBe(0);
+  expect(exporter).toHaveBeenCalledTimes(1);
+  expect(noticeAttempted).toBe(true);
+  expect(JSON.parse(stdout.text()).sarifPath).toBe(output);
+});
+
 test("preserves completed scan data when SARIF export fails", async () => {
   const { directory, repository, result } = await completedScan();
   const deps = dependencies({ currentDirectory: repository, result });
@@ -240,7 +279,12 @@ test("rejects a SARIF output path that would overwrite a scan artifact", async (
   expect(await readFile(result.findingsPath)).toEqual(before);
 });
 
-test.each(["canonical", "alias", "child-directory"] as const)(
+test.each([
+  "canonical",
+  "alias",
+  "child-directory",
+  "external-child-directory",
+] as const)(
   "rejects repository output symlinks with a %s path",
   async (pathKind) => {
     const { directory, repository, result } = await completedScan();
@@ -250,6 +294,14 @@ test.each(["canonical", "alias", "child-directory"] as const)(
     const output = join(outside, "results.sarif");
     await mkdir(outside);
     await mkdir(launchDirectory);
+    if (pathKind === "external-child-directory") {
+      const initialized = await runCommand("git", [
+        "init",
+        "--quiet",
+        repository,
+      ]);
+      expect(initialized.status, initialized.stderr).toBe(0);
+    }
     await writeFile(output, "unchanged\n");
     const linkType = process.platform === "win32" ? "junction" : "dir";
     await symlink(repository, alias, linkType);
@@ -267,7 +319,11 @@ test.each(["canonical", "alias", "child-directory"] as const)(
       await runCli(
         [
           "scan",
-          pathKind === "child-directory" ? "src" : alias,
+          pathKind === "child-directory"
+            ? "src"
+            : pathKind === "external-child-directory"
+              ? join(repository, "src")
+              : alias,
           "--sarif",
           pathKind === "child-directory"
             ? join("reports", "results.sarif")

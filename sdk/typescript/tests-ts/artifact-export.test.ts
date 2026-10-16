@@ -14,8 +14,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { describe, expect, spyOn, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
 import {
@@ -37,6 +38,68 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
+  test.skipIf(process.platform === "win32")(
+    "does not execute Python discovered inside a separate SARIF source root",
+    async () => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-export-python-"),
+      );
+      const repository = join(root, "repository");
+      const caller = join(root, "caller");
+      const scanDir = join(root, "scan");
+      const executable = join(repository, "python3");
+      try {
+        await mkdir(repository);
+        await mkdir(caller);
+        await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+          recursive: true,
+        });
+        await writeFile(
+          executable,
+          '#!/bin/sh\nprintf probed > "$0.probed"\nprintf "codex-security-python-ok\\n"\n',
+          { mode: 0o700 },
+        );
+        const child = childProcess.spawnSync(
+          process.execPath,
+          [
+            "-e",
+            `
+              const { runArtifactExport } = await import(process.argv[1]);
+              process.stdout.write(await runArtifactExport({
+                scanDir: process.argv[2],
+                sourceRoot: process.argv[3],
+                format: "sarif",
+                output: "-",
+              }));
+            `,
+            fileURLToPath(
+              new URL("../src/artifact-export.ts", import.meta.url),
+            ),
+            scanDir,
+            repository,
+          ],
+          {
+            cwd: caller,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              PATH: [repository, dirname(PYTHON), process.env["PATH"]].join(
+                delimiter,
+              ),
+              PYTHON: "",
+              XDG_CACHE_HOME: join(root, "cache"),
+            },
+          },
+        );
+        expect(await stat(`${executable}.probed`).catch(() => null)).toBeNull();
+        expect(child.status, child.stderr).toBe(0);
+        expect(JSON.parse(child.stdout).version).toBe("2.1.0");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("exports with Python from the selected managed-runtime cache", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-export-cache-"));
     const environment = {

@@ -204,6 +204,7 @@ export async function runArtifactExport(
     ],
     {
       pythonPath: arguments_.pythonPath,
+      protectedRoot: arguments_.sourceRoot,
       signal: arguments_.signal,
       failureMessage:
         artifact === "findings"

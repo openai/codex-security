@@ -9100,12 +9100,20 @@ async function executeScan(
         pythonPath: arguments_.pythonPath,
       };
       let exported = exportArguments;
-      for (const root of new Set([directory, repositoryPath, sourceRoot])) {
+      const protectedRoots = new Set([
+        directory,
+        repositoryPath,
+        sourceRoot,
+        ...(await enclosingGitWorktreeRoots(sourceRoot)),
+      ]);
+      for (const root of protectedRoots) {
         exported = await resolveArtifactExportOutput(exportArguments, root);
       }
       await dependencies.exportFindings(exported);
       scanData = { ...scanData, sarifPath: exported.output };
-      errorOutput.write(`SARIF: ${diagnosticValue(exported.output)}\n`);
+      try {
+        errorOutput.write(`SARIF: ${diagnosticValue(exported.output)}\n`);
+      } catch {}
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
       return finishResult(2, errorMessage(error));
