@@ -92,6 +92,10 @@ For an application spread across repositories, see
 Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
 reviews in one resumable campaign.
 
+After a scan, [inspect its scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
+to understand recorded exclusions and decide whether to review the findings,
+run a focused scan, or recover an interrupted run.
+
 ## TypeScript SDK
 
 Install the package locally in your TypeScript project:
