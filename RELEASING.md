@@ -117,6 +117,12 @@ updates that pin and lockfile to the verified publication. This lets release
 PRs run CI while the next npm version is still unavailable; `node-ci` also
 tests the Action against the packed CLI candidate before publication.
 
+The standalone workflow in `examples/github-actions/codex-security.yml` also
+pins `CODEX_SECURITY_VERSION` to the proposed release version. Only that value
+changes; other workflow content comes from the latest `main`. After the release
+PR merges, this example can reference the new version before npm publication
+finishes. Wait for publication before using that pin.
+
 If a run reports that GitHub has not exposed the updated PR head, manually
 rerun the updater with **dry_run** disabled after the PR catches up. This
 allows any deferred review request or note suggestions to be posted. Verify
@@ -136,8 +142,9 @@ pauses updates; restore its `main` base before resuming. Both ready proposals
 and existing drafts receive updates. Existing drafts can be marked ready
 without pausing the updater. Review the current head before merging if
 `main` has advanced. The updater rechecks pause conditions before advancing
-the branch. Changes to other files on the release branch, or to package
-fields other than the version, also pause the
+the branch. Changes to other files on the release branch, to package
+fields other than the version, or to the standalone example beyond its CLI
+version also pause the
 updater so those edits cannot be lost. These intentional pauses return
 `action: "held"` and leave the workflow successful. Preserve or merge the
 additional changes, then rerun the updater to resume.
