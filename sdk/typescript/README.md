@@ -194,6 +194,10 @@ Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
+The TypeScript SDK exposes `ScanResult.repositoryFindings` as an optional
+post-scan summary. It does not have a saved-history browsing API; scripts can
+use the CLI's paginated `--json` output.
+
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
 
@@ -259,6 +263,10 @@ const security = new CodexSecurity({
 Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
+
+The SDK refreshes its `sdk-marketplace` directory before installing. Custom
+sources inside it are rejected to avoid deleting the source, except for the
+staged `plugins/codex-security` directory itself.
 
 New and resumed Deep Scans require a current plugin with
 `directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker

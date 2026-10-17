@@ -10,12 +10,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 from workbench_constants import (
+    DEFAULT_PAGE_SIZE,
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
     FINDING_CLOSE_REASONS,
     FINDING_SEVERITIES,
     FINDING_STATUSES,
-    FINDINGS_PAGE_MAX,
     MODES,
     PHASE_PROGRESS_UNITS,
     PHASES,
@@ -102,7 +102,11 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
 
-    add_command("rename-scan", "--scan-id", "--name")
+    get_finding = subparsers.add_parser("get-finding")
+    get_finding.add_argument("--occurrence-id", required=True)
+    rename_scan = subparsers.add_parser("rename-scan")
+    rename_scan.add_argument("--scan-id", required=True)
+    rename_scan.add_argument("--name", required=True)
 
     add_command("get-scan-feedback", "--scan-id")
 
@@ -167,9 +171,12 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
-    list_global_findings.add_argument("--target-id")
+    list_global_findings.add_argument("--repository")
+    list_global_findings.add_argument("--target-id", action="append")
+    list_global_findings.add_argument("--target-path", action="append")
+    list_global_findings.add_argument("--include-resolved", action="store_true")
     list_global_findings.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
-    list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
+    list_global_findings.add_argument("--limit", type=positive_int, default=DEFAULT_PAGE_SIZE)
     list_repositories = subparsers.add_parser("list-repositories")
     list_repositories.add_argument("--query")
     list_repositories.add_argument("--target-id")
@@ -182,7 +189,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_findings.add_argument("--offset", type=deep_scan.non_negative_int, default=0)
-    list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
+    list_findings.add_argument("--limit", type=positive_int, default=DEFAULT_PAGE_SIZE)
 
     update_progress = add_command("update-progress", "--scan-id")
     update_progress.add_argument("--phase", choices=PHASES)

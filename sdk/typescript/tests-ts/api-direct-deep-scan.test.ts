@@ -1,3 +1,4 @@
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -13,7 +14,6 @@ import {
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);

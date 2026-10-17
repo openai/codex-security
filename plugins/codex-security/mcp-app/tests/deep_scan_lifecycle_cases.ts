@@ -179,10 +179,23 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         },
         async workbench([command]: string[]) {
           current.calls.push(command);
-          if (command === "get-scan")
-            return current.readParent
+          if (["get-scan", "get-deep-scan"].includes(command)) {
+            const result = current.readParent
               ? await current.readParent()
               : { workspace: structuredClone(current.workspace) };
+            if (command === "get-deep-scan")
+              return {
+                parentScan: {
+                  workspaceId: "fixture-workspace",
+                  status: result.workspace.results.progress.status,
+                  failureMessage: result.workspace.results.failureMessage,
+                },
+                ...(result.workspace.results.progress.status === "running"
+                  ? {}
+                  : { workspace: result.workspace }),
+              };
+            return result;
+          }
           if (command === "fail-scan") {
             current.store.run.status = "failed";
             current.store.run.error = "synthetic external failure";
@@ -612,7 +625,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
                 );
               assert.equal((await terminal).status, "succeeded");
               assert.equal(publications, 0);
-              assert.deepEqual(current.calls, ["get-scan", "cancel-scan"]);
+              assert.deepEqual(current.calls, ["get-deep-scan", "cancel-scan"]);
               continue;
             }
             assert.equal(
@@ -654,7 +667,12 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
                   "canceled",
                 );
             }
-            assert.equal(current.calls[0], "get-scan");
+            assert.equal(
+              current.calls[0],
+              stage === "unpersisted unowned failure"
+                ? "get-scan"
+                : "get-deep-scan",
+            );
             assert.equal(
               current.calls.filter((command) => command === "cancel-scan")
                 .length,

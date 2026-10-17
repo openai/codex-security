@@ -181,6 +181,10 @@ export class DeepScanCoordinator {
     });
   }
 
+  get owningThreadId(): string | undefined {
+    return this.options.threadId;
+  }
+
   snapshot(): DeepScanRunState {
     return cloneState(this.state);
   }

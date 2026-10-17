@@ -91,6 +91,8 @@ EXPECTED_MIGRATIONS = [
     (47, "snapshot deep scan discovery context"),
     (48, "share finding issue receipts across trackers"),
     (49, "index finding issue receipt ownership"),
+    (50, "preserve finding decision append chronology"),
+    (51, "bind new finding decisions to admitted scans"),
 ]
 
 
@@ -2699,3 +2701,85 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize("installed_version", [42, 43, 48])
+@pytest.mark.parametrize("with_scan_boundary", [False, True])
+def test_decision_history_upgrade_preserves_published_sequences(
+    installed_version: int, with_scan_boundary: bool
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    timestamp = "2026-09-01T00:00:00Z"
+    historical = [
+        (version, name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if version < installed_version
+    ]
+    historical.extend(
+        (version - (50 - installed_version), name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if version == 50 or (version == 51 and with_scan_boundary)
+    )
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        create_migration_history(connection)
+        apply_historical_migrations(connection, historical, timestamp)
+        decision_columns = (
+            "id, occurrence_id, status, close_reason, note, created_at, decision_sequence"
+        )
+        if with_scan_boundary:
+            decision_columns += ", scan_sequence"
+        connection.executescript("""
+            INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', 'created', 'updated');
+            INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode,
+                scan_dir, status, phase, started_at, created_at, updated_at)
+            VALUES ('scan', 'workspace', '/synthetic/repository', 'synthetic', '.', 'standard',
+                '/synthetic/output', 'complete', 'reporting', 'started', 'created', 'updated');
+            INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+            VALUES ('finding', 'synthetic', 'rule', 'anchor', 'created', 'updated');
+            INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity,
+                confidence, remediation, created_at)
+            VALUES ('occurrence', 'finding', 'scan', 'Synthetic finding', 'Synthetic summary',
+                'high', 'high', 'Synthetic remediation', 'created');
+        """)
+        values = (
+            "decision",
+            "occurrence",
+            "closed",
+            "false_positive",
+            "Retained decision",
+            "original-time",
+            17,
+        )
+        if with_scan_boundary:
+            values += (1,)
+        connection.execute(
+            f"INSERT INTO finding_decisions ({decision_columns}) VALUES ({','.join('?' for _ in values)})",
+            values,
+        )
+        before = tuple(
+            connection.execute(f"SELECT {decision_columns} FROM finding_decisions").fetchone()
+        )
+        receipts = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+        assert (
+            tuple(
+                connection.execute(f"SELECT {decision_columns} FROM finding_decisions").fetchone()
+            )
+            == before
+        )
+        assert "name" in {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        current = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        assert all(current[name] == applied_at for name, applied_at in receipts.items())
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert {
+            row[0] for row in connection.execute("SELECT version FROM schema_migrations")
+        } == set(range(1, 52))

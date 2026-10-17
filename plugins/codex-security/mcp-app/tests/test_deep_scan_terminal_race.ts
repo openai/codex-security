@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,9 @@ export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-dr
 const source = await readFile(new URL("../server.ts", import.meta.url), "utf8");
 
 for (const ordering of [
+  "cancellation after checkout replacement",
+  "failed cleanup with running replacement scan",
+  "failed cleanup with terminal replacement scan",
   "failure response first",
   "failure response last",
   "lost cancellation response",
@@ -52,7 +55,11 @@ for (const ordering of [
     );
     const failedBeforeAdmission =
       ordering === "failure before admission with active worker";
-    const activeBeforeAdmission = ordering.endsWith("active worker");
+    const replacedCheckout =
+      ordering === "cancellation after checkout replacement";
+    const replacementScan = ordering.endsWith("replacement scan");
+    const activeBeforeAdmission =
+      replacedCheckout || replacementScan || ordering.endsWith("active worker");
     const canceledBeforeFailure = ordering.includes(
       "cancellation before failure",
     );
@@ -133,7 +140,14 @@ for (const ordering of [
         return result;
       };
       Object.assign(globalThis, {
-        terminalRaceFixture: { registry, workbench },
+        terminalRaceFixture: {
+          registry,
+          workbench: async (args: string[]) => {
+            const result = await workbench(args);
+            if (args[0] === "get-deep-scan") admissionRead.resolve();
+            return result;
+          },
+        },
       });
       const { createCodexSecurityServer } = await importModule({
         stdin: {
@@ -224,6 +238,10 @@ for (const ordering of [
           );
         },
         onStopped: async (stopped: DeepScanRunState) => {
+          if (replacementScan) {
+            cleanupEntered.resolve();
+            await cleanupRelease.promise;
+          }
           if (failureDuringPublication) {
             publicationEntered.resolve();
             await publicationRelease.promise;
@@ -241,6 +259,106 @@ for (const ordering of [
       });
       terminal = coordinator.settled();
       void terminal!.catch(() => {});
+      if (replacementScan) {
+        await executor.discoveryStarted.promise;
+        const running = await runWorkbench([
+          "get-deep-scan",
+          "--scan-id",
+          run.scanId,
+          "--thread-id",
+          "fixture-owner",
+        ]);
+        assert.equal(running.parentScan.status, "running");
+        assert.equal(running.workspace, undefined);
+        failureResponse.resolve();
+        await fail(
+          { scanId: run.scanId, message: "synthetic old failure" },
+          {},
+        );
+        await cleanupEntered.promise;
+        const replacementWorkspace = await runWorkbench([
+          "start-scan",
+          "--workspace-id",
+          running.parentScan.workspaceId,
+          "--scan-root",
+          join(root, "scans"),
+        ]);
+        const replacement = { scanId: replacementWorkspace.results.scanId };
+        assert.equal(replacementWorkspace.id, running.parentScan.workspaceId);
+        assert.notEqual(replacement.scanId, run.scanId);
+        if (ordering.includes("terminal replacement"))
+          await runWorkbench(["cancel-scan", "--scan-id", replacement.scanId]);
+        const replacementBefore = await runWorkbench([
+          "get-scan",
+          "--scan-id",
+          replacement.scanId,
+        ]);
+        cancelRelease.resolve();
+        const lateCancellation = cancel({ scanId: run.scanId });
+        cancellation = lateCancellation;
+        void lateCancellation.catch(() => {});
+        cleanupRelease.resolve();
+        const response = await lateCancellation;
+        assert.equal(
+          response.structuredContent.workspace.results.scanId,
+          run.scanId,
+        );
+        assert.equal(
+          response.structuredContent.workspace.results.progress.status,
+          "failed",
+        );
+        assert.equal(
+          response.structuredContent.workspace.results.failureMessage,
+          "synthetic old failure",
+        );
+        assert.equal((await terminal!).status, "failed");
+        const replacementAfter = await runWorkbench([
+          "get-scan",
+          "--scan-id",
+          replacement.scanId,
+        ]);
+        assert.deepEqual(
+          replacementAfter.workspace.results,
+          replacementBefore.workspace.results,
+        );
+        return;
+      }
+      if (replacedCheckout) {
+        await executor.discoveryStarted.promise;
+        await rename(target, `${target}-previous`);
+        await mkdir(target);
+        await writeFile(join(target, "replacement.py"), "value = 2\n");
+        await assert.rejects(
+          () => runWorkbench(["get-scan", "--scan-id", run.scanId]),
+          /unavailable for the current checkout owner/,
+        );
+        await assert.rejects(
+          () => store.get(run.scanId, "other-owner"),
+          /owning Codex thread/,
+        );
+        cancelRelease.resolve();
+        const first = cancel({ scanId: run.scanId });
+        cancellation = first;
+        const joined = cancel({ scanId: run.scanId });
+        const responses = await Promise.all([first, joined]);
+        assert.equal((await terminal!).status, "canceled");
+        assert.equal(executor.runningDiscovery, 0);
+        for (const response of responses)
+          assert.equal(
+            response.structuredContent.workspace.results.progress.status,
+            "canceled",
+          );
+        const after = await runWorkbench([
+          "get-deep-scan",
+          "--scan-id",
+          run.scanId,
+          "--thread-id",
+          "fixture-owner",
+        ]);
+        assert.equal(after.parentScan.status, "canceled");
+        assert.equal(after.deepScan.status, "canceled");
+        return;
+      }
       if (canceledBeforeAdmission || failedBeforeAdmission) {
         if (activeBeforeAdmission) await executor.discoveryStarted.promise;
         else await finishCommitted.promise;
