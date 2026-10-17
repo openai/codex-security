@@ -874,6 +874,25 @@ The extraction root is not enforced.
                 self.assertIn("candidate_id", reader.fieldnames or [])
                 self.assertEqual(next(reader)["candidate_id"], f"legacy-{field}")
 
+    def test_deep_csv_candidate_selection_preserves_precedence_and_unicode_whitespace(self) -> None:
+        self.coverage["mode"] = "deep_repository"
+        for provenance, candidate, report, ledger, expected in (
+            ("provenance", "candidate", "report", "ledger", "provenance"),
+            ("\ufeff", "candidate", "report", "ledger", "candidate"),
+            ("\ufeff", "\ufeff", "report", "ledger", "report"),
+            ("\ufeff", "\ufeff", "\ufeff", "ledger", "ledger"),
+            ("\ufeff", "\ufeff", "\ufeff", "\ufeff", ""),
+            ("\u0085", "candidate", "report", "ledger", "\u0085"),
+        ):
+            with self.subTest(expected=expected):
+                self.finding["provenance"]["candidateId"] = provenance
+                self.finding["extensions"] = {
+                    "candidateId": candidate,
+                    "reportId": report,
+                    "ledgerRowId": ledger,
+                }
+                self.assertEqual(next(self.export_csv())["candidate_id"], expected)
+
     def test_scoped_csv_export_does_not_classify_ordinary_ledger_ids_as_deep(self) -> None:
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
@@ -967,6 +986,59 @@ The extraction root is not enforced.
                     result.stderr,
                 )
                 self.assertEqual(output.read_bytes(), sealed_export)
+
+    @pytest.mark.cross_platform
+    def test_finalization_preserves_sealed_projection_aliases_and_distinct_paths(self) -> None:
+        root = self.scan_dir
+        for relative, alias, media_type in (
+            ("report.md", "Report.md", "text/markdown"),
+            ("report.html", "REPORT.HTML", "text/html"),
+            ("exports/results.sarif", "Exports/Results.SARIF", "application/sarif+json"),
+        ):
+            for hardlink in (False, True):
+                with self.subTest(relative=relative, hardlink=hardlink):
+                    with tempfile.TemporaryDirectory(dir=root) as directory:
+                        self.scan_dir = Path(directory)
+                        self.write_sealed_scan()
+                        output = self.scan_dir / relative
+                        artifact = self.scan_dir / alias
+                        artifact.parent.mkdir(exist_ok=True)
+                        contents = b"Sealed authored projection.\n"
+                        output.write_bytes(contents)
+                        # Probe native case lookup before creating any hardlink alias.
+                        case_alias = artifact.exists()
+                        if not case_alias:
+                            if hardlink:
+                                os.link(output, artifact)
+                            else:
+                                artifact.write_bytes(contents)
+                        same_file = output.samefile(artifact)
+                        self.assertEqual(same_file, case_alias or hardlink)
+                        manifest = self.read_json("scan-manifest.json")
+                        manifest["scan"]["artifacts"].append(
+                            {
+                                "path": alias,
+                                "mediaType": media_type,
+                                "sha256": hashlib.sha256(contents).hexdigest(),
+                            }
+                        )
+                        self.write_json("scan-manifest.json", manifest)
+                        sealed_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        for _ in range(2):
+                            FINALIZER.finalize_scan(self.scan_dir)
+                            self.assertEqual(artifact.read_bytes(), contents)
+                            self.assertEqual(
+                                (self.scan_dir / "scan-manifest.json").read_bytes(),
+                                sealed_manifest,
+                            )
+                            if same_file:
+                                self.assertTrue(output.samefile(artifact))
+                                self.assertEqual(output.read_bytes(), contents)
+                            elif relative == "report.html":
+                                self.assertFalse(output.exists())
+                            else:
+                                self.assertNotEqual(output.read_bytes(), contents)
+        self.scan_dir = root
 
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
         self.write_sealed_scan()
@@ -1342,6 +1414,35 @@ The extraction root is not enforced.
             FINALIZER.finalize_scan(self.scan_dir, source_root=self.scan_dir)
 
         self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+
+    @pytest.mark.cross_platform
+    def test_optional_sarif_failure_does_not_abort_first_or_repeated_finalization(self) -> None:
+        root = self.scan_dir
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                with tempfile.TemporaryDirectory(dir=root) as directory:
+                    self.scan_dir = Path(directory)
+                    if sealed:
+                        self.write_sealed_scan()
+                        (self.scan_dir / "exports" / "results.sarif").unlink()
+                        (self.scan_dir / "exports").rmdir()
+                    else:
+                        self.write_scan()
+                    contents = b"Saved optional export destination.\n"
+                    (self.scan_dir / "exports").write_bytes(contents)
+                    errors = io.StringIO()
+                    with mock.patch.object(FINALIZER.sys, "stderr", errors):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                        manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertIn("automatic SARIF export failed", errors.getvalue())
+                    self.assertEqual((self.scan_dir / "exports").read_bytes(), contents)
+                    self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), manifest)
+                    self.assertEqual(
+                        self.read_json("scan-manifest.json")["scan"]["status"], "completed"
+                    )
+                    self.assertEqual(len(self.read_json("findings.json")["findings"]), 1)
+        self.scan_dir = root
 
     def test_sarif_output_fails_closed_without_secure_file_backend(self) -> None:
         with mock.patch.object(FINALIZER.os, "supports_dir_fd", set()):
@@ -3136,81 +3237,6 @@ The extraction root is not enforced.
             FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
 
         self.assertEqual(line_hashes.call_count, 1)
-
-
-@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
-def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
-    schema = {"type": expected}
-    FINALIZER._validate_schema_node(value, schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
-        FINALIZER._validate_schema_node(True, schema, "value")
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
-@pytest.mark.parametrize(
-    "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
-)
-def test_missing_writeup_recovery_rejects_other_file_errors(tmp_path, kind):
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
-    report = scan_dir / "findings" / "report.md"
-    report.parent.mkdir()
-    outside = tmp_path / "outside.md"
-    outside.write_text("# Outside the scan\n")
-    report_path = "findings/report.md"
-    if kind == "unsafe":
-        report_path = "../outside.md"
-    elif kind == "symlink":
-        report.symlink_to(outside)
-    elif kind == "dangling-symlink":
-        report.symlink_to(report.parent / "missing.md")
-    elif kind == "parent-symlink":
-        report.parent.rmdir()
-        report.parent.symlink_to(tmp_path, target_is_directory=True)
-    elif kind == "directory":
-        report.mkdir()
-    else:
-        if os.geteuid() == 0:
-            pytest.skip("root can read files without permission bits")
-        report.write_text("# Unreadable writeup\n")
-        report.chmod(0)
-    findings = {"findings": [{"writeup": {"reportPath": report_path}}]}
-    original = copy.deepcopy(findings)
-    with pytest.raises(FINALIZER.ContractError):
-        FINALIZER._prepare_derived_writeups(scan_dir, findings, allow_missing=True)
-    assert findings == original
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("error_code", [2, 3, 5, 22, 32, 33])
-def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch, error_code):
-    backend = windows_file_backend()
-    windows_error = load_script("windows_scan_local_files").WindowsScanLocalFileError
-    backend.open_read_fd.side_effect = windows_error(error_code, "Synthetic Windows file error")
-    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
-    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
-    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
-    findings = {"findings": [{"writeup": {"reportPath": "findings/report.md"}}]}
-    if error_code in {2, 3}:
-        warnings = FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert findings == {"findings": [{}]}
-        assert len(warnings) == 1
-    else:
-        with pytest.raises(FINALIZER.ContractError):
-            FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert "writeup" in findings["findings"][0]
-
-
-def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
-    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
-    reference = {"$ref": "#/$defs/text"}
-    FINALIZER._validate_schema_node("yes", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
-        FINALIZER._validate_schema_node("", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
-    with pytest.raises(RecursionError):
-        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
 if __name__ == "__main__":

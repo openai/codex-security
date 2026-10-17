@@ -36,11 +36,33 @@ export async function recordCodexSecurityScanDraft(
     input,
     async (args: string[]) => {
       const draft = await readJson(args[args.indexOf("--draft-path") + 1]);
-      const rawContents = await fs.readFile(
+      let rawContents = await fs.readFile(
         args[args.indexOf("--checkpoint-path") + 1],
         "utf8",
       );
       const checkpoint = JSON.parse(rawContents);
+      const { complete, scope, threatModel } = draft.manifest.scan;
+      const projected = {
+        scanId: checkpoint.scanId,
+        ...(complete === undefined ? {} : { complete }),
+        ...(scope === undefined ? {} : { scope }),
+        ...(threatModel === undefined ? {} : { threatModel }),
+        findings: draft.findings.findings,
+        coverage: draft.coverage,
+      };
+      if (context.mode === "deep") {
+        const head = await readJson(context.root, "checkpoint-head.json").catch(
+          (error) => {
+            if (error.code !== "ENOENT") throw error;
+            return undefined;
+          },
+        );
+        checkpoint.publication = {
+          previousCheckpoint: head?.checkpoint ?? null,
+          previousInputCheckpoint: head?.inputCheckpoint ?? null,
+        };
+        rawContents = JSON.stringify(checkpoint);
+      }
       const rawName =
         createHash("sha256").update(rawContents).digest("hex") + ".json";
       await replaceArtifactText(
@@ -51,16 +73,23 @@ export async function recordCodexSecurityScanDraft(
         ),
         rawContents,
       );
-      const { complete, scope, threatModel } = draft.manifest.scan;
       await draftApi.saveScanDraftCheckpoint(
         { ...context, layout: "worker" },
+        projected,
+        false,
+      );
+      await replaceArtifactJson(
+        await artifactDestination(
+          context,
+          ["checkpoint-head.json"],
+          "scan checkpoint head",
+        ),
         {
-          scanId: checkpoint.scanId,
-          ...(complete === undefined ? {} : { complete }),
-          ...(scope === undefined ? {} : { scope }),
-          ...(threatModel === undefined ? {} : { threatModel }),
-          findings: draft.findings.findings,
-          coverage: draft.coverage,
+          checkpoint:
+            createHash("sha256")
+              .update(JSON.stringify(projected))
+              .digest("hex") + ".json",
+          ...(checkpoint.publication ? { inputCheckpoint: rawName } : {}),
         },
       );
       for (const [key, name] of [
@@ -190,3 +219,23 @@ export const surfaceDisposition = ({
   id: string;
   disposition: string;
 }) => ({ id, disposition });
+
+/** Stop after the admitted raw checkpoint and before the projected checkpoint. */
+export async function interruptDraftAfterRaw(action: () => Promise<unknown>) {
+  const rename = fs.rename;
+  let checkpoints = 0;
+  fs.rename = async (source, destination) => {
+    if (
+      path.basename(path.dirname(String(destination))) === "checkpoints" &&
+      ++checkpoints === 2
+    )
+      throw new Error("interrupted projected checkpoint");
+    return rename(source, destination);
+  };
+  try {
+    await assert.rejects(action(), /interrupted projected checkpoint/);
+    assert.equal(checkpoints, 2);
+  } finally {
+    fs.rename = rename;
+  }
+}

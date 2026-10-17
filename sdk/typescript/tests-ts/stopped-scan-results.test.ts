@@ -48,13 +48,20 @@ const stoppedScanProbe = [
   "    checkpoint = {**payload, 'complete': False}",
   "    checkpoint_dir = artifact_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",
-  "    if source == 'refined-checkpoint':",
+  "    if source.startswith('refined-checkpoint'):",
   "        earlier = json.loads(json.dumps(checkpoint))",
   "        earlier['findings'][0]['locations'][0].update({'startLine': 21, 'endLine': 26})",
   "        later = json.loads(json.dumps(checkpoint))",
   "        later['findings'][0]['locations'][0].update({'startLine': 24, 'endLine': 26})",
   "        for document in (earlier, later):",
   "            encoded = json.dumps(document).encode()",
+  "            if document is earlier:",
+  "                earlier_digest = hashlib.sha256(encoded).hexdigest()",
+  "            else:",
+  "                # JSON whitespace controls hash order without changing either checkpoint.",
+  "                earlier_first = source.endswith('earlier-first')",
+  "                while (earlier_digest < hashlib.sha256(encoded).hexdigest()) != earlier_first:",
+  "                    encoded += b'\\n'",
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text(json.dumps(later), encoding='utf-8')",
   "    else:",
@@ -140,7 +147,7 @@ const stoppedScanProbe = [
   "findings = json.loads(findings_path.read_text(encoding='utf-8'))['findings'] if findings_path.exists() else []",
   "if source == 'late-checkpoint':",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'artifactFindingCount': len(findings), 'manifestUnchanged': manifest_before == (scan_dir / 'scan-manifest.json').read_bytes(), 'findingsUnchanged': findings_before == (scan_dir / 'findings.json').read_bytes()}))",
-  "elif source == 'refined-checkpoint':",
+  "elif source.startswith('refined-checkpoint'):",
   "    histories = [item for finding in findings for item in finding.get('provenance', {}).get('previousFindings', [])]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'historyCount': len(histories), 'representedStartLines': sorted([finding['locations'][0]['startLine'] for finding in findings] + [finding['locations'][0]['startLine'] for finding in histories])}))",
   "elif source == 'distinct-instances':",
@@ -185,19 +192,23 @@ test.each(["accepted", "checkpoint"] as const)(
   30_000,
 );
 
-test("keeps refined checkpoints as one finding with retained history", () => {
-  const recovered = runStoppedScanProbe(
-    "refined-checkpoint",
-    "codex-security-refined-checkpoint-",
-  );
-  expect(recovered).toEqual({
-    findingCount: 1,
-    progressStatus: "failed",
-    artifactFindingCount: 1,
-    historyCount: 1,
-    representedStartLines: [21, 24],
-  });
-}, 30_000);
+test.each(["earlier-first", "later-first"] as const)(
+  "keeps refined checkpoints as one finding with retained history (%s)",
+  (order) => {
+    const recovered = runStoppedScanProbe(
+      `refined-checkpoint-${order}`,
+      "codex-security-refined-checkpoint-",
+    );
+    expect(recovered).toEqual({
+      findingCount: 1,
+      progressStatus: "failed",
+      artifactFindingCount: 1,
+      historyCount: 1,
+      representedStartLines: [21, 24],
+    });
+  },
+  30_000,
+);
 
 test.each(["failed", "interrupted"] as const)(
   "keeps the first %s seal immutable when a worker writes late",

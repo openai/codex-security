@@ -978,7 +978,7 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     unsafe_location["identity"]["anchor"] = "unsafe-location"
     unsafe_location["locations"][0]["path"] = "../outside.py"
     missing_identity = copy.deepcopy(valid)
-    missing_identity.pop("identity")
+    missing_identity["identity"] = {}
     invalid_evidence_id = copy.deepcopy(valid)
     invalid_evidence_id["identity"]["anchor"] = "invalid-evidence-id"
     invalid_evidence_id["codeEvidence"][0]["id"] = "src/extract.py:41"
