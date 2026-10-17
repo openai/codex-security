@@ -20,12 +20,42 @@ function snykIdentity(value: unknown): string {
         record(value, "Location")["physicalLocation"] ?? {},
         "Physical location",
       );
-      return text(
-        record(physical["artifactLocation"] ?? {}, "Artifact location")["uri"],
+      const artifact = record(
+        physical["artifactLocation"] ?? {},
+        "Artifact location",
       );
+      if (
+        artifact["index"] !== undefined ||
+        artifact["uriBaseId"] !== undefined
+      )
+        throw new Error(
+          "Snyk SARIF artifact references are unsupported; use direct manifest URIs from the Snyk Open Source formatter.",
+        );
+      return text(artifact["uri"]);
     })
     .filter((path): path is string => path !== null);
   return stableId("snyk-sarif", [id, [...new Set(paths)].sort()]);
+}
+
+/** @internal Repository claims retained in the adapter's original SARIF context. */
+export function snykRepositoryUrls(sourceData: unknown): string[] {
+  if (
+    !sourceData ||
+    typeof sourceData !== "object" ||
+    Array.isArray(sourceData)
+  )
+    return [];
+  const run = (sourceData as Record<string, unknown>)["run"];
+  if (run == null) return [];
+  return array(
+    record(run, "Snyk run context")["versionControlProvenance"] ?? [],
+    "Snyk version control provenance",
+  ).map((entry) =>
+    requiredText(
+      record(entry, "Snyk repository provenance")["repositoryUri"],
+      "Snyk repository URI",
+    ),
+  );
 }
 
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */
