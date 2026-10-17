@@ -719,6 +719,33 @@ function csvReport(
     .join("\r\n");
 }
 
+test.each(["", "\n \r\n"])(
+  "JSONL retains CSV-like column names as evidence with prefix %j",
+  async (prefix) => {
+    const f = await fixture({});
+    const records = ["first", "second"].map((id) => ({
+      source_finding_id: id,
+      evidence: {
+        title: "Synthetic normalized finding",
+        severity: "high",
+        source_data: { columns: ["extra", ...Object.keys(csvRow), "other"] },
+      },
+    }));
+    await writeFile(
+      f.file,
+      prefix + records.map((record) => JSON.stringify(record)).join("\r\n"),
+    );
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings.map((finding) => finding.source_finding_id)).toEqual(
+      ["first", "second"],
+    );
+    expect(
+      parsed.findings.map((finding) => finding.evidence.source_data),
+    ).toEqual(records.map((record) => record.evidence.source_data));
+  },
+);
+
 test.each(["plain", "gzip", "bom"])(
   "Wiz Code CSV maps source claims and retains every original cell (%s)",
   async (encoding) => {
@@ -912,6 +939,63 @@ test.each([false, true])(
     );
   },
 );
+
+for (const normalized of [false, true]) {
+  test.each([
+    [
+      "https://github.example.test:443",
+      "https://github.example.test:443",
+      true,
+    ],
+    ["http://github.example.test:80", "http://github.example.test:80", true],
+    [
+      "https://github.example.test:8443",
+      "https://github.example.test:8443",
+      true,
+    ],
+    ["https://github.example.test:443", "https://github.example.test", false],
+    ["http://github.example.test:80", "http://github.example.test", false],
+    ["https://github.example.test", "https://github.example.test:443", false],
+    ["http://github.example.test", "http://github.example.test:80", false],
+  ])(
+    `Wiz CSV preserves repository ports in ${normalized ? "normalized JSONL" : "native CSV"}: %s → %s`,
+    async (source, destination, matches) => {
+      const f = await cloudFixture({});
+      f.destination.url = `${destination}/example/project`;
+      const options = { ...f.options, repository: f.destination.id };
+      const rows = ["csv-occurrence-1", "csv-occurrence-2"].map((ID) => ({
+        ...csvRow,
+        ID,
+        CloudProviderURL: `${source}/example/project/tree/main`,
+      }));
+      await writeFile(f.file, csvReport(rows));
+      if (normalized)
+        await writeFile(
+          f.file,
+          (await readVendorFindings(f.file)).findings
+            .map((finding) => JSON.stringify(finding))
+            .join("\n"),
+        );
+      if (matches) {
+        const prepared = await prepareExternalPublication(
+          f.file,
+          options,
+          f.deps,
+        );
+        expect(prepared.preview.findings).toHaveLength(2);
+        expect(prepared.preview.excluded).toEqual([]);
+      } else {
+        await expect(
+          prepareExternalPublication(f.file, options, f.deps),
+        ).rejects.toThrow("does not match");
+        expect(
+          f.calls.filter((call) => call.includes("/source_reports")),
+        ).toEqual([]);
+      }
+      expect(f.posts).toEqual([]);
+    },
+  );
+}
 
 test("Wiz CSV retries retain acknowledged requests across column reordering and repeated imports stay unchanged", async () => {
   const f = await cloudFixture({});
@@ -1213,58 +1297,89 @@ test("unidentified source hosts still require exact supplied and inventory URL p
   expect(parsed.excluded[0]!.reason).toContain("conflicting repository URLs");
 });
 
-test("Node reads a large complete named collection without a function argument limit", async () => {
-  const count = 150_000;
-  const records = Array.from({ length: count }, (_, index) => ({
-    id: `vendor-${index}`,
-    name: "CVE-2099-0001",
-    detailedName: "example-package",
-    severity: "HIGH",
-    vulnerableAsset: { id: "synthetic-asset" },
-  }));
-  const f = await fixture(envelope("vulnerabilityFindings", records, false));
-  // Run the actual parser under Node; Bun does not have the same argument limit.
-  const bundle = await mkdtemp(join(import.meta.dir, "..", ".wiz-parser-"));
-  directories.push(bundle);
-  const runner = join(bundle, "large-input.mts");
-  await writeFile(
-    runner,
-    `
-    import { readVendorFindings } from "../src/wiz-findings.js";
-    const parsed = await readVendorFindings(process.argv[2]!);
+test.each(["named collection", "normalized JSONL"])(
+  "Node reads a large %s without parsing limits",
+  async (format) => {
+    const count = 150_000;
+    const records = Array.from({ length: count }, (_, index) => ({
+      id: `vendor-${index}`,
+      name: "CVE-2099-0001",
+      detailedName: "example-package",
+      severity: "HIGH",
+      vulnerableAsset: { id: "synthetic-asset" },
+    }));
+    const f = await fixture(envelope("vulnerabilityFindings", records, false));
+    if (format === "normalized JSONL")
+      await writeFile(
+        f.file,
+        records
+          .map((record) =>
+            JSON.stringify({
+              source_finding_id: record.id,
+              evidence: {
+                title: "Synthetic package vulnerability",
+                severity: "high",
+                source_data: {
+                  ...record,
+                  vendorSeverity: "HIGH",
+                  description: "Synthetic package vulnerability evidence.",
+                },
+              },
+            }),
+          )
+          .join("\n"),
+      );
+    // Run the actual parser under Node; Bun does not have the same argument limit.
+    const bundle = await mkdtemp(join(import.meta.dir, "..", ".wiz-parser-"));
+    directories.push(bundle);
+    const runner = join(bundle, "large-input.mts");
+    await writeFile(
+      runner,
+      `
+    import { readVendorFindings, readVendorFindingsForPublication } from "../src/wiz-findings.js";
+    const parsed = process.argv[3] === "normalized JSONL"
+      ? (await readVendorFindingsForPublication(process.argv[2]!)).current
+      : await readVendorFindings(process.argv[2]!);
     console.log(JSON.stringify({
       read: parsed.read, ready: parsed.findings.length, excluded: parsed.excluded.length,
       first: parsed.findings[0]?.source_finding_id,
       last: parsed.findings.at(-1)?.source_finding_id,
     }));
   `,
-  );
-  const built = await Bun.build({
-    entrypoints: [runner],
-    outdir: bundle,
-    target: "node",
-    format: "esm",
-    packages: "external",
-  });
-  expect(built.success).toBe(true);
-  const child = Bun.spawn(
-    [Bun.which("node")!, built.outputs[0]!.path, f.file],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  expect(exitCode, stderr).toBe(0);
-  expect(JSON.parse(stdout)).toEqual({
-    read: count,
-    ready: count,
-    excluded: 0,
-    first: "vendor-0",
-    last: `vendor-${count - 1}`,
-  });
-});
+    );
+    const built = await Bun.build({
+      entrypoints: [runner],
+      outdir: bundle,
+      target: "node",
+      format: "esm",
+      packages: "external",
+    });
+    expect(built.success).toBe(true);
+    const child = Bun.spawn(
+      [
+        Bun.which("node")!,
+        ...(format === "normalized JSONL" ? ["--max-old-space-size=256"] : []),
+        built.outputs[0]!.path,
+        f.file,
+        format,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      read: count,
+      ready: count,
+      excluded: 0,
+      first: "vendor-0",
+      last: `vendor-${count - 1}`,
+    });
+  },
+);
 
 test.each(["migrate", "distinct", "duplicate"])(
   "Unicode readback resumes historical checkpoints (%s)",

@@ -22,6 +22,14 @@ function text(value: unknown): string | null {
 export function readWizCsv(
   contents: string,
 ): Record<string, string>[] | undefined {
+  // JSONL can retain CSV column names in its evidence. Recognize the first
+  // JSON value before interpreting all of its quoted records as CSV.
+  try {
+    JSON.parse(contents.trimStart().split(/\r?\n/u, 1)[0]!);
+    return undefined;
+  } catch {
+    // A CSV header is not a JSON value.
+  }
   // Read arrays so duplicate headers cannot be silently renamed, and unknown
   // columns (including object-prototype names) remain ordinary source data.
   const parsed = Papa.parse<string[]>(contents, {
@@ -49,16 +57,19 @@ function repositoryUrl(row: Record<string, unknown>): string {
     );
   const value = text(row["CloudProviderURL"]);
   const url = value ? new URL(value) : undefined;
+  const origin = value?.match(/^(https?:\/\/[^/?#]+)/iu)?.[1];
   const path = url?.pathname.match(/^\/([^/]+)\/([^/]+)\/tree\/(.+)$/u);
   if (
     !url ||
+    !origin ||
     !["http:", "https:"].includes(url.protocol) ||
     url.username ||
     url.password ||
     !path
   )
     throw new Error("Wiz CSV finding requires a GitHub repository-branch URL.");
-  return `${url.origin}/${path[1]}/${path[2]}`;
+  // URL.origin removes explicit default ports, which the Cloud contract keeps.
+  return `${origin}/${path[1]}/${path[2]}`;
 }
 
 /** Keep repository binding available after a normalized JSONL round trip. */
