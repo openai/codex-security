@@ -426,8 +426,11 @@ codex-security scans show SCAN_ID --json
 codex-security scans logs SCAN_ID
 ```
 
-Replace `SCAN_ID` with the ID from the completion or failure summary. Use the
-saved results directory returned by `scans show` to inspect these files:
+Replace `SCAN_ID` with the ID from the completion or failure summary. A scan can
+fail after registration but before writing its artifacts; investigate those
+failures through its history record and any available logs. When artifacts were
+retained, use the saved results directory returned by `scans show` to inspect
+whichever of these files are present:
 
 | File                 | What to check                                                                                                                                                                                                    |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
