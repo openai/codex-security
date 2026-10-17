@@ -6,6 +6,7 @@ import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
+import { readWizCsv, wizCsvFinding } from "./wiz-csv.js";
 
 const decompressGzip = promisify(gunzip);
 
@@ -119,7 +120,7 @@ type RepositoryFindingKind = "sast" | "secret" | "iac";
 
 type InputRecord = {
   value: unknown;
-  kind?: "sca" | RepositoryFindingKind | "cloud_configuration";
+  kind?: "sca" | "sca_csv" | RepositoryFindingKind | "cloud_configuration";
 };
 
 type RepositoryMetadata = {
@@ -469,7 +470,7 @@ function records(payload: unknown): FindingInput {
         : {}),
     };
   throw new Error(
-    "Unsupported Wiz export. Supply vulnerability finding objects, named sastFindings/secretInstances/iacFindings collections, or normalized JSONL. CSV reports must be converted to the documented normalized JSONL profile.",
+    "Unsupported Wiz export. Supply repository vulnerability CSV, vulnerability finding objects, named sastFindings/secretInstances/iacFindings collections, or normalized JSONL. Other CSV reports need an explicit normalized JSONL mapping.",
   );
 }
 
@@ -538,6 +539,12 @@ async function readFindingInput(path: string): Promise<FindingInput> {
     try {
       payload = JSON.parse(contents);
     } catch {
+      const csv = readWizCsv(contents);
+      if (csv)
+        return {
+          records: csv.map((value) => ({ value, kind: "sca_csv" })),
+          repositories: new Map(),
+        };
       payload = contents
         .split(/\r?\n/u)
         .filter((line) => line.trim())
@@ -546,7 +553,7 @@ async function readFindingInput(path: string): Promise<FindingInput> {
     return records(payload);
   } catch (cause) {
     throw new CodexSecurityError(
-      `Could not read vendor findings as UTF-8 JSON or JSONL: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `Could not read vendor findings as UTF-8 JSON, JSONL, or Wiz CSV: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );
   }
@@ -568,7 +575,9 @@ function normalizeFindings(
     try {
       if (!record) throw new Error("Finding must be an object.");
       let finding: VendorFinding;
-      if ("source_finding_id" in record) {
+      if (item.kind === "sca_csv") {
+        finding = wizCsvFinding(record, sourceFindingId(record["ID"]));
+      } else if ("source_finding_id" in record) {
         if (
           Object.keys(record).some(
             (key) => !["source_finding_id", "evidence"].includes(key),
@@ -612,13 +621,16 @@ function normalizeFindings(
       }
       identities.add(finding.source_finding_id);
       result.findings.push(finding);
-      if ("source_finding_id" in record) normalized?.add(finding);
+      if (item.kind !== "sca_csv" && "source_finding_id" in record)
+        normalized?.add(finding);
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
       result.excluded.push({
         position: index + 1,
         source_finding_id:
-          text(record?.["source_finding_id"]) ?? text(record?.["id"]),
+          item.kind === "sca_csv"
+            ? text(record?.["ID"])
+            : (text(record?.["source_finding_id"]) ?? text(record?.["id"])),
         reason: error instanceof Error ? error.message : String(error),
       });
     }

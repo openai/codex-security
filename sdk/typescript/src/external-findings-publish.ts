@@ -24,6 +24,7 @@ import {
   validatePreparedOutputDir,
 } from "./runtime.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
+import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
@@ -669,6 +670,9 @@ async function preparePublicationInput(
     for (const finding of parsed.findings) {
       const sourceRepositories = [
         finding.evidence.details?.repository?.url,
+        ...(options.provider === "wiz"
+          ? [wizCsvRepositoryUrl(finding.evidence)]
+          : []),
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(finding.evidence.source_data)
           : []),

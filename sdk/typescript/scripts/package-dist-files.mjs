@@ -25,6 +25,7 @@ const distModules = [
   "scanner-import",
   "semgrep-findings",
   "snyk-findings",
+  "wiz-csv",
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
