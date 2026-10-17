@@ -71,6 +71,7 @@ export async function readJsonObject(
 export async function requireRegularFile(
   path: string,
   root: string,
+  allowEmpty = false,
 ): Promise<void> {
   const rootPath = await fs.realpath(root);
   const resolvedPath = await fs.realpath(path);
@@ -91,7 +92,11 @@ export async function requireRegularFile(
     fs.lstat(path),
     fs.stat(path),
   ]);
-  if (linkStat.isSymbolicLink() || !fileStat.isFile() || fileStat.size === 0) {
+  if (
+    linkStat.isSymbolicLink() ||
+    !fileStat.isFile() ||
+    (!allowEmpty && fileStat.size === 0)
+  ) {
     throw new Error(`Deep Scan artifact is not a valid regular file: ${path}`);
   }
 }

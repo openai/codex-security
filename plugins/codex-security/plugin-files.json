@@ -1,8 +1,5 @@
 {
-  "externalOwnedExact": [
-    ".codex-plugin/plugin.json",
-    "OWNERS"
-  ],
+  "externalOwnedExact": [".codex-plugin/plugin.json", "OWNERS"],
   "shippedExact": [
     ".app.json",
     ".mcp.json",
@@ -82,6 +79,7 @@
     "scripts/workbench/storage.py",
     "scripts/workbench_cli.py",
     "scripts/workbench_constants.py",
+    "scripts/workbench_coverage_receipts.py",
     "scripts/workbench_db.py",
     "scripts/workbench_feedback.py",
     "scripts/workbench_finding_index.py",

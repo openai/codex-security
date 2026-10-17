@@ -24,6 +24,15 @@ from workbench_scan_usage import (
 reject_non_finite_json = finalizer._reject_non_finite_json
 
 
+def javascript_utf8(value: str) -> bytes:
+    """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
+    return (
+        value.encode("utf-16-le", errors="surrogatepass")
+        .decode("utf-16-le", errors="replace")
+        .encode("utf-8")
+    )
+
+
 def timestamp_key(value: str) -> datetime:
     return finalizer.parse_timestamp(value)
 
