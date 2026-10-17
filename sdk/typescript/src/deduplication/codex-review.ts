@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { z } from "incur";
+import { z } from "zod";
 import type { JsonObject } from "../config.js";
 import {
   comparisonEnvironment,

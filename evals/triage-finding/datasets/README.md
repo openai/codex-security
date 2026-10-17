@@ -17,7 +17,7 @@ The important distinction is that GitHub advisory state is source material, not 
 
 - `triage-calibration-seed.json` is the first OSS-only seed dataset. It contains public vulnerable/fixed commit pairs.
 - `../scripts/test-calibration-dataset.mts` performs deterministic structural validation so future additions do not silently break the dataset shape.
-- `../scripts/generate-calibration-tests.mts` converts the dataset into Promptfoo tests at `../tests/calibration-oss.yaml`.
+- `../scripts/generate-calibration-tests.mts` supplies test objects directly to Promptfoo and can optionally export them as YAML.
 - `../scripts/hydrate-calibration-repos.mts` downloads the pinned OSS checkouts under `../artifacts/calibration-repos/` for local eval runs.
 
 ## Case Families

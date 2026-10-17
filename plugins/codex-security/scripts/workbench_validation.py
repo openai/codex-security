@@ -92,6 +92,19 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or thread_count < 0
     ):
         return False
+    completion = usage.get("completion")
+    if "completion" in usage and (
+        not isinstance(completion, dict)
+        or set(completion) != {"threadId", "turnId", "finalized"}
+        or not isinstance(completion["threadId"], str)
+        or not completion["threadId"]
+        or not isinstance(completion["turnId"], str)
+        or not completion["turnId"]
+        or type(completion["finalized"]) is not bool
+        or not completion["finalized"]
+        and coverage == "complete"
+    ):
+        return False
     warnings = usage.get("warnings", [])
     if (
         not isinstance(warnings, list)
@@ -105,7 +118,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         return False
     if coverage == "unavailable":
         return thread_count == 0 and set(usage).issubset(
-            {"coverage", "source", "threadCount", "warnings"}
+            {"coverage", "source", "threadCount", "warnings", "completion"}
         )
 
     allowed_keys = {
@@ -114,6 +127,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "completion",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
