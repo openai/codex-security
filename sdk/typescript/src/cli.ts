@@ -3251,14 +3251,14 @@ export async function main(
   publication.command("findings", {
     description:
       "Preview and import selected Wiz repository findings to Cloud.",
-    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+    hint: "Supply a Wiz Code vulnerability CSV for GitHub repositories, package vulnerability JSON, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; other CSV profiles, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.csv --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
         .describe(
-          "Saved Wiz finding collections, package vulnerability JSON, or normalized JSONL.",
+          "Wiz Code vulnerability CSV, saved finding collections, package vulnerability JSON, or normalized JSONL.",
         ),
     }),
     options: z.object({

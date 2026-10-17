@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { isDeepStrictEqual } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -544,7 +545,7 @@ async function cloudFixture(payload: unknown) {
       const results = request.items.map((item) => {
         const previous = reports.get(item.source_finding_id);
         const outcome = previous
-          ? JSON.stringify(previous.evidence) === JSON.stringify(item.evidence)
+          ? isDeepStrictEqual(previous.evidence, item.evidence)
             ? "unchanged"
             : "updated"
           : "created";
@@ -685,6 +686,258 @@ test("a wrong source repository stops raw and normalized imports before source l
   expect(
     await readdir(join(f.root, "state")).catch(() => undefined),
   ).toBeUndefined();
+});
+
+const csvRow: Record<string, string> = {
+  ID: "csv-occurrence-1",
+  WizURL: "https://app.wiz.io/vulnerability-findings/csv-occurrence-1",
+  Name: "CVE-2026-0001",
+  DetailedName: "example-package",
+  AssetID: "synthetic-repository-branch",
+  AssetName: "example/project/feature/parser",
+  CloudPlatform: "GitHub",
+  CloudProviderURL: "https://github.com/example/project/tree/feature/parser",
+  Severity: "HIGH",
+  VendorSeverity: "LOW",
+  CVSSSeverity: "CRITICAL",
+  Description: 'A quoted "description", with a comma.\r\nAnd another line.',
+  LocationPath: "/package-lock.json",
+  Version: "1.0.0",
+  FixedVersion: "2.0.0",
+  DetectionMethod: "Library",
+  FindingStatus: "Resolved",
+  LastDetected: "2026-01-02T03:04:05Z",
+};
+
+function csvReport(
+  rows: Record<string, string>[],
+  headers = Object.keys(rows[0] ?? csvRow),
+): string {
+  const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+  return [headers, ...rows.map((row) => headers.map((key) => row[key] ?? ""))]
+    .map((cells) => cells.map(quote).join(","))
+    .join("\r\n");
+}
+
+test.each(["plain", "gzip", "bom"])(
+  "Wiz Code CSV maps source claims and retains every original cell (%s)",
+  async (encoding) => {
+    const f = await fixture({});
+    const csv = csvReport([csvRow]);
+    await writeFile(
+      f.file,
+      encoding === "gzip"
+        ? gzipSync(csv)
+        : (encoding === "bom" ? "\ufeff" : "") + csv,
+    );
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.read).toBe(1);
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings[0]).toMatchObject({
+      source_finding_id: "csv-occurrence-1",
+      evidence: {
+        title: "example-package 1.0.0 CVE-2026-0001",
+        description: csvRow["Description"],
+        severity: "high",
+        advisory_ids: ["CVE-2026-0001"],
+        packages: [
+          {
+            name: "example-package",
+            ecosystem: null,
+            installed_version: "1.0.0",
+            manifest_path: "package-lock.json",
+            fixed_versions: ["2.0.0"],
+          },
+        ],
+        locations: [{ path: "package-lock.json", line: null }],
+        branch: null,
+        code_revision: null,
+        source_scan_id: null,
+        source_updated_at: null,
+        source_data: { format: "wiz-code-vulnerability-csv", row: csvRow },
+      },
+    });
+    expect(parsed.findings[0]!.evidence.details).toBeUndefined();
+  },
+);
+
+test("Wiz CSV keeps opaque columns and formula-like text without interpreting them", async () => {
+  const row = Object.fromEntries([
+    ...Object.entries(csvRow),
+    ["__proto__", '{"admin":true}'],
+    ["constructor", "opaque constructor"],
+    ["source_finding_id", "opaque source id"],
+    ["evidence", "opaque evidence"],
+    ["Extra", "'=SUM(1,2)"],
+  ]);
+  const f = await fixture({});
+  await writeFile(f.file, csvReport([row]));
+  const parsed = await readVendorFindings(f.file);
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.source_finding_id).toBe(csvRow["ID"]!);
+  expect(parsed.findings[0]!.evidence.source_data!["row"]).toEqual(row);
+  expect(
+    Object.getPrototypeOf(parsed.findings[0]!.evidence.source_data!["row"]),
+  ).toBe(Object.prototype);
+});
+
+test.each([
+  {
+    Severity: "",
+    VendorSeverity: "MEDIUM",
+    CVSSSeverity: "HIGH",
+    expected: "medium",
+  },
+  { Severity: "", VendorSeverity: "", CVSSSeverity: "LOW", expected: "low" },
+  {
+    Severity: "Informational",
+    VendorSeverity: "",
+    CVSSSeverity: "",
+    expected: "informational",
+  },
+])(
+  "Wiz CSV uses the reported severity fallback %j",
+  async ({ expected, ...severity }) => {
+    const f = await fixture({});
+    await writeFile(f.file, csvReport([{ ...csvRow, ...severity }]));
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.findings[0]!.evidence.severity).toBe(expected);
+  },
+);
+
+test.each([
+  { ID: "" },
+  { AssetID: "" },
+  { DetailedName: "" },
+  { Severity: "not-a-severity" },
+  { CloudPlatform: "AWS" },
+  { CloudProviderURL: "https://github.com/example/project" },
+  { CloudProviderURL: "not a URL" },
+  { LocationPath: "/../outside/package.json" },
+  { LocationPath: "C:\\outside\\package.json" },
+] as Record<string, string>[])(
+  "Wiz CSV excludes a malformed or unsupported occurrence without losing other rows: %j",
+  async (change) => {
+    const f = await fixture({});
+    await writeFile(
+      f.file,
+      csvReport([csvRow, { ...csvRow, ID: "bad-row", ...change }]),
+    );
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.read).toBe(2);
+    expect(parsed.findings.map((finding) => finding.source_finding_id)).toEqual(
+      [csvRow["ID"]!],
+    );
+    expect(parsed.excluded).toHaveLength(1);
+    expect(parsed.excluded[0]!.position).toBe(2);
+  },
+);
+
+test("Wiz CSV accepts an empty report and never uses an advisory as occurrence identity", async () => {
+  const f = await fixture({});
+  await writeFile(f.file, csvReport([]));
+  expect(await readVendorFindings(f.file)).toEqual({
+    read: 0,
+    findings: [],
+    excluded: [],
+  });
+  await writeFile(
+    f.file,
+    csvReport([csvRow, { ...csvRow, ID: "csv-occurrence-2" }]),
+  );
+  expect(
+    (await readVendorFindings(f.file)).findings.map(
+      (finding) => finding.source_finding_id,
+    ),
+  ).toEqual(["csv-occurrence-1", "csv-occurrence-2"]);
+  await writeFile(f.file, csvReport([csvRow, csvRow]));
+  await expect(readVendorFindings(f.file)).rejects.toThrow(
+    "Duplicate source finding id",
+  );
+});
+
+test.each([
+  "duplicate header",
+  "short row",
+  "long row",
+  "unterminated quote",
+  "invalid UTF-8",
+])(
+  "Wiz CSV rejects a damaged report before publication (%s)",
+  async (damage) => {
+    const f = await cloudFixture({});
+    let contents = csvReport([csvRow]);
+    if (damage === "duplicate header")
+      contents = csvReport([csvRow], [...Object.keys(csvRow), "ID"]);
+    if (damage === "short row") contents = csvReport([]) + '\r\n"short"';
+    if (damage === "long row") contents += ',"extra"';
+    if (damage === "unterminated quote") contents = contents.slice(0, -1);
+    await writeFile(
+      f.file,
+      damage === "invalid UTF-8"
+        ? Buffer.concat([Buffer.from(contents), Buffer.from([0xff])])
+        : contents,
+    );
+    await expect(
+      prepareExternalPublication(f.file, f.options, f.deps),
+    ).rejects.toThrow();
+    expect(f.posts).toEqual([]);
+  },
+);
+
+test.each([false, true])(
+  "Wiz CSV binds the source repository before uploads, including normalized input (%s)",
+  async (normalized) => {
+    const f = await cloudFixture({});
+    await writeFile(
+      f.file,
+      csvReport([
+        {
+          ...csvRow,
+          CloudProviderURL: "https://github.com/other/project/tree/main",
+        },
+      ]),
+    );
+    if (normalized)
+      await writeFile(
+        f.file,
+        JSON.stringify((await readVendorFindings(f.file)).findings),
+      );
+    await expect(
+      prepareExternalPublication(f.file, f.options, f.deps),
+    ).rejects.toThrow("does not match");
+    expect(f.posts).toEqual([]);
+    expect(f.calls.filter((call) => call.includes("/source_reports"))).toEqual(
+      [],
+    );
+  },
+);
+
+test("Wiz CSV retries retain acknowledged requests across column reordering and repeated imports stay unchanged", async () => {
+  const f = await cloudFixture({});
+  const rows = [csvRow, { ...csvRow, ID: "csv-occurrence-2" }];
+  await writeFile(f.file, csvReport(rows));
+  const original = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(f.posts).toEqual([]);
+  f.state.failReadback = true;
+  await expect(original.publish()).rejects.toBeInstanceOf(
+    ExternalPublicationError,
+  );
+  await writeFile(f.file, csvReport(rows, Object.keys(csvRow).reverse()));
+  const resumed = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(resumed.preview.resumed).toBe(true);
+  expect(resumed.preview.requests).toEqual(original.preview.requests);
+  f.state.failReadback = false;
+  expect((await resumed.publish()).verified).toBe(2);
+  expect(f.posts).toHaveLength(1);
+  const repeated = await prepareExternalPublication(f.file, f.options, f.deps);
+  const result = await repeated.publish();
+  expect(result.verified).toBe(2);
+  expect(result.receipts[0]!.counts.unchanged).toBe(2);
+  expect([...f.reports.values()].map((report) => report.version)).toEqual([
+    1, 1,
+  ]);
+  expect(f.posts[0]!.items[0]!.evidence.source_data!["row"]).toEqual(csvRow);
 });
 
 test("saved typed requests resume by repository ID after a repository rename", async () => {

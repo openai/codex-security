@@ -970,11 +970,12 @@ Before the first import:
    authorized environment, but does not need a completed native scan.
 2. For **package vulnerabilities**, in Wiz **Vulnerability Findings**, filter to the intended repository and
    findings. Choose **Save as → Report**, select **Repository Branch** as the
-   resource type (remove the default Virtual Machine selection), **JSON** format,
+   resource type (remove the default Virtual Machine selection), **CSV** or **JSON** format,
    and **Detailed** columns. Retain the repository filter and download the completed
    report. Gzip compression can stay enabled; the importer detects it even when
    the download is named `.json`. **Raw Event** on Code & Build Scans exports scan
-   metadata, not finding records. CSV is not supported.
+   metadata, not finding records. CSV requires GitHub repository-branch findings
+   and a comma delimiter; other report profiles need an explicit mapping.
    Alternatively, read selected package vulnerability records through your
    authorized Wiz connection and save their JSON. Include `id`, `name`,
    `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`;
@@ -1010,7 +1011,7 @@ the manual navigation guidance rather than guessing a UI host or port.
 Preview the selection and destination:
 
 ```bash
-codex-security publish findings selected-wiz.json \
+codex-security publish findings selected-wiz.csv \
   --to cloud --repository https://github.com/example/project --provider wiz \
   --source-key TENANT_ID/vulnerability-finding --dry-run --format json
 ```
@@ -1032,12 +1033,31 @@ exclusions. `--dry-run --format json` retains all normalized findings and comple
 evidence for inspection. A prompt explicitly includes any records that will be
 skipped.
 
-Package input can be a downloaded Wiz JSON vulnerability report, a vulnerability
+Package input can be a downloaded Wiz Code vulnerability CSV, a Wiz JSON vulnerability report, a vulnerability
 finding, an array, a complete `data.vulnerabilityFindings.nodes` response, or JSONL
 with one package record per line. Plain and gzip-compressed files are accepted.
 A response that advertises another page is rejected. Complete the requested pages
 or save only the explicitly selected records; retain the named collection for
-SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
+SAST, repository secrets, and IaC.
+
+The supported CSV profile includes `ID`, `Name`, `DetailedName`, `AssetID`,
+`WizURL`, `CloudPlatform`, and `CloudProviderURL`. Its public column conventions
+are illustrated by the [Wiz vulnerability CSV fixture](https://github.com/DefectDojo/django-DefectDojo/blob/10453d6c62d68eee6d6b0ecc0acde5d61d1dd02d/unittests/scans/wiz/sca_format.csv).
+For repository imports, `CloudPlatform` must identify GitHub and
+`CloudProviderURL` must identify a repository branch. The repository URL must
+match the selected Cloud repository, including when the parsed findings are
+saved and read again as normalized JSONL. Other resource types are excluded.
+
+CSV imports use `ID` as the occurrence identity and retain every parsed field,
+including unknown columns and quoted multiline values, in `source_data.row`.
+Severity comes from `Severity`, then `VendorSeverity`, then `CVSSSeverity`.
+Vendor resolution status stays in the original evidence. The importer does not
+derive a branch or revision from a tree URL, or treat last-detected time as a
+record-update timestamp. Duplicate headers, damaged CSV rows, invalid UTF-8,
+and duplicate occurrence IDs stop the import. Review any excluded records in
+the preview before publishing.
+
+Normalized JSONL is also accepted:
 
 ```json
 {
@@ -1050,7 +1070,7 @@ SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
 }
 ```
 
-Use Wiz's finding `id`, not a CVE, as identity. Keep the source key stable across
+Use Wiz's finding `id` (`ID` in CSV), not a CVE, as identity. Keep the source key stable across
 exports; a selected project filter does not change the vendor namespace. Confirm
 that the selected assets or builds map to this repository. The raw Wiz adapter
 retains each record in `source_data`, uses reported severity, and leaves unknown
@@ -1137,7 +1157,7 @@ does not establish that it is deployed. Precise original timestamps remain in
 timestamps.
 
 Native SAST and secret report downloads can be CSV, including gzip-compressed
-CSV. CSV is not parsed directly. Convert a selected report with a reviewed mapping
+CSV. Those CSV profiles are not parsed directly. Convert a selected report with a reviewed mapping
 for its actual column headers into normalized JSONL, preserving each original row
 in `source_data`. Set `details.kind` and `details.repository.url` explicitly after
 verifying the source repository. Use the same prefixed occurrence ID shown above
