@@ -7,12 +7,14 @@ import {
   coverageReceiptComponents,
   validateRetainedCoverage,
 } from "../coverage-publication.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
   parsePersistedScanDraft,
-  parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
+  validateFindingSemantics,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import {
@@ -23,6 +25,9 @@ import {
 import type { DeepScanArtifacts } from "./artifacts.js";
 
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
+);
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -37,20 +42,15 @@ export interface ReducerArtifactValidation {
 /** Reduction combines findings; it does not complete the source workers' review. */
 export function aggregateDiscoveryCoverage(
   artifacts: DeepScanArtifacts,
-  discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "coverage">[],
-): JsonObject {
-  const coverage: JsonObject = {
-    completeness: discoveries.every(
-      ({ coverage }) => coverage.completeness === "complete",
-    )
-      ? "complete"
-      : "partial",
+  discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "result">[],
+): ScanDraftInput["coverage"] {
+  const coverage: ScanDraftInput["coverage"] = {
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
   };
   for (const worker of discoveries) {
-    const source = structuredClone(worker.coverage);
+    const source = structuredClone(worker.result.coverage);
     const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
       .split(sep)
       .join("/");
@@ -105,26 +105,9 @@ export function aggregateDiscoveryCoverage(
   return coverage;
 }
 
-/**
- * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
- */
-export function parseDeepReduction(
-  input: Record<string, unknown>,
-  persisted = false,
-): DeepReductionInput {
-  const standard = {
-    ...input,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
-  };
-  const { coverage: _coverage, ...parsed } = persisted
-    ? parsePersistedScanDraft(standard)
-    : parseScanDraft(standard as unknown as ScanDraftInput);
+export function parseDeepReduction(input: unknown): DeepReductionInput {
+  const parsed = deepReductionInputSchema.parse(input);
+  validateFindingSemantics(parsed.findings);
   return parsed;
 }
 
@@ -194,7 +177,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
   );
   if (result.complete === false)
     throw new Error(
@@ -208,7 +191,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      (value) => parseDeepReduction(value, true),
+      parseDeepReduction,
     );
   }
 
@@ -290,7 +273,7 @@ export function reconcileDeepReduction(
     const sourceValues = [
       ...discoveries.map((discovery) => discovery.result[field]),
       previous?.[field],
-    ].filter((value): value is Record<string, unknown> => value !== undefined);
+    ].filter((value) => value !== undefined);
     if (
       sourceValues.some((value) => !isDeepStrictEqual(sourceValues[0], value))
     ) {
@@ -299,7 +282,7 @@ export function reconcileDeepReduction(
       );
     }
     if (sourceValues[0] !== undefined) {
-      result[field] = structuredClone(sourceValues[0]);
+      Object.assign(result, { [field]: structuredClone(sourceValues[0]) });
     }
   }
   return result;

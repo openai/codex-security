@@ -4,13 +4,12 @@ This file is the source of truth for portable deterministic, no-model Codex Secu
 
 ## Covered
 
-- **Python utilities:** unit and CLI tests cover capability preflight, scan contract finalization, rank-input generation and selection, and report format validation.
+- **Python utilities:** unit and CLI tests cover scan contract finalization, diff and scoped-file worklist generation, and report format validation.
 - **Schema validation:** Draft 2020-12 validators and checked-in completed-scan examples are validated with `jsonschema`, including RFC 3339 formats.
 - **Plugin metadata:** the plugin manifest, referenced assets, skill frontmatter, and agent interface YAML are parsed and checked for required fields and file consistency.
 - **Prompt linting:** agent default prompts are required to be non-empty.
 - **CLI and harness dry runs:** every Python script supports `--help`; major command paths run against temporary repositories and scan bundles without a model call.
 - **Static checks:** Ruff checks the plugin scripts and tests; the `--help` smoke test exercises top-level Python script imports.
-- **Golden files:** deterministic repository ranking JSONL output is compared against a checked-in golden file.
 
 - **MCP dependencies and templates:** CI installs the MCP package with its frozen lockfile; its deterministic tests exercise Deep Scan prompt-template rendering.
 

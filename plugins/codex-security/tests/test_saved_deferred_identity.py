@@ -137,7 +137,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     prepared_coverage = []
 
     def fail_publication(prepared, *, projection_warnings=None):
-        prepared_coverage.append(prepared[4])
+        prepared_coverage.append(prepared.coverage)
         raise OSError("injected publication failure")
 
     with monkeypatch.context() as patch:

@@ -114,7 +114,6 @@ def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_
     parent = saved_draft("coverage-scan")
     parent["coverage"] = {
         "mode": "deep_repository",
-        "completeness": "partial",
         "inventoryStrategy": "repository",
         "includePaths": ["."],
         "excludePaths": [],
@@ -495,7 +494,7 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
     prepared = finalizer._prepare_scan_finalization(
         root,
         completion_binding=binding,
-        completion_warnings=warnings,
+        recover_unsealed=True,
         expected_coverage_mode="deep_repository",
         draft_documents=recovered,
     )
@@ -504,12 +503,12 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
     )
     assert len(published_findings["findings"]) == 1
     assert published_findings["findings"][0]["title"] == finding["title"]
-    assert published_coverage["completeness"] == "partial"
+    assert "completeness" not in published_coverage
     failed_surfaces = [
         row for row in published_coverage["surfaces"] if row.get("workerId") == "failed"
     ]
     assert any(row["disposition"] == "needs_follow_up" for row in failed_surfaces)
-    assert any("duplicate artifact path" in warning for warning in warnings)
+    assert any("duplicate artifact path" in warning for warning in prepared.warnings)
     assert (root / "report.md").is_file()
     manifest = json.loads((root / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "interrupted"

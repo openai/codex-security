@@ -146,11 +146,7 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
   ].join("\n");
 }
 
-function packageVersions(url: URL): {
-  package: string;
-  sdk: string;
-  executable: string;
-} {
+function packageVersions(url: URL) {
   try {
     const manifest: unknown = JSON.parse(readFileSync(url, "utf8"));
     if (

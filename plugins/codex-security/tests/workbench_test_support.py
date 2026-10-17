@@ -56,9 +56,8 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
-def saved_coverage(*, deferred=(), surfaces=(), completeness=None):
+def saved_coverage(*, deferred=(), surfaces=()):
     return {
-        "completeness": completeness or ("partial" if deferred else "complete"),
         "surfaces": list(surfaces),
         "explicitExclusions": [],
         "deferred": list(deferred),
@@ -73,14 +72,13 @@ def saved_draft(
     closures=(),
     complete=False,
     findings=(),
-    completeness=None,
 ):
     return {
         "scanId": scan_id,
         "complete": complete,
         "findings": list(findings),
         "coverage": {
-            **saved_coverage(deferred=deferred, surfaces=surfaces, completeness=completeness),
+            **saved_coverage(deferred=deferred, surfaces=surfaces),
             **({"resolvedDeferred": list(closures)} if closures else {}),
         },
     }
@@ -820,7 +818,7 @@ def write_completed_contract(
                 },
                 "evidenceExcerpt": "destination.write_bytes(entry.read())",
                 "attackPath": {
-                    "dataFlow": "archive entry -> destination path -> filesystem write",
+                    "dataflow": "archive entry -> destination path -> filesystem write",
                     "reachability": "An archive uploader can supply the crafted entry.",
                     "evidenceRefs": ["archive-write"],
                     "impact": {
@@ -845,7 +843,6 @@ def write_completed_contract(
         "schemaVersion": "1.0",
         "scanId": scan_id,
         "mode": coverage_mode,
-        "completeness": "complete",
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
         "excludePaths": [],

@@ -4,6 +4,8 @@ For every reportable finding in `findings.json`, preserve the validated reasonin
 
 ## Writing Rules
 
+New drafts and imports use `codeEvidence`, `rootCause`, `attackPath.dataflow`, and `evidenceRefs`. Legacy aliases (`code_evidence`, `root_cause`, `dataFlow`, `data_flow`, and `evidence_refs`) are rejected on writes. Optional fields must match the current schema; invalid values are not silently repaired or removed. Historical sealed reports remain readable without changing their saved bytes.
+
 - Lead the title and `summary` with the user action and product impact.
 - Use `attackPath.summary` to briefly explain how to reproduce the issue.
 - Explain how the code causes that product behavior in `rootCause.summary`. Use plain language and avoid repetition.
@@ -170,4 +172,4 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
 }
 ```
 
-`rootCause.code` and `rootCause.language` remain supported for older producers that can provide only one snippet. New producers should use the shared `codeEvidence` catalog, assign call-stack roles, and order `rootCause.evidenceRefs` from input to outcome so the same exact source can support Root Cause, Validation, and Attack-path analysis without copying it into several fields.
+Historical sealed reports may contain `rootCause.code` and `rootCause.language`; readers preserve those snippets. New writes reject these duplicate snippet fields. Use the shared `codeEvidence` catalog and order `rootCause.evidenceRefs` from input to outcome so the same source supports Root Cause, Validation, and Attack-path analysis.

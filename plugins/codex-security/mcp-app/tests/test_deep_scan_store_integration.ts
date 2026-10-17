@@ -10,7 +10,10 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type {
+  DeepScanPublication,
+  ScanDraftInput,
+} from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinator,
   FakeExecutor,
@@ -24,11 +27,12 @@ const {
   WorkbenchDeepScanStore,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
+  saveScanDraftCheckpoint,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
-export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";`,
+export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
 });
@@ -44,10 +48,12 @@ await testReceiptRepairSurvivesStoppedRecovery("nonportable");
 await testReceiptRepairSurvivesStoppedRecovery("case_collision");
 await testReceiptRepairSurvivesStoppedRecovery("control");
 await testReceiptRepairSurvivesStoppedRecovery("cross_surface_collision");
+await testDeadlinePreservesValidWorkerCheckpoints();
 await testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalSeal();
 await testRecoveredPublicationRejectsLateFailure();
 await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
+await testReplacementFailureDuringCancellation();
 await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
@@ -126,7 +132,11 @@ async function testCoordinatorCommitResponseRecovery(
       threadId,
       executor: new FakeExecutor(),
       heartbeatIntervalMs: 60_000,
-      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+      onComplete: async (
+        draft: ScanDraftInput,
+        signal: AbortSignal,
+        publication: DeepScanPublication,
+      ) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -140,6 +150,7 @@ async function testCoordinatorCommitResponseRecovery(
           draft,
           runWorkbench,
           signal,
+          publication,
         );
       },
     });
@@ -285,6 +296,11 @@ async function testRecoveredPublicationRejectsLateFailure() {
         "Publication recovery remains pending.",
       ),
       runWorkbench,
+      undefined,
+      {
+        coordinatorGeneration: claim.run.coordinatorGeneration,
+        resultPath: null,
+      },
     );
     await runWorkbench([
       "cancel-scan",
@@ -372,7 +388,6 @@ function checkpoint(scanId: string, candidateId: string, reason: string) {
     complete: false,
     findings: [],
     coverage: {
-      completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
       deferred: [{ candidateId, reason, paths: ["fixture.py"] }],
@@ -405,7 +420,7 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
     );
     const coverage = await readJson(run.scanDir, "coverage.json");
     coverage.surfaces = [
-      { id: "HTTP API", label: "HTTP API", disposition: "reported" },
+      { id: "http-api", label: "HTTP API", disposition: "reported" },
     ];
     const findings = await readJson(run.scanDir, "findings.json");
     findings.findings[0].locations[0].path = "./fixture.py";
@@ -425,11 +440,11 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
       );
       assert.equal(
         (await readJson(run.scanDir, "coverage.json")).surfaces[0].id,
-        "HTTP API",
+        "http-api",
       );
       const head = await readJson(run.scanDir, "checkpoint-head.json");
       const saved = await readJson(run.scanDir, "checkpoints", head.checkpoint);
-      assert.equal(saved.coverage.surfaces[0].id, "HTTP API");
+      assert.equal(saved.coverage.surfaces[0].id, "http-api");
       assert.equal(saved.findings[0].locations[0].path, "./fixture.py");
     }
 
@@ -450,7 +465,7 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
         checkpoint(run.scanId, "unsafe-checkpoint", "Review remains pending."),
         runWorkbench,
       ),
-      /expected a safe scan-relative POSIX path/,
+      /Invalid string.*pattern|expected a safe scan-relative POSIX path/,
     );
     assert.deepEqual(
       await Promise.all(
@@ -989,7 +1004,6 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
         const root = request.artifactContext!.root;
         const draft = await readJson(root, "result.json");
         draft.coverage = {
-          completeness: "partial",
           surfaces: [
             {
               id: "1",
@@ -1028,7 +1042,11 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
       pluginRoot,
       threadId,
       executor,
-      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+      onComplete: async (
+        draft: ScanDraftInput,
+        signal: AbortSignal,
+        publication: DeepScanPublication,
+      ) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -1039,6 +1057,7 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
           draft,
           runWorkbench,
           signal,
+          publication,
         );
       },
     });
@@ -1047,7 +1066,6 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
     const coverage = await readJson(run.scanDir, "coverage.json");
-    assert.equal(coverage.completeness, "partial");
     for (const field of ["surfaces", "explicitExclusions", "deferred"]) {
       assert.equal(coverage[field].length, 4, field);
       assert.equal(
@@ -1078,6 +1096,187 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
     assert.equal(
       typeof (await readJson(run.scanDir, "scan-manifest.json")).scan.sealedAt,
       "string",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDeadlinePreservesValidWorkerCheckpoints() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-deadline-checkpoints-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const store = new WorkbenchDeepScanStore(runWorkbench);
+  const threadId = "deadline-checkpoint-owner";
+  try {
+    await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(environment.CODEX_HOME, "codex-security", "config.toml"),
+      "[deep_scan]\nworkers = 2\nmax_discovery_runs = 6\nmax_time_hours = 1e-12\n",
+    );
+    const run = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    const worker = await createWorkerFixture(run, "saved", "discovery");
+    await store.updateWorker({ ...worker, status: "running" });
+    await saveScanDraftCheckpoint(
+      { root: worker.artifactDir, layout: "worker", repoRoot: targetPath },
+      {
+        ...checkpoint(
+          run.scanId,
+          "pending-review",
+          "Worker did not finish reviewing this source.",
+        ),
+        findings: [finding("saved", "fixture.py")],
+      },
+    );
+    await store.updateWorker({ ...worker, status: "canceled" });
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      {
+        scanId: run.scanId,
+        findings: [],
+        coverage: {
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [
+            {
+              reason:
+                "The configured discovery time limit elapsed before any source review completed.",
+            },
+          ],
+        },
+      },
+      runWorkbench,
+      undefined,
+      {
+        coordinatorGeneration: claim.run.coordinatorGeneration,
+        resultPath: null,
+      },
+    );
+    const draftNames = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "checkpoint-head.json",
+    ];
+    const beforeFailure = await Promise.all(
+      draftNames.map((name) => readFile(path.join(run.scanDir, name), "utf8")),
+    );
+    const database = path.join(
+      environment.CODEX_SECURITY_STATE_DIR,
+      "workbench.sqlite3",
+    );
+    const runSql = async (sql: string) =>
+      execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          "-c",
+          "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.executescript(sys.argv[2]); connection.close()",
+          database,
+          sql,
+        ],
+        { env: environment },
+      );
+    await runSql(
+      "CREATE TRIGGER reject_deadline_commit BEFORE UPDATE OF status ON deep_scan_runs WHEN NEW.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'fixture deadline commit failure'); END;",
+    );
+    await assert.rejects(
+      store.finish({
+        scanId: run.scanId,
+        reason: "capped",
+        manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+        omittedWorkerIds: [],
+      }),
+      /fixture deadline commit failure/,
+    );
+    assert.deepEqual(
+      await Promise.all(
+        draftNames.map((name) =>
+          readFile(path.join(run.scanDir, name), "utf8"),
+        ),
+      ),
+      beforeFailure,
+      "a failed finish commit must restore the unsealed parent and accepted checkpoint head",
+    );
+    assert.equal((await store.get(run.scanId, threadId)).status, "running");
+    await runSql("DROP TRIGGER reject_deadline_commit;");
+    const finished = await store.finish({
+      scanId: run.scanId,
+      reason: "capped",
+      manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+      omittedWorkerIds: [],
+    });
+    assert.equal(finished.status, "succeeded");
+    assert.equal(
+      finished.persistedWorkers.every(
+        (worker: { status: string }) => worker.status === "canceled",
+      ),
+      true,
+    );
+    const recovered = await readJson(run.scanDir, "findings.json");
+    assert.deepEqual(
+      recovered.findings.map((item: { title: string }) => item.title),
+      ["Unsafe request output saved"],
+    );
+    assert.equal(recovered.findings[0].provenance.workerId, worker.id);
+    const coverage = await readJson(run.scanDir, "coverage.json");
+
+    assert.equal(
+      coverage.deferred.some((item: { reason: string }) =>
+        /time limit elapsed/.test(item.reason),
+      ),
+      true,
+    );
+    assert.equal(
+      coverage.deferred.some(
+        (item: { candidateId: string }) =>
+          item.candidateId === "pending-review",
+      ),
+      true,
+    );
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(manifest.scan.sealedAt, undefined);
+    assert.equal(manifest.scan.complete, undefined);
+    assert.equal(
+      Object.keys(manifest.scan.preservedSources).some((source) =>
+        source.includes("saved/output/checkpoints/"),
+      ),
+      true,
+    );
+    const beforeReplay = await readFile(
+      path.join(run.scanDir, "scan-manifest.json"),
+      "utf8",
+    );
+    await store.finish({
+      scanId: run.scanId,
+      reason: "capped",
+      manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+      omittedWorkerIds: [],
+    });
+    assert.equal(
+      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
+      beforeReplay,
+    );
+    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    const sealed = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(typeof sealed.scan.sealedAt, "string");
+    assert.deepEqual(
+      (await readJson(run.scanDir, "findings.json")).findings,
+      recovered.findings,
     );
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
@@ -1210,8 +1409,20 @@ async function testReceiptRepairSurvivesStoppedRecovery(
         process.platform === "win32" &&
         (receiptFailure === "nonportable" || receiptFailure === "control")
       );
+    const caseProbe = path.join(fixtureRoot, "case-probe");
+    await writeFile(caseProbe, "filesystem case probe");
+    const caseInsensitive = await readFile(
+      path.join(fixtureRoot, "CASE-PROBE"),
+    ).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    await rm(caseProbe);
     const archivedContents = (ref: string) =>
-      process.platform === "win32" && caseCollision
+      caseInsensitive && caseCollision
         ? "Archived case-insensitive evidence.\n"
         : `Archived evidence for ${ref}.\n`;
     const pending =
@@ -1367,7 +1578,11 @@ async function testReceiptRepairSurvivesStoppedRecovery(
       threadId,
       executor,
       retryDelaysMs: [0, 0],
-      onComplete: async (draft: ScanDraftInput, signal: AbortSignal) => {
+      onComplete: async (
+        draft: ScanDraftInput,
+        signal: AbortSignal,
+        publication: DeepScanPublication,
+      ) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -1378,6 +1593,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
           draft,
           runWorkbench,
           signal,
+          publication,
         );
       },
     });
@@ -1472,6 +1688,121 @@ async function testReceiptRepairSurvivesStoppedRecovery(
     assert.equal(manifest.scan.status, "canceled");
     assert.equal(typeof manifest.scan.sealedAt, "string");
   } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function testReplacementFailureDuringCancellation() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-cancel-replacement-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const cancellationEntered = Promise.withResolvers<void>();
+  const releaseCancellation = Promise.withResolvers<void>();
+  let coordinator: InstanceType<typeof DeepScanCoordinator> | undefined;
+  let cancellation: Promise<void> | undefined;
+  try {
+    const threadId = "cancel-replacement-owner";
+    const store = new WorkbenchDeepScanStore(runWorkbench);
+    const run = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    assert.equal(claim.acquired, true);
+    const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+    let publications = 0;
+    coordinator = new DeepScanCoordinator({
+      run: claim.run,
+      store,
+      executor,
+      pluginRoot,
+      threadId,
+      heartbeatIntervalMs: 60_000,
+      onStopped: async () => {
+        publications += 1;
+      },
+    });
+    coordinator.start();
+    const settled = coordinator.settled();
+    await Promise.race([
+      executor.discoveryStarted.promise,
+      settled.then(() => assert.fail("coordinator stopped before discovery")),
+    ]);
+    cancellation = assert.rejects(
+      coordinator.cancelAfterPersistence(
+        "user_cancel",
+        async () => {
+          cancellationEntered.resolve();
+          await releaseCancellation.promise;
+          await runWorkbench(["cancel-scan", "--scan-id", run.scanId]);
+        },
+        async () => {
+          const parent = (
+            await runWorkbench(["get-scan", "--scan-id", run.scanId])
+          ).workspace.results;
+          return {
+            status: parent.progress.status,
+            failureMessage: parent.failureMessage,
+          };
+        },
+      ),
+      /Only a running scan can be canceled/,
+    );
+    await cancellationEntered.promise;
+    assert.equal(executor.runningDiscovery, 0);
+    assert.equal((await store.get(run.scanId, threadId)).status, "running");
+
+    // Expire only the lease clock; claim and failure use the real workbench.
+    await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+      "-c",
+      `import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?", ("2000-01-01T00:00:00Z", sys.argv[2]))
+connection.commit()`,
+      path.join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      run.scanId,
+    ]);
+    await rm(
+      path.join(
+        run.scanDir,
+        "artifacts",
+        "deep_discovery",
+        `coordinator-heartbeat-${claim.run.coordinatorGeneration}.json`,
+      ),
+      { force: true },
+    );
+    const replacement = new WorkbenchDeepScanStore(runWorkbench);
+    const adopted = await replacement.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    assert.equal(adopted.acquired, true);
+    assert.equal(
+      adopted.run.coordinatorGeneration,
+      claim.run.coordinatorGeneration + 1,
+    );
+    const failure = await replacement.fail(run.scanId, "replacement failure");
+    assert.equal(failure.status, "failed");
+    releaseCancellation.resolve();
+    await cancellation;
+    const terminal = await settled;
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.error, "replacement failure");
+    assert.equal(
+      terminal.coordinatorGeneration,
+      adopted.run.coordinatorGeneration,
+    );
+    assert.equal(publications, 0, "the old generation must not publish");
+  } finally {
+    releaseCancellation.resolve();
+    coordinator?.cancel("fixture_cleanup");
+    await Promise.allSettled([cancellation, coordinator?.settled()]);
     await rm(fixtureRoot, { recursive: true, force: true });
   }
 }

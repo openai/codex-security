@@ -383,6 +383,9 @@ const root = realpathSync.native(
 );
 let proofError: unknown;
 try {
+  const handles = handleProof(root);
+  const privateDirectories = privateDirectoryProof(root, native);
+  const wideProcessAndPaths = wideProcessProof(root);
   console.log(
     JSON.stringify(
       {
@@ -390,10 +393,15 @@ try {
         platform: process.platform,
         architecture: process.arch,
         nodeApi: 8,
-        handles: handleProof(root),
-        privateDirectories: privateDirectoryProof(root, native),
-        wideProcessAndPaths: wideProcessProof(root),
-        childProcesses: await processProof(root),
+        handles,
+        privateDirectories,
+        wideProcessAndPaths,
+        childProcesses: await processProof(
+          root,
+          wideProcessAndPaths[
+            "cachedSymlinkTagsIncludingDanglingDirectories"
+          ] === true,
+        ),
         garbageCollectionClosesHandle: await ownershipProof(root),
         fixture: basename(root),
       },

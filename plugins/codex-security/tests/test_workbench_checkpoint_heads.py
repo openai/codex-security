@@ -183,7 +183,7 @@ def test_file_authored_resolution_can_leave_manifest_unchanged(
         tmp_path, scan_id, binding, [], warnings, stopped=False, reason=""
     )
     # Headless file-authored documents replace their older checkpoint coverage.
-    assert result[2]["completeness"] == ("partial" if retain_pending else "complete")
+
     assert result[2]["deferred"] == ([independent] if retain_pending else [])
     assert warnings == []
 
@@ -309,7 +309,6 @@ def test_malformed_parent_deferred_id_reaches_existing_recovery_diagnostics(
         )
         assert warnings
         assert all(isinstance(row["id"], str) for row in coverage["deferred"])
-        assert coverage["completeness"] == "partial"
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
@@ -556,9 +555,7 @@ def test_completion_checks_selected_parent_checkpoint(
     manifest_path.write_text(json.dumps(manifest))
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     if complete is False:
-        coverage.update(
-            completeness="partial", deferred=[{"id": "review", "reason": "Review reopened."}]
-        )
+        coverage.update(deferred=[{"id": "review", "reason": "Review reopened."}])
     draft = {
         "scanId": scan_id,
         "findings": json.loads((scan_dir / "findings.json").read_text())["findings"],
@@ -824,7 +821,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     worker_id, worker_result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     worker = json.loads(worker_result.read_text())
     child_work = {"id": "child-review", "reason": "Worker review remains."}
-    worker["coverage"].update(completeness="partial", deferred=[child_work])
+    worker["coverage"].update(deferred=[child_work])
     worker_result.write_text(json.dumps(worker))
 
     contract = tmp_path / "contract"
@@ -856,7 +853,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     initial["coverage"].update(surfaces=[], deferred=[])
     if evidence == "deferred":
         initial["findings"]["findings"] = []
-        initial["coverage"].update(completeness="partial", deferred=[parent_work])
+        initial["coverage"].update(deferred=[parent_work])
     else:
         initial["findings"]["findings"][0]["extensions"] = {"candidateId": "candidate-review"}
         initial["coverage"]["surfaces"] = [
@@ -884,7 +881,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     terminal = copy.deepcopy(initial)
     terminal["manifest"]["scan"].pop("complete")
     terminal["findings"]["findings"] = []
-    terminal["coverage"].update(completeness="complete", deferred=[], surfaces=[])
+    terminal["coverage"].update(deferred=[], surfaces=[])
     if evidence == "reported":
         terminal["coverage"]["surfaces"] = [
             {
@@ -921,7 +918,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     first = []
 
     def fail_publication(prepared, *, projection_warnings=None):
-        first.append(copy.deepcopy((prepared[3], prepared[4])))
+        first.append(copy.deepcopy((prepared.findings, prepared.coverage)))
         raise OSError("injected stopped publication failure")
 
     with monkeypatch.context() as patch:

@@ -18,7 +18,7 @@ function bundledFunction(runtime: string, name: string): string {
 test("advertises distinct Standard worker and Deep reducer contracts", async () => {
   const runtime = await loadBundledRuntime();
   const method =
-    /  async compactArtifactServer\(request\) \{[\s\S]*?\n  \}/u.exec(
+    /  compactArtifactServer\(request, includePathsFile\) \{[\s\S]*?\n  \}/u.exec(
       runtime,
     )?.[0];
   expect(method).toBeDefined();
@@ -30,7 +30,7 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
   )({ join }) as (
     this: { modelSettings: { artifactContext: Record<string, string> } },
     request: Record<string, unknown>,
-  ) => Promise<Record<string, { args: string[]; env: NodeJS.ProcessEnv }>>;
+  ) => Record<string, { args: string[]; env: NodeJS.ProcessEnv }>;
 
   const node = Bun.which("node");
   expect(node).not.toBeNull();
@@ -44,7 +44,7 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
     for (const layout of ["worker", "reducer"] as const) {
       const artifactRoot = join(scanRoot, layout);
       mkdirSync(artifactRoot);
-      const servers = await compactArtifactServer.call(
+      const servers = compactArtifactServer.call(
         {
           modelSettings: {
             artifactContext: {

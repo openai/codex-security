@@ -71,7 +71,7 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     assert stopped["findingCount"] == 1
     assert not any("coverage receipt" in warning for warning in stopped["warnings"])
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert {row["id"] for row in coverage["surfaces"]} == {
         f"{worker_id}/api" for worker_id, _ in workers.values()
     }

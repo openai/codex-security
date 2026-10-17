@@ -38,21 +38,17 @@ import type {
 export interface AcceptedDiscovery {
   id: string;
   resultPath: string;
-  coverage: ScanDraftInput["coverage"];
+  result: ScanDraftInput;
   completionSequence: number;
 }
 
 export type DiscoveryOutcome =
   | { type: "discovery"; status: "succeeded"; worker: AcceptedDiscovery }
   | { type: "discovery"; status: "canceled"; workerId: string }
-  | {
+  | (Extract<WorkerAttemptOutcome, { status: "failed" }> & {
       type: "discovery";
-      status: "failed";
       workerId: string;
-      error: Error;
-      replaceableFailureKind?: DeepScanReplaceableFailureKind;
-      consecutiveErrors?: number;
-    };
+    });
 
 export interface SuccessfulDedupOutcome {
   type: "dedup";
@@ -89,6 +85,7 @@ export interface DeepScanWorkerRunnerOptions {
   log: DeepScanLogger;
   retryDelaysMs: readonly number[];
   signal: AbortSignal;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 type WorkerAttemptOutcome =
@@ -149,7 +146,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryCoverage: ScanDraftInput["coverage"] | undefined;
+    let discoveryResult: ScanDraftInput | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -159,13 +156,15 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        discoveryCoverage = (
-          await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId)
-        ).coverage;
+        discoveryResult = await validateDiscoveryArtifacts(
+          artifacts,
+          resultPath,
+          run.scanId,
+        );
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      await this.persistWorkerCancellation(
+      outcome = await this.cancelAttempt(
         {
           workerId,
           kind: "discovery",
@@ -175,24 +174,13 @@ export class DeepScanWorkerRunner {
         outcome.attempt,
         outcome.threadId,
       );
-      outcome = { status: "canceled" };
     }
-    if (!discoveryCoverage) {
+    if (!discoveryResult) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
-      return {
-        type: "discovery",
-        status: "failed",
-        workerId,
-        error: outcome.error,
-        ...(outcome.replaceableFailureKind
-          ? { replaceableFailureKind: outcome.replaceableFailureKind }
-          : {}),
-        ...(outcome.consecutiveErrors === undefined
-          ? {}
-          : { consecutiveErrors: outcome.consecutiveErrors }),
-      };
+      const { status, ...failure } = outcome;
+      return { type: "discovery", status, workerId, ...failure };
     }
     if (outcome.status === "canceled" || this.options.signal.aborted) {
       return { type: "discovery", status: "canceled", workerId };
@@ -236,7 +224,7 @@ export class DeepScanWorkerRunner {
       worker: {
         id: workerId,
         resultPath,
-        coverage: discoveryCoverage!,
+        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
       },
     };
@@ -314,7 +302,7 @@ export class DeepScanWorkerRunner {
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      await this.persistWorkerCancellation(
+      outcome = await this.cancelAttempt(
         {
           workerId: reducerId,
           kind: "dedup",
@@ -324,7 +312,6 @@ export class DeepScanWorkerRunner {
         outcome.attempt,
         outcome.threadId,
       );
-      outcome = { status: "canceled" };
     }
     if (outcome.status === "failed") {
       if (outcome.error instanceof DeepScanNonRetryableError)
@@ -414,6 +401,7 @@ export class DeepScanWorkerRunner {
               : join(run.scanDir, "artifacts"),
           subagents: input.subagents,
           signal,
+          onNonRetryableError: this.options.onNonRetryableError,
           resumeThreadId: resumableThreadId,
           continuationPrompt: resumableThreadId
             ? (continuationPrompt ??
@@ -576,16 +564,14 @@ export class DeepScanWorkerRunner {
     );
   }
 
-  private async persistWorkerCancellation(
-    input: {
-      workerId: string;
-      kind: "discovery" | "dedup";
-      promptPath: string;
-      artifactDir: string;
-    },
+  private async cancelAttempt(
+    input: Pick<
+      Parameters<DeepScanWorkerRunner["runWorkerWithRetries"]>[0],
+      "workerId" | "kind" | "promptPath" | "artifactDir"
+    >,
     attempt: number,
     threadId: string | undefined,
-  ): Promise<void> {
+  ): Promise<WorkerAttemptOutcome> {
     const coordinatorShutdown =
       this.options.signal.reason === "mcp_transport_closed";
     await this.options.store.updateWorker({
@@ -601,19 +587,6 @@ export class DeepScanWorkerRunner {
         ? { error: "coordinator_shutdown: mcp_transport_closed" }
         : {}),
     });
-  }
-
-  private async cancelAttempt(
-    input: {
-      workerId: string;
-      kind: "discovery" | "dedup";
-      promptPath: string;
-      artifactDir: string;
-    },
-    attempt: number,
-    threadId: string | undefined,
-  ): Promise<WorkerAttemptOutcome> {
-    await this.persistWorkerCancellation(input, attempt, threadId);
     return { status: "canceled" };
   }
 }
@@ -689,6 +662,7 @@ function reducerInputRecoveryInstructions(): string[] {
   return [
     "If input retrieval exceeded a response or IPC size limit, call get_codex_security_deep_reducer_inputs({ cursor?, maxBytes, findingRef? }) with a smaller maxBytes budget (for example, halve the failed request's budget), preserving its cursor and findingRef to retry the same page.",
     "Do not repeat an oversized request unchanged. If inputs have not been read yet, paginate all assigned findings and the previous aggregate, assembling each json fragment in code and following nextCursor until absent; inspect assembled data selectively and fetch details by findingRef.",
+    "Persist fragments, cursor: nextCursor ?? null, and completion together in one serializable store value after each successful page. Never store an undefined cursor or append a page already committed before a later cell failure. Check MCP isError before parsing its text as a page.",
     "Preserve pages already read and account for every finding before submitting the aggregate.",
   ];
 }

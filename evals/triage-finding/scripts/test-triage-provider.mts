@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { parse } from "yaml";
 import { beforeAll } from "./triage-provider.mts";
-const require = createRequire(import.meta.url);
-const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 const runner = path.join(import.meta.dirname, "run-promptfoo.mts");
+function providerConfig(name: string) {
+  return parse(
+    fs.readFileSync(path.join(evalRoot, "providers", `${name}.yaml`), "utf8"),
+  );
+}
 const extensions = [
   `file://${path.join(import.meta.dirname, "triage-provider.mts")}:beforeAll`,
 ];
@@ -59,7 +62,7 @@ function invoke(args: string[], environment: NodeJS.ProcessEnv) {
 }
 
 test(
-  "runtime extension preserves native credential precedence and wraps providers once",
+  "preloaded runtime preserves native credentials and legacy hooks wrap once",
   { skip: process.platform === "win32" },
   async (t) => {
     const root = fs.realpathSync(
@@ -82,6 +85,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
 `,
       { mode: 0o755 },
     );
+    await import("./initialize-provider.mts");
     const { loadApiProvider } = await import("promptfoo");
     const cases = [
       {
@@ -115,13 +119,16 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
       },
     ];
     for (const entry of cases) {
-      const load = () =>
+      const load = (runtime = false) =>
         loadApiProvider("openai:codex-sdk:gpt-5.5", {
           basePath: root,
           env: entry.env,
           options: {
             env: entry.providerEnv,
             config: {
+              cli_config: runtime
+                ? { default_permissions: "triage_runtime_only" }
+                : undefined,
               working_dir: root,
               codex_path_override: fakeCodex,
               skip_git_repo_check: true,
@@ -133,13 +140,19 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
           },
         });
       const native = await load();
-      const adapted = await load();
+      const adapted = await load(true);
       try {
+        const preloaded = await adapted.callApi("synthetic");
         const context = { suite: { providers: [adapted] } };
         beforeAll(context);
         beforeAll(context);
         const original = await native.callApi("synthetic");
         const result = await adapted.callApi("synthetic");
+        assert.equal(preloaded.error, undefined);
+        assert.deepEqual(
+          JSON.parse(String(preloaded.output)),
+          JSON.parse(String(result.output)),
+        );
         assert.equal(original.error, undefined);
         assert.equal(result.error, undefined);
         const originalOutput = JSON.parse(String(original.output));
@@ -158,6 +171,80 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
         await adapted.cleanup?.();
       }
     }
+  },
+);
+
+test(
+  "native CLI provider overrides without a working directory use the staged runtime",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "triage-cli-provider-")),
+    );
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const capture = path.join(root, "capture.json");
+    const fakeCodex = path.join(root, "custom-codex");
+    fs.writeFileSync(
+      fakeCodex,
+      `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const cwd = process.argv[process.argv.indexOf('--cd') + 1];
+fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,node:process.env.CODEX_MCP_NODE_PATH,directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])}));
+console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-cli-provider'}));
+console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:'ok'}}));
+console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
+`,
+      { mode: 0o755 },
+    );
+    const provider = {
+      id: "openai:codex-sdk:gpt-5.5",
+      config: {
+        codex_path_override: fakeCodex,
+        skip_git_repo_check: true,
+        approval_policy: "never",
+        cli_env: { CODEX_MCP_NODE_PATH: process.execPath },
+      },
+    };
+    const configPath = path.join(root, "config.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        providers: [provider],
+        prompts: ["hello"],
+        tests: [{ assert: [{ type: "equals", value: "ok" }] }],
+      }),
+    );
+    const result = await invoke(
+      [
+        "eval",
+        "-c",
+        configPath,
+        "--providers",
+        provider.id,
+        "--no-cache",
+        "--no-share",
+        "--no-progress-bar",
+      ],
+      {
+        OPENAI_API_KEY: "synthetic-test-key",
+        PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+        PROMPTFOO_DISABLE_WAL_MODE: "true",
+        PROMPTFOO_DISABLE_TELEMETRY: "1",
+        PROMPTFOO_DISABLE_UPDATE: "1",
+      },
+    );
+    assert.equal(result.code, 0, result.output);
+    const row = JSON.parse(fs.readFileSync(capture, "utf8"));
+    assert.notEqual(row.cwd, evalRoot);
+    assert.equal(fs.existsSync(row.cwd), false);
+    assert.equal(row.node, process.execPath);
+    assert.deepEqual(row.directories, [
+      path.dirname(fs.realpathSync(process.execPath)),
+      path.dirname(process.execPath),
+      path.dirname(fakeCodex),
+    ]);
   },
 );
 
@@ -215,25 +302,17 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       PROMPTFOO_DISABLE_UPDATE: "1",
     };
     const configPath = path.join(root, "config.json");
-    const provider = parse(
-      fs.readFileSync(path.join(evalRoot, "promptfooconfig.yaml"), "utf8"),
-    ).providers[0];
+    const provider = providerConfig("triage");
     provider.config.codex_path_override = fakeCodex;
     fs.writeFileSync(
       configPath,
       JSON.stringify({
-        extensions,
         providers: [provider],
         prompts: ["hello"],
         tests: [{ assert: [{ type: "equals", value: "ok" }] }],
       }),
     );
-    const calibration = parse(
-      fs.readFileSync(
-        path.join(evalRoot, "promptfooconfig.calibration.yaml"),
-        "utf8",
-      ),
-    ).providers[0];
+    const calibration = providerConfig("calibration");
     calibration.id = provider.id;
     calibration.config.codex_path_override = fakeCodex;
     const customNode = path.join(root, "custom-node", "bin", "node");
@@ -280,7 +359,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     fs.writeFileSync(
       calibrationConfig,
       JSON.stringify({
-        extensions,
         defaultTest: {
           options: {
             transformVars: `file://${path.join(import.meta.dirname, "runtime-vars.mts")}`,
@@ -368,7 +446,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     fs.writeFileSync(
       templatedConfig,
       JSON.stringify({
-        extensions,
         providers: [
           {
             ...provider,
@@ -1140,9 +1217,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
   },
 );
 
-for (const suite of ["SAST", "calibration"] as const) {
+for (const [suite, legacy] of [
+  ["SAST", false],
+  ["calibration", false],
+  ["SAST", true],
+] as const) {
   test(
-    `${suite} provider survives persisted retry, resume, and viewer replay`,
+    `${suite}${legacy ? " legacy hook" : ""} provider survives persisted retry, resume, and viewer replay`,
     { skip: process.platform === "win32", timeout: 120000 },
     async (t) => {
       const root = fs.realpathSync(
@@ -1165,7 +1246,10 @@ for (const suite of ["SAST", "calibration"] as const) {
         `#!${process.execPath}
 const fs = require('node:fs');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
-fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ cwd, directories: process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []) }) + '\\n');
+const model = process.argv[process.argv.indexOf('--model') + 1];
+const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
+const effort = overrides.find(value => value.startsWith('model_reasoning_effort='));
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ cwd, model, effort, marker: process.env.SAVED_PROVIDER_MARKER, directories: process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []) }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: 'synthetic-sast-replay' }));
 if (fs.existsSync(${JSON.stringify(failure)})) {
  console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'synthetic retryable failure' } }));
@@ -1189,15 +1273,25 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
           path.join(
             evalRoot,
             suite === "SAST"
-              ? "sastbench/promptfooconfig.sastbench.yaml"
+              ? "promptfooconfig.sastbench.yaml"
               : "promptfooconfig.calibration.yaml",
           ),
           "utf8",
         ),
       );
-      const provider = template.providers[0];
+      const provider = providerConfig(
+        suite === "SAST" ? "sastbench" : "calibration",
+      );
       provider.config.codex_path_override = fakeCodex;
-      // Keep the real YAML provider reference and its original configuration directory.
+      provider.config.model = "gpt-5.5";
+      provider.config.model_reasoning_effort = "high";
+      provider.config.cli_env = {
+        ...provider.config.cli_env,
+        SAVED_PROVIDER_MARKER: "original-provider",
+      };
+      const providerFile = path.join(root, "provider.json");
+      fs.writeFileSync(providerFile, JSON.stringify(provider));
+      // Resolve suite hooks relative to their original configuration directory.
       const configPath = path.join(
         evalRoot,
         suite === "SAST" ? "sastbench" : ".",
@@ -1207,8 +1301,10 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       fs.writeFileSync(
         configPath,
         JSON.stringify({
-          extensions: template.extensions,
-          providers: [provider],
+          extensions: legacy
+            ? [...extensions, ...(template.extensions ?? [])]
+            : template.extensions,
+          providers: [legacy ? provider : { $ref: providerFile }],
           prompts: ["hello"],
           defaultTest:
             suite === "calibration"
@@ -1250,18 +1346,50 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       );
       assert.notEqual(initial.code, 0, initial.output);
       assert.match(initial.output, /synthetic retryable failure/);
+      const initialDatabase = new DatabaseSync(
+        path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+        { enableForeignKeyConstraints: false },
+      );
+      const initialEvaluation = initialDatabase
+        .prepare("SELECT config FROM evals ORDER BY created_at DESC LIMIT 1")
+        .get();
+      assert.ok(
+        initialEvaluation && typeof initialEvaluation.config === "string",
+      );
+      const savedProvider = JSON.parse(initialEvaluation.config).providers[0];
+      assert.equal(savedProvider.id, provider.id);
+      assert.equal(savedProvider.$ref, undefined);
+      assert.equal(savedProvider.config.model, "gpt-5.5");
+      assert.equal(savedProvider.config.model_reasoning_effort, "high");
+      assert.equal(
+        savedProvider.config.cli_env.SAVED_PROVIDER_MARKER,
+        "original-provider",
+      );
       if (suite === "SAST") {
-        const initialDatabase = new DatabaseSync(
-          path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-          { enableForeignKeyConstraints: false },
-        );
         const initialResult = initialDatabase
           .prepare("SELECT metadata FROM eval_results LIMIT 1")
           .get();
-        initialDatabase.close();
         assert.ok(
           JSON.parse((initialResult?.metadata as string) || "{}").sastbench,
           initial.output,
+        );
+      }
+      initialDatabase.close();
+      if (!legacy) {
+        fs.writeFileSync(
+          providerFile,
+          JSON.stringify({
+            ...provider,
+            config: {
+              ...provider.config,
+              model: "gpt-5.4",
+              model_reasoning_effort: "minimal",
+              cli_env: {
+                ...provider.config.cli_env,
+                SAVED_PROVIDER_MARKER: "changed-provider",
+              },
+            },
+          }),
         );
       }
       fs.rmSync(failure);
@@ -1286,10 +1414,13 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         )
         .get();
       assert.ok(stored && typeof stored.config === "string");
-      assert.equal(JSON.parse(stored.config).providers[0].id, provider.id);
+      assert.deepEqual(JSON.parse(stored.config).providers[0], savedProvider);
       assert.deepEqual(
         JSON.parse(stored.config).extensions,
-        template.extensions.map((extension: string) =>
+        (legacy
+          ? [...extensions, ...(template.extensions ?? [])]
+          : (template.extensions ?? [])
+        ).map((extension: string) =>
           extension.replace(
             "{{env.TRIAGE_PROVIDER_PATH}}",
             path.join(import.meta.dirname, "triage-provider.mts"),
@@ -1396,6 +1527,9 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       assert.equal(new Set(rows.map((row) => row.cwd)).size, 4);
       for (const row of rows) {
         assert.equal(fs.existsSync(row.cwd), false);
+        assert.equal(row.model, "gpt-5.5");
+        assert.equal(row.effort, 'model_reasoning_effort="high"');
+        assert.equal(row.marker, "original-provider");
         assert.deepEqual(row.directories, [
           ...(suite === "SAST"
             ? [

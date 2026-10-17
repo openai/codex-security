@@ -34,7 +34,7 @@
           "description": "Omit or set true when submitting the finished aggregate."
         },
         "scanId": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanId"
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
         },
         "handoffClaimToken": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/handoffClaimToken"
@@ -46,7 +46,10 @@
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/threatModel"
         },
         "findings": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput/properties/findings"
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/finding"
+          }
         }
       },
       "required": ["scanId", "findings"],

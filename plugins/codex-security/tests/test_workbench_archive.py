@@ -9,6 +9,7 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 from workbench_test_support import SCRIPT, run_workbench
@@ -162,6 +163,64 @@ def test_registration_rejection_restores_files_and_database(previous_scan):
     assert (output / "report.md").read_text() == "previous scan\n"
     assert list(output.parent.glob("scan.previous-*")) == []
     assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
+
+
+def test_registration_waits_for_in_progress_archive_rename(workflow_scan, monkeypatch):
+    state, target, output, scan_id = workflow_scan
+    mark_stopped(state, scan_id)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    module = runpy.run_path(str(SCRIPT))
+    connection = module["connect"]()
+    ready, renamed, attempted = Event(), Event(), Event()
+    args = argparse.Namespace(
+        repository=str(target),
+        scan_dir=str(output),
+        archive_existing=True,
+        archived_scan_dir=None,
+        recipe_json=recipe(target),
+        recipe_json_stdin=False,
+        registration_json_stdin=False,
+        parent_scan_id=None,
+    )
+
+    def competing_registration():
+        other = module["connect"]()
+        other.set_trace_callback(lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None)
+        try:
+            ready.set()
+            assert renamed.wait(5)
+            with pytest.raises(SystemExit) as error:
+                module["register_cli_scan"](other, args)
+            return str(error.value)
+        finally:
+            attempted.set()
+            other.close()
+
+    rename = Path.rename
+
+    def pause_after_rename(path, destination):
+        result = rename(path, destination)
+        if path == output:
+            # The second caller reaches registration while output is absent.
+            # It must wait for the writer before inspecting the replacement.
+            renamed.set()
+            assert attempted.wait(5)
+        return result
+
+    monkeypatch.setattr(Path, "rename", pause_after_rename)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            competing = pool.submit(competing_registration)
+            assert ready.wait(5)
+            registered = module["register_cli_scan"](connection, args)
+            assert competing.result(timeout=5) == "Cannot archive the output of a running scan."
+        archive = Path(registered["archivedScanDir"])
+        assert (archive / "report.md").read_text() == "previous scan\n"
+        assert list(output.iterdir()) == []
+        assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
+    finally:
+        renamed.set()
+        connection.close()
 
 
 def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
