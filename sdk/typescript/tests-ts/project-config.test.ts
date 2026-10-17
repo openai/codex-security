@@ -187,6 +187,22 @@ describe("project configuration input contract", () => {
     expect((await readProjectConfig(json)).input).toEqual(input);
   });
 
+  test("loads a JSON project file with a UTF-8 byte order mark", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "scan.json");
+    const input = {
+      scan: { mode: "deep", deep: { subagents_per_worker: 0 } },
+      codex: { synthetic_setting: "preserve\uFEFFthis" },
+    } satisfies ProjectConfigInput;
+    await writeFile(path, `\uFEFF${JSON.stringify(input)}`);
+
+    expect(await readProjectConfig(path)).toEqual({
+      path,
+      directory: root,
+      input,
+    });
+  });
+
   test.each([
     [150, 1],
     [500, 20],
