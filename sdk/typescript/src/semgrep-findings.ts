@@ -1,5 +1,5 @@
 import {
-  repositoryUrlKey,
+  cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
@@ -132,9 +132,11 @@ function sarifIdentity(value: unknown): string {
   return identity(
     null,
     requiredText(result["ruleId"], "Semgrep ruleId"),
-    requiredText(
-      record(physical["artifactLocation"], "Artifact location")["uri"],
-      "Semgrep artifact URI",
+    decodeURIComponent(
+      requiredText(
+        record(physical["artifactLocation"], "Artifact location")["uri"],
+        "Semgrep artifact URI",
+      ),
     ),
     line,
     column,
@@ -234,7 +236,7 @@ export function normalizeSemgrepSarif(
       );
       if (
         declared &&
-        repositoryUrlKey(declared) !== repositoryUrlKey(repositoryUrl)
+        cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
       )
         throw new Error(
           "SARIF source repository does not match the declared source repository URL.",
@@ -353,7 +355,7 @@ export function normalizeSemgrepSarif(
             : level === "note"
               ? "low"
               : "unknown";
-      const path = relativePath(rawPath);
+      const path = relativePath(decodeURIComponent(rawPath));
       return {
         source_finding_id: sarifIdentity(result),
         evidence: validateExternalEvidence({

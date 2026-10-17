@@ -33,7 +33,7 @@ import type {
   ExternalPublicationInput,
 } from "./external-findings.js";
 import {
-  repositoryUrlKey,
+  cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
   validateImportReceipt,
@@ -49,12 +49,6 @@ import type {
 } from "./external-import-models.js";
 
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
-
-// Cloud's import catalog contains GitHub repositories, including custom Enterprise
-// hosts. Match its case-insensitive URL identity without merging schemes or ports.
-function cloudRepositoryUrlKey(value: string): string {
-  return repositoryUrlKey(value).toLowerCase();
-}
 
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {

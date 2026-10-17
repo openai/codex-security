@@ -156,6 +156,75 @@ test("requires source identity and rejects conflicting SARIF repository provenan
   expect(() => normalizeSemgrepFindings(input)).toThrow("does not match");
 });
 
+test.each([true, false])(
+  "SARIF decodes source paths once and matches JSON identity (fingerprint=%s)",
+  (fingerprint) => {
+    for (const path of ["src/my file.ts", "src/my%20file.ts"]) {
+      const json: any = semgrepJson();
+      const sarif: any = semgrepSarif();
+      json.results[0].path = path;
+      sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri =
+        path.split("/").map(encodeURIComponent).join("/");
+      if (!fingerprint) {
+        delete json.results[0].extra.fingerprint;
+        delete sarif.runs[0].results[0].fingerprints;
+      }
+      const original = structuredClone(sarif);
+      const finding = normalizeSemgrepSarif(sarif).findings[0]!;
+      expect(finding.evidence.locations).toEqual([{ path, line: 3 }]);
+      expect(finding.source_finding_id).toBe(
+        normalizeSemgrepFindings(json).findings[0]!.source_finding_id,
+      );
+      expect(finding.evidence.source_data).toMatchObject({
+        result: original.runs[0].results[0],
+      });
+      expect(sarif).toEqual(original);
+    }
+  },
+);
+
+test.each([
+  "%2e%2e/outside.ts",
+  "%2Foutside.ts",
+  "C%3A%5Coutside.ts",
+  "src/%00.ts",
+])(
+  "SARIF retains encoded unsafe URI %s without a repository location",
+  (uri) => {
+    const input = semgrepSarif();
+    input.runs[0]!.results[0]!.locations[0]!.physicalLocation.artifactLocation.uri =
+      uri;
+    const output = normalizeSemgrepSarif(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([]);
+    expect(output.findings[0]!.evidence.details?.code?.end_line).toBeNull();
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({
+      result: input.runs[0]!.results[0],
+    });
+  },
+);
+
+test("SARIF matches custom GitHub Enterprise repository casing without merging ports or schemes", () => {
+  const input: any = semgrepSarif();
+  input.runs[0].versionControlProvenance = [
+    { repositoryUri: "https://git.example.test/Example/Project.git" },
+  ];
+  expect(
+    normalizeSarif(input, {
+      sourceRepositoryUrl: "https://GIT.EXAMPLE.TEST/example/project/",
+    }).findings,
+  ).toHaveLength(1);
+  for (const sourceRepositoryUrl of [
+    "http://git.example.test/example/project",
+    "https://git.example.test:443/example/project",
+    "https://git.example.test/other/project",
+  ]) {
+    expect(() => normalizeSarif(input, { sourceRepositoryUrl })).toThrow(
+      "does not match",
+    );
+  }
+});
+
 test("gated CE fingerprint placeholders use independent location identities", () => {
   const input: any = semgrepSarif();
   delete input.runs[0].tool.driver.rules;

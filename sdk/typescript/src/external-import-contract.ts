@@ -45,6 +45,12 @@ export function repositoryUrlKey(value: string): string {
   return `${parts[1]!.toLowerCase()}://${authority}${path}${parts[4]!}`;
 }
 
+// Cloud's import catalog contains GitHub repositories, including custom Enterprise
+// hosts. Match its case-insensitive URL identity without merging schemes or ports.
+export function cloudRepositoryUrlKey(value: string): string {
+  return repositoryUrlKey(value).toLowerCase();
+}
+
 // Cloud ImportModel applies these constraints to both requests and responses.
 // Its UTF-8 limits are not exported as JSON Schema character limits: even a
 // plain string field such as a receipt error message inherits the 512-byte bound.
