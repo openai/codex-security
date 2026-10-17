@@ -1,15 +1,23 @@
 import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
 import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
+import {
+  legacyAcceptedFinding,
+  legacyRawDiscoveryFinding,
+} from "./legacy-accepted-finding.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 
-const { validateDiscoveryArtifacts, validateReducerArtifacts } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-  );
+const {
+  parseDeepReduction,
+  projectDiscoveryCoverage,
+  validateDiscoveryArtifacts,
+  validateReducerArtifacts,
+} = await importSource(
+  path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+);
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
@@ -17,11 +25,69 @@ try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
+  await testLongDeferredCandidateRecovery(root);
+  await testAcceptedHistoricalFindings(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testAcceptedHistoricalFindings(root: string) {
+  const current = finding("historical-checkpoint", "fixture.py");
+  const legacy = legacyAcceptedFinding(current);
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "accepted-history"),
+    "worker-history",
+    draft([legacyRawDiscoveryFinding(current)]),
+  );
+  const workerBytes = await readFile(worker.resultPath, "utf8");
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+  );
+  const recovered = await validateDiscoveryArtifacts(
+    artifacts,
+    worker.resultPath,
+    scanId,
+    true,
+    true,
+  );
+  assert.deepEqual(recovered.findings, [legacy]);
+  assert.equal(await readFile(worker.resultPath, "utf8"), workerBytes);
+
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-history", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
+  await writeResult(resultPath, reduction([legacy]));
+  const input = {
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-history",
+  };
+  const previousBytes = await readFile(resultPath, "utf8");
+  await assert.rejects(validateReducerArtifacts(input, scanId));
+  assert.deepEqual(
+    (await validateReducerArtifacts({ ...input, accepted: true }, scanId))
+      .result.findings,
+    [legacy],
+  );
+  assert.equal(await readFile(resultPath, "utf8"), previousBytes);
+
+  const currentPath = path.join(artifactDir, "current.json");
+  await writeResult(currentPath, reduction([current]));
+  const next = await validateReducerArtifacts(
+    {
+      ...input,
+      resultPath: currentPath,
+      previousReducerResultPath: resultPath,
+    },
+    scanId,
+  );
+  assert.equal(next.newFindings, 0);
+  assert.deepEqual(next.result.findings, [current]);
+  assert.equal(await readFile(resultPath, "utf8"), previousBytes);
+}
 
 async function testDiscoveryValidation(root: string) {
   const result = draft([finding("shared", "src/a.js")], {
@@ -162,9 +228,20 @@ async function testReducerValidation(root: string) {
       ],
       previous: null,
     };
-  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
+  const validateSnapshot = (
+    reducerId = "dedup-0001",
+    snapshot = sources,
+    persistSourceCoverage = false,
+  ) =>
     validateReducerArtifacts(
-      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId,
+        sources: snapshot,
+        persistSourceCoverage,
+      },
       scanId,
     );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
@@ -173,10 +250,18 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
+  const { sourceCoverage, ...legacySnapshot } = validatedSnapshot.result;
+  assert.equal(sourceCoverage.completeness, undefined);
   assert.deepEqual(
-    validatedSnapshot.result,
+    legacySnapshot,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "v1 preserves host coverage in memory while retaining the legacy persisted shape",
+  );
+  const versionedSnapshot = await validateSnapshot("dedup-0001", sources, true);
+  assert.deepEqual(
+    versionedSnapshot.result,
+    JSON.parse(await readFile(resultPath, "utf8")),
+    "v2 persists the full host projection",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
@@ -587,6 +672,81 @@ async function testEmptyDiscoveryAndReduction(root: string) {
     result.result,
     { scanId, findings: [] },
     "reducers submit and return results without coverage",
+  );
+}
+
+async function testLongDeferredCandidateRecovery(root: string) {
+  const candidateIds = ["a".repeat(512), "b".repeat(512)];
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "long-deferred-candidates"),
+    "903ef9e0-b34e-4b59-99ac-31d047f82742",
+    draft([], {
+      coverage: {
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: candidateIds.map((candidateId) => ({
+          candidateId,
+          reason: "Follow up on this accepted candidate.",
+        })),
+      },
+    }),
+  );
+  const discovery = await validateDiscoveryArtifacts(
+    artifacts,
+    worker.resultPath,
+    scanId,
+  );
+  const prefix = "artifacts/deep_discovery/workers/discovery-0001/output";
+  const coverage = projectDiscoveryCoverage(
+    discovery.coverage,
+    { id: worker.id, attempt: 2 },
+    prefix,
+  );
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-long", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
+  await writeResult(resultPath, reduction([]));
+  const accepted = await validateReducerArtifacts(
+    {
+      artifacts,
+      artifactDir,
+      resultPath,
+      reducerId: "dedup-long",
+      persistSourceCoverage: true,
+      sources: {
+        discoveries: [
+          { workerId: worker.id, attempt: 2, coverage, result: discovery },
+        ],
+        previous: null,
+      },
+    },
+    scanId,
+  );
+  const recovered = parseDeepReduction(await readJson(resultPath), true);
+  assert.deepEqual(recovered.sourceCoverage, accepted.result.sourceCoverage);
+  assert.deepEqual(
+    recovered.sourceCoverage.deferred.map(
+      (item: { provenance: { candidateId: string } }) =>
+        item.provenance.candidateId,
+    ),
+    candidateIds,
+  );
+  assert.equal(
+    new Set(
+      recovered.sourceCoverage.deferred.map(
+        (item: { candidateId: string }) => item.candidateId,
+      ),
+    ).size,
+    candidateIds.length,
+  );
+  const nextAttempt = projectDiscoveryCoverage(
+    discovery.coverage,
+    { id: worker.id, attempt: 3 },
+    prefix,
+  );
+  assert.notEqual(
+    nextAttempt.deferred[0].candidateId,
+    recovered.sourceCoverage.deferred[0].candidateId,
   );
 }
 

@@ -1,7 +1,7 @@
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
-  parsePersistedScanDraft,
+  parseAcceptedDiscoveryDraft,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
@@ -13,7 +13,9 @@ import {
   writeJsonAtomic,
 } from "./deep-scan/artifacts.js";
 import {
+  deepReductionForPersistence,
   parseDeepReduction,
+  projectDiscoveryCoverage,
   parseStoredScanDraft,
   reconcileDeepReduction,
   type DeepReductionInput,
@@ -28,6 +30,22 @@ export { deepReductionInputSchema } from "./deep-scan/artifact-validation.js";
 export async function getCodexSecurityDeepReducerInputs(
   context: ArtifactContext,
 ): Promise<DeepReductionSources> {
+  const inputs = await readDeepReductionSources(context);
+  const { sourceCoverage: _coverage, ...previous } = inputs.previous ?? {};
+  return {
+    discoveries: inputs.discoveries.map(({ workerId, result }) => ({
+      workerId,
+      result,
+    })),
+    previous:
+      inputs.previous === null ? null : (previous as DeepReductionInput),
+  };
+}
+
+/** Capture host coverage alongside the reducer's immutable finding inputs. */
+export async function readDeepReductionSources(
+  context: ArtifactContext,
+): Promise<DeepReductionSources> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
     const discoveries = await Promise.all(
@@ -40,7 +58,7 @@ export async function getCodexSecurityDeepReducerInputs(
           await readJsonObject(worker.resultPath),
           "Accepted Standard worker " + worker.id,
           bound.scanId,
-          parsePersistedScanDraft,
+          parseAcceptedDiscoveryDraft,
           " has an invalid Standard scan result: ",
           " belongs to a different scan.",
         );
@@ -48,12 +66,29 @@ export async function getCodexSecurityDeepReducerInputs(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
-        for (const [index, finding] of result.findings.entries()) {
-          const provenance = finding.provenance as Record<string, unknown>;
-          provenance.sourceFindingIds = [`${worker.id}:${index}`];
-        }
-        const { coverage: _coverage, ...reduction } = result;
-        return { workerId: worker.id, result: reduction };
+        result.findings = result.findings.map((finding, index) => ({
+          ...finding,
+          provenance: {
+            ...finding.provenance,
+            sourceFindingIds: [`${worker.id}:${index}`],
+          },
+        }));
+        const { coverage, ...reduction } = result;
+        return {
+          workerId: worker.id,
+          ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
+          coverage: projectDiscoveryCoverage(
+            coverage,
+            worker,
+            relative(
+              bound.artifacts.scanDir,
+              worker.artifactDir ?? dirname(worker.resultPath),
+            )
+              .split(sep)
+              .join("/"),
+          ),
+          result: reduction,
+        };
       }),
     );
     const previous = await readPreviousReduction(bound);
@@ -88,7 +123,7 @@ export async function recordCodexSecurityDeepReduction(
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",
       );
-    const inputs = await getCodexSecurityDeepReducerInputs(context);
+    const inputs = await readDeepReductionSources(context);
     const expectedScanId =
       bound.scanId ??
       inputs.previous?.scanId ??
@@ -104,8 +139,12 @@ export async function recordCodexSecurityDeepReduction(
       inputs.previous,
     );
 
-    await saveScanDraftCheckpoint(context, reduction);
-    await writeJsonAtomic(bound.resultPath, reduction);
+    const persisted = deepReductionForPersistence(
+      reduction,
+      bound.state.persistSourceCoverage,
+    );
+    await saveScanDraftCheckpoint(context, persisted);
+    await writeJsonAtomic(bound.resultPath, persisted);
     const documentWarning = await saveThreatModelDocument(
       context,
       reduction.threatModel,
@@ -169,7 +208,7 @@ async function readPreviousReduction(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
     bound.scanId,
-    parseDeepReduction,
+    (value) => parseDeepReduction(value, true),
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

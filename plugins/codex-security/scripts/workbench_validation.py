@@ -51,6 +51,76 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
 path_within_scope = finalizer.path_within_scope
 
 
+def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | None:
+    # Publication follows the durable reducer sequence, not completion timestamps.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    return max(
+        (
+            worker
+            for worker in db.saved_results._saved_workers(connection, scan_id)
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+
+
+def has_verified_selected_result(
+    db: Any, connection: Any, scan: Any, *, reducer: Any = None
+) -> bool:
+    """Verify persisted Deep publication authority before using the artifact read contract."""
+    if scan["mode"] != "deep":
+        return False
+    run = db.deep_scan.find_supported_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
+    try:
+        if selection is not None:
+            db.saved_results._require_selected_result(scan, selection)
+            return selection["resultPath"] is not None
+        if run is None or run["workflow_version"] not in {
+            "deep-scan-mcp/v1",
+            "deep-security-scan/v1",
+        }:
+            return False
+        if reducer is None:
+            reducer = latest_publication_reducer(db, connection, scan["id"])
+        accepted = reducer["accepted_result_path"] if reducer is not None else None
+        digests = db.saved_results._accepted_source_digests(connection, scan["id"])
+        if accepted is None or accepted not in digests:
+            return False
+        scan_dir = Path(scan["scan_dir"])
+        db.saved_results._read_saved_result(
+            scan_dir,
+            Path(accepted).relative_to(scan_dir).as_posix(),
+            scan["id"],
+            kind="dedup",
+            accepted_source_digests=digests,
+        )
+    except (finalizer.ContractError, ValueError) as exc:
+        raise finalizer.RecoverableContractError(str(exc)) from exc
+    return True
+
+
+def validate_completed_scan_artifacts(db: Any, scan: sqlite3.Row) -> None:
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    try:
+        manifest = db._prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+        )[2]
+    except db.ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    db.verify_manifest_binding(scan, manifest)
+    db.published_manifest_digest(scan_dir, manifest)
+
+
 def require_close_note(close_reason: str | None, note: str | None) -> None:
     if note is None and close_reason == "false_positive":
         raise SystemExit("Explain why this finding is a false positive.")
@@ -127,6 +197,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "modelUsage",
         "completion",
         *SCAN_USAGE_TOKEN_KEYS,
     }
@@ -137,6 +208,22 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
     ):
         return False
+    if "modelUsage" in usage:
+        parts = usage["modelUsage"]
+        if not isinstance(parts, list) or not parts:
+            return False
+        for part in parts:
+            if not isinstance(part, dict) or set(part) != {"model", *SCAN_USAGE_TOKEN_KEYS}:
+                return False
+            if part["model"] is not None and not isinstance(part["model"], str):
+                return False
+            if (
+                not all(type(part[key]) is int and part[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+                or part["cachedInputTokens"] + part["cacheWriteInputTokens"] > part["inputTokens"]
+            ):
+                return False
+        if any(sum(part[key] for part in parts) != usage[key] for key in SCAN_USAGE_TOKEN_KEYS):
+            return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
         return False
@@ -147,7 +234,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     return True
 
 
-def parse_scan_cost(value: str | None) -> str | None:
+def parse_scan_cost(value: str | None, *, allow_lower_bound: bool = False) -> str | None:
     if value is None:
         return None
     if len(value.encode("utf-8")) > 8192:
@@ -156,7 +243,10 @@ def parse_scan_cost(value: str | None) -> str | None:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:
         raise SystemExit("Scan cost must be a valid JSON object.") from exc
-    if isinstance(cost, dict) and "usage" in cost:
+    if allow_lower_bound and isinstance(cost, dict) and set(cost) == {"lowerBound"}:
+        if not _valid_legacy_scan_cost(cost["lowerBound"]):
+            raise SystemExit("Scan cost lower bound must be a valid measured cost.")
+    elif isinstance(cost, dict) and "usage" in cost:
         if (
             not set(cost).issubset({"usage", "cost"})
             or not _valid_measured_scan_usage(cost["usage"])

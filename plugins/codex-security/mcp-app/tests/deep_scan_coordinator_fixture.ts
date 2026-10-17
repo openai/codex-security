@@ -90,10 +90,11 @@ export async function fixtureRun(
 export type TestWorker = PersistedDeepScanWorker &
   Pick<DeepScanWorkerMutation, "replaceableFailureKind">;
 export type StoreInput<Method extends keyof DeepScanStore> = Parameters<
-  DeepScanStore[Method]
+  NonNullable<DeepScanStore[Method]>
 >[0];
 
 export class FakeStore {
+  declare selectFinalization: DeepScanStore["selectFinalization"];
   run: DeepScanRunState;
   declare failProgressAt: number | undefined;
   constructor(run: DeepScanRunState) {

@@ -31,12 +31,25 @@ interface WorkbenchOptions {
 export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  selectFinalization: boolean | WorkbenchOptions = false,
+  withExecutionSettings = false,
+  signal?: AbortSignal,
+  releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbench(pythonCommand, args, input, options);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      input,
+      selectFinalization,
+      withExecutionSettings,
+      signal,
+      releaseCoordinator,
+      isolatedPython,
+    );
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -55,8 +68,29 @@ async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  selectFinalization: boolean | WorkbenchOptions = false,
+  withExecutionSettings = false,
+  signal?: AbortSignal,
+  releaseCoordinator = false,
+  isolatedPython = false,
 ): Promise<JsonObject> {
+  if (typeof selectFinalization === "object") {
+    isolatedPython = selectFinalization.isolatedPython ?? isolatedPython;
+    selectFinalization = false;
+  }
+  const internalInvocation = releaseCoordinator
+    ? "release_coordinator=True"
+    : selectFinalization
+      ? "select_finalization=True"
+      : withExecutionSettings
+        ? "with_execution_settings=True"
+        : undefined;
+  const pythonSource = internalInvocation
+    ? WORKBENCH_PYTHON.replace(
+        "workbench_db.main()",
+        `workbench_db.main(${internalInvocation})`,
+      )
+    : WORKBENCH_PYTHON;
   const timeout = [
     "begin-deep-scan",
     "cancel-scan",
@@ -89,13 +123,14 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
+      ...(isolatedPython ? ["-I", "-X", "utf8"] : []),
       "-B",
       "-c",
-      WORKBENCH_PYTHON,
+      pythonSource,
       workbenchScriptPath(),
     ],
     {
+      signal,
       cwd: PLUGIN_ROOT,
       windowsHide: true,
       env: process.env,

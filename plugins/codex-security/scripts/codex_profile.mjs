@@ -127,8 +127,9 @@ class ProfileThread {
           );
         }
         if (event.type === "thread.started") this.id = event.thread_id;
-        if (event.type === "turn.completed" && event.usage != null)
-          event.usage.cache_write_input_tokens ??= 0;
+        if (event.type === "turn.completed") {
+          if (event.usage != null) event.usage.cache_write_input_tokens ??= 0;
+        }
         yield event;
       }
     } finally {
@@ -235,5 +236,8 @@ async function* execute(options, args, input, signal) {
   } finally {
     lines.close();
     if (child.exitCode === null && child.signalCode === null) child.kill();
+    child.stdout.destroy();
+    child.stderr.destroy();
+    await closed;
   }
 }

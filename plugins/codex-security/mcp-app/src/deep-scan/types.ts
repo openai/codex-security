@@ -3,6 +3,8 @@ import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
 import type {
   configSchema,
+  finalizationInputSchema,
+  mergeClaimSchema,
   dedupInputSchema,
   runSchema,
   workerSchema,
@@ -12,10 +14,20 @@ import type {
 export type DeepScanConfig = z.output<typeof configSchema>;
 export type DeepScanRunState = Omit<
   z.output<typeof runSchema>,
-  "persistedWorkers" | "persistedDedupInputs"
+  | "persistedWorkers"
+  | "persistedDedupInputs"
+  | "persistedMergeClaims"
+  | "finalizationInput"
+  | "usageOwner"
+  | "executionSettings"
 > & {
+  finalizationInput?: z.output<typeof runSchema>["finalizationInput"];
+  usageOwner?: z.output<typeof runSchema>["usageOwner"];
+  executionSettings?: z.output<typeof runSchema>["executionSettings"];
+  persistedMergeClaims?: PersistedDeepScanMergeClaim[];
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
+  startDisposition?: "created" | "joined";
 };
 export type DeepScanTerminalReason = NonNullable<
   DeepScanRunState["terminalReason"]
@@ -26,6 +38,18 @@ export type PersistedDeepScanWorker = z.output<typeof workerSchema> & {
   consecutiveErrors?: number;
 };
 export type DeepScanWorkerKind = PersistedDeepScanWorker["kind"];
+export type DeepScanRunStatus = DeepScanRunState["status"];
+export type DeepScanWorkerStatus = PersistedDeepScanWorker["status"];
+export type DeepScanMergeState = PersistedDeepScanWorker["mergeState"];
+export type DeepScanFinalizationInput = z.output<
+  typeof finalizationInputSchema
+>;
+export type PersistedDeepScanMergeClaim = z.output<typeof mergeClaimSchema>;
+export interface DeepScanCanonicalArtifacts {
+  inScopeFilesPath: string;
+  candidateLedgerPath: string;
+}
+export type DeepScanReducerArtifacts = DeepScanCanonicalArtifacts;
 
 export interface DeepScanCoordinatorClaim {
   run: DeepScanRunState;
@@ -62,8 +86,13 @@ export interface DedupCommit {
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs"
->;
+  "begin" | "coordinatorLeaseArgs" | "selectFinalization" | "claimDedup"
+> & {
+  selectFinalization?: WorkbenchDeepScanStore["selectFinalization"];
+  claimDedup(
+    ...args: Parameters<WorkbenchDeepScanStore["claimDedup"]>
+  ): Promise<DeepScanRunState | void>;
+};
 
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {

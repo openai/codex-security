@@ -2,21 +2,45 @@ import { readJson, writeJson } from "./support/json.ts";
 import { sourceReferences } from "./support/source-references.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  legacyAcceptedFinding,
+  legacyRawDiscoveryFinding,
+} from "./legacy-accepted-finding.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 
 type Finding = ReturnType<typeof finding>;
+type SourceCoverage =
+  import("../src/artifact-scan-draft.js").ScanDraftInput["coverage"] & {
+    reviews: unknown[];
+    deferred: { provenance: unknown }[];
+    surfaces: { receiptRefs: unknown[] }[];
+  };
 
 const {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
-  getCodexSecurityDeepReducerInputs,
+  getCodexSecurityDeepReducerInputs: getModelInputs,
+  readDeepReductionSources,
   recordCodexSecurityDeepReduction,
-} = await importSource(
+} = (await importSource(
   path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
-);
+)) as typeof import("../src/artifact-deep-reducer.js");
+
+async function getCodexSecurityDeepReducerInputs(
+  context: Parameters<typeof readDeepReductionSources>[0],
+) {
+  return (await readDeepReductionSources(context)) as Omit<
+    Awaited<ReturnType<typeof readDeepReductionSources>>,
+    "discoveries"
+  > & {
+    discoveries: (Awaited<
+      ReturnType<typeof readDeepReductionSources>
+    >["discoveries"][number] & { coverage: SourceCoverage })[];
+  };
+}
 
 const validReduction = reduction([]);
 
@@ -54,6 +78,7 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-deep-reducer-", true);
 try {
+  await testHistoricalAssignedInputs(root);
   const scanRoot = path.join(root, "scan");
   const workersRoot = path.join(
     scanRoot,
@@ -117,9 +142,10 @@ try {
     root: outputRoot,
     repoRoot: root,
     scanId,
-    layout: "reducer",
+    layout: "reducer" as const,
     deepReducer: {
       scanRoot,
+      persistSourceCoverage: true,
       claimedWorkers: [first, second],
     },
   };
@@ -164,13 +190,39 @@ try {
     /evidenceRefs must refer/,
     "live reducer submissions reject unknown evidence references instead of silently removing them",
   );
-  assert.deepEqual(inputs, {
-    discoveries: [
-      { workerId: first.id, result: withSourceRefs(first) },
-      { workerId: second.id, result: withSourceRefs(second) },
-    ],
-    previous: null,
+  assert.deepEqual(
+    {
+      ...inputs,
+      discoveries: inputs.discoveries.map(({ coverage, ...source }) => source),
+    },
+    {
+      discoveries: [
+        { workerId: first.id, result: withSourceRefs(first) },
+        { workerId: second.id, result: withSourceRefs(second) },
+      ],
+      previous: null,
+    },
+  );
+  assert.equal(inputs.discoveries[0]!.coverage!.completeness, undefined);
+  assert.equal(inputs.discoveries[1]!.coverage!.completeness, undefined);
+  assert.deepEqual(
+    await getModelInputs(context),
+    {
+      discoveries: inputs.discoveries.map(({ workerId, result }) => ({
+        workerId,
+        result,
+      })),
+      previous: null,
+    },
+    "coverage accounting does not change reducer model inputs",
+  );
+  assert.deepEqual(inputs.discoveries[0]!.coverage!.deferred[0].provenance, {
+    workerId: first.id,
+    candidateId: "candidate-upload",
   });
+  assert.deepEqual(inputs.discoveries[0]!.coverage!.surfaces[0].receiptRefs, [
+    "artifacts/deep_discovery/workers/discovery-0001/output/artifacts/missing-worker-receipt.md",
+  ]);
   assert.equal(JSON.stringify(inputs).includes(root), false);
   assert.equal(JSON.stringify(inputs).includes("result.json"), false);
 
@@ -194,6 +246,13 @@ try {
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
+    sourceCoverage: {
+      ...inputs.discoveries[0]!.coverage!,
+      reviews: [
+        ...inputs.discoveries[0]!.coverage!.reviews,
+        ...inputs.discoveries[1]!.coverage!.reviews,
+      ],
+    },
     findings: [
       retainedFinding(shared, [
         { id: "worker-001:0", finding: shared },
@@ -217,7 +276,7 @@ try {
   assert.deepEqual(
     await readJson(outputRoot, "checkpoints", checkpointNames[0]),
     mergedWithSources,
-    "reducer checkpoints retain the accepted findings and scope without coverage",
+    "reducer checkpoints retain accepted findings, scope and source coverage",
   );
 
   assert.deepEqual(
@@ -254,8 +313,8 @@ try {
     await getCodexSecurityDeepReducerInputs(collisionContext);
   const sourceFindingIds =
     collisionInputs.discoveries[0].result.findings.flatMap(
-      (finding: { provenance: { sourceFindingIds: string[] } }) =>
-        finding.provenance.sourceFindingIds,
+      (finding) =>
+        (finding.provenance as { sourceFindingIds: string[] }).sourceFindingIds,
     );
   assert.deepEqual(sourceFindingIds, [
     "worker-collision:0",
@@ -314,18 +373,33 @@ try {
     root: nextOutputRoot,
     repoRoot: root,
     scanId,
-    layout: "reducer",
+    layout: "reducer" as const,
     deepReducer: {
       scanRoot,
+      persistSourceCoverage: true,
       claimedWorkers: [third],
       previousReducerResultPath: path.join(outputRoot, "result.json"),
     },
   };
   const nextInputs = await getCodexSecurityDeepReducerInputs(nextContext);
-  assert.deepEqual(nextInputs, {
-    discoveries: [{ workerId: third.id, result: withSourceRefs(third) }],
-    previous: mergedWithSources,
-  });
+  const { sourceCoverage, ...previousModelInput } = mergedWithSources;
+  assert.deepEqual(
+    (await getModelInputs(nextContext)).previous,
+    previousModelInput,
+    "host coverage metadata is excluded from the previous model input too",
+  );
+  assert.deepEqual(
+    {
+      ...nextInputs,
+      discoveries: nextInputs.discoveries.map(
+        ({ coverage, ...source }) => source,
+      ),
+    },
+    {
+      discoveries: [{ workerId: third.id, result: withSourceRefs(third) }],
+      previous: mergedWithSources,
+    },
+  );
   await assert.rejects(
     recordCodexSecurityDeepReduction(nextContext, reduction([shared])),
     (error: NodeJS.ErrnoException) =>
@@ -335,17 +409,29 @@ try {
     await recordCodexSecurityDeepReduction(nextContext, merged),
     { findingCount: 2, consumedWorkerIds: [third.id] },
   );
-  assert.deepEqual(await readJson(nextOutputRoot, "result.json"), {
-    ...mergedWithSources,
-    findings: [
-      retainedFinding(shared, [
-        { id: "worker-003:0", finding: shared },
-        { id: "worker-001:0", finding: shared },
-        { id: "worker-002:0", finding: shared },
-      ]),
-      mergedWithSources.findings[1],
-    ],
-  });
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(path.join(nextOutputRoot, "result.json"), "utf8"),
+    ),
+    {
+      ...mergedWithSources,
+      sourceCoverage: {
+        ...mergedWithSources.sourceCoverage,
+        reviews: [
+          ...(mergedWithSources.sourceCoverage as SourceCoverage).reviews,
+          ...nextInputs.discoveries[0]!.coverage!.reviews,
+        ],
+      },
+      findings: [
+        retainedFinding(shared, [
+          { id: "worker-003:0", finding: shared },
+          { id: "worker-001:0", finding: shared },
+          { id: "worker-002:0", finding: shared },
+        ]),
+        mergedWithSources.findings[1],
+      ],
+    },
+  );
 
   const enrichedPrevious = structuredClone(mergedWithSources);
   enrichedPrevious.findings[0].summary =
@@ -449,6 +535,63 @@ try {
 }
 
 console.log("artifact deep reducer tests passed");
+
+async function testHistoricalAssignedInputs(root: string) {
+  const scanRoot = path.join(root, "historical");
+  const workersRoot = path.join(
+    scanRoot,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
+  const dedupRoot = path.join(scanRoot, "artifacts", "deep_discovery", "dedup");
+  const current = finding("historical-checkpoint", "fixture.py");
+  const legacy = legacyAcceptedFinding(current);
+  const worker = await createWorker({
+    workersRoot,
+    label: "discovery-history",
+    id: "worker-history",
+    result: workerDraft([legacyRawDiscoveryFinding(current)]),
+  });
+  const output = path.join(dedupRoot, "dedup-history", "output");
+  await mkdir(output, { recursive: true });
+  const previousReducerResultPath = path.join(output, "previous.json");
+  await writeJson(previousReducerResultPath, reduction([legacy]));
+  const context = {
+    root: output,
+    repoRoot: root,
+    scanId,
+    layout: "reducer" as const,
+    deepReducer: {
+      scanRoot,
+      claimedWorkers: [worker],
+      previousReducerResultPath,
+    },
+  };
+  const sourceBytes = await readFile(worker.resultPath, "utf8");
+  const previousBytes = await readFile(previousReducerResultPath, "utf8");
+  const sources = await readDeepReductionSources(context);
+  assert.deepEqual(
+    sources.discoveries[0].result.findings[0].root_cause,
+    legacy.root_cause,
+  );
+  assert.deepEqual(sources.previous!.findings[0], legacy);
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(context, reduction([legacy])),
+  );
+  await recordCodexSecurityDeepReduction(context, reduction([current]));
+  const saved = await readJson(path.join(output, "result.json"));
+  assert.equal(saved.findings[0].root_cause, undefined);
+  assert.deepEqual(
+    saved.findings[0].provenance.sourceFindings[0].finding.root_cause,
+    legacy.root_cause,
+  );
+  assert.equal(await readFile(worker.resultPath, "utf8"), sourceBytes);
+  assert.equal(
+    await readFile(previousReducerResultPath, "utf8"),
+    previousBytes,
+  );
+}
 
 async function createWorker({
   workersRoot,

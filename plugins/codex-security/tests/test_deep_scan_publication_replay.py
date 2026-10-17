@@ -8,9 +8,11 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
+from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from test_publication_stop_interleavings import saved_selection
 
 _CRASH_PUBLICATION = """
 import json, os, runpy, sqlite3, sys
@@ -56,11 +58,21 @@ raise AssertionError("publication never reached the requested crash boundary")
     "boundary",
     ["findings.json", "coverage.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
 )
+@pytest.mark.parametrize("selection_reason", [None, "saturated", "capped"])
 def test_publication_crash_replays_selected_input_without_stale_overwrite(
-    workbench_api, workbench_db, publication_scan, tmp_path, boundary
+    workbench_api, workbench_db, publication_scan, tmp_path, boundary, selection_reason
 ):
     scan = publication_scan()
-    result_path = add_worker(workbench_db, scan)
+    if selection_reason is None:
+        result_path = add_worker(workbench_db, scan)
+    else:
+        _, result_path, _ = accept_reducer(workbench_db, scan)
+        saved_selection(workbench_db, scan, result_path, reason=selection_reason)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_runs SET terminal_reason = ? WHERE scan_id = ?",
+                (selection_reason, scan.scan_id),
+            )
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 3 WHERE scan_id = ?",
@@ -133,7 +145,18 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
         )["scan"]
         assert completed["progress"]["status"] == "complete"
         assert completed["findingCount"] == 1
-        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == run_before
+        run_after = dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone())
+        if run_before["finalization_input_json"] is not None:
+            before_selection = json.loads(run_before["finalization_input_json"])
+            after_selection = json.loads(run_after["finalization_input_json"])
+            digest = after_selection.pop("publicationSha256")
+            assert len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
+            if "publicationSha256" in before_selection:
+                before_digest = before_selection.pop("publicationSha256")
+                assert digest == before_digest
+            assert after_selection == before_selection
+            run_after["finalization_input_json"] = run_before["finalization_input_json"]
+        assert run_after == run_before
         assert [
             dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")
         ] == workers_before
