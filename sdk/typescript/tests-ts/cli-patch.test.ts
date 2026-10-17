@@ -2382,6 +2382,7 @@ describe("scan and patch workflow", () => {
               "--json",
             ],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2441,6 +2442,7 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
