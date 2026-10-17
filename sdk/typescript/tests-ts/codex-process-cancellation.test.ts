@@ -3,6 +3,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptions,
 } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { getEventListeners } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -12,7 +13,7 @@ import {
   setTimeout as delay,
 } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { sendFeedback } from "../src/feedback.js";
 import { runCodexCommand } from "../src/runtime.js";
@@ -58,18 +59,33 @@ for (const mode of [
         throw error;
       }
     };
+    const exited = Promise.withResolvers<void>();
+    const originalSpawn = childProcess.spawn;
+    const observer = spyOn(childProcess, "spawn").mockImplementation(((
+      ...args: Parameters<typeof originalSpawn>
+    ) => {
+      const child = originalSpawn(...args);
+      child.once("exit", () => exited.resolve());
+      return child;
+    }) as typeof originalSpawn);
+    let operation: ReturnType<typeof runCodexCommand>;
+    try {
+      operation = runCodexCommand(
+        { command: node },
+        [fixture, mode, release],
+        {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+        },
+        undefined,
+        controller.signal,
+        mode.startsWith("archive-"),
+      );
+    } finally {
+      observer.mockRestore();
+    }
     let settled = false;
-    const result = runCodexCommand(
-      { command: node },
-      [fixture, mode, release],
-      {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-      },
-      undefined,
-      controller.signal,
-      mode.startsWith("archive-"),
-    ).then(
+    const result = operation.then(
       (value) => {
         settled = true;
         return { value, error: undefined };
@@ -98,7 +114,8 @@ for (const mode of [
         expect(alive(parentPid)).toBe(true);
         controller.abort({ mode });
       }
-      await bounded(until(() => !alive(parentPid!)));
+      // OS PID disappearance can precede delivery of the child exit event.
+      await bounded(exited.promise);
       parentExited = true;
       if (mode === "command-success" || mode === "command-failure")
         controller.abort({ mode });
