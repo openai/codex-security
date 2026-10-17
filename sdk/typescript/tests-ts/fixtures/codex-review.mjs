@@ -4,6 +4,25 @@ import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout, stage = "pair-review"] =
   process.argv.slice(2);
+const refusalMessages = {
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-prefix-text": "Safety policy: request refused.",
+  "policy-intro-text":
+    "Review cannot proceed. Safety policy: this request is refused.",
+  "policy-prefix-due-text":
+    "Safety policy: this request is refused due to disallowed content.",
+  "policy-prefix-under-text":
+    "Safety policy: your request was blocked under the applicable restrictions.",
+  "policy-suffix-text": "Request refused: safety policy.",
+  "policy-suffix-explanation-text":
+    "Request refused: safety policy. I can offer a defensive alternative.",
+  "policy-causal-refusal-text":
+    "This request was refused because it violates the safety policy.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
+  "policy-first-refusal-text":
+    "Cybersecurity policy: this request is refused because it would facilitate unauthorized access.",
+};
 const turnFailures = {
   "policy-turn-code": {
     message: "Request blocked.",
@@ -27,6 +46,41 @@ const turnFailures = {
   },
   "server-error": {
     message: "Provider temporarily unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "service-unavailable": {
+    message: "Connection refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "network-request-error": {
+    message: "Network request refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "http-request-error": {
+    message: "HTTP request blocked: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-network-error": {
+    message:
+      "Failed to contact safety policy: request refused by upstream with 503",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-because-error": {
+    message:
+      "Safety policy: request refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-as-error": {
+    message:
+      "Safety policy: request refused as the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-service-error": {
+    message: "Safety policy: request refused: service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-upstream-error": {
+    message: "Safety policy: request refused by upstream with 503",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
   "connection-error": {
@@ -235,10 +289,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
-      scenario === "refusal-text" ||
-      scenario === "policy-causal-refusal-text" ||
-      scenario === "policy-refusal-text" ||
-      scenario === "policy-first-refusal-text" ||
+      Object.hasOwn(refusalMessages, scenario) ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -253,16 +304,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           turnId,
           item: {
             type: "agentMessage",
-            text:
-              scenario === "refusal-text"
-                ? "I'm sorry, but I can't assist with that request."
-                : scenario === "policy-first-refusal-text"
-                  ? "Cybersecurity policy: this request is refused."
-                  : scenario === "policy-causal-refusal-text"
-                    ? "This request was refused because it violates the safety policy."
-                    : scenario === "policy-refusal-text"
-                      ? "This request was refused because of the safety policy."
-                      : '{"decision":"SAME"}',
+            text: refusalMessages[scenario] ?? '{"decision":"SAME"}',
           },
         },
       });
