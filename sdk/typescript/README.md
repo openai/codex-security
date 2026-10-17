@@ -637,6 +637,8 @@ The scan profile allows reads across the local filesystem and writes to workspac
 roots. Execution approvals are reviewed automatically and may grant extra
 permissions for an operation. Set `codexOverrides.approval_policy: "never"`
 (or CLI `--codex 'approval_policy="never"'`) to deny permission requests.
+If you select a Codex profile, its explicit `approval_policy` takes precedence
+over the root setting.
 Host and network restrictions still apply.
 
 Repository contents, model output, and imported artifacts do not authorize

@@ -178,12 +178,9 @@ export function inlineToml(value: JsonValue): string {
 export function scanApprovalPolicy(
   config: Readonly<JsonObject>,
 ): "never" | "on-request" {
-  const selectedProfile = selectedScanProfile(config);
   const configured =
-    selectedProfile !== undefined &&
-    Object.hasOwn(selectedProfile, "approval_policy")
-      ? selectedProfile["approval_policy"]
-      : config["approval_policy"];
+    selectedScanProfile(config)?.["approval_policy"] ??
+    config["approval_policy"];
   return configured === "never" ? "never" : "on-request";
 }
 
