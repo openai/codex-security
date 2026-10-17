@@ -1341,6 +1341,22 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
         : "Current reader review.\n",
     );
   }
+  const retainedWriter = accepted.coverage.surfaces.find(
+    (row: JsonObject) => row.id === "writer",
+  )!;
+  const retainedPath = path.join(output, retainedWriter.receiptRefs[0]);
+  await writeFile(retainedPath, "Updated writer review.\n");
+  await recordCodexSecurityWorkerScanDraft(context, accepted);
+  assert.equal(
+    await readFile(retainedPath, "utf8"),
+    "Updated writer review.\n",
+  );
+  await rm(path.join(archive, "artifacts/writer.md"));
+  await recordCodexSecurityWorkerScanDraft(context, accepted);
+  assert.equal(
+    await readFile(retainedPath, "utf8"),
+    "Updated writer review.\n",
+  );
   assert.equal(
     await readFile(path.join(archive, "result.json"), "utf8"),
     original,

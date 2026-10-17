@@ -374,6 +374,13 @@ async function preserveScanDraft(
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
   );
+  const currentReceipts = new Set(
+    current.flatMap(({ input }) =>
+      input.coverage.surfaces.flatMap((row) =>
+        Array.isArray(row.receiptRefs) ? row.receiptRefs : [],
+      ),
+    ),
+  );
   const archivedReceipts = new Map<
     string,
     { context: ArtifactContext; components: string[] }
@@ -394,13 +401,15 @@ async function preserveScanDraft(
           attempt,
           ...components,
         ].join("/");
-        archivedReceipts.set(retained, {
-          context: {
-            ...context,
-            root: join(dirname(context.root), "attempts", attempt),
-          },
-          components,
-        });
+        if (!currentReceipts.has(retained)) {
+          archivedReceipts.set(retained, {
+            context: {
+              ...context,
+              root: join(dirname(context.root), "attempts", attempt),
+            },
+            components,
+          });
+        }
         return retained;
       });
     }

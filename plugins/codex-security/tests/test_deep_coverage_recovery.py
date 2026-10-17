@@ -175,6 +175,37 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
     ]
 
 
+@pytest.mark.parametrize("earlier_identity", [None, "restored"])
+def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(tmp_path, earlier_identity):
+    surface = {"label": "API", "disposition": "needs_follow_up"}
+    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface])
+    source = worker(tmp_path, "first", draft)
+    if earlier_identity is not None:
+        older = copy.deepcopy(draft)
+        older["coverage"]["surfaces"][0]["id"] = earlier_identity
+        checkpoint = write_checkpoint(Path(source["artifact_dir"]) / "checkpoints", older)
+        os.utime(checkpoint, ns=(50, 50))
+    parent = copy.deepcopy(draft)
+    parent["coverage"]["surfaces"] = [{**surface, "id": "first/0", "workerId": "first"}]
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0"]}
+    ]
+    write_saved_parent(tmp_path, parent, 200)
+    originals = {p: p.read_bytes() for p in tmp_path.rglob("result.json")}
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+    assert replay[2] == result[2]
+    for coverage in (result[2], replay[2]):
+        assert len(coverage["surfaces"]) == 1
+        recovered_surface = coverage["surfaces"][0]
+        task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == [recovered_surface["id"]]
+        assert recovered_surface["workerId"] == "first"
+        if earlier_identity is not None:
+            assert recovered_surface["id"] == f"first/{earlier_identity}"
+    assert all(p.read_bytes() == contents for p, contents in originals.items())
+
+
 @pytest.mark.parametrize("worker_metadata", ["first", ["first"], {"hint": "first"}])
 def test_parent_evidence_is_retained_without_matching_saved_worker_source(
     tmp_path, worker_metadata

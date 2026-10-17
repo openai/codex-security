@@ -1059,7 +1059,7 @@ def _prepare_worker_coverage_recovery(
     parent: dict[str, Any] | None,
     *,
     enabled: bool,
-) -> bool:
+) -> tuple[bool, list[tuple[dict[str, Any], str, dict[str, Any]]]]:
     """Put bound worker evidence in parent coordinates without changing source files."""
     workers = {owner for _, _, owner in sources if owner is not None}
     parents = [draft for _, draft, owner in sources if owner is None]
@@ -1084,8 +1084,10 @@ def _prepare_worker_coverage_recovery(
             )
         )
     if not enabled:
-        return False
+        return False, []
     projected: dict[str, list[Any]] = {field: [] for field in fields}
+    surface_sources: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    surface_links: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
     for relative, draft, owner in sources:
         if owner is None:
             continue
@@ -1119,7 +1121,14 @@ def _prepare_worker_coverage_recovery(
                     row["receiptRefs"] = refs
                 if field == "surfaces":
                     row.setdefault("receiptRefs", [])
-            projected[field].extend(_aggregate_worker_coverage_rows(rows, owner, field))
+            aggregate_rows = _aggregate_worker_coverage_rows(rows, owner, field)
+            projected[field].extend(aggregate_rows)
+            if field == "surfaces":
+                surface_sources.extend(
+                    (aggregate, row)
+                    for aggregate, row in zip(aggregate_rows, rows)
+                    if isinstance(aggregate, dict) and isinstance(row, dict) and "id" not in row
+                )
     # A canonical aggregate contains copies of the same worker evidence. Let
     # the existing per-worker chronology reconcile those originals exactly once.
     # Keep parent-only evidence when its bound worker source is unavailable.
@@ -1129,12 +1138,34 @@ def _prepare_worker_coverage_recovery(
         for field in fields:
             rows = draft["coverage"].get(field, [])
             if isinstance(rows, list):
+                if field == "surfaces":
+                    tasks = draft["coverage"].get("deferred", [])
+                    for row in rows:
+                        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                            continue
+                        source = next(
+                            (
+                                original
+                                for aggregate, original in surface_sources
+                                if aggregate == _coverage_comparison_row(row, field)
+                            ),
+                            None,
+                        )
+                        if source is None:
+                            continue
+                        for task in tasks if isinstance(tasks, list) else []:
+                            if (
+                                isinstance(task, dict)
+                                and isinstance(task.get("surfaceIds"), list)
+                                and row["id"] in task["surfaceIds"]
+                            ):
+                                surface_links.append((task, row["id"], source))
                 draft["coverage"][field] = [
                     row
                     for row in rows
                     if _coverage_comparison_row(row, field) not in projected[field]
                 ]
-    return True
+    return True, surface_links
 
 
 def merge_saved_results(
@@ -1416,7 +1447,7 @@ def merge_saved_results(
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
 
-    project_worker_coverage = _prepare_worker_coverage_recovery(
+    project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
         sources, parent, enabled=project_worker_coverage
     )
 
@@ -1467,6 +1498,15 @@ def merge_saved_results(
                 if identity is not None:
                     row["id"] = identity
                     reserved.add(identity)
+
+    # Aggregate IDs can differ from the reconciled identity of an anonymous
+    # worker row. Keep parent-only review tasks linked to the recovered surface.
+    for task, published_id, surface in surface_links:
+        recovered_id = retained_coverage_row(surface, surface["workerId"], "surfaces")["id"]
+        task["surfaceIds"] = [
+            recovered_id if identity == published_id else identity
+            for identity in task["surfaceIds"]
+        ]
 
     if parent is None and not sources:
         return None
