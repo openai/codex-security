@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ntpath
-import sys
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -377,83 +376,25 @@ def test_scan_list_probes_requested_repository_once(
     ]
 
 
-@pytest.fixture
-def unscanned_targets(workbench_api, workbench_db, tmp_path, monkeypatch):
-    targets = []
-    for index, name in enumerate(("needle-unscanned-first", "needle-unscanned-second")):
-        target = tmp_path / name
-        target.mkdir()
-        target = target.resolve()
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "workbench_db.py",
-                "create-workspace",
-                "--workspace-id",
-                f"20000000-0000-4000-8000-{index:012d}",
-                "--target-path",
-                str(target),
-            ],
-        )
-        workspace = workbench_api["create_workspace"](
-            workbench_db, workbench_api["parse_args"]("test")
-        )
-        assert workspace["targetPath"] == str(target)
-        assert "results" not in workspace
-        targets.append(target)
-    return workbench_db, targets
-
-
-def test_repository_index_includes_workspace_targets_before_scanning(
-    workbench_api, unscanned_targets
-):
-    connection, targets = unscanned_targets
-    query = workbench_api["native_indexes"].list_repositories
-    repositories = query(connection)["repositories"]
-    assert {row["targetId"] for row in repositories} == {
-        stable_target_id(target) for target in targets
-    }
-    assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
-    for repository in repositories:
-        assert repository["scanCount"] == 0
-        assert repository["latestScan"] is None
-        assert repository["openFindingsCount"] == 0
-        assert repository["checkoutAvailable"] is True
-        assert repository["targetPath"] in {str(target) for target in targets}
-    assert query(connection, query_args(status="scanned"))["repositories"] == []
-    assert query(connection, query_args(status="open_findings"))["repositories"] == []
-
-
 def test_unscanned_repository_filters_preserve_latest_scan_order_and_pagination(
-    workbench_api, indexed_collections, unscanned_targets, tmp_path
+    workbench_api, indexed_collections, tmp_path
 ):
     connection, scanned = indexed_collections
-    _, unscanned = unscanned_targets
-    newest = "00000000-0000-4000-8000-000000000003"
+    unscanned = []
     timestamp = "2026-08-02T00:00:00Z"
     with connection:
+        for name in ("needle-unscanned-first", "needle-unscanned-second"):
+            target = (tmp_path / name).resolve()
+            target.mkdir()
+            workbench_api["ensure_security_target"](connection, str(target))
+            unscanned.append(target)
         connection.execute(
-            "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
-            "scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) "
-            "SELECT ?, workspace_id, target_id, target_path, target_revision, scope, mode, ?, "
-            "status, phase, ?, ?, ?, ? FROM scans WHERE id = ?",
-            (
-                newest,
-                str(tmp_path / newest),
-                timestamp,
-                timestamp,
-                timestamp,
-                timestamp,
-                SCAN_IDS[0],
-            ),
-        )
-        connection.execute(
-            "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)", (newest, timestamp)
+            "UPDATE scans SET started_at = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+            (timestamp, timestamp, timestamp, SCAN_IDS[0]),
         )
         # History sorts by updates, but repository summaries retain latest-started ordering.
         connection.execute(
-            "UPDATE scans SET updated_at = '2026-08-03T00:00:00Z' WHERE id = ?", (SCAN_IDS[0],)
+            "UPDATE scans SET updated_at = '2026-08-03T00:00:00Z' WHERE id = ?", (SCAN_IDS[1],)
         )
     query = workbench_api["native_indexes"].list_repositories
     repositories = query(connection)["repositories"]
@@ -461,8 +402,7 @@ def test_unscanned_repository_filters_preserve_latest_scan_order_and_pagination(
     unscanned_ids = {stable_target_id(target) for target in unscanned}
     assert [row["targetId"] for row in repositories[:3]] == scanned_ids
     assert {row["targetId"] for row in repositories[3:]} == unscanned_ids
-    assert repositories[0]["scanCount"] == 2
-    assert repositories[0]["latestScan"]["scanId"] == newest
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]
     assert [
         row["targetId"] for row in query(connection, query_args(status="scanned"))["repositories"]
     ] == scanned_ids

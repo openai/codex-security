@@ -217,6 +217,7 @@ def list_repositories(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+    # Keep scanned targets in latest-started order, then include targets without scans.
     target_ids = [
         *latest_scan_by_target,
         *(target_id for target_id in targets if target_id not in latest_scan_by_target),
