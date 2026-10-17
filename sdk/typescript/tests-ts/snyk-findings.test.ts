@@ -116,6 +116,29 @@ test("every ambiguous duplicate is excluded instead of keeping an arbitrary proj
 });
 
 test.each([
+  { index: 0 },
+  { uri: "package.json", index: 0 },
+  { uri: "package.json", uriBaseId: "ROOT" },
+])(
+  "unresolved SARIF artifact references cannot identify a Snyk manifest: %p",
+  (artifact) => {
+    for (const manifest of ["one/package.json", "two/package.json"]) {
+      const input: any = snykSarif();
+      input.runs[0].artifacts = [{ location: { uri: manifest } }];
+      input.runs[0].originalUriBaseIds = { ROOT: { uri: "file:///outside/" } };
+      input.runs[0].results[0].locations[0].physicalLocation.artifactLocation =
+        artifact;
+      const original = structuredClone(input);
+      const output = normalizeSnykSarif(input);
+      expect(output.findings).toEqual([]);
+      expect(output.excluded).toHaveLength(1);
+      expect(output.excluded[0]!.reason).toContain("artifact references");
+      expect(input).toEqual(original);
+    }
+  },
+);
+
+test.each([
   "/tmp/package.json",
   "C:\\work\\package.json",
   "../package.json",

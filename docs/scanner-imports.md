@@ -29,8 +29,14 @@ the original evidence; they are not presented as verified fixes or source lines.
 Absolute paths and traversal paths also stay in the original evidence without
 being mapped to repository locations.
 
+Reported version-control repository URLs must match the selected Cloud repository
+before a new upload is prepared. Existing immutable requests continue to use their
+saved repository IDs when resuming, including after a repository rename.
+
 Snyk Code, Container, IaC, license findings and external SARIF property files are
-not supported by this profile. Gzip and UTF-8 BOM input are accepted. The existing
+not supported by this profile. Indexed or base-relative artifact references are
+excluded because this formatter profile uses direct manifest URIs. Gzip and UTF-8
+BOM input are accepted. The existing
 Cloud evidence limits still apply: oversized or invalid records are excluded, not
 truncated. Review the preview's exclusions before proceeding.
 

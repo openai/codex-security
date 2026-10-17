@@ -2759,3 +2759,79 @@ test("Snyk CLI dry run selects its adapter without writing an import", async () 
   expect(await cli.runCli(command, f.cliDeps)).toBe(0);
   expect(f.posts).toHaveLength(0);
 });
+
+test.each([
+  { uris: ["https://github.com/other/project"] },
+  {
+    uris: [
+      "https://github.com/example/project",
+      "https://github.com/other/project",
+    ],
+  },
+  { uris: ["https://github.com:443/example/project"] },
+])(
+  "Snyk source repository provenance binds both publication entrypoints: %p",
+  async ({ uris }) => {
+    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+    const { normalizeSnykSarif } = await import("../src/snyk-findings.js");
+    const input: any = snykSarif();
+    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
+      repositoryUri,
+    }));
+    const f = await fixture(input);
+    const selected = { ...options, provider: "snyk" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeSnykSarif(input),
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(f.reports.size).toBe(0);
+  },
+);
+
+test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input: any = snykSarif();
+  input.runs[0].versionControlProvenance = [
+    {
+      repositoryUri: "https://GITHUB.COM/EXAMPLE/PROJECT.git",
+      revisionId: "synthetic-revision",
+    },
+  ];
+  const original = structuredClone(input);
+  const f = await fixture(input);
+  const selected = { ...options, provider: "snyk" as const };
+  const first = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(first.verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    run: {
+      versionControlProvenance: original.runs[0].versionControlProvenance,
+    },
+  });
+  const changedDestination = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.endsWith("/repositories")) {
+        const body = await response.json();
+        body.data[0].url = "https://github.com/other/project";
+        return Response.json(body);
+      }
+      return response;
+    },
+  };
+  const posted = f.posts.length;
+  await expect(
+    prepareExternalPublication(f.file, selected, changedDestination),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(posted);
+  expect(input).toEqual(original);
+});
