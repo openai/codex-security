@@ -466,6 +466,9 @@ jobs:
       - name: Test secret discovery eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+      - name: Test workflow routing eval contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
   required-test:
     name: ${{ matrix.os }} / node-22
