@@ -9,6 +9,7 @@
 - support scan CLI inference providers ([#1677](https://github.com/openai/codex-security/pull/1677))
 - do not report a successful envelope for a failed dedupe ([#1071](https://github.com/openai/codex-security/pull/1071))
 - separate Git transport from review providers ([#1551](https://github.com/openai/codex-security/pull/1551))
+- update Bedrock workflow to CLI 0.3.0 ([#1675](https://github.com/openai/codex-security/pull/1675))
 
 <!-- release-section: highlights:end -->
 
