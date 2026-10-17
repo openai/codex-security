@@ -1204,6 +1204,34 @@ def test_git_discovery_continues_past_repository_tools_and_batch_shims(
         trusted_git_executable(repository)
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("windows", [False, True])
+def test_scoped_git_discovery_pins_all_target_roots_and_restores_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    first, second, host = (tmp_path / name for name in ("first", "second", "host"))
+    for root in (first, second, host):
+        root.mkdir()
+    for repository in (first, second):
+        (repository / ".git").mkdir()
+    name = "git.exe" if windows else "git"
+    for root in (second, host):
+        (root / name).write_text("synthetic executable fixture\n")
+        (root / name).chmod(0o700)
+    monkeypatch.setitem(
+        trusted_git_executable.__globals__,
+        "sys",
+        SimpleNamespace(platform="win32" if windows else "linux"),
+    )
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (second, host))))
+    with WORKBENCH_TARGET["scoped_git_discovery"](lambda: (first, second)):
+        assert trusted_git_executable(first) == str(host / name)
+        monkeypatch.setenv("PATH", str(second))
+        assert trusted_git_executable(second) == str(host / name)
+    assert trusted_git_executable(first) == str(second / name)
+
+
 def test_git_discovery_does_not_invoke_through_repository_directory_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

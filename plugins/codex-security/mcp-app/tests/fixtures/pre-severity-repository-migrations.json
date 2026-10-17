@@ -1,0 +1,22 @@
+[
+  {
+    "version": 43,
+    "name": "persist repository identities",
+    "statements": [
+      "ALTER TABLE security_targets\n        ADD COLUMN repository_identity TEXT;",
+      "CREATE INDEX security_targets_by_repository_identity\n        ON security_targets(repository_identity);",
+      "ALTER TABLE scans\n        ADD COLUMN repository_generation TEXT;",
+      "CREATE INDEX scans_by_repository_generation\n        ON scans(repository_generation);",
+      "CREATE INDEX scans_by_target_path\n        ON scans(target_path);",
+      "ALTER TABLE scans\n        ADD COLUMN completion_sequence INTEGER CHECK (completion_sequence >= 1);",
+      "CREATE UNIQUE INDEX scans_completion_sequence\n        ON scans(completion_sequence);",
+      "CREATE TRIGGER scans_assign_inserted_completion_sequence\n        AFTER INSERT ON scans\n        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL\n        BEGIN\n            UPDATE scans\n            SET completion_sequence = (\n                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans\n            )\n            WHERE id = NEW.id AND completion_sequence IS NULL;\n        END;",
+      "CREATE TRIGGER scans_assign_updated_completion_sequence\n        AFTER UPDATE OF status ON scans\n        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL\n        BEGIN\n            UPDATE scans\n            SET completion_sequence = (\n                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans\n            )\n            WHERE id = NEW.id AND completion_sequence IS NULL;\n        END;"
+    ]
+  },
+  {
+    "version": 44,
+    "name": "stabilize Linux repository generations",
+    "statements": []
+  }
+]

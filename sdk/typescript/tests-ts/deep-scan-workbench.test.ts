@@ -35,6 +35,7 @@ const deepScanOwnershipProbe = [
   "elif case.get('mutation') == 'withdraw':",
   "    connection.executescript(\"CREATE TRIGGER withdraw_handoff BEFORE UPDATE OF thread_id ON workspaces BEGIN UPDATE scans SET handoff_status = 'pending' WHERE workspace_id = NEW.id; END\")",
   "deep_scan.require_scan = lambda database, value: database.execute('SELECT * FROM scans WHERE id = ?', (value,)).fetchone()",
+  "deep_scan.require_scan_checkout_owner = lambda database, scan: None",
   "deep_scan.require_workspace = lambda database, value: database.execute('SELECT * FROM workspaces WHERE id = ?', (value,)).fetchone()",
   "deep_scan.now = lambda: 'after'",
   "deep_scan.configure(deep_scan)",

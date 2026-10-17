@@ -2019,6 +2019,13 @@ describe("semantic scan comparison", () => {
       after: [after],
       knownFindingGroups: [["dismissed", "historical-alias"]],
     });
+    expect(commands[0]?.args).toEqual([
+      "list-unmatched-scan-pairs",
+      "--repository",
+      "/repository",
+      "--after-scan-id",
+      "current",
+    ]);
     expect(commands.map(({ args: [command] }) => command)).toEqual([
       "list-unmatched-scan-pairs",
     ]);
@@ -2095,6 +2102,61 @@ describe("semantic scan comparison", () => {
         ],
       });
     }
+  });
+
+  test("matches a later-started alias when the earlier scan completes last", async () => {
+    const later = {
+      findingId: "later-finding",
+      occurrenceId: "later-occurrence",
+    };
+    const earlier = {
+      findingId: "earlier-finding",
+      occurrenceId: "earlier-occurrence",
+    };
+    const commands: (readonly string[])[] = [];
+    await matchCompletedScan({
+      scanId: "earlier-scan",
+      repository: "/repository",
+      previousFindings: [later],
+      falsePositives: [],
+      findings: [earlier],
+      async workbench(args) {
+        commands.push(args);
+        return args[0] === "list-unmatched-scan-pairs"
+          ? {
+              batches: [
+                {
+                  afterScanId: "earlier-scan",
+                  afterFindings: [earlier],
+                  beforeScans: [{ scanId: "later-scan", findings: [later] }],
+                },
+              ],
+            }
+          : {};
+      },
+      async matchFindings(input) {
+        expect(input).toEqual({ before: [later], after: [earlier] });
+        return {
+          matches: [
+            {
+              beforeOccurrenceIds: ["later-occurrence"],
+              afterOccurrenceIds: ["earlier-occurrence"],
+              confidence: "high",
+              reason: "Same synthetic finding.",
+            },
+          ],
+          uncertain: [],
+        };
+      },
+    });
+    expect(commands[0]?.slice(-2)).toEqual(["--after-scan-id", "earlier-scan"]);
+    expect(commands[1]?.slice(0, 5)).toEqual([
+      "save-scan-comparison",
+      "--before-scan-id",
+      "later-scan",
+      "--after-scan-id",
+      "earlier-scan",
+    ]);
   });
 
   test.each([
@@ -2748,3 +2810,68 @@ describe("semantic scan comparison", () => {
     ).rejects.toThrow(error);
   });
 });
+
+test.each(["selected predecessor", "unrelated predecessor"] as const)(
+  "history archive compatibility matches %s when a later scan represents its group",
+  async (selection) => {
+    const before = {
+      findingId: "saved-finding",
+      occurrenceId: "saved-occurrence",
+    };
+    const representative = {
+      findingId: "later-finding",
+      occurrenceId: "later-occurrence",
+      scanId: "later-scan",
+      knownScanIds: ["saved-scan", "later-scan"],
+    };
+    const after = {
+      findingId: "current-finding",
+      occurrenceId: "current-occurrence",
+    };
+    const beforeScanId =
+      selection === "selected predecessor" ? "saved-scan" : "unrelated-scan";
+    const comparisons: (readonly string[])[] = [];
+    const matchFindings = mock<typeof matchScanFindings>(async () => ({
+      matches: [],
+      uncertain: [],
+    }));
+    await matchCompletedScan({
+      scanId: "current-scan",
+      repository: "/repository",
+      previousFindings: [representative],
+      falsePositives: [],
+      findings: [after],
+      matchFindings,
+      async workbench(args) {
+        if (args[0] === "list-unmatched-scan-pairs")
+          return {
+            batches: [
+              {
+                afterScanId: "current-scan",
+                afterFindings: [after],
+                beforeScans: [{ scanId: beforeScanId, findings: [before] }],
+              },
+            ],
+          };
+        comparisons.push(args);
+        return {};
+      },
+    });
+    expect(matchFindings).toHaveBeenCalledTimes(
+      selection === "selected predecessor" ? 1 : 0,
+    );
+    if (selection === "selected predecessor") {
+      expect(matchFindings.mock.lastCall?.[0]).toEqual({
+        before: [before],
+        after: [after],
+      });
+      expect(comparisons[0]?.slice(0, 5)).toEqual([
+        "save-scan-comparison",
+        "--before-scan-id",
+        "saved-scan",
+        "--after-scan-id",
+        "current-scan",
+      ]);
+    }
+  },
+);
