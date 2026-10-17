@@ -13,6 +13,8 @@ import type {
   ScanProgress,
   ScanWorkerStatus,
   SeverityLevel,
+  ValidationOptions,
+  ValidationResult,
 } from "../src/index.js";
 import { CodexSecurityError, ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
@@ -208,6 +210,7 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
+    onValidate?: (options: ValidationOptions) => Promise<ValidationResult>;
     onCodex?: OnCodex;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
@@ -261,8 +264,15 @@ export function dependencies(
     },
     preflight: async (repository: string) =>
       options.preflight ?? fakePreflight(repository),
+    validate: async (validationOptions: ValidationOptions) =>
+      options.onValidate?.(validationOptions) ?? {
+        disposition: "deferred",
+        report: "Additional evidence is needed.",
+        outputDir: "/tmp/validation",
+        threadId: "validation-thread",
+      },
     close: async () => await options.onClose?.(),
-  } as Pick<CodexSecurity, "run" | "preflight" | "close">;
+  } as Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   return {
     createSecurity: (config) => {
       options.onConfig?.(config);
@@ -314,7 +324,11 @@ export function dependencies(
 export const mustNotInitializeCodex = throwing("must not initialize Codex");
 
 export function fakeSecurity(run: CodexSecurity["run"]) {
-  return { run, preflight: async () => fakePreflight(), close: async () => {} };
+  return {
+    ...dependencies().createSecurity({}),
+    run,
+    preflight: async () => fakePreflight(),
+  };
 }
 
 export function failingSecurity(message: string) {

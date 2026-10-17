@@ -62,8 +62,9 @@ export class CheckpointedReviewRunner {
   async assertSourceUnchanged(): Promise<void> {
     const current = await this.workflow.sourceSnapshot(
       this.source["repository"] as string,
-      false,
-      (this.source["privateStatePaths"] ?? []) as string[],
+      {
+        privateStatePaths: (this.source["privateStatePaths"] ?? []) as string[],
+      },
     );
     if (workflowDigest(current) !== workflowDigest(this.source))
       throw new CodexSecurityError(

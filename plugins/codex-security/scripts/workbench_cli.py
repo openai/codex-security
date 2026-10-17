@@ -101,6 +101,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
+    get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
 
