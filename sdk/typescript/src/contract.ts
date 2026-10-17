@@ -12,7 +12,11 @@ import {
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { regexes } from "zod";
-import { ContractValidationError, abortReason } from "./errors.js";
+import {
+  ContractValidationError,
+  abortReason,
+  errorMessage,
+} from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
   CoverageDocument,
@@ -409,7 +413,7 @@ async function requireCheckedScanFile(
       throw error;
     }
     throw new ContractValidationError(
-      `${context}: expected a file inside the scan directory.`,
+      `${context}: expected a file inside the scan directory: ${errorMessage(error)}`,
       {
         cause: error,
       },

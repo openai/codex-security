@@ -249,7 +249,7 @@ def list_repositories(
     if args.limit is None and args.offset == 0:
         return {"repositories": repositories}
 
-    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+    limit = args.limit or FINDINGS_PAGE_MAX
     page = repositories[args.offset : args.offset + limit]
     next_offset = args.offset + len(page)
     return {

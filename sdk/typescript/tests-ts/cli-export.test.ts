@@ -19,6 +19,7 @@ import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
+import { exportArtifact } from "../src/artifact-export.js";
 import type { JsonObject } from "../src/config.js";
 import {
   CodexSecurityError,
@@ -895,6 +896,40 @@ describe("CLI", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  (process.platform === "win32" ? test.skip : test).each(["\u001b", "\u009b"])(
+    "escapes terminal controls in Python export errors: %j",
+    async (control) => {
+      const directory = await temporaryDirectory("codex-security-export-");
+      try {
+        const scan = join(
+          directory,
+          `missing-${control}sk-proj-SYNTHETIC_KEEP`,
+        );
+        const output = join(scan, "exports", "results.sarif");
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            ["export", scan, "--output", output],
+            stdout.stream,
+            stderr.stream,
+          ),
+        ).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).not.toContain(control);
+        expect(stderr.text()).toContain(
+          `scan directory ${scan.replace(control, " ")}: expected an existing non-symlink directory`,
+        );
+        expect(stderr.text()).toContain("No such file or directory");
+        await expect(
+          exportArtifact({ source: { directory: scan }, output }),
+        ).rejects.toThrow(scan);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("rejects a repository-controlled output symlink without following it", async () => {
     const directory = await temporaryDirectory("codex-security-export-");

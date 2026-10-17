@@ -149,6 +149,8 @@ def main() -> int:
     parser.parse_args()
     try:
         payload = json.load(sys.stdin)
+        if not isinstance(payload["threatModel"], dict):
+            raise ValueError("threatModel must be an object")
         sys.stdout.buffer.write(
             render_threat_model(payload["threatModel"], payload.get("provenance"))
         )

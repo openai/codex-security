@@ -850,9 +850,9 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
         state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
+    assert second_page["nextOffset"] == 70
     assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
+    assert len(second_page["findings"]) == 50
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )

@@ -13,6 +13,14 @@ const turnFailures = {
     message: "Request flagged for possible cybersecurity risk.",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
+  "policy-accordance-turn": {
+    message: "This request was refused in accordance with the safety policy.",
+    codexErrorInfo: "other",
+  },
+  "policy-terse-turn": {
+    message: "Refused due to the safety policy",
+    codexErrorInfo: "other",
+  },
   "failed-turn": {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",
@@ -228,6 +236,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     } else if (
       scenario === "text-only" ||
       scenario === "refusal-text" ||
+      scenario === "policy-causal-refusal-text" ||
+      scenario === "policy-refusal-text" ||
+      scenario === "policy-first-refusal-text" ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -245,7 +256,13 @@ for await (const line of createInterface({ input: process.stdin })) {
             text:
               scenario === "refusal-text"
                 ? "I'm sorry, but I can't assist with that request."
-                : '{"decision":"SAME"}',
+                : scenario === "policy-first-refusal-text"
+                  ? "Cybersecurity policy: this request is refused."
+                  : scenario === "policy-causal-refusal-text"
+                    ? "This request was refused because it violates the safety policy."
+                    : scenario === "policy-refusal-text"
+                      ? "This request was refused because of the safety policy."
+                      : '{"decision":"SAME"}',
           },
         },
       });
@@ -275,8 +292,19 @@ for await (const line of createInterface({ input: process.stdin })) {
         {
           reason:
             scenario === "policy-reported-error"
-              ? "Request refused due to cybersecurity policy violation."
-              : "Required source revision could not be read.",
+              ? "Request refusal due to the safety policy."
+              : scenario === "required-source-error-policy-file"
+                ? "Connection refused while fetching content-policy.ts"
+                : scenario === "required-source-error-upload-policy"
+                  ? "Artifact upload was blocked by the content policy."
+                  : scenario === "required-source-error-publication-policy"
+                    ? "Artifact publication was refused due to the content policy."
+                    : scenario === "required-source-error-publication-refusal"
+                      ? "Artifact publication refusal due to the content policy."
+                      : scenario ===
+                          "required-source-error-policy-requires-refusal"
+                        ? "Artifact upload failed because the content policy requires refusal of unsupported media"
+                        : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );
