@@ -13,6 +13,7 @@
 - avoid copying unused dictionary items ([#1661](https://github.com/openai/codex-security/pull/1661))
 - normalize hostnames before credential lookup and API routing ([#1069](https://github.com/openai/codex-security/pull/1069))
 - clean up imports and expected test exceptions ([#1665](https://github.com/openai/codex-security/pull/1665))
+- honor selected profile approval policy ([#530](https://github.com/openai/codex-security/pull/530))
 
 <!-- release-section: highlights:end -->
 
