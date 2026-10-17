@@ -191,10 +191,10 @@ async function publishCloudPayload(
     };
   }
   const environment = dependencies.environment ?? process.env;
-  const credentials = await readCloudCredentials(environment);
   const publishUrl =
     environment["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
     `${cloudBaseUrl(environment)}/cli/findings`;
+  const credentials = await readCloudCredentials(environment);
   const timeout = AbortSignal.timeout(30_000);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])

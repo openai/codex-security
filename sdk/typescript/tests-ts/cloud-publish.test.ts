@@ -614,6 +614,26 @@ describe("Cloud publication", () => {
     expect(urls).toEqual([`${cloudBase}/cli/findings`, publishUrl]);
   });
 
+  test("rejects a remote HTTP Cloud base before reading credentials or sending a scan", async () => {
+    const { scan, home, environment } = await fixture();
+    await rm(join(home, "auth.json"));
+    let requests = 0;
+    await expect(
+      publishScanToCloud(scan, {
+        environment: {
+          ...environment,
+          CODEX_SECURITY_CLOUD_BASE_URL:
+            "http://cloud.example.test/backend-api/aardvark",
+        },
+        fetch: async () => {
+          requests++;
+          return Response.json(receipt);
+        },
+      }),
+    ).rejects.toThrow("requires HTTPS");
+    expect(requests).toBe(0);
+  });
+
   test("reuses the dedicated Codex Security login and honors an explicit logout", async () => {
     const { scan, environment } = await fixture();
     const home = codexSecurityCredentialHome(environment);

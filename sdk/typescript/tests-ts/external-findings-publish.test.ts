@@ -2200,6 +2200,27 @@ test("Cloud deployment routing covers every request and isolates saved retries",
   expect(requested.some((url) => url.includes("/source_reports/"))).toBe(true);
 });
 
+test.each(["localhost", "127.0.0.1", "127.0.0.2", "[::1]"])(
+  "loopback Cloud APIs support local HTTP publication: %s",
+  async (host) => {
+    const f = await fixture();
+    const cloudBase = `http://${host}:4200/backend-api/aardvark`;
+    const prepared = await prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: cloudBase,
+      },
+      fetch: (url, init) => {
+        expect(url.startsWith(`${cloudBase}/external/`)).toBe(true);
+        return f.deps.fetch(url, init);
+      },
+    });
+    expect((await prepared.publish()).status).toBe("complete");
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
 test("a separate Cloud app URL follows the resolved repository without changing API routing", async () => {
   const f = await fixture();
   const requested: string[] = [];
@@ -2279,6 +2300,9 @@ test.each([
   "https://user:password@cloud.example.test",
   "https://cloud.example.test?deployment=pilot",
   "https://cloud.example.test#pilot",
+  "http://cloud.example.test/backend-api/aardvark",
+  "http://127.example.test/backend-api/aardvark",
+  "http://192.0.2.1/backend-api/aardvark",
 ])(
   "invalid Cloud base URL fails before authentication or network: %s",
   async (baseUrl) => {

@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { CodexSecurityError } from "./errors.js";
 
 export const DEFAULT_CLOUD_BASE_URL =
@@ -56,6 +57,15 @@ export function cloudBaseUrl(environment: NodeJS.ProcessEnv): string {
   )
     throw new CodexSecurityError(
       "CODEX_SECURITY_CLOUD_BASE_URL must be an HTTP(S) Cloud API base URL without credentials, a query, or a fragment.",
+    );
+  if (
+    url.protocol === "http:" &&
+    url.hostname !== "localhost" &&
+    url.hostname !== "[::1]" &&
+    !(isIP(url.hostname) === 4 && url.hostname.startsWith("127."))
+  )
+    throw new CodexSecurityError(
+      "CODEX_SECURITY_CLOUD_BASE_URL requires HTTPS for remote Cloud APIs; HTTP is supported only for loopback development.",
     );
   return url.href.replace(/\/+$/u, "");
 }

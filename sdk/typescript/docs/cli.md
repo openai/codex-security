@@ -991,8 +991,10 @@ Before the first import:
 
 For an alternate Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its
 API root before previewing or uploading, for example
-`https://cloud.example.test/backend-api/aardvark`. Use a login issued by that
-deployment and an isolated `CODEX_SECURITY_STATE_DIR` for testing. The endpoint
+`https://cloud.example.test/backend-api/aardvark`. Remote APIs require HTTPS;
+HTTP is accepted only for loopback development (`localhost`, `127.0.0.0/8`, or
+`::1`). Use a login issued by that deployment and an isolated
+`CODEX_SECURITY_STATE_DIR` for testing. The endpoint
 does not change your login or sign you into another deployment. An invalid or
 empty configured URL stops the import before authentication or network requests.
 With the variable unset, the existing production endpoint remains the default.
