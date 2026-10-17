@@ -85,6 +85,7 @@ function packageTar({
     "package/docs/validate-records.md",
     "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
+    "package/schemas/external-findings.schema.json",
     "package/LICENSE",
     ...executablePaths,
     ...packageDistFiles,

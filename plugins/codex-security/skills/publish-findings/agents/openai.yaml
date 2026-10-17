@@ -1,0 +1,6 @@
+interface:
+  display_name: "Publish Findings"
+  short_description: "Preview and publish vendor findings to Cloud"
+  default_prompt: "Use $publish-findings to preview selected Wiz findings for my Cloud repository."
+policy:
+  allow_implicit_invocation: true

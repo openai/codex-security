@@ -130,6 +130,8 @@
     "skills/security-scan/references/scan-artifacts-and-ledger.md",
     "skills/threat-model/SKILL.md",
     "skills/threat-model/agents/openai.yaml",
+    "skills/publish-findings/SKILL.md",
+    "skills/publish-findings/agents/openai.yaml",
     "skills/track-findings/SKILL.md",
     "skills/track-findings/agents/openai.yaml",
     "skills/track-findings/references/github-security-advisories.md",
