@@ -26,13 +26,14 @@ import {
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
 } from "./external-findings.js";
 import {
-  repositoryUrlKey,
+  cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
   validateImportReceipt,
@@ -49,16 +50,11 @@ import type {
 
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
-// Cloud's import catalog contains GitHub repositories, including custom Enterprise
-// hosts. Match its case-insensitive URL identity without merging schemes or ports.
-function cloudRepositoryUrlKey(value: string): string {
-  return repositoryUrlKey(value).toLowerCase();
-}
-
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {
   repository: string;
-  provider: "wiz" | "github" | "snyk" | "endor";
+  provider: "wiz" | "github" | "snyk" | "endor" | "semgrep";
+  sourceRepositoryUrl?: string;
   sourceKey: string;
 }
 
@@ -289,6 +285,14 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  if (options.provider === "semgrep")
+    return prepareNormalizedExternalPublication(
+      await readSemgrepFindings(path, {
+        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+      }),
+      options,
+      dependencies,
+    );
   if (options.provider === "endor")
     return prepareNormalizedExternalPublication(
       await readEndorFindings(path),

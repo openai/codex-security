@@ -76,3 +76,51 @@ Synthetic QA covers both formats and 500-record exports; live tenant verificatio
 is separate.
 
 Endor list responses with a continuation cursor or token are rejected. Finish fetching the export or provide an explicitly selected array; a single unfinished page is not a complete import. Fractional timestamps are rounded down to Cloud epoch seconds while their original precision remains in source evidence.
+
+## Semgrep SAST
+
+Use Semgrep JSON or self-contained SARIF 2.1.0, with an explicit declaration of
+the source repository. The publisher checks this URL against the selected Cloud
+repository; it never fills missing source provenance from the destination.
+
+```sh
+codex-security publish findings semgrep.json --to cloud \
+  --provider semgrep --source-key ORGANIZATION/PROJECT/BRANCH \
+  --source-repository-url https://github.com/example/project \
+  --repository https://github.com/example/project --dry-run --format json
+```
+
+Review the findings and exclusions, then repeat without `--dry-run` and confirm
+the upload. Semgrep requires a Cloud version that accepts the `semgrep` provider.
+
+- Scope: Semgrep SAST. Do not supply Supply Chain or Secrets exports; identifiable
+  records from these products are excluded. SARIF may omit product metadata, so
+  select a SAST-only scan when exporting it.
+- Logged-in Platform fingerprints are stable across range and message changes.
+  JSON and SARIF reuse a matching fingerprint. Community Edition omits stable
+  fingerprints or emits the placeholder `requires login`; its fallback combines
+  the rule, literal path, and range. Moving a CE finding creates a new identity.
+  Keep a stable source key and review changed exports; this adapter cannot infer
+  cross-export equivalence for moved CE findings.
+- SARIF supports direct artifact URIs and Semgrep's native `%SRCROOT%` marker
+  without a base definition. Native paths retain literal percent characters;
+  direct URIs without that marker are URI-decoded once.
+  Indexed artifacts, other URI bases and redefined
+  source roots remain in the original evidence without repository locations.
+  CE records with those references are excluded because a reliable fallback
+  identity cannot be derived. See the [native SARIF formatter](https://github.com/semgrep/semgrep/blob/51602ad27f09ef9342a5620601de5ef8f572fbc6/src/osemgrep/reporting/Sarif_output.ml#L410).
+- Prefer JSON for original severity. Semgrep SARIF combines Critical and High
+  into diagnostic `error`, which this mapper displays as High. Both representations
+  retain the complete selected source evidence.
+- Scan-wide JSON path inventories and timing tables are omitted from individual
+  findings; the selected raw result and remaining report metadata are retained.
+- JSON scan errors, unsuccessful SARIF invocations, and SARIF scan-error
+  notifications are rejected. Ambiguous
+  duplicate identities and invalid records are excluded before publication.
+- Original source suppressions and ignored status stay separate from Cloud
+  lifecycle state and Codex assessment. This adapter does not launch a scan,
+  evaluate rules, follow URLs, or read source paths from the report.
+
+Programmatic callers pass `{ sourceRepositoryUrl }` to
+`normalizeSemgrepFindings`, `normalizeSemgrepSarif`, or `readSemgrepFindings`.
+See the [official output documentation](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif).

@@ -280,3 +280,10 @@ export {
   normalizeEndorSarif,
   readEndorFindings,
 } from "./endor-findings.js";
+
+export {
+  normalizeSemgrepFindings,
+  normalizeSemgrepSarif,
+  readSemgrepFindings,
+  type SemgrepImportOptions,
+} from "./semgrep-findings.js";
