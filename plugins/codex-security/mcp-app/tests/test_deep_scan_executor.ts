@@ -58,15 +58,17 @@ const {
   codexWorkerTurnError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
+  parseDeepScan,
 } = await importModule({
   define: {
     "import.meta.url": JSON.stringify(executorSource.href),
   },
   stdin: {
-    // Test the environment snapshot without adding a production export.
+    // Expose the environment snapshot only for tests.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export * from "./errors.js";`,
+export * from "./errors.js";
+export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
     sourcefile: fileURLToPath(executorSource),
@@ -1374,6 +1376,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_CLI_PATH",
     "CODEX_MCP_NODE_PATH",
     "CODEX_HOME",
+    "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1861,6 +1864,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+              process.env.CODEX_SECURITY_STATE_DIR = path.join(
+                fixture.root,
+                `state-${index}`,
+              );
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
               process.env.CODEX_SECURITY_KNOWLEDGE_BASE =
@@ -1995,6 +2002,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
+            assert.equal(
+              invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
+              path.join(fixture.root, `state-${index}`),
+            );
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.mcpNodePath, nodePaths[index]);
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
@@ -2233,6 +2244,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
+            );
+            assert.equal(
+              launch.environment!.CODEX_SECURITY_STATE_DIR,
+              path.join(
+                fixture.root,
+                `state-${workerConfigurations.indexOf(selectedProvider)}`,
+              ),
             );
             assert.equal(
               preflight.providerKey,
@@ -2644,15 +2662,37 @@ async function testLargeScopeTransport() {
                 (_, row) =>
                   `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
               );
+              const filePaths = includePaths.filter(
+                (_, index) => index % 2 === 0,
+              );
+              const run = parseDeepScan({
+                deepScan: {
+                  scanId,
+                  status: "running",
+                  targetPath: fixture.root,
+                  scope: ".",
+                  includePaths,
+                  filePaths,
+                  scanDir: workerRoot,
+                  config: {
+                    workers: 1,
+                    subagents: 0,
+                    stopAfterNoNew: 1,
+                    maxDiscoveryRuns: 1,
+                  },
+                  dispatchedCount: 0,
+                  noNewStreak: 0,
+                },
+              });
               const executor = new CodexSdkWorkerExecutor({
                 parentSandbox: trustedParentSandbox,
                 artifactContext: {
                   pluginRoot: fixture.root,
-                  repoRoot: fixture.root,
-                  scanId,
-                  scope: ".",
-                  includePaths,
-                  filePaths: includePaths.filter((_, index) => index % 2 === 0),
+                  repoRoot: run.targetPath,
+                  scanId: run.scanId,
+                  scope: run.scope,
+                  includePaths: run.includePaths,
+                  filePaths: run.filePaths,
                 },
               });
               await executor.run(
@@ -2685,10 +2725,7 @@ async function testLargeScopeTransport() {
               );
               const invocation = await readJson(output, "invocation.json");
               assert.deepEqual(invocation.scopeInput.paths, includePaths);
-              assert.deepEqual(
-                invocation.scopeInput.filePaths,
-                includePaths.filter((_, index) => index % 2 === 0),
-              );
+              assert.deepEqual(invocation.scopeInput.filePaths, filePaths);
               assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
               await assert.rejects(readFile(invocation.scopeInput.file), {
                 code: "ENOENT",

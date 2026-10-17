@@ -1,5 +1,9 @@
 const distModules = [
   "api",
+  "scan-executor",
+  "host-protocol",
+  "hosted-scan",
+  "hosted-scan-protocol",
   "artifact-export",
   "auth",
   "bulk-scan-discovery",
@@ -65,6 +69,7 @@ const distModules = [
   "security-policy",
   "security-policy-cli",
   "standalone-validation-prompt",
+  "validation-records",
   "suggest-owners",
   "scan-sessions",
   "server/api",

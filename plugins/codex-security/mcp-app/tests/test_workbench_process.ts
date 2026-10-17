@@ -56,6 +56,7 @@ try {
     "fail-scan",
     "preserve-scan-results",
     "complete-scan",
+    "finding-issues",
     "start-prompt-only-scan",
   ]) {
     await executeWorkbench("fixture-python", [command, "--scan-id", "fixture"]);
