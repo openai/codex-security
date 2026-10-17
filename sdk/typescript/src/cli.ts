@@ -39,6 +39,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -268,6 +269,9 @@ import {
 import {
   abortable,
   DiffTarget,
+  normalizeRepository,
+  resolveRepositoryPath,
+  resolveTargetPath,
   enclosingGitWorktreeRoots,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
@@ -954,6 +958,18 @@ const DEEP_SCAN_OPTION_SCHEMAS = Object.fromEntries(
 
 export function resolveCliPath(directory: string, value: string): AbsolutePath {
   return resolveConfigPath(directory, value);
+}
+
+function resolveCliRepositoryPath(value: string, directory: string): string {
+  if (value === "~") value = expandHome("~");
+  else if (value.startsWith("~/") || value.startsWith("~\\")) {
+    const home = expandHome("~");
+    const suffix = value.startsWith("~\\")
+      ? value.slice(2).split("\\").filter(Boolean).join(sep)
+      : value.slice(2);
+    value = home === "" ? suffix : `${home}${sep}${suffix}`;
+  }
+  return resolveTargetPath(value, directory);
 }
 
 interface ScanArguments extends ResolvedScanSettings {
@@ -2031,13 +2047,16 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const requestedRepository = resolveCliPath(
-        dependencies.currentDirectory(),
+      const requestedPath = resolveCliRepositoryPath(
         args.repository ?? ".",
+        dependencies.currentDirectory(),
       );
-      const repository = await realpath(requestedRepository).catch(
-        () => requestedRepository,
+      const canonicalPath = await realpath(requestedPath).catch(
+        () => undefined,
       );
+      const requestedRepository =
+        canonicalPath === undefined ? resolve(requestedPath) : requestedPath;
+      const repository = canonicalPath ?? requestedRepository;
       return presentHistory(
         await history(
           ["list-repositories"],
@@ -2119,7 +2138,7 @@ export async function main(
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolveCliPath(directory, args.repository ?? directory);
+            : resolveCliRepositoryPath(args.repository ?? directory, directory);
         return presentHistory(
           await history(
             workbenchArgs("list-scans", {
@@ -3431,7 +3450,10 @@ export async function main(
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
-                repository: resolveCliPath(directory, args.repository ?? "."),
+                repository: resolveCliRepositoryPath(
+                  args.repository ?? ".",
+                  directory,
+                ),
                 config: {
                   pluginPath: options.pluginPath,
                   pythonPath: options.python,
@@ -3803,9 +3825,9 @@ export async function main(
             "git",
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
+              resolveCliRepositoryPath(
                 args.repository ?? ".",
+                dependencies.currentDirectory(),
               ),
               "rev-parse",
               "--path-format=absolute",
@@ -3882,9 +3904,9 @@ export async function main(
         const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(
-            directory,
+          const repository = resolveCliRepositoryPath(
             options.sourceRoot ?? ".",
+            directory,
           );
           const findings = await parseImportedFindings(
             await readRegularInputFile(
@@ -4297,7 +4319,10 @@ export async function main(
         signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(directory, args.repository ?? ".");
+          const repository = resolveCliRepositoryPath(
+            args.repository ?? ".",
+            directory,
+          );
           const project = await selectedProjectConfig(
             options.config,
             dependencies,
@@ -8308,10 +8333,17 @@ async function executeScan(
   try {
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
+    const repositoryPath = resolveRepositoryPath(repository, directory);
+    if (repositoryPath.split(sep).includes("..")) {
+      repository = await normalizeRepository(
+        repositoryPath,
+        preparationAbortController.signal,
+      );
+    }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
-      resolve(directory, repository),
+      resolveRepositoryPath(repository, directory),
       directory,
     );
     const config: CodexSecurityConfig = {
@@ -8800,7 +8832,10 @@ async function executeScan(
     } else {
       result = await security.run(repository, options);
       scanDir = result.scanDir;
-      repository = resolve(dependencies.currentDirectory(), repository);
+      repository = resolveRepositoryPath(
+        repository,
+        dependencies.currentDirectory(),
+      );
     }
   } catch (error) {
     failed = true;
