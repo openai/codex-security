@@ -35,6 +35,7 @@ import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
+import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_alias_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
@@ -136,6 +137,14 @@ try {
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
     await testWorkerLaunchesWithoutGlobalCodex();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
+    await testConcurrentWorkerExecutableAliases({
+      CodexSdkWorkerExecutor,
+      fakeCodexFixture,
+      parentSandbox: trustedParentSandbox,
+      bundledCodexSdkEnvironment,
+      assertConfigOverrides,
+      assertReadOnlyWorkerPolicy,
+    });
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testBedrockCredentialsReachWorker("oidc");
