@@ -66,6 +66,14 @@ export interface PatchGitCommandOptions {
   readonly environment?: NodeJS.ProcessEnv;
 }
 
+export interface PatchGitAdministrationReference {
+  readonly path: string;
+  readonly canonical: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly root: string;
+}
+
 type RunGit = (
   root: string,
   directory: string,
@@ -342,6 +350,19 @@ async function directoryLinks(path: string): Promise<string[]> {
   return [...links];
 }
 
+export async function capturePatchGitAdministrationReferences(
+  path: string,
+): Promise<PatchGitAdministrationReference[]> {
+  const root = await realControlPath(path);
+  const references: PatchGitAdministrationReference[] = [];
+  for (const link of await directoryLinks(path)) {
+    const canonical = await realControlPath(link);
+    const { dev, ino } = await stat(canonical, { bigint: true });
+    references.push({ path: link, canonical, dev, ino, root });
+  }
+  return references;
+}
+
 async function readableGitParent(
   checkout: string,
   path: Buffer,
@@ -409,6 +430,7 @@ export async function capturePatchGitControls(
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
   selectedGitDirectory?: string,
+  administrationReferences: readonly PatchGitAdministrationReference[] = [],
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -617,6 +639,23 @@ export async function capturePatchGitControls(
   };
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
+      const reference = administrationReferences.find(
+        (reference) => reference.path === entry,
+      );
+      if (reference !== undefined) {
+        const canonical = await realControlPath(entry);
+        const identity = await stat(canonical, { bigint: true });
+        if (
+          canonical !== reference.canonical ||
+          identity.dev !== reference.dev ||
+          identity.ino !== reference.ino ||
+          !administrationRoots.has(reference.root)
+        )
+          throw new Error(
+            `Git administration reference changed during the patch: ${entry}`,
+          );
+        administrationLinks.add(entry);
+      }
       if (administrationLinks.has(entry))
         await rememberControl(entry, true, false);
       const parent = dirname(entry);
@@ -639,7 +678,19 @@ export async function capturePatchGitControls(
       inaccessibleHooks.add(path);
     }
   };
+  // Git can retain an outside caller's cwd or move an inside caller to the
+  // worktree root. Resolve its relative paths in that setup directory.
+  const setupDirectory = async (checkout: string): Promise<string> =>
+    (
+      await runControl(
+        root,
+        checkout,
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        { environment: { GIT_OBJECT_DIRECTORY: "." } },
+      )
+    ).replace(/\n$/u, "");
   const captureReferences = async (checkout: string): Promise<void> => {
+    const configurationDirectory = await setupDirectory(checkout);
     const origins = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -653,7 +704,7 @@ export async function capturePatchGitControls(
       const origin = origins[index]!;
       if (origin.startsWith("file:"))
         await rememberControl(
-          relativeFile(checkout, configPath(origin.slice(5))),
+          relativeFile(configurationDirectory, configPath(origin.slice(5))),
         );
       if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
         includes = true;
@@ -703,8 +754,10 @@ export async function capturePatchGitControls(
           throw error;
         }
         const relativeTo = origin.startsWith("file:")
-          ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
-          : checkout;
+          ? dirname(
+              relativeFile(configurationDirectory, configPath(origin.slice(5))),
+            )
+          : configurationDirectory;
         const includePath = relativeFile(relativeTo, path);
         try {
           await rememberControl(includePath, !key.startsWith("includeif."));
@@ -759,12 +812,13 @@ export async function capturePatchGitControls(
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
     : selectedDirectories[1];
+  const selectorDirectory = await setupDirectory(root);
   for (const argument of [
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
     ...(usesCommonDirectoryMarker ? [] : ["--git-common-dir"]),
   ]) {
     const path = relativeFile(
-      root,
+      selectorDirectory,
       (await runControl(root, root, ["rev-parse", argument])).replace(
         /\n$/u,
         "",

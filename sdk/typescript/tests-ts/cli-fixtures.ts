@@ -203,6 +203,7 @@ export class FakeSignals {
 
 export function dependencies(
   options: {
+    bulkScan?: MainDependencies["bulkScan"];
     onConfig?: (config: CodexSecurityConfig) => void;
     onTurn?: (repository: string, options: ScanOptions) => void;
     onRun?: () => void;
@@ -295,9 +296,14 @@ export function dependencies(
       )) ??
       (command === "gh" && args[0] === "pr" && args[1] === "list"
         ? "[]"
-        : args.includes("--name-only")
-          ? "src/finding-1.ts\0"
-          : ""),
+        : command === "git" && args.includes("--absolute-git-dir")
+          ? (commandOptions?.environment?.["GIT_DIR"] ??
+            commandOptions?.directory ??
+            repository)
+          : args.includes("--name-only")
+            ? "src/finding-1.ts\0"
+            : ""),
+    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),

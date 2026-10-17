@@ -26,11 +26,13 @@ export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  additionalProtectedRoots: readonly string[] = [],
 ): Promise<TrustedExecutable | null> {
   const inspected = await inspectTrustedExecutable(
     candidate,
     environment,
     protectedRoot,
+    additionalProtectedRoots,
   );
   return inspected.executable === null
     ? null
@@ -41,11 +43,13 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  additionalProtectedRoots: readonly string[] = [],
 ): Promise<InspectedExecutable> {
   const roots = await Promise.all(
-    (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
-      (root) => realpath(root).catch(() => resolve(root)),
-    ),
+    [
+      ...(typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot),
+      ...additionalProtectedRoots,
+    ].map((root) => realpath(root).catch(() => resolve(root))),
   );
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));

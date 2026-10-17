@@ -265,12 +265,13 @@ for await (const line of createInterface({ input: process.stdin })) {
       wrapper,
       `
 import { writeFileSync } from "node:fs";
-import { runWorkflow, savedScan, resultWithFindings } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
-import { runCodexSkillCommand, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+import { capture, dependencies } from ${JSON.stringify(new URL("./cli-fixtures.ts", import.meta.url).href)};
+import { main, runCodexSkillCommand, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 let snapshots = 0;
-const outcome = await runWorkflow(${JSON.stringify(saved ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", ...(preflight ? ["--create-pr"] : []), "--json"])}, {
+const stdout = capture(), stderr = capture();
+const exitCode = await main(${JSON.stringify(saved ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", ...(preflight ? ["--create-pr"] : []), "--json"])}, stdout.stream, stderr.stream, dependencies({
   currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)}, CODEX_CLI_PATH: ${JSON.stringify(executor)} }, manualCodexPreparation: true,
-  onWorkbench: () => savedScan(resultWithFindings(["high"]), "scan-1", ${JSON.stringify(repository)}),
+  onWorkbench: () => (${JSON.stringify(savedScan(resultWithFindings(["high"]), "scan-1", repository))}),
   onCodex: (args, output, environment) => runCodexSkillCommand([${JSON.stringify(server)}], { ...output, auth: undefined }, { command: process.execPath }, environment),
   onRepositoryCommand: (command, args, cwd, options) => {
     if (command !== "git") return "[]";
@@ -282,7 +283,8 @@ const outcome = await runWorkflow(${JSON.stringify(saved ? ["patch", "--scan", "
     }
     return runRepositoryCommand(command, args, cwd, options);
   },
-});
+}));
+const outcome = { exitCode, stdout: stdout.text(), stderr: stderr.text() };
 process.stdout.write(JSON.stringify({ ...outcome, snapshots }) + "\\n");
 process.exitCode = outcome.exitCode;
 `,
