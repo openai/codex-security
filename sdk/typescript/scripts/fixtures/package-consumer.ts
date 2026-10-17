@@ -6,6 +6,11 @@ import {
   classifyScanDirectorySeverity,
   deduplicateScan,
   deduplicateRecords,
+  runHostedScan,
+  type HostedScanInput,
+  type HostedScanOptions,
+  type HostedScanResult,
+  type ScanExecutor,
   type DeduplicateRecordsInput,
   type DeduplicateRecordsResult,
   type DeduplicationReviewRequest,
@@ -18,10 +23,15 @@ import {
   publishScan,
   runComponentScans,
   resolveProjectConfig,
+  suggestOwners,
+  type OwnerFinding,
+  type OwnerSuggestion,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type PatchOptions,
+  type PatchResult,
   type ProjectConfigInput,
   type SeverityClassification,
   type ScanSeverityClassification,
@@ -181,6 +191,36 @@ export async function validate(
   return await client.validate(options);
 }
 
+export async function patch(
+  repositoryPath: string,
+  finding: Finding | ImportedFinding,
+): Promise<PatchResult> {
+  await using client = new CodexSecurity();
+  const options: PatchOptions = {
+    repositoryPath,
+    finding,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+  };
+  const result = await client.patch(options);
+  result.changedFiles satisfies readonly string[];
+  // @ts-expect-error Patch results expose changed files as immutable metadata.
+  result.changedFiles.push("unexpected.ts");
+  switch (result.status) {
+    case "verified":
+    case "no_change":
+      result.verificationReport satisfies string;
+      break;
+    case "blocked":
+    case "failed":
+      result.reason satisfies string;
+      break;
+    default:
+      result satisfies never;
+  }
+  return result;
+}
+
 // @ts-expect-error The dependency-injection constructor is internal.
 new CodexSecurity({}, undefined as never, undefined as never);
 
@@ -241,3 +281,49 @@ export async function dedupeRecords(
   };
   return await deduplicateRecords(input, { reviewRunner, signal });
 }
+
+export const ownerVariants: OwnerSuggestion["owner"][] = [
+  { name: "Alex Example", email: "alex@example.test" },
+  { kind: "person", provider: "github", handle: "example-user" },
+  { kind: "group", provider: "github", handle: "example/maintainers" },
+  { kind: "person", email: "alex@example.test" },
+  null,
+];
+
+export function ownerIdentifier(owner: OwnerSuggestion["owner"]) {
+  if (owner === null) return null;
+  return "handle" in owner ? owner.handle : owner.email;
+}
+
+export async function suggestFindingOwners(
+  repository: string,
+  findings: OwnerFinding[],
+) {
+  const report = await suggestOwners(repository, findings);
+  const schemaVersion: 2 = report.schemaVersion;
+  return {
+    schemaVersion,
+    identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
+  };
+}
+
+export async function hostedScan(
+  input: HostedScanInput,
+  executor: ScanExecutor,
+  signal: AbortSignal,
+): Promise<HostedScanResult> {
+  const options: HostedScanOptions = {
+    executor,
+    signal,
+    onEvent(event) {
+      event.type satisfies "progress" | "activity";
+    },
+  };
+  return await runHostedScan(input, options);
+}
+
+const localOptions: ScanOptions = {
+  // @ts-expect-error Hosted execution uses the standalone runHostedScan API.
+  hosted: {},
+};
+void localOptions;

@@ -23,7 +23,7 @@ def complete_scan(
     target: Path,
     *,
     identity_anchor: str,
-    completeness: str = "complete",
+    follow_up: bool = False,
     finding: bool = True,
     include_paths: list[str] | None = None,
     relative_path: str = "src/extract.py",
@@ -51,10 +51,9 @@ def complete_scan(
         findings = json.loads(findings_path.read_text())
         findings["findings"] = []
         findings_path.write_text(json.dumps(findings))
-    if completeness != "complete":
+    if follow_up:
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
-        coverage["completeness"] = completeness
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
@@ -64,11 +63,11 @@ def complete_scan(
 
 
 @pytest.mark.parametrize(
-    ("completeness", "include_paths"),
-    [("complete", None), ("partial", None), ("complete", ["docs"])],
+    ("follow_up", "include_paths"),
+    [(False, None), (True, None), (False, ["docs"])],
 )
 def test_later_scans_preserve_global_findings_and_repository_counts(
-    tmp_path: Path, completeness: str, include_paths: list[str] | None
+    tmp_path: Path, follow_up: bool, include_paths: list[str] | None
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "repo"
@@ -80,7 +79,7 @@ def test_later_scans_preserve_global_findings_and_repository_counts(
         state_dir,
         target,
         identity_anchor="clean-scan",
-        completeness=completeness,
+        follow_up=follow_up,
         finding=False,
         include_paths=include_paths,
     )

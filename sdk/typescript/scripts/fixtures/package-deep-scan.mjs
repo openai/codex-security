@@ -68,6 +68,11 @@ try {
     restoreSpawn = installFixtureSpawn(executable);
   }
   await chmod(executable, 0o700);
+  if (process.platform === "win32") {
+    // The direct SDK engine launches its preflight from this process too.
+    process.env.PACKAGE_DEEP_EXECUTABLE = executable;
+    await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
+  }
 
   const checks = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable).then(() =>
@@ -393,6 +398,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       environment: f.env,
       prepareRuntime: async () => ({
         codexHome: f.home,
+        deepScanConfigPath: join(f.home, "deep-scan-config.toml"),
         environment: f.env,
         credentialsAvailable: true,
         plugin: {

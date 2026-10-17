@@ -133,11 +133,11 @@ describe("scan navigation", () => {
   });
 
   test("completion navigation uses the complete scan ID without changing JSON", async () => {
-    const result = fakeResult(["high"], "partial");
+    const result = fakeResult(["high"]);
     result.manifest.scan.id = completedId;
     const cli = createCliTest(main);
     expect(await cli.runCli(["scan", "--json"], dependencies({ result }))).toBe(
-      2,
+      0,
     );
     expect(JSON.parse(cli.stdout.text())).toEqual(result.toJSON());
     expect(cli.stderr.text()).toContain(`Scan ${completedId} · complete`);

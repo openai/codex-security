@@ -1,4 +1,5 @@
-import { sha256Text as sha256 } from "./contract.js";
+import { isRecord } from "./record.js";
+import { deriveFindingIdentity, sha256Text as sha256 } from "./contract.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -123,11 +124,7 @@ export async function parseImportedFindings(
       { cause: error },
     );
   }
-  if (
-    payload === null ||
-    typeof payload !== "object" ||
-    Array.isArray(payload)
-  ) {
+  if (!isRecord(payload)) {
     throw new CodexSecurityError(
       "Findings JSON must contain a findings document or an object with a findings array.",
     );
@@ -174,24 +171,14 @@ export function bindImportedFindings(
   targetId: string,
 ): Finding[] {
   return findings.map((finding) => {
-    const ruleId = `import.${format}`;
-    const anchor = finding.occurrenceId;
-    const fingerprint = `codex-security/v1:sha256:${sha256(
-      ["codex-security/v1", targetId, ruleId, anchor, ""].join("\0"),
-    )}`;
     // A source report path names another scan's artifact. Preserve it as
     // provenance without treating the imported path as permission to read it.
     const { writeup, ...content } = finding;
     return {
       ...content,
-      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${sha256([scanId, fingerprint].join("\0")).slice(0, 24)}`,
-      ruleId,
-      identity: { anchor },
-      fingerprints: {
-        algorithm: "codex-security/v1",
-        primary: fingerprint,
-      },
+      ...deriveFindingIdentity(scanId, targetId, `import.${format}`, {
+        anchor: finding.occurrenceId,
+      }),
       provenance: { source: `${format}_import` },
       extensions: {
         ...finding.extensions,

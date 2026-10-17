@@ -18,6 +18,7 @@ import {
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
 import { main } from "../src/cli.js";
@@ -54,6 +55,8 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { mockWorkbench } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
 
 const { temporaryDirectory, cleanup } =
   createApiTestFixtures("component-scan-");
@@ -126,7 +129,7 @@ function finding(
 async function completed(
   options: ScanOptions,
   findings = [finding(String(options.target))],
-  coverage: "complete" | "partial" = "complete",
+  coverage?: "complete" | "partial",
   threatModelPath: string | null = null,
 ) {
   const original = fakeResult([], coverage);
@@ -416,8 +419,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   );
   expect(summary).toMatchObject({
     total: 3,
-    completed: 1,
-    incomplete: 1,
+    completed: 2,
     failed: 1,
   });
   const saved = await json(summary.findingsPath!);
@@ -429,7 +431,6 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     ),
   ).toEqual(["apps/web", "shared"]);
   expect(await json(summary.summaryPath!)).toMatchObject({
-    completeness: "partial",
     findingCount: 2,
     components: expect.arrayContaining([
       expect.objectContaining({
@@ -439,7 +440,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     ]),
   });
   expect(await json(summary.retryPlanPath!)).toEqual({
-    components: components.slice(0, 2),
+    components: [components[0]],
   });
   expect(
     await readFile(join(paths.outputDir, "component-2", "report.md"), "utf8"),
@@ -693,7 +694,7 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
   expect(await json(join(paths.outputDir, "retry-components.json"))).toEqual({
     components: [{ name: "apps/web", paths: ["apps/web"] }],
   });
-  expect(stderr.text()).toContain("1 complete, 0 incomplete, 1 failed");
+  expect(stderr.text()).toContain("1 complete, 1 failed");
   expect(stderr.text()).toContain("Retry with --components-file");
   expect(stderr.text().indexOf("\u001B[?1049l")).toBeLessThan(
     stderr.text().indexOf("Component scans:"),
@@ -841,7 +842,7 @@ test("retains earlier confirmed matches if later matching fails", async () => {
   expect(summary).toMatchObject({
     completed: 3,
     failed: 0,
-    deduplication: { status: "incomplete", confirmedGroups: 1 },
+    deduplication: { status: "failed", confirmedGroups: 1 },
   });
   expect(
     (await json(summary.findingsPath!)).findings.map(
@@ -902,8 +903,7 @@ test.each(["scan", "matching"])(
     expect(await json(join(paths.outputDir, "summary.json"))).toMatchObject({
       completed: finished,
       failed: 3 - finished,
-      completeness: "partial",
-      deduplication: { status: "incomplete" },
+      deduplication: { status: "failed" },
     });
     expect(
       (await json(join(paths.outputDir, "findings.json"))).findings,
@@ -1677,6 +1677,167 @@ test.each([
   },
 );
 
+test("default scan clients use the component scan environment", async () => {
+  const paths = await fixture();
+  const summary = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: undefined,
+    environment: { ...process.env, GIT_DIR: join(paths.root, "synthetic.git") },
+  });
+  expect(summary.failed).toBe(1);
+  expect(await json(summary.summaryPath!)).toMatchObject({
+    components: [
+      expect.objectContaining({
+        error: "GIT_DIR is not supported for Codex Security scans.",
+      }),
+    ],
+  });
+});
+
+test.each([
+  ["standard", "api-key"],
+  ["deep", "api-key"],
+  ["standard", "chatgpt"],
+  ["deep", "chatgpt"],
+] as const)(
+  "isolates concurrent default %s component scans with %s authentication at the Codex child boundary",
+  async (mode, auth) => {
+    const name = `isolates concurrent default ${mode} component scans with ${auth} authentication at the Codex child boundary`;
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const originalEnvironment = { ...process.env };
+    const node = nodeCommand().command;
+    const ready = Promise.withResolvers<void>();
+    let arrivals = 0;
+    const resolveCommand = runtime.resolveCodexCommand;
+    const spies = [
+      spyOn(runtime, "resolveCodexCommand").mockImplementation(
+        (environment) => {
+          if (environment?.["CODEX_CLI_PATH"] !== node)
+            throw new Error(
+              "Component scan environment did not reach the runtime.",
+            );
+          return resolveCommand(environment);
+        },
+      ),
+      spyOn(runtime, "bootstrapPlugin").mockImplementation(async () => {
+        if (++arrivals === 2) ready.resolve();
+        await ready.promise;
+        return preparedRuntime("unused").plugin;
+      }),
+      spyOn(runtime, "probeCodexSandbox").mockImplementation(async () => {}),
+      spyOn(runtime, "resolvePluginPython").mockResolvedValue(
+        "/managed/python",
+      ),
+      spyOn(runtime, "prepareScanArtifactRestorer").mockResolvedValue({
+        restore: async () => {},
+      }),
+      spyOn(runtime, "runWorkbench").mockImplementation(
+        async (_options, args, input) => mockWorkbench(args, input),
+      ),
+    ];
+    try {
+      const outcomes = await Promise.allSettled(
+        ["first", "second"].map(async (value) => {
+          const paths = await fixture();
+          const preload = join(paths.root, "codex.mjs");
+          const receipt = join(paths.root, "child.json");
+          const environment = {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(([key]) =>
+                /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(key),
+              ),
+            ),
+            OPENAI_API_KEY: `synthetic-${value}-key`,
+            CODEX_HOME: join(paths.root, "ambient-home"),
+            CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+            CODEX_CLI_PATH: node,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            SYNTHETIC_COMPONENT: value,
+          };
+          const original = { ...environment };
+          const storedAuthentication = {
+            auth_mode: "chatgpt",
+            synthetic_identity: value,
+          };
+          await mkdir(environment.CODEX_HOME, { mode: 0o700 });
+          await writeFile(
+            join(environment.CODEX_HOME, "auth.json"),
+            JSON.stringify(storedAuthentication),
+          );
+          await writeFile(
+            preload,
+            [
+              'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
+              'import { join } from "node:path";',
+              'import { createHash } from "node:crypto";',
+              "for await (const chunk of process.stdin) {}",
+              `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
+              'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
+              'const coveragePath = join(scan, "coverage.json"); const coverage = JSON.parse(readFileSync(coveragePath, "utf8")); coverage.mode = "scoped_path";',
+              'const bytes = JSON.stringify(coverage); writeFileSync(coveragePath, bytes); const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
+              'manifest.scan.artifacts.find(artifact => artifact.path === "coverage.json").sha256 = createHash("sha256").update(bytes).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
+              'const authPath = join(process.env.CODEX_HOME, "auth.json");',
+              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
+              'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
+              'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "scan complete" } }));',
+              'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
+              "process.exit(0);",
+            ].join("\n"),
+          );
+          const summary = await scan(paths, {
+            components: [{ name: "Source", paths: ["."] }],
+            createSecurity: undefined,
+            environment,
+            config: {
+              pluginPath: PLUGIN_ROOT,
+              codexOverrides: {
+                shell_environment_policy: {
+                  set: { SYNTHETIC_COMPONENT: `worker-${value}` },
+                },
+              },
+            },
+            scanOptions: { auth, mode },
+          }).finally(ready.resolve);
+          expect(
+            summary,
+            JSON.stringify(await json(summary.summaryPath!)),
+          ).toMatchObject({ completed: 1, failed: 0 });
+          const child = await json(receipt);
+          expect(await realpath(child.executable)).toBe(await realpath(node));
+          expect(child).toMatchObject({
+            home: join(environment.CODEX_SECURITY_STATE_DIR, "codex-home"),
+            state: environment.CODEX_SECURITY_STATE_DIR,
+            key: auth === "api-key" ? environment.OPENAI_API_KEY : null,
+            auth: auth === "chatgpt" ? storedAuthentication : null,
+            value,
+            python: "/managed/python",
+          });
+          if (mode === "deep") {
+            expect(parseToml(child.workerConfig)).toMatchObject({
+              worker_runtime: {
+                shell_environment_policy: {
+                  set: { SYNTHETIC_COMPONENT: `worker-${value}` },
+                },
+              },
+            });
+          } else expect(child.workerConfig).toBeNull();
+          expect(environment).toEqual(original);
+          expect(await json(join(environment.CODEX_HOME, "auth.json"))).toEqual(
+            storedAuthentication,
+          );
+        }),
+      );
+      for (const outcome of outcomes)
+        if (outcome.status === "rejected") throw outcome.reason;
+      expect(arrivals).toBe(2);
+      expect(Bun.deepEquals(process.env, originalEnvironment)).toBe(true);
+    } finally {
+      ready.resolve();
+      for (const spy of spies) spy.mockRestore();
+    }
+  },
+);
+
 test("CLI requires an explicitly selected API key before automatic planning", async () => {
   const paths = await fixture();
   const planComponentsMock = mock(resolving({ components }));
@@ -1693,7 +1854,7 @@ test("CLI requires an explicitly selected API key before automatic planning", as
   expect(planComponentsMock).not.toHaveBeenCalled();
 });
 
-test("CLI forwards scan settings and returns incomplete coverage", async () => {
+test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const paths = await fixture();
   const planFile = join(paths.root, "plan.json");
   await writeFile(planFile, JSON.stringify({ components: [components[0]] }));
@@ -1721,7 +1882,7 @@ test("CLI forwards scan settings and returns incomplete coverage", async () => {
       createSecurity,
     },
   );
-  expect(result.code).toBe(2);
+  expect(result.code).toBe(0);
   expect(createSecurity.mock.lastCall?.[0]).toMatchObject({
     codexOverrides: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
   });
@@ -1730,7 +1891,9 @@ test("CLI forwards scan settings and returns incomplete coverage", async () => {
     mode: "standard",
     maxCostUsd: 2,
   });
-  expect(JSON.parse(result.stdout).incomplete).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    completed: 1,
+  });
   expect(
     [...signals.listeners.values()].every((listeners) => listeners.size === 0),
   ).toBe(true);
@@ -1781,7 +1944,7 @@ test.each([false, true])(
     expect(JSON.parse(result.stdout)).toMatchObject({
       completed: 2,
       failed: 0,
-      deduplication: { status: failMatching ? "incomplete" : "completed" },
+      deduplication: { status: failMatching ? "failed" : "completed" },
     });
     expect(JSON.parse(saved).deduplication.error).toBe(
       failMatching ? failure : undefined,

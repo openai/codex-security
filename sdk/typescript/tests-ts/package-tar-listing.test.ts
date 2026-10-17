@@ -26,10 +26,6 @@ import {
   tarRecord,
 } from "./package-tar-fixtures.js";
 
-// Bun on Windows can start synchronous timeouts from a stale loop clock.
-// https://github.com/oven-sh/bun/pull/33935
-const execFileAsync = promisify(execFile);
-
 const { assertTarListingSizes, regularTarListingLines } = (await import(
   new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
 )) as {
@@ -39,6 +35,10 @@ const { assertTarListingSizes, regularTarListingLines } = (await import(
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
 )) as { packageDistFiles: readonly string[] };
+// Avoid Bun 1.3.14's stale Windows spawnSync timeout.
+// https://github.com/oven-sh/bun/issues/33932
+const execFileAsync = promisify(execFile);
+
 const pluginContract = {
   externalOwnedExact: [".codex-plugin/plugin.json"],
   shippedExact: ["scripts/launch_codex_security_mcp"],
@@ -81,6 +81,9 @@ function packageTar({
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
+    "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/LICENSE",
     ...executablePaths,
@@ -518,202 +521,199 @@ describe("npm package tar listings", () => {
     "ordinary-pax-then-wrong-long-name",
     "ordinary-pax-then-correct-long-name",
     "ordinary-long-name-then-pax",
-  ])(
-    "validates archive assets as npm installs them: %s",
-    async (representation) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
-      try {
-        const logo = readFileSync(
-          new URL(
-            "../../../plugins/codex-security/assets/logo.png",
-            import.meta.url,
-          ),
+  ])("validates assets installed by npm: %s", async (representation) => {
+    const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
+    try {
+      const logo = readFileSync(
+        new URL(
+          "../../../plugins/codex-security/assets/logo.png",
+          import.meta.url,
+        ),
+      );
+      const path = "package/_bundled_plugin/logo.png";
+      const renamed =
+        representation === "sparse-name" || representation === "pax-path";
+      const wrongPath = "package/synthetic-storage.png";
+      const ordinary = representation.startsWith("ordinary-");
+      const pathOrder = ordinary
+        ? representation.slice("ordinary-".length)
+        : representation;
+      const wrongLongName = pathOrder === "pax-then-wrong-long-name";
+      const orderedPath = representation.includes("then");
+      const overwrite = representation.startsWith("overwrite");
+      let stored =
+        representation === "overwrite-text" ? Buffer.from("fixture\n") : logo;
+      const attributes: Record<string, string> = ordinary
+        ? {}
+        : {
+            "GNU.sparse.size": String(stored.length),
+            "GNU.sparse.numblocks": "1",
+            "GNU.sparse.map": `0,${stored.length}`,
+          };
+      if (representation === "pax-map-prefix") {
+        const map = Buffer.alloc(512);
+        map.write(`1\n0\n${logo.length}\n`);
+        stored = Buffer.concat([map, logo]);
+        for (const key of Object.keys(attributes)) delete attributes[key];
+        Object.assign(attributes, {
+          "GNU.sparse.major": "1",
+          "GNU.sparse.minor": "0",
+          "GNU.sparse.name": path,
+          "GNU.sparse.realsize": String(logo.length),
+        });
+      } else if (representation === "pax-hole") {
+        const hole = logo.findIndex(
+          (byte, index) => index > 0 && index % 512 === 0 && byte === 0,
         );
-        const path = "package/_bundled_plugin/logo.png";
-        const renamed =
-          representation === "sparse-name" || representation === "pax-path";
-        const wrongPath = "package/synthetic-storage.png";
-        const ordinary = representation.startsWith("ordinary-");
-        const pathOrder = ordinary
-          ? representation.slice("ordinary-".length)
-          : representation;
-        const wrongLongName = pathOrder === "pax-then-wrong-long-name";
-        const orderedPath = representation.includes("then");
-        const overwrite = representation.startsWith("overwrite");
-        let stored =
-          representation === "overwrite-text" ? Buffer.from("fixture\n") : logo;
-        const attributes: Record<string, string> = ordinary
-          ? {}
-          : {
-              "GNU.sparse.size": String(stored.length),
-              "GNU.sparse.numblocks": "1",
-              "GNU.sparse.map": `0,${stored.length}`,
-            };
-        if (representation === "pax-map-prefix") {
-          const map = Buffer.alloc(512);
-          map.write(`1\n0\n${logo.length}\n`);
-          stored = Buffer.concat([map, logo]);
-          for (const key of Object.keys(attributes)) delete attributes[key];
-          Object.assign(attributes, {
-            "GNU.sparse.major": "1",
-            "GNU.sparse.minor": "0",
-            "GNU.sparse.name": path,
-            "GNU.sparse.realsize": String(logo.length),
-          });
-        } else if (representation === "pax-hole") {
-          const hole = logo.findIndex(
-            (byte, index) => index > 0 && index % 512 === 0 && byte === 0,
-          );
-          expect(hole).toBeGreaterThan(0);
-          stored = Buffer.concat([
-            logo.subarray(0, hole),
-            logo.subarray(hole + 1),
-          ]);
-          attributes["GNU.sparse.numblocks"] = "2";
-          attributes["GNU.sparse.map"] =
-            `0,${hole},${hole + 1},${logo.length - hole - 1}`;
-        }
-        if (
-          !ordinary &&
-          (renamed || orderedPath || representation === "global-path")
-        )
-          attributes["GNU.sparse.name"] = path;
-        if (overwrite) attributes["GNU.sparse.name"] = "package/README.md";
-        if (representation === "pax-path" || orderedPath)
-          attributes["path"] =
-            representation === "pax-then-long-name" ? wrongPath : path;
-        const longName = tarRecord(
-          Buffer.from(
-            `${representation === "pax-then-long-name" || representation === "ordinary-pax-then-correct-long-name" || pathOrder === "long-name-then-pax" ? path : wrongPath}\0`,
-          ),
-          { name: "././@LongLink", type: 0x4c },
-        );
-        const record =
-          representation === "oldgnu"
-            ? oldGnuSparseRecord(logo, path)
-            : Buffer.concat([
-                ...(representation === "global-path"
-                  ? [
-                      tarRecord(paxRecords({ path: wrongPath }), {
-                        name: "GlobalHead",
-                        type: 0x67,
-                      }),
-                    ]
-                  : []),
-                ...(pathOrder === "long-name-then-pax" ? [longName] : []),
-                tarRecord(paxRecords(attributes), {
-                  name: "PaxHeaders/asset",
-                  type: 0x78,
-                }),
-                ...(pathOrder.startsWith("pax-then") ? [longName] : []),
-                tarRecord(stored, {
-                  name: renamed || ordinary ? wrongPath : path,
-                }),
-              ]);
-        const archivePath = join(root, "package.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(
-            packageTar({
-              overrides: overwrite
-                ? new Map([["package/README.md", Buffer.alloc(0)]])
-                : undefined,
-              additionalRecords: overwrite
-                ? [tarRecord(logo, { name: path }), record]
-                : [record],
-            }),
-          ),
-        );
-        const nativeRoot = join(root, "native");
-        mkdirSync(nativeRoot);
-        const extracted = await execFileAsync(
-          "tar",
-          ["-xzf", archivePath, "-C", nativeRoot],
-          { encoding: "buffer", timeout: 30_000, windowsHide: true },
-        );
-        expect(extracted.stderr.toString()).toBe("");
-        // These incompatible packages do not promise a portable native asset path.
-        if (!wrongLongName)
-          expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
-        const contractPath = join(root, "contract.json");
-        writeFileSync(
-          contractPath,
-          JSON.stringify({
-            ...pluginContract,
-            shippedExact: [...pluginContract.shippedExact, "logo.png"],
-          }),
-        );
-        const environment: NodeJS.ProcessEnv = {
-          ...process.env,
-          npm_config_cache: join(root, "npm-cache"),
-        };
-        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        const installed = installPackage(root, archivePath, environment);
-        const consumer = join(root, "consumer");
-        expect({
-          status: installed.status,
-          stderr: installed.status === 0 ? "" : installed.stderr,
-        }).toEqual({ status: 0, stderr: "" });
-        const installedPackage = join(
-          consumer,
-          "node_modules",
-          "@openai",
-          "codex-security",
-        );
-        const installedLogo = join(
-          installedPackage,
-          "_bundled_plugin",
-          "logo.png",
-        );
-        if (wrongLongName) {
-          expect(existsSync(installedLogo)).toBe(false);
-          expect(
-            readFileSync(
-              join(installedPackage, wrongPath.slice("package/".length)),
-            ).equals(logo),
-          ).toBe(true);
-        }
-        const compatible = [
-          "pax-full",
-          "pax-path",
-          "global-path",
-          "pax-then-long-name",
-          "long-name-then-pax",
-          "overwrite-logo",
-          "ordinary-pax-then-correct-long-name",
-          "ordinary-long-name-then-pax",
-        ].includes(representation);
-        expect(
-          existsSync(installedLogo) && readFileSync(installedLogo).equals(logo),
-        ).toBe(compatible);
-        if (overwrite)
-          expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-        const checked = spawnSync(
-          commandPath("node"),
-          [
-            fileURLToPath(
-              new URL("../scripts/check-package.mjs", import.meta.url),
-            ),
-            archivePath,
-            contractPath,
-          ],
-          {
-            cwd: root,
-            env: environment,
-            encoding: "utf8",
-            timeout: 30_000,
-            windowsHide: true,
-          },
-        );
-        expect({
-          status: checked.status,
-          stderr: compatible ? checked.stderr : "",
-        }).toEqual({ status: compatible ? 0 : 1, stderr: "" });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
+        expect(hole).toBeGreaterThan(0);
+        stored = Buffer.concat([
+          logo.subarray(0, hole),
+          logo.subarray(hole + 1),
+        ]);
+        attributes["GNU.sparse.numblocks"] = "2";
+        attributes["GNU.sparse.map"] =
+          `0,${hole},${hole + 1},${logo.length - hole - 1}`;
       }
-    },
-  );
+      if (
+        !ordinary &&
+        (renamed || orderedPath || representation === "global-path")
+      )
+        attributes["GNU.sparse.name"] = path;
+      if (overwrite) attributes["GNU.sparse.name"] = "package/README.md";
+      if (representation === "pax-path" || orderedPath)
+        attributes["path"] =
+          representation === "pax-then-long-name" ? wrongPath : path;
+      const longName = tarRecord(
+        Buffer.from(
+          `${representation === "pax-then-long-name" || representation === "ordinary-pax-then-correct-long-name" || pathOrder === "long-name-then-pax" ? path : wrongPath}\0`,
+        ),
+        { name: "././@LongLink", type: 0x4c },
+      );
+      const record =
+        representation === "oldgnu"
+          ? oldGnuSparseRecord(logo, path)
+          : Buffer.concat([
+              ...(representation === "global-path"
+                ? [
+                    tarRecord(paxRecords({ path: wrongPath }), {
+                      name: "GlobalHead",
+                      type: 0x67,
+                    }),
+                  ]
+                : []),
+              ...(pathOrder === "long-name-then-pax" ? [longName] : []),
+              tarRecord(paxRecords(attributes), {
+                name: "PaxHeaders/asset",
+                type: 0x78,
+              }),
+              ...(pathOrder.startsWith("pax-then") ? [longName] : []),
+              tarRecord(stored, {
+                name: renamed || ordinary ? wrongPath : path,
+              }),
+            ]);
+      const archivePath = join(root, "package.tgz");
+      writeFileSync(
+        archivePath,
+        gzipSync(
+          packageTar({
+            overrides: overwrite
+              ? new Map([["package/README.md", Buffer.alloc(0)]])
+              : undefined,
+            additionalRecords: overwrite
+              ? [tarRecord(logo, { name: path }), record]
+              : [record],
+          }),
+        ),
+      );
+      const nativeRoot = join(root, "native");
+      mkdirSync(nativeRoot);
+      const extracted = await execFileAsync(
+        "tar",
+        ["-xzf", archivePath, "-C", nativeRoot],
+        { encoding: "buffer", timeout: 30_000, windowsHide: true },
+      );
+      expect(extracted.stderr.toString()).toBe("");
+      // These incompatible packages do not promise a portable native asset path.
+      if (!wrongLongName)
+        expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
+      const contractPath = join(root, "contract.json");
+      writeFileSync(
+        contractPath,
+        JSON.stringify({
+          ...pluginContract,
+          shippedExact: [...pluginContract.shippedExact, "logo.png"],
+        }),
+      );
+      const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        npm_config_cache: join(root, "npm-cache"),
+      };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      const installed = installPackage(root, archivePath, environment);
+      const consumer = join(root, "consumer");
+      expect({
+        status: installed.status,
+        stderr: installed.status === 0 ? "" : installed.stderr,
+      }).toEqual({ status: 0, stderr: "" });
+      const installedPackage = join(
+        consumer,
+        "node_modules",
+        "@openai",
+        "codex-security",
+      );
+      const installedLogo = join(
+        installedPackage,
+        "_bundled_plugin",
+        "logo.png",
+      );
+      if (wrongLongName) {
+        expect(existsSync(installedLogo)).toBe(false);
+        expect(
+          readFileSync(
+            join(installedPackage, wrongPath.slice("package/".length)),
+          ).equals(logo),
+        ).toBe(true);
+      }
+      const compatible = [
+        "pax-full",
+        "pax-path",
+        "global-path",
+        "pax-then-long-name",
+        "long-name-then-pax",
+        "overwrite-logo",
+        "ordinary-pax-then-correct-long-name",
+        "ordinary-long-name-then-pax",
+      ].includes(representation);
+      expect(
+        existsSync(installedLogo) && readFileSync(installedLogo).equals(logo),
+      ).toBe(compatible);
+      if (overwrite)
+        expect(readFileSync(installedLogo).equals(stored)).toBe(true);
+      const checked = spawnSync(
+        commandPath("node"),
+        [
+          fileURLToPath(
+            new URL("../scripts/check-package.mjs", import.meta.url),
+          ),
+          archivePath,
+          contractPath,
+        ],
+        {
+          cwd: root,
+          env: environment,
+          encoding: "utf8",
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect({
+        status: checked.status,
+        stderr: compatible ? checked.stderr : "",
+      }).toEqual({ status: compatible ? 0 : 1, stderr: "" });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
 
   test.each([
     "oldgnu-manifest",
