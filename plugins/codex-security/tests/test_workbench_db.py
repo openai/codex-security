@@ -70,6 +70,7 @@ BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost
 EXPECTED_TABLES = {
     "deep_scan_dedup_inputs",
     "deep_scan_runs",
+    "deep_scan_worker_threads",
     "deep_scan_workers",
     "finding_decisions",
     "finding_dedupe_group_members",

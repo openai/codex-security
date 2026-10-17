@@ -11,6 +11,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import { VERSION } from "../src/version.js";
+import { requestMetadata } from "./support/request-metadata.js";
 
 const fixtures = createApiTestFixtures();
 
@@ -94,8 +95,11 @@ describe("delegated scan attribution", () => {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
                 analytics: { enabled: surface === "sdk" },
+                otel: { environment: `synthetic-${surface}` },
                 responses_api_metadata: {
                   custom_attribution: surface,
+                  "team.tag": `synthetic-${surface}`,
+                  codex_security_integration: "github_action",
                   codex_security_surface: "spoofed",
                   codex_security_command: "spoofed",
                   codex_security_package_version: "spoofed",
@@ -203,12 +207,22 @@ describe("delegated scan attribution", () => {
                         features,
                         ...(model === undefined ? {} : { model }),
                         analytics: { enabled: surface === "sdk" },
-                        responses_api_metadata: {
-                          custom_attribution: surface,
-                          codex_security_surface: surface,
-                          codex_security_command: "scan",
-                          codex_security_package_version: VERSION,
-                        },
+                        otel: { environment: `synthetic-${surface}` },
+                      });
+                      expect(options.config).not.toHaveProperty(
+                        "responses_api_metadata",
+                      );
+                      expect(
+                        requestMetadata(options.configOverrides),
+                      ).toMatchObject({
+                        custom_attribution: surface,
+                        "team.tag": `synthetic-${surface}`,
+                        codex_security_integration: "github_action",
+                        codex_security_surface: surface,
+                        codex_security_command: "scan",
+                        codex_security_package_version: VERSION,
+                        codex_security_provider: "openai",
+                        codex_security_scan_mode: mode,
                       });
                       const deepConfigPath =
                         options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
@@ -221,8 +235,10 @@ describe("delegated scan attribution", () => {
                           parseToml(deepConfig)["worker_runtime"],
                         ).toMatchObject({
                           analytics: { enabled: surface === "sdk" },
-                          responses_api_metadata:
-                            options.config?.["responses_api_metadata"],
+                          otel: { environment: `synthetic-${surface}` },
+                          responses_api_metadata: requestMetadata(
+                            options.configOverrides,
+                          ),
                         });
                       }
                       expect(threadOptions.threadSource).toBe("security_scan");
@@ -286,6 +302,7 @@ describe("delegated scan attribution", () => {
                       expect(sharedConfig).not.toHaveProperty(
                         "responses_api_metadata",
                       );
+                      expect(sharedConfig).not.toHaveProperty("otel");
                       expect(sharedConfig).not.toHaveProperty("model");
                       expect(sharedConfig).not.toHaveProperty("codex_security");
                       expect(sharedConfig).not.toHaveProperty("analytics");

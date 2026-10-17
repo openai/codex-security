@@ -100,7 +100,7 @@ import {
   type DeepScanProgress,
 } from "./deep-progress.js";
 import { findScanSession } from "./scan-logs.js";
-import { runDeepScan } from "./deep-scan.js";
+import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -195,7 +195,7 @@ import {
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
@@ -887,7 +887,7 @@ export class CodexSecurity {
       session.sessionConfig["approval_policy"] = "never";
       const { codex } = await this.#createSessionCodex(
         session,
-        "validate",
+        { command: "validate" },
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -998,7 +998,7 @@ export class CodexSecurity {
       };
       const { codex } = await this.#createSessionCodex(
         session,
-        "patch",
+        { command: "patch" },
         {
           CODEX_SECURITY_REPOSITORY: repository,
           CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
@@ -1028,7 +1028,9 @@ export class CodexSecurity {
         onCost:
           options.onCost === undefined
             ? undefined
-            : notifyObserver(options, "onCost"),
+            : (cost, complete) => {
+                if (complete) notifyObserver(options, "onCost")(cost);
+              },
         onError: reportTrackingError,
       });
       const thread = codex.startThread({
@@ -1365,7 +1367,7 @@ export class CodexSecurity {
       );
       const { codex } = await this.#createSessionCodex(
         session,
-        "policy",
+        { command: "policy" },
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1383,9 +1385,12 @@ export class CodexSecurity {
           `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystem)}`,
         ],
       );
-      const reportCost = (current: Readonly<ScanCost>): void => {
+      const reportCost = (
+        current: Readonly<ScanCost>,
+        complete = true,
+      ): void => {
         const total = addScanCosts(accumulatedCost, current);
-        if (completeCost) notifyObserver(options, "onCost")(total);
+        if (completeCost && complete) notifyObserver(options, "onCost")(total);
         if (
           options.maxCostUsd !== undefined &&
           total.estimatedUsd > options.maxCostUsd
@@ -1557,6 +1562,7 @@ export class CodexSecurity {
     ]);
     let maxCostUsd = options.maxCostUsd;
     let latestCost: Readonly<ScanCost> | null = null;
+    let latestCostComplete = false;
     let notifiedLimit: number | undefined;
     let scanDir = "";
     let targetPathsFile: string | null = null;
@@ -1798,16 +1804,12 @@ export class CodexSecurity {
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
-        responses_api_metadata: {
-          ...(isRecord(workerRuntimeConfig["responses_api_metadata"])
-            ? workerRuntimeConfig["responses_api_metadata"]
-            : {}),
-          ...codexSecurityRequestMetadata(
-            this.#surface,
-            "scan",
-            runtime.plugin.version,
-          ),
-        },
+        responses_api_metadata: codexSecurityRequestContext(effectiveConfig, {
+          surface: this.#surface,
+          command: "scan",
+          pluginVersion: runtime.plugin.version,
+          mode,
+        }).metadata,
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -1959,9 +1961,11 @@ export class CodexSecurity {
         onCost:
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
-            : (cost) => {
+            : (cost, complete) => {
                 latestCost = cost;
-                notifyObserver(options, "onCost")(cost, maxCostUsd);
+                latestCostComplete = complete;
+                if (complete)
+                  notifyObserver(options, "onCost")(cost, maxCostUsd);
                 if (
                   maxCostUsd !== undefined &&
                   cost.estimatedUsd > maxCostUsd
@@ -2013,7 +2017,11 @@ export class CodexSecurity {
                     );
                     if (budgetSignal.aborted) return;
                     maxCostUsd = next;
-                    notifyObserver(options, "onCost")(latestCost!, maxCostUsd);
+                    if (latestCostComplete)
+                      notifyObserver(options, "onCost")(
+                        latestCost!,
+                        maxCostUsd,
+                      );
                   })
                   .catch((error: unknown) => {
                     if (!budgetSignal.aborted) {
@@ -2375,7 +2383,7 @@ export class CodexSecurity {
       const { codex, environment, codexOptions } =
         await this.#createSessionCodex(
           session,
-          "scan",
+          { command: "scan", mode },
           runtimePaths,
           options.auth,
           git,
@@ -2475,6 +2483,8 @@ export class CodexSecurity {
             return;
           }
           if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
+          if (directDeepScan)
+            tracker.recordUsage(DIRECT_DEEP_SCAN_CONTROL_USAGE, threadId);
           tracker.start(threadId);
           try {
             await workbench(
@@ -2765,7 +2775,10 @@ export class CodexSecurity {
           "all",
         );
         if (previousFindings !== undefined) {
-          const matchingRuntimeConfig = structuredClone(workerRuntimeConfig);
+          const matchingRuntimeConfig: JsonObject = {
+            ...structuredClone(workerRuntimeConfig),
+            responses_api_metadata: workerSnapshot["responses_api_metadata"]!,
+          };
           const matchingFeatures = matchingRuntimeConfig["features"];
           if (isRecord(matchingFeatures)) delete matchingFeatures["plugins"];
           await matchCompletedScan({
@@ -3206,7 +3219,7 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
-    command: string,
+    { command, mode }: { command: string; mode?: ScanMode },
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
@@ -3355,11 +3368,16 @@ export class CodexSecurity {
         ...configOverrides,
       ];
     }
-    const configuredResponsesMetadata = isRecord(
-      sdkCodexConfig["responses_api_metadata"],
-    )
-      ? sdkCodexConfig["responses_api_metadata"]
-      : {};
+    const requestContext = codexSecurityRequestContext(
+      config ?? sessionConfig,
+      {
+        surface: this.#surface,
+        command,
+        pluginVersion: runtime.plugin.version,
+        mode,
+      },
+    );
+    delete sdkCodexConfig["responses_api_metadata"];
     const configuredCodexPath = environmentValue(
       this.#dependencies.environment,
       "CODEX_CLI_PATH",
@@ -3388,23 +3406,9 @@ export class CodexSecurity {
       ...(runtime.providerProfile === undefined
         ? {}
         : { nativeProfile: runtime.providerProfile.name }),
-      ...(configOverrides.length > 0
-        ? {
-            configOverrides,
-          }
-        : {}),
+      configOverrides: [...configOverrides, requestContext.configOverride],
       env: sdkEnvironment,
-      config: {
-        ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-        responses_api_metadata: {
-          ...configuredResponsesMetadata,
-          ...codexSecurityRequestMetadata(
-            this.#surface,
-            command,
-            runtime.plugin.version,
-          ),
-        },
-      },
+      config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
     };
     const codex = await this.#dependencies.createCodex(codexOptions);
     return { codex, environment, codexOptions };
@@ -4462,7 +4466,8 @@ export async function runScanEvents(
     }
     // Managed scans reconcile saved checkpoints before admitting canonical artifacts.
     if (options.workbenchValidated && options.onFinalize !== undefined) {
-      usage = (await options.onFinalize(usage)) ?? usage;
+      const finalizedUsage = await options.onFinalize(usage);
+      if (finalizedUsage !== undefined) usage = finalizedUsage;
     }
     options.signal.throwIfAborted();
     await requireScanArtifacts(
@@ -4498,7 +4503,8 @@ export async function runScanEvents(
       );
     }
     if (!options.workbenchValidated && options.onFinalize !== undefined) {
-      usage = (await options.onFinalize(usage)) ?? usage;
+      const finalizedUsage = await options.onFinalize(usage);
+      if (finalizedUsage !== undefined) usage = finalizedUsage;
     }
     const result = await collectResult(
       {
@@ -5594,6 +5600,7 @@ function selectedWorkerRuntimeConfig(
       [
         ...CODEX_AUTH_CONFIG_KEYS,
         "analytics",
+        "otel",
         "responses_api_metadata",
         "openai_base_url",
         "features",

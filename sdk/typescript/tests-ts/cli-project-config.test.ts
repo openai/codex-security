@@ -1225,7 +1225,9 @@ test.each([
           codexHome: input.root,
           model,
           onUsage: options?.onUsage,
-          onCost: options?.onCost,
+          onCost: (cost, complete) => {
+            if (complete) options?.onCost?.(cost);
+          },
         });
         tracker.start("synthetic-scan-thread");
         await tracker.stop(usage);

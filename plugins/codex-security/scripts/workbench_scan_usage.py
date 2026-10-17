@@ -120,6 +120,7 @@ def collect_scan_usage(
 
     total = _empty_token_usage()
     accepted_thread_ids: set[str] = set()
+    measured_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     for session in sessions:
         if session.parent_thread_id in excluded_thread_ids:
@@ -138,6 +139,10 @@ def collect_scan_usage(
                 started_at=started_at,
                 completed_at=stopped_at,
                 completed_turn_id=completed_turn_id if session.thread_id == thread_id else None,
+                is_scan_owner=(
+                    scan["mode"] == "deep"
+                    and session.thread_id == scan["deep_scan_owner_thread_id"]
+                ),
             )
         except (OSError, UnicodeError, ValueError):
             missing_thread_ids.add(session.thread_id)
@@ -153,16 +158,22 @@ def collect_scan_usage(
             missing_thread_ids.add(session.thread_id)
             continue
         accepted_thread_ids.add(session.thread_id)
+        if "token_usage_unavailable" in session_warnings:
+            missing_thread_ids.add(session.thread_id)
+            continue
+        measured_thread_ids.add(session.thread_id)
         _add_token_usage(total, session_usage)
 
     if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
+    if not measured_thread_ids:
+        return _unavailable_usage("token_usage_unavailable", warnings=warnings)
 
     result: dict[str, Any] = {
         "coverage": "partial" if missing_thread_ids or warnings else "complete",
         "source": "codex_rollout",
         **total,
-        "threadCount": len(accepted_thread_ids),
+        "threadCount": len(measured_thread_ids),
     }
     if missing_thread_ids:
         result["missingThreadCount"] = len(missing_thread_ids)
@@ -196,8 +207,8 @@ def _scan_root_thread_ids(
             for row in connection.execute(
                 """
                 SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
+                FROM deep_scan_worker_threads
+                WHERE scan_id = ?
                 ORDER BY sdk_thread_id
                 """,
                 (scan["id"],),
@@ -440,6 +451,7 @@ def _read_rollout_usage(
     started_at: datetime,
     completed_at: datetime | None,
     completed_turn_id: str | None = None,
+    is_scan_owner: bool = False,
 ) -> tuple[dict[str, int], set[str]]:
     total = _empty_token_usage()
     warnings: set[str] = set()
@@ -451,6 +463,8 @@ def _read_rollout_usage(
     response_ids: set[str] = set()
     current_turn_id: str | None = None
     completed_turn_measured = False
+    usage_observed = False
+    direct_control_session = False
 
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -488,6 +502,13 @@ def _read_rollout_usage(
                     and not recorded_parent
                     and not payload.get("forked_from_id")
                 )
+                # prepareCliDeepScanSession creates this owner through app-server
+                # without a model turn, so its initial token usage is known zero.
+                direct_control_session = (
+                    boundary_reached
+                    and is_scan_owner
+                    and payload.get("originator") == "codex_security_deep_scan"
+                )
                 continue
 
             if not isinstance(payload, dict):
@@ -513,6 +534,19 @@ def _read_rollout_usage(
                         previous = inherited_usage
                 continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
+                # The same owner can resume as a model-backed coordinator. Only
+                # a provably post-scan turn leaves the original control zero intact.
+                task_started_at = _timestamp(event.get("timestamp"))
+                if (
+                    completed_at is None
+                    or task_started_at is None
+                    or task_started_at <= completed_at
+                    or (
+                        completed_turn_id is not None
+                        and payload.get("turn_id") == completed_turn_id
+                    )
+                ):
+                    direct_control_session = False
                 if (
                     completed_turn_id is not None
                     and current_turn_id == completed_turn_id
@@ -585,6 +619,7 @@ def _read_rollout_usage(
                     if turn_usage is not None:
                         observed_response_usage = turn_usage
                     continue
+                usage_observed = True
                 if is_completion_turn:
                     completed_turn_measured = True
                 if turn_usage is not None and any(
@@ -614,6 +649,7 @@ def _read_rollout_usage(
             )
             if completed_at is not None and timestamp > completed_at and not is_completion_turn:
                 continue
+            usage_observed = True
             if is_completion_turn:
                 completed_turn_measured = True
             if delta["totalTokens"] <= 0:
@@ -623,6 +659,8 @@ def _read_rollout_usage(
     _add_token_usage(total, response_usage if response_usage is not None else legacy_usage)
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
+    elif not usage_observed and not direct_control_session:
+        warnings.add("token_usage_unavailable")
     if completed_turn_id is not None and not completed_turn_measured:
         warnings.add("completion_turn_unavailable")
     return total, warnings

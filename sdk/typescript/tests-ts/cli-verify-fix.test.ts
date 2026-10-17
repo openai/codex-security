@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -49,12 +50,10 @@ describe("read-only finding verification", () => {
           },
           linearClient,
           onCodex: (args, output, processEnvironment, input) => {
-            expect(args).toContain(
-              'responses_api_metadata.codex_security_command="verify-fix"',
-            );
-            expect(args).toContain(
-              `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
-            );
+            expect(requestMetadata(args)).toMatchObject({
+              codex_security_command: "verify-fix",
+              codex_security_package_version: VERSION,
+            });
             expect(args[0]).toBe("app-server");
             expect(input).toBeUndefined();
             expect(args).toContain('approval_policy="on-request"');
