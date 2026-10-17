@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -12,6 +12,21 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+let moduleSource: string;
+beforeAll(async () => {
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    [
+      "build",
+      fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
+      "--target=node",
+      "--format=esm",
+    ],
+    { encoding: "utf8" },
+  );
+  moduleSource = stdout;
+});
 
 test.each(["native", "without zstd"])(
   "reads saved logs with Node's %s capabilities",
@@ -37,16 +52,8 @@ test.each(["native", "without zstd"])(
       zstdCompressSync(`${JSON.stringify(worker)}\n`),
     );
 
-    const built = await Bun.build({
-      entrypoints: [
-        fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
-      ],
-      target: "node",
-      format: "esm",
-    });
-    expect(built.success).toBe(true);
     const module = join(root, "scan-logs.mjs");
-    await writeFile(module, await built.outputs[0]!.text());
+    await writeFile(module, moduleSource);
     const { stdout } = await promisify(execFile)(
       "node",
       [

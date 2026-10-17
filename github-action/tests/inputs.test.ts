@@ -7,7 +7,7 @@ test('defaults are stable across events', () => {
   const input = parse();
   assert.deepEqual(input, {
     repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
-    model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
+    provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
     verbose: true, dryRun: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
@@ -17,6 +17,23 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
   assert.ok(!args.includes('--cyber-access-program'));
+});
+test('provider and model inputs map directly to scan CLI arguments in both modes', () => {
+  for (const provider of ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'])
+  for (const mode of ['standard', 'deep']) for (const dryRun of ['false', 'true']) {
+    const input = parse({provider, model:'synthetic/model', mode, 'dry-run':dryRun});
+    const args = scanArguments(input, {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--provider') + 1], provider);
+    assert.equal(args[args.indexOf('--auth') + 1], provider === 'amazon-bedrock' || dryRun === 'true' ? 'auto' : 'api-key');
+    assert.ok(args.includes('--model=synthetic/model'));
+    assert.equal(args.includes('--dry-run'), dryRun === 'true');
+  }
+  assert.throws(() => parse({provider:'unsupported'}), /provider must be one of/);
+  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const model of ['', '  ']) {
+    const args = scanArguments(parse({provider, model}), {repository:'/checkout'}, '/results');
+    assert.ok(!args.some(arg => arg.startsWith('--model')), 'Leave missing model validation to the CLI');
+  }
+  assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
 });
 test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
   for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {

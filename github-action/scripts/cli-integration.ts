@@ -97,6 +97,23 @@ try {
     assert.equal(preflight.mode, mode);
   }
 
+  // Pass provider/model through the locked CLI without copying its provider setup or validation.
+  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const mode of ['standard', 'deep']) {
+    const values: Record<string, string> = {provider, model:'synthetic/model', mode, 'dry-run':'true'};
+    const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
+      {repository}, join(root, `${provider}-${mode}`));
+    const preflight = JSON.parse(run(args, 0));
+    assert.equal(preflight.dryRun, true); assert.equal(preflight.mode, mode);
+    assert.equal(preflight.modelProvider, provider);
+    if (provider === 'amazon-bedrock') assert.equal(preflight.authentication.method, 'aws_credentials');
+    values.model = '';
+    const missingModelArgs = scanArguments(parseInputs(name => values[name] ?? '', repository), {repository}, join(root, 'missing-model'));
+    const missing = spawnSync(process.execPath, [cli, ...missingModelArgs], {cwd:repository, env, encoding:'utf8', timeout:120_000});
+    if (missing.error) throw missing.error;
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr + missing.stdout, /--model is required when using --provider/);
+  }
+
   // Normalization must not let a literal repository path become a framework option.
   await mkdir(join(repository, '--help'));
   await writeFile(join(repository, '--help/example.ts'), 'export const example = 1;\n');
