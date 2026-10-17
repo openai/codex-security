@@ -38,20 +38,31 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
-  test
-    .skipIf(process.platform === "win32")
-    .each(["PATH", "PYTHON", "configured"] as const)(
-    "does not execute Python in input directories when selected via %s",
-    async (selection) => {
+  test.skipIf(process.platform === "win32").each([
+    ["artifact helper", "PATH"],
+    ["artifact helper", "PYTHON"],
+    ["artifact helper", "configured"],
+    ["SDK scan ID", "PYTHON"],
+    ["SDK scan ID", "configured"],
+    ["CLI scan ID", "PYTHON"],
+    ["CLI scan ID", "configured"],
+    ["CLI latest", "PYTHON"],
+    ["CLI latest", "configured"],
+  ] as const)(
+    "%s does not execute Python in input directories when selected via %s",
+    async (entrypoint, selection) => {
       const root = await mkdtemp(
         join(tmpdir(), "codex-security-export-python-"),
       );
       const caller = join(root, "caller");
-      const repository =
-        selection === "PATH" ? join(root, "repository") : join(caller, "src");
+      const protectCaller =
+        entrypoint === "artifact helper" && selection !== "PATH";
+      const repository = protectCaller
+        ? join(caller, "src")
+        : join(root, "repository");
       const scanDir = join(root, "scan");
       const executable = join(
-        selection === "PATH" ? repository : join(caller, "tools"),
+        protectCaller ? join(caller, "tools") : repository,
         "python3",
       );
       try {
@@ -71,14 +82,29 @@ describe("offline artifact export", () => {
           [
             "-e",
             `
-              const { runArtifactExport } = await import(process.argv[1]);
-              process.stdout.write(await runArtifactExport({
+              const { exportArtifact, runArtifactExport } = await import(process.argv[1]);
+              const options = {
                 scanDir: process.argv[2],
                 sourceRoot: process.argv[3],
                 pythonPath: process.argv[4] || undefined,
                 format: "sarif",
                 output: "-",
-              }));
+              };
+              const entrypoint = process.argv[5];
+              if (entrypoint === "artifact helper") {
+                process.stdout.write(await runArtifactExport(options));
+              } else if (entrypoint === "SDK scan ID") {
+                await exportArtifact({ ...options, source: { scanId: "synthetic-scan" } });
+              } else {
+                const { main } = await import(process.argv[6]);
+                process.exitCode = await main([
+                  "export",
+                  ...(entrypoint === "CLI scan ID" ? ["--scan", "synthetic-scan"] : []),
+                  "--source-root", options.sourceRoot,
+                  "--output", "-",
+                  ...(options.pythonPath ? ["--python", options.pythonPath] : []),
+                ]);
+              }
             `,
             fileURLToPath(
               new URL("../src/artifact-export.ts", import.meta.url),
@@ -86,6 +112,8 @@ describe("offline artifact export", () => {
             scanDir,
             repository,
             selection === "configured" ? executable : "",
+            entrypoint,
+            fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
           ],
           {
             cwd: caller,
@@ -98,6 +126,7 @@ describe("offline artifact export", () => {
                 process.env["PATH"],
               ].join(delimiter),
               PYTHON: selection === "PYTHON" ? executable : "",
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
               XDG_CACHE_HOME: join(root, "cache"),
             },
           },

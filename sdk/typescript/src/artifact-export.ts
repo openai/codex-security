@@ -349,6 +349,10 @@ export async function exportArtifact(
 ): Promise<ArtifactExportResult> {
   const artifact = options.artifact ?? "findings";
   const format = resolveArtifactFormat(artifact, options.format);
+  const sourceRoot =
+    options.sourceRoot === undefined
+      ? undefined
+      : resolve(expandHome(options.sourceRoot));
   const environment = {
     ...exportEnvironment(),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -360,6 +364,8 @@ export async function exportArtifact(
     const python = await resolvePluginPython({
       configuredPath: options.pythonPath,
       environment,
+      protectedRoot:
+        sourceRoot === undefined ? undefined : [process.cwd(), sourceRoot],
       signal: options.signal,
     });
     const pluginRoot = await bundledPluginRoot();
@@ -390,9 +396,7 @@ export async function exportArtifact(
       pythonPath: options.pythonPath,
       signal: options.signal,
       includeMetadata: artifact === "threat-model" && options.output !== "-",
-      ...(options.sourceRoot === undefined
-        ? {}
-        : { sourceRoot: resolve(expandHome(options.sourceRoot)) }),
+      ...(sourceRoot === undefined ? {} : { sourceRoot }),
     },
     process.cwd(),
   );

@@ -219,6 +219,7 @@ import {
   sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
+  type PluginPythonOptions,
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
@@ -1174,6 +1175,7 @@ interface CliDependencies {
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1258,7 +1260,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
+  runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1268,6 +1270,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         python: await resolvePluginPython({
           configuredPath: pythonPath,
           environment,
+          protectedRoot,
           signal,
         }),
         pluginRoot: await bundledPluginRoot(),
@@ -1805,10 +1808,17 @@ export async function main(
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
+        await dependencies.runWorkbench(
+          args,
+          undefined,
+          undefined,
+          pythonPath,
+          protectedRoot,
+        ),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -1820,6 +1830,7 @@ export async function main(
     count = 1,
     status: "complete" | "any" = "complete",
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       workbenchArgs("list-scans", {
@@ -1839,6 +1850,7 @@ export async function main(
         return value;
       },
       pythonPath,
+      protectedRoot,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
@@ -4801,11 +4813,21 @@ export async function main(
             options.artifact,
             options.exportFormat,
           );
+          const sourceRoot =
+            options.sourceRoot === undefined
+              ? undefined
+              : resolveCliPath(currentDirectory, options.sourceRoot);
+          const protectedRoot =
+            sourceRoot === undefined
+              ? undefined
+              : [currentDirectory, sourceRoot];
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
             const scanId =
               options.scan ??
-              (await latestScans(1, "complete", options.python))?.[0]?.scanId;
+              (
+                await latestScans(1, "complete", options.python, protectedRoot)
+              )?.[0]?.scanId;
             if (scanId === undefined) return;
             scanDir = await resolveSavedArtifactDirectory(
               scanId,
@@ -4817,6 +4839,7 @@ export async function main(
                   undefined,
                   undefined,
                   options.python,
+                  protectedRoot,
                 ),
             );
           }
@@ -4831,10 +4854,7 @@ export async function main(
                     currentDirectory,
                     options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
                   ),
-            sourceRoot:
-              options.sourceRoot === undefined
-                ? undefined
-                : resolveCliPath(currentDirectory, options.sourceRoot),
+            sourceRoot,
             pythonPath: options.python,
           };
           try {
