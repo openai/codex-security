@@ -8,7 +8,7 @@ import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 const { normalizeCandidatesCommand } = await importSource(
-  new URL("../src/helpers/normalize-candidates.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
 );
 const { recordCodexSecurityDiscoveryCandidates } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
@@ -23,9 +23,9 @@ const { recordCodexSecurityDiscoveryCandidates } = await importSource(
     },
   },
 );
-const inventoryScript = path.join(
+const inventoryHelper = path.join(
   import.meta.dirname,
-  "../../scripts/generate_in_scope_files.py",
+  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
 );
 
 for (const deleted of [false, true]) {
@@ -66,8 +66,9 @@ for (const deleted of [false, true]) {
         git("commit", "-qm", "change");
 
         const scope = path.join(root, "in-scope.txt");
-        execFileSync(process.env.PYTHON ?? "python3", [
-          inventoryScript,
+        execFileSync(process.execPath, [
+          inventoryHelper,
+          "generate-in-scope-files",
           "--repo",
           repo,
           "--scope",

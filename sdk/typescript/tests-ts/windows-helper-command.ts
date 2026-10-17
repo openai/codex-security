@@ -41,9 +41,12 @@ export function windowsHelperFixture(
       input?: string,
       workingDirectory = root,
       pipelineInput?: string,
+      blockIndex = 0,
     ) {
       const source = readFileSync(join(PLUGIN_ROOT, document), "utf8");
-      let command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(source)?.[1];
+      let command = [
+        ...source.matchAll(/```powershell\r?\n([\s\S]*?)\r?\n```/gu),
+      ][blockIndex]?.[1];
       if (command === undefined)
         throw new Error(`No PowerShell command in ${document}`);
       for (const [placeholder, path] of Object.entries(paths))

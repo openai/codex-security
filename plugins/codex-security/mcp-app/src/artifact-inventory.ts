@@ -1,8 +1,6 @@
-import { execFile as nodeExecFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { promisify } from "node:util";
 import * as z from "zod/v4";
+import { join } from "node:path";
 import {
   artifactDestination,
   artifactSourcePath,
@@ -11,14 +9,11 @@ import {
   type ArtifactPage,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import {
-  missingPythonHelperMessage,
-  resolvePythonCommand,
-} from "./python_command.js";
 import { decodeUtf8 } from "./helpers/utf8.js";
-import { decodePosixBytes } from "./helpers/posix-path.js";
+import { runTool } from "./helpers/inventory-git";
+import { environmentValue } from "./helpers/helper-files";
+import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path";
 
-const execFile = promisify(nodeExecFile);
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
@@ -48,20 +43,12 @@ export async function prepareCodexSecurityReviewItems(
     inventoryComponents,
     label,
   );
-  const pythonCommand = context.pythonCommand ?? (await resolvePythonCommand());
-  const helper = join(
-    context.pluginRoot,
-    "scripts",
-    "generate_in_scope_files.py",
-  );
+  const windows = process.platform === "win32";
   const arguments_ = [
-    "-B",
-    helper,
-    "--repo",
-    context.repoRoot,
+    "generate-in-scope-files",
+    `--repo=${context.repoRoot}`,
     `--scope=${context.scope ?? "."}`,
-    "--out",
-    destination,
+    `--out=${destination}`,
   ];
 
   if (context.mode === "diff") {
@@ -85,27 +72,43 @@ export async function prepareCodexSecurityReviewItems(
       );
     }
     arguments_.push(
-      "--diff-base",
-      baseRevision,
-      "--diff-head",
-      headRevision,
-      "--diff-mode",
-      kind === "working_tree" ? "local-patch" : "revisions",
+      `--diff-base=${baseRevision}`,
+      `--diff-head=${headRevision}`,
+      `--diff-mode=${kind === "working_tree" ? "local-patch" : "revisions"}`,
     );
   }
 
   try {
-    await execFile(pythonCommand, arguments_, {
-      cwd: context.pluginRoot,
-      encoding: "utf8",
-      shell: false,
-    });
+    if (arguments_.some((argument) => argument.includes("\0")))
+      throw new TypeError("Process arguments must not contain NUL bytes");
+    const helper = join(context.pluginRoot, "mcp", "helpers.mjs");
+    const home = environmentValue("HOME");
+    const input = windows
+      ? undefined
+      : Buffer.from(
+          encodePosixPath(
+            [home === undefined ? "" : "1", home ?? "", ...arguments_, ""].join(
+              "\0",
+            ),
+          ).toString("hex"),
+        );
+    const result = await runTool(
+      process.execPath,
+      windows ? [helper, ...arguments_] : [helper, "--helper"],
+      // Relative NODE_OPTIONS preloads use the MCP process's current directory.
+      undefined,
+      input,
+      windows ? 0 : 3,
+    );
+    if (result.status !== 0)
+      throw new Error(
+        result.stderr.trim() ||
+          (result.signal
+            ? `Inventory helper terminated by ${result.signal}`
+            : `Inventory helper exited with status ${result.status}`),
+      );
   } catch (error) {
-    const missingPython = missingPythonHelperMessage(error, pythonCommand);
-    if (missingPython) {
-      throw new Error(`${label}: ${missingPython}`, { cause: error });
-    }
-    const details = helperError(error);
+    const details = error instanceof Error ? error.message : String(error);
     throw new Error(
       `${label}: the scan inventory helper failed${details ? `: ${details}` : "."}`,
       { cause: error },
@@ -162,14 +165,4 @@ async function readReviewItems(
   }
 
   return rows;
-}
-
-function helperError(error: unknown): string {
-  if (error && typeof error === "object" && "stderr" in error) {
-    const stderr = error.stderr;
-    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
-    if (Buffer.isBuffer(stderr) && stderr.length)
-      return stderr.toString("utf8").trim();
-  }
-  return error instanceof Error ? error.message : String(error);
 }

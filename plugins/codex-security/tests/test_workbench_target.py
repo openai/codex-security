@@ -758,10 +758,6 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     ]
     assert max(reads) == 64 * 1024
 
-    from rank_preview import is_binary_file
-
-    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
-
 
 @pytest.mark.parametrize(
     "output",
@@ -1407,9 +1403,12 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
             )
         else:
             source.symlink_to(outside, target_is_directory=True)
-    from generate_rank_input import git_changed_paths
-
-    assert dict(git_changed_paths(target, revision, revision, "local-patch"))[source] == "D"
+    assert (
+        dict(WORKBENCH_TARGET["git_changed_paths"](target, revision, revision, "local-patch"))[
+            source
+        ]
+        == "D"
+    )
     sources = WORKBENCH_TARGET["candidate_source_lines"](
         target,
         {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},

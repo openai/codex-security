@@ -15,6 +15,7 @@ import {
 } from "./src/helpers/normalize-candidates";
 import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
+import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
@@ -76,7 +77,16 @@ function runHelper(): void {
     "read-severity-classification":
       "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
   };
-  if (command === "resolve-security-md") {
+  if (
+    command === "generate-in-scope-files" ||
+    command === "make-repo-rank-input" ||
+    command === "make-repo-scope-input" ||
+    command === "make-diff-rank-input"
+  ) {
+    void inventoryCommand(command, args).then((code) => {
+      process.exitCode = code;
+    });
+  } else if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);
@@ -132,7 +142,7 @@ function runHelper(): void {
     });
   } else {
     console.error(
-      `Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-rank-input | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
     );
     process.exitCode = 2;
   }
