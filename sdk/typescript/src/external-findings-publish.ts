@@ -25,7 +25,7 @@ import {
 } from "./runtime.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
-import { readSnykFindings } from "./snyk-findings.js";
+import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readEndorFindings } from "./endor-findings.js";
 import type {
@@ -667,15 +667,21 @@ async function preparePublicationInput(
   let requests = saved?.requests;
   if (!requests) {
     for (const finding of parsed.findings) {
-      const sourceRepository = finding.evidence.details?.repository;
-      if (
-        sourceRepository &&
-        cloudRepositoryUrlKey(sourceRepository.url) !==
-          cloudRepositoryUrlKey(destination.url)
-      )
-        throw new CodexSecurityError(
-          `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository.url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-        );
+      const sourceRepositories = [
+        finding.evidence.details?.repository?.url,
+        ...(options.provider === "snyk"
+          ? snykRepositoryUrls(finding.evidence.source_data)
+          : []),
+      ];
+      for (const sourceRepository of sourceRepositories)
+        if (
+          sourceRepository &&
+          cloudRepositoryUrlKey(sourceRepository) !==
+            cloudRepositoryUrlKey(destination.url)
+        )
+          throw new CodexSecurityError(
+            `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+          );
     }
     let preparedCount = 0;
     progress({
