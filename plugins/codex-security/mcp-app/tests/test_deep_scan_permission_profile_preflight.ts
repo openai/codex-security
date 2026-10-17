@@ -681,26 +681,50 @@ async function testUnexpectedTerminationRemainsRetryable() {
 }
 
 async function testStdioFailuresRemainRetryable() {
-  for (const stream of ["stdin", "stdout"] as const) {
+  for (const stream of ["stdin", "stdout", "write callback"] as const) {
     await withFakeCodex(
       { hangAt: "initialize" },
       async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
         const running = preflight(codexPath, cwd);
         await waitForFile(readyPath);
         assert.equal(children.length, 1);
-        children[0][stream]!.destroy(
-          new Error("SECRET_REPOSITORY_PATH=/repo/private"),
-        );
-        await assert.rejects(
-          running,
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes(JSON.stringify(codexPath)) &&
-            error.message.includes(
-              "could not exchange app-server JSON-RPC over stdio",
-            ) &&
-            error.message.includes("SECRET_REPOSITORY_PATH"),
-        );
+        const stdin = children[0].stdin!;
+        const originalWrite = stdin.write;
+        try {
+          if (stream === "write callback") {
+            stdin.write = ((
+              _message: unknown,
+              callback: (error: Error) => void,
+            ) => {
+              queueMicrotask(() =>
+                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
+              );
+              return false;
+            }) as typeof stdin.write;
+            children[0].stdout!.emit(
+              "data",
+              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
+            );
+          } else {
+            children[0][stream]!.destroy(
+              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
+            );
+          }
+          await assert.rejects(
+            running,
+            (
+              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
+            ) =>
+              error?.name === "Error" &&
+              error.message.includes(JSON.stringify(codexPath)) &&
+              error.message.includes(
+                "could not exchange app-server JSON-RPC over stdio",
+              ) &&
+              error.message.includes("SECRET_REPOSITORY_PATH"),
+          );
+        } finally {
+          stdin.write = originalWrite;
+        }
         await assertPreflightStopped(children, terminatedPath);
       },
     );

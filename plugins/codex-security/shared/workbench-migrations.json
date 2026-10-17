@@ -393,5 +393,22 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;"
     ]
+  },
+  {
+    "version": 48,
+    "name": "share finding issue receipts across trackers",
+    "statements": [
+      "CREATE TABLE finding_issue_receipts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL,\n    finding_id TEXT NOT NULL,\n    occurrence_id TEXT NOT NULL,\n    destination_key TEXT NOT NULL,\n    external_id TEXT NOT NULL,\n    external_url TEXT,\n    operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'reuse')),\n    readback_json TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (occurrence_id, destination_key, external_id, operation)\n);",
+      "INSERT INTO finding_issue_receipts (\n    scan_id, finding_id, occurrence_id, destination_key, external_id, external_url,\n    operation, readback_json, created_at, updated_at\n) SELECT scan_id, finding_id, occurrence_id, json_array(destination_type, team_id, project_id),\n    external_id, external_url, 'create', NULL, created_at, created_at\nFROM finding_publications ORDER BY id;",
+      "DROP TABLE finding_publications;",
+      "CREATE INDEX finding_issue_receipts_by_finding\nON finding_issue_receipts(finding_id, destination_key, id);"
+    ]
+  },
+  {
+    "version": 49,
+    "name": "index finding issue receipt ownership",
+    "statements": [
+      "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
+    ]
   }
 ]

@@ -987,33 +987,10 @@ describe("one-shot scan events", () => {
     );
   });
 
-  test("forwards bounded worker-capacity updates while the scan runs", async () => {
+  test("forwards worker dispatch updates while the scan runs", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
-      yield {
-        type: "item.completed",
-        item: {
-          id: "command-1",
-          type: "command_execution",
-          command:
-            "python3 /plugin/scripts/config_preflight.py --profile security_scan",
-          aggregated_output: JSON.stringify({
-            profile: "security_scan",
-            status: "ready",
-            results: [
-              { capability: "delegated_workers", status: "pass" },
-              {
-                capability: "usable_worker_slots_6",
-                status: "pass",
-                actual: 8,
-              },
-            ],
-          }),
-          exit_code: 0,
-          status: "completed",
-        },
-      };
       yield {
         type: "item.completed",
         item: {
@@ -1030,7 +1007,6 @@ describe("one-shot scan events", () => {
       }),
     ).resolves.toBeDefined();
     expect(statuses).toEqual([
-      { kind: "preflight", delegation: "available", configuredSlots: 8 },
       { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
     ]);
   });

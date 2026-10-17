@@ -34,6 +34,11 @@ For CI's full archive inspection, pass the exact `.tgz` path printed by
 These checks include native Node contracts for SDK completion, cancellation,
 close cleanup, and CLI terminal sanitization. They use the installed package,
 controlled model output, and the real workbench without live model credentials.
+The installed-package checks also verify hosted SDK exports, input validation,
+and the `scan --host` protocol without preparing a repository or requiring Git.
+The hosted-scan tests cover real repository scans, scope, artifact seals, and
+executor receipts. To rerun just the installed-package check, use
+`node scripts/smoke-hosted-package.mjs /absolute/path/to/node_modules/@openai/codex-security`.
 
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.

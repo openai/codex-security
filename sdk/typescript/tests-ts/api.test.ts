@@ -990,9 +990,9 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["root configuration", { approval_policy: "never" }],
+    ["root configuration", { approval_policy: "never" }, "never"],
     [
-      "selected profile",
+      "selected never profile",
       {
         approval_policy: "on-request",
         profile: "strict",
@@ -1000,10 +1000,22 @@ describe("CodexSecurity orchestration", () => {
           strict: { approval_policy: "never", model: "profile-model" },
         },
       },
+      "never",
+    ],
+    [
+      "selected on-request profile",
+      {
+        approval_policy: "never",
+        profile: "review",
+        profiles: {
+          review: { approval_policy: "on-request", model: "profile-model" },
+        },
+      },
+      "on-request",
     ],
   ] as const)(
-    "preserves strict approvals from %s in scan threads and saved recipes",
-    async (_source, codexOverrides) => {
+    "preserves approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides, approvalPolicy) => {
       const { root, repository, codexHome } = await runtimeDirectories();
       let threadOptions: Record<string, unknown> | undefined;
       let recipe: Record<string, unknown> | undefined;
@@ -1023,8 +1035,11 @@ describe("CodexSecurity orchestration", () => {
             }
             return mockWorkbench(args, input);
           },
-          createCodex: () => ({
+          createCodex: (codexOptions) => ({
             startThread: (options: Record<string, unknown>) => {
+              expect(codexOptions.config).toMatchObject({
+                approval_policy: approvalPolicy,
+              });
               threadOptions = options;
               return {
                 id: null,
@@ -1038,9 +1053,9 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, { outputDir: join(root, "scan") }),
       ).rejects.toThrow("scan approval policy captured");
-      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(threadOptions).toMatchObject({ approvalPolicy });
       expect(recipe).toMatchObject({
-        config: { approval_policy: "never" },
+        config: { approval_policy: approvalPolicy },
       });
       await client.close();
     },
@@ -1541,13 +1556,55 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      for (const operation of ["preflight", "run"] as const) {
-        await expect(client[operation](repository)).rejects.toThrow(
+      for (const auth of ["api-key", "chatgpt"] as const) {
+        await expect(client.preflight(repository, { auth })).rejects.toThrow(
           `Set ${apiKey} to run a scan through ${name}.`,
         );
       }
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto", "api-key", "chatgpt"] as const) {
+          await expect(client.run(repository, { mode, auth })).rejects.toThrow(
+            `Set ${apiKey} to run a scan through ${name}.`,
+          );
+        }
+      }
       expect(prepareRuntime).not.toHaveBeenCalled();
       await client.close();
+    },
+  );
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "preflights %s with auto authentication without credentials or runtime startup",
+    async (_name, provider, apiKey, model, providerConfig) => {
+      const { repository } = await repositoryDirectories();
+      const prepareRuntime = mock(rejecting("runtime must not start"));
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model,
+            model_provider: provider,
+            model_providers: { [provider]: providerConfig },
+          },
+        },
+        { environment: {}, prepareRuntime },
+      );
+
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto"] as const) {
+          await expect(
+            client.preflight(repository, { mode, auth }),
+          ).resolves.toMatchObject({
+            mode,
+            modelProvider: provider,
+            authentication: {
+              method: "api_key",
+              source: apiKey,
+              verified: false,
+            },
+          });
+        }
+      }
+      expect(prepareRuntime).not.toHaveBeenCalled();
     },
   );
 
@@ -3783,6 +3840,7 @@ describe("CodexSecurity orchestration", () => {
       "get-scan-feedback",
       "set-scan-thread",
       "prepare-scan-completion",
+      "get-scan",
       "fail-scan",
     ]);
     await client.close();
@@ -4184,7 +4242,25 @@ describe("CodexSecurity orchestration", () => {
                       {},
                       { parent: "thread-1" },
                     );
-                    await observed.promise;
+                    // The fake stream has no executor transport to keep the
+                    // event loop alive while the tracker polls its new worker.
+                    const timeout = setTimeout(
+                      () =>
+                        observed.reject(
+                          new Error(
+                            "Timed out waiting for worker observation.",
+                          ),
+                        ),
+                      Number(
+                        process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ??
+                          "30000",
+                      ),
+                    );
+                    try {
+                      await observed.promise;
+                    } finally {
+                      clearTimeout(timeout);
+                    }
                   }
                 }
               }
@@ -4208,6 +4284,7 @@ describe("CodexSecurity orchestration", () => {
         expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
         expect(errors).toEqual(failure === "none" ? [] : ["onWorkerEvent"]);
       } finally {
+        observed.resolve();
         await client.close();
       }
     },
@@ -5484,7 +5561,8 @@ describe("CodexSecurity orchestration", () => {
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands[3]).toEqual([
+    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
+    expect(commands[4]).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -5557,6 +5635,17 @@ describe("CodexSecurity orchestration", () => {
           await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
           return {
             scan: {
+              ...(completion === "completed"
+                ? {
+                    usage: {
+                      completion: {
+                        threadId: "scan-thread",
+                        turnId: "completion-turn",
+                        finalized: false,
+                      },
+                    },
+                  }
+                : {}),
               warnings: [
                 args
                   .find((value) => value.startsWith("--message="))!
@@ -5597,6 +5686,19 @@ describe("CodexSecurity orchestration", () => {
             `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+          expect(
+            commands.find((args) => args[0] === "finalize-scan-usage"),
+          ).toEqual([
+            "finalize-scan-usage",
+            "--scan-id",
+            "scan_example_001",
+            "--thread-id",
+            "scan-thread",
+            "--turn-id",
+            "completion-turn",
+            "--turn-status",
+            "interrupted",
+          ]);
         }
         expect(runStreamed).toHaveBeenCalledTimes(1);
         const recovery = commands.find(
