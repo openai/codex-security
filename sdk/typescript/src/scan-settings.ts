@@ -48,6 +48,11 @@ export const DEEP_SCAN_SETTINGS = [
   ["maxTimeHours", "max_time_hours", "max_time_hours", "--max-time-hours"],
 ] as const;
 
+export const DEEP_SCAN_DISCOVERY_SETTINGS = [
+  ["discoveryModel", "discovery_model"],
+  ["discoveryReasoningEffort", "discovery_reasoning_effort"],
+] as const;
+
 const positiveIntegerError = "must be a positive integer";
 const positiveInteger = z
   .number({ error: positiveIntegerError })
@@ -60,8 +65,20 @@ const nonnegativeInteger = z
   .nonnegative({ error: nonnegativeIntegerError });
 const maximumHours = 96;
 const hoursError = `must be a positive number no greater than ${maximumHours}`;
+const discoverySettingError = "must be a non-empty string";
+const discoverySetting = z
+  .string({ error: discoverySettingError })
+  .trim()
+  .min(1, { error: discoverySettingError })
+  .optional();
 
 export const DeepScanSettingsSchema = z.strictObject({
+  discoveryModel: discoverySetting.describe(
+    "Discovery worker model. Omit to inherit the parent model.",
+  ),
+  discoveryReasoningEffort: discoverySetting.describe(
+    "Discovery worker reasoning effort. Omit to inherit the parent effort.",
+  ),
   workers: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.workers,
     description: "Maximum concurrent deep-scan discovery workers.",
@@ -95,6 +112,10 @@ export const DeepScanSettingsSchema = z.strictObject({
 });
 
 export type DeepScanOptions = z.infer<typeof DeepScanSettingsSchema>;
+export type ResolvedDeepScanOptions = Required<
+  Pick<DeepScanOptions, (typeof DEEP_SCAN_SETTINGS)[number][0]>
+> &
+  DeepScanOptions;
 
 const inputPath = z.string().min(1);
 

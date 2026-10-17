@@ -75,6 +75,13 @@ async function testDeepScanStdioLifecycle() {
     `.deep-scan-stdio-test-${randomUUID()}.cjs`,
   );
   const threadId = "deep-scan-stdio-lifecycle-thread";
+  const deepConfigPath = path.join(codexHome, "codex-security", "config.toml");
+  const deepConfig = `[deep_scan]
+workers = 1
+subagents = 0
+stop_after_no_new = 1
+max_discovery_runs = 2
+`;
 
   await mkdir(targetPath, { recursive: true });
   await mkdir(failedTargetPath, { recursive: true });
@@ -111,12 +118,9 @@ async function testDeepScanStdioLifecycle() {
     "print('failure fixture')\n",
   );
   await writeFile(
-    path.join(codexHome, "codex-security", "config.toml"),
-    `[deep_scan]
-workers = 1
-subagents = 0
-stop_after_no_new = 1
-max_discovery_runs = 2
+    deepConfigPath,
+    `${deepConfig}discovery_model = "gpt-5.6-luna"
+discovery_reasoning_effort = "medium"
 `,
   );
   await writeFakeCodex(fakeCodexPath);
@@ -273,9 +277,11 @@ model_reasoning_summary = "none"
       ),
       { code: "ENOENT" },
     );
-    assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
+    assert.equal(startedState.config.discoveryModel, "gpt-5.6-luna");
+    assert.equal(startedState.config.discoveryReasoningEffort, "medium");
+    assertFlagPair(startedWorker.argv, "--model", "gpt-5.6-luna");
     assert.equal(
-      startedWorker.argv.includes('model_reasoning_effort="xhigh"'),
+      startedWorker.argv.includes('model_reasoning_effort="medium"'),
       true,
     );
     assert.equal(
@@ -486,6 +492,7 @@ model_reasoning_summary = "none"
     assertCanceled(lateJoin, scanId, startedState.scanDir);
     assert.equal((await readLogLines(startLogPath)).length, 1);
 
+    await writeFile(deepConfigPath, deepConfig);
     const failureThreadId = "deep-scan-stdio-failure-thread";
     server.sendRequest(
       20,
@@ -662,6 +669,12 @@ model_reasoning_summary = "none"
       "the MCP server must remain responsive after canceling one scan",
     );
 
+    await writeFile(
+      deepConfigPath,
+      `${deepConfig}discovery_model = "fixture-resumed-discovery-model"
+discovery_reasoning_effort = "low"
+`,
+    );
     const resumedThreadId = "deep-scan-stdio-resumed-thread";
     const opened = await server.request(
       24,
@@ -812,6 +825,12 @@ model_reasoning_summary = "none"
       resumedScanId,
     ]);
     await writeFile(restartControlPath, "after-restart");
+    await writeFile(
+      deepConfigPath,
+      `${deepConfig}discovery_model = "fixture-unrelated-discovery-model"
+discovery_reasoning_effort = "minimal"
+`,
+    );
 
     const resumedStartIndex = (await readJsonLines(startLogPath)).length;
     const restartedServer = startServer(serverBundlePath, environment);
@@ -970,11 +989,15 @@ model_reasoning_summary = "none"
         assertFlagPair(
           execution.argv,
           "--model",
-          afterRestart ? "gpt-6.1-sol" : "gpt-5.6-sol",
+          context.workerLabel
+            ? "fixture-resumed-discovery-model"
+            : afterRestart
+              ? "gpt-6.1-sol"
+              : "gpt-5.6-sol",
         );
         assert.ok(
           execution.argv.includes(
-            `model_reasoning_effort=${JSON.stringify(afterRestart ? "max" : "high")}`,
+            `model_reasoning_effort=${JSON.stringify(context.workerLabel ? "low" : afterRestart ? "max" : "high")}`,
           ),
         );
 
@@ -994,6 +1017,7 @@ model_reasoning_summary = "none"
     } finally {
       await restartedServer.stop();
     }
+    await writeFile(deepConfigPath, deepConfig);
     await testCliDeepScanEngine({
       fixtureRoot,
       environment,

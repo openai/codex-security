@@ -511,7 +511,7 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47])
+  for (const version of [27, 28, 31, 32, 47, 50])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
@@ -528,8 +528,18 @@ test("recorded additive migrations restore missing columns and configured error 
       .get()?.discovery_user_context_json,
     null,
   );
+  const discoverySettings = () =>
+    Object.values(
+      database
+        .prepare(
+          "SELECT discovery_model, discovery_reasoning_effort FROM deep_scan_runs",
+        )
+        .get()!,
+    );
+  assert.deepEqual(discoverySettings(), [null, null]);
   database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
-    discovery_user_context_json = '"Original discovery context"'`);
+    discovery_user_context_json = '"Original discovery context"',
+    discovery_model = 'fixture-model', discovery_reasoning_effort = 'custom-effort'`);
   applyMigrations(database);
   assert.equal(
     database
@@ -543,6 +553,7 @@ test("recorded additive migrations restore missing columns and configured error 
       .get()?.discovery_user_context_json,
     '"Original discovery context"',
   );
+  assert.deepEqual(discoverySettings(), ["fixture-model", "custom-effort"]);
 });
 
 test("workflow and review checkpoints upgrade atomically with their preserved result data", (t) => {

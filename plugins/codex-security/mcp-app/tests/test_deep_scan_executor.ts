@@ -1446,9 +1446,21 @@ wire_api = "responses"
 env_key = "SYNTHETIC_GATEWAY_KEY"`,
       );
       const settings = [
-        { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
-        { model: "gpt-6-astra", reasoningEffort: "ultra" },
-        { model: "gpt-6.1-sol", reasoningEffort: "max" },
+        {
+          model: "gpt-5.6-sol",
+          reasoningEffort: "xhigh",
+          discovery: { model: "gpt-5.6-luna", reasoningEffort: "medium" },
+        },
+        {
+          model: "gpt-6-astra",
+          reasoningEffort: "ultra",
+          discovery: { model: "fixture-discovery-model" },
+        },
+        {
+          model: "gpt-6.1-sol",
+          reasoningEffort: "max",
+          discovery: { reasoningEffort: "fixture-future-effort" },
+        },
         { model: "gpt-6-sol", reasoningEffort: "high" },
         { model: "fixture-future-model", reasoningEffort: "future-effort" },
         // Omitted settings preserve the model and effort in the Codex home.
@@ -1859,7 +1871,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           }),
       );
       // A running coordinator retains its settings if the source file changes.
-      for (const kind of ["discovery", "dedup"] as const) {
+      for (const kind of ["discovery", "dedup", "setup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           launches.length = 0;
           await Promise.all(
@@ -1922,14 +1934,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ({ args }) => args[0] === "exec",
           );
           assert.equal(workerLaunches.length, settings.length);
-          for (const [
-            index,
-            { model, reasoningEffort },
-          ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(({ args }) =>
-              model === undefined
-                ? !args.includes("--model")
-                : args[args.indexOf("--model") + 1] === model,
+          for (const [index, parent] of settings.entries()) {
+            const discovery =
+              kind === "discovery" ? parent.discovery : undefined;
+            const model = discovery?.model ?? parent.model;
+            const reasoningEffort =
+              discovery?.reasoningEffort ?? parent.reasoningEffort;
+            const workerLaunch = workerLaunches.find(
+              ({ environment }) =>
+                environment!.CODEX_SECURITY_CONFIG_PATH ===
+                workerConfigurations[index].path,
             );
             assert.ok(workerLaunch, `missing worker launch for ${model}`);
             assert.equal(

@@ -149,11 +149,13 @@ export async function writeSession(
     parent,
     cwd,
     timestamp,
+    model,
     parentField = "source",
   }: {
     parent?: string;
     cwd?: string;
     timestamp?: string;
+    model?: string;
     parentField?: SessionParentField;
   } = {},
 ): Promise<string> {
@@ -172,6 +174,9 @@ export async function writeSession(
           ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
         },
       }),
+      ...(model === undefined
+        ? []
+        : [JSON.stringify({ type: "turn_context", payload: { model } })]),
       JSON.stringify({
         type: "event_msg",
         payload: {

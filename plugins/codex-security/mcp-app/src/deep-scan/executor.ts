@@ -54,6 +54,10 @@ import type {
 export interface CodexSdkWorkerModelSettings {
   model?: string;
   reasoningEffort?: string;
+  discovery?: {
+    model?: string;
+    reasoningEffort?: string;
+  };
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
 }
@@ -121,13 +125,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
         await writePrivateFile(includePathsFile, scopeInput);
       }
+      const discovery =
+        request.kind === "discovery" ? this.modelSettings.discovery : undefined;
+      const model = discovery?.model ?? this.modelSettings.model;
+      const reasoningEffort =
+        discovery?.reasoningEffort ?? this.modelSettings.reasoningEffort;
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
       const configOverrides = profileConfigOverrides({
         ...runtimeSettings.config,
-        ...(this.modelSettings.reasoningEffort
-          ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
-          : {}),
+        ...(reasoningEffort ? { model_reasoning_effort: reasoningEffort } : {}),
         mcp_servers: {
           // A disabled server still needs a valid transport during native resolution.
           "codex-security": { command: "node", enabled: false },
@@ -187,9 +194,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               profileName: runtimeSettings.nativeProfile,
             });
       const threadOptions = {
-        ...(this.modelSettings.model
-          ? { model: this.modelSettings.model }
-          : {}),
+        ...(model ? { model } : {}),
         threadSource: "security_scan",
         skipGitRepoCheck: true,
         workingDirectory: request.workingDirectory,

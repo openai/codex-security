@@ -361,6 +361,8 @@ describe("project configuration resolution", () => {
       project,
       {
         subagents: 0,
+        discoveryModel: "sdk-discovery",
+        discoveryReasoningEffort: "high",
         codexOverrides: {
           model: "gpt-5.6-sol",
           synthetic_setting: { enabled: false, itemCount: 0, names: [] },
@@ -370,6 +372,8 @@ describe("project configuration resolution", () => {
     );
     expect(settings).toMatchObject({
       subagents: 0,
+      discoveryModel: "sdk-discovery",
+      discoveryReasoningEffort: "high",
       workers: 8,
     });
     expect(config).toEqual({

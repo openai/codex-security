@@ -155,6 +155,11 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
     let modelCalls = 0;
     let completed = false;
+    let savedCost: JsonObject | null = null;
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const expectedCostUsd =
+      estimateScanCost("gpt-5.6-sol", usage)!.estimatedUsd +
+      estimateScanCost("gpt-5.6-luna", usage)!.estimatedUsd;
     let loseReceipt = scenario === "receipt-lost";
     const makeClient = async (attempt: number) => {
       const codexHome = join(root, `codex-home-${attempt}`);
@@ -183,6 +188,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
               scan: {
                 progress: { status: completed ? "complete" : "failed" },
                 continuationThreadId: "thread-1",
+                cost: savedCost,
               },
             };
           if (args[0] === "register-cli-scan") {
@@ -194,7 +200,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
             });
             return registration;
           }
-          if (args[0] === "complete-scan") completed = true;
+          if (args[0] === "complete-scan") {
+            completed = true;
+            savedCost = JSON.parse(args[args.indexOf("--cost-json") + 1]!);
+          }
           return mockWorkbench(args, input);
         },
         createCodex: codexFactory(async (input: string) => {
@@ -202,6 +211,13 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
           if (scenario === "prompt-files") expect(input).toContain(scanPrompt);
           if (scenario === "scan-interrupted" && modelCalls === 1)
             throw new Error("Synthetic interrupted scan");
+          await writeUsageSession(codexHome, "thread-1", usage, {
+            model: "gpt-5.6-sol",
+          });
+          await writeUsageSession(codexHome, "discovery-thread", usage, {
+            parent: "thread-1",
+            model: "gpt-5.6-luna",
+          });
           await copyCompletedScan(root);
           return { events: completedEvents() };
         }, "thread-1"),
@@ -236,6 +252,10 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
       expect(result.manifest.scan.id).toBe("scan_example_001");
+      expect(result.cost?.estimatedUsd).toBe(expectedCostUsd);
+      expect(result.cost?.model).toContain("gpt-5.6-sol");
+      expect(result.cost?.model).toContain("gpt-5.6-luna");
+      expect(result.cost).toEqual(savedCost);
       expect(python).toHaveBeenCalledWith(
         expect.objectContaining({ protectedRoot: repository }),
       );
@@ -1225,6 +1245,21 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       unpriced.preflight(repository, { maxCostUsd: 5 }),
     ).rejects.toThrow("cost limit is not available for the configured model");
+    await expect(
+      client.preflight(repository, {
+        mode: "deep",
+        maxCostUsd: 5,
+        discoveryModel: "unknown-discovery-model",
+      }),
+    ).rejects.toThrow(
+      "cost limit is not available for the configured model: unknown-discovery-model",
+    );
+    await expect(
+      client.preflight(repository, {
+        mode: "deep",
+        discoveryModel: "unknown-discovery-model",
+      }),
+    ).resolves.toMatchObject({ discoveryModel: "unknown-discovery-model" });
     expect(prepareRuntime).not.toHaveBeenCalled();
     await unpriced.close();
     await client.close();
@@ -3403,6 +3438,8 @@ describe("CodexSecurity orchestration", () => {
         "stop_after_no_new = 7",
         "max_discovery_runs = 60",
         "max_time_hours = 48",
+        'discovery_model = "synthetic-discovery"',
+        'discovery_reasoning_effort = "high"',
         "[other]",
         "enabled = true",
         "",
@@ -3459,6 +3496,8 @@ describe("CodexSecurity orchestration", () => {
     expect(configuration).toContain("stop_after_consecutive_errors = 2");
     expect(configuration).toContain("max_discovery_runs = 10");
     expect(configuration).toContain("max_time_hours = 1.5");
+    expect(configuration).toContain('discovery_model = "synthetic-discovery"');
+    expect(configuration).toContain('discovery_reasoning_effort = "high"');
     expect(configuration).toContain("[other]");
     expect(configuration).toContain("enabled = true");
     expect(recipe).toMatchObject({
@@ -3472,6 +3511,8 @@ describe("CodexSecurity orchestration", () => {
         stopAfterConsecutiveErrors: 2,
         maxDiscoveryRuns: 10,
         maxTimeHours: 1.5,
+        discoveryModel: "synthetic-discovery",
+        discoveryReasoningEffort: "high",
       },
     });
     await client.close();

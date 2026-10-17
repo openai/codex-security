@@ -42,6 +42,7 @@ export interface ScanResultOptions {
   scanDir: string;
   threadId: string;
   turnResult: TurnResultMetadata;
+  observedCost?: Readonly<ScanCost> | null;
   sarifPath?: string | null;
   threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
@@ -68,10 +69,10 @@ export class ScanResult {
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
     this.threatModelPath = options.threatModelPath ?? null;
-    this.cost = estimateScanCost(
-      options.turnResult.model,
-      options.turnResult.usage,
-    );
+    this.cost =
+      options.observedCost === undefined
+        ? estimateScanCost(options.turnResult.model, options.turnResult.usage)
+        : options.observedCost;
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {

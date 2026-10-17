@@ -34,6 +34,10 @@ export function startDeepScanEngine(options: {
       executor: new CodexSdkWorkerExecutor({
         model: options.model,
         reasoningEffort: options.reasoningEffort,
+        discovery: {
+          model: run.config.discoveryModel,
+          reasoningEffort: run.config.discoveryReasoningEffort,
+        },
         parentSandbox: options.parentSandbox,
         artifactContext: {
           pluginRoot,

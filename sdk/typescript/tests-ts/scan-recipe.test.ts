@@ -34,6 +34,14 @@ test.each(
     const codexHome = join(root, "state", "codex-home");
     await mkdir(repository);
     await mkdir(codexHome, { recursive: true });
+    const legacyConfig = join(codexHome, "codex-security", "config.toml");
+    if (mode === "deep") {
+      await mkdir(join(codexHome, "codex-security"));
+      await writeFile(
+        legacyConfig,
+        '[deep_scan]\ndiscovery_model = "synthetic-discovery"\ndiscovery_reasoning_effort = "high"\n',
+      );
+    }
     await writeFile(join(repository, "source.py"), "# synthetic source\n");
     const promptFile = join(root, "post-scan.md");
     const postScanPrompt =
@@ -112,6 +120,15 @@ test.each(
       scans[0]!.scanId,
     ]);
     expect(saved["recipe"]).toMatchObject({ mode, postScanPrompt });
+    if (mode === "deep") {
+      expect(saved["recipe"]).toMatchObject({
+        deepScan: {
+          discoveryModel: "synthetic-discovery",
+          discoveryReasoningEffort: "high",
+        },
+      });
+      await writeFile(legacyConfig, "invalid TOML [");
+    }
     expect(JSON.stringify(saved)).not.toContain(promptFile);
     expect(JSON.stringify(saved)).not.toContain("synthetic-launch-key");
     expect(JSON.stringify(saved)).not.toContain("synthetic-bedrock-key");
@@ -120,6 +137,17 @@ test.each(
         ...dependencies({
           environment,
           currentDirectory: root,
+          onTurn: (_repository, options) => {
+            if (mode === "deep")
+              expect(options).toMatchObject({
+                discoveryModel: "synthetic-discovery",
+                discoveryReasoningEffort: "high",
+              });
+            else {
+              expect(options).not.toHaveProperty("discoveryModel");
+              expect(options).not.toHaveProperty("discoveryReasoningEffort");
+            }
+          },
           onConfig: ({ codexOverrides }) => {
             expect(resolveCodexProfile(codexOverrides!)).toMatchObject(
               selected,
