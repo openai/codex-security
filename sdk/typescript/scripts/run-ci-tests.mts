@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomInt } from "node:crypto";
 import { mkdir, readdir } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
@@ -127,6 +128,11 @@ do {
     parsingArguments[bareOptional.index] = `--${bareOptional.name}=`;
   }
 } while (bareOptional);
+const seed = parsed.values.seed ?? String(randomInt(2 ** 32));
+if (parsed.values.seed === undefined) {
+  testArguments.splice(1, 0, `--seed=${seed}`);
+}
+console.log(`Bun test seed: ${seed}`);
 const child = spawn("bun", testArguments, {
   cwd: new URL("../", import.meta.url),
   env: {

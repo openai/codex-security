@@ -410,5 +410,15 @@
     "statements": [
       "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
     ]
+  },
+  {
+    "version": 50,
+    "name": "retain deep scan worker session ownership",
+    "statements": [
+      "CREATE TABLE deep_scan_worker_threads (\n            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n            sdk_thread_id TEXT NOT NULL,\n            PRIMARY KEY (worker_id, sdk_thread_id)\n        );",
+      "INSERT INTO deep_scan_worker_threads (worker_id, sdk_thread_id)\n        SELECT id, sdk_thread_id FROM deep_scan_workers WHERE sdk_thread_id IS NOT NULL;",
+      "CREATE TRIGGER record_deep_scan_worker_thread_insert\n        AFTER INSERT ON deep_scan_workers\n        WHEN NEW.sdk_thread_id IS NOT NULL\n        BEGIN\n            INSERT OR IGNORE INTO deep_scan_worker_threads (worker_id, sdk_thread_id)\n            VALUES (NEW.id, NEW.sdk_thread_id);\n        END;",
+      "CREATE TRIGGER record_deep_scan_worker_thread_update\n        AFTER UPDATE OF sdk_thread_id ON deep_scan_workers\n        WHEN NEW.sdk_thread_id IS NOT NULL AND OLD.sdk_thread_id IS NOT NEW.sdk_thread_id\n        BEGIN\n            INSERT OR IGNORE INTO deep_scan_worker_threads (worker_id, sdk_thread_id)\n            VALUES (NEW.id, NEW.sdk_thread_id);\n        END;"
+    ]
   }
 ]

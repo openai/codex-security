@@ -195,10 +195,11 @@ def _scan_root_thread_ids(
             row["sdk_thread_id"]
             for row in connection.execute(
                 """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
-                ORDER BY sdk_thread_id
+                SELECT DISTINCT threads.sdk_thread_id
+                FROM deep_scan_worker_threads AS threads
+                JOIN deep_scan_workers AS workers ON workers.id = threads.worker_id
+                WHERE workers.scan_id = ?
+                ORDER BY threads.sdk_thread_id
                 """,
                 (scan["id"],),
             )
@@ -444,8 +445,10 @@ def _read_rollout_usage(
     total = _empty_token_usage()
     warnings: set[str] = set()
     previous = _empty_token_usage()
+    previous_cache_writes_reported = True
     boundary_reached = False
     legacy_usage = _empty_token_usage()
+    completed_legacy_usage = _empty_token_usage()
     response_usage: dict[str, int] | None = None
     observed_response_usage = _empty_token_usage()
     response_ids: set[str] = set()
@@ -510,7 +513,9 @@ def _read_rollout_usage(
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
-                        previous = inherited_usage
+                        previous = _retain_cache_baseline(
+                            previous, inherited_usage, _cache_writes_reported(payload)
+                        )
                 continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
                 if (
@@ -522,6 +527,8 @@ def _read_rollout_usage(
                 _add_token_usage(
                     total, response_usage if response_usage is not None else legacy_usage
                 )
+                if response_usage is None:
+                    _add_token_usage(completed_legacy_usage, legacy_usage)
                 legacy_usage = _empty_token_usage()
                 response_usage = None
                 if payload.get("turn_id") != current_turn_id:
@@ -602,11 +609,28 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
+            reset = snapshot["totalTokens"] < previous["totalTokens"]
+            cache_writes_reported = _cache_writes_reported(payload)
+            baseline = _retain_cache_baseline(previous, snapshot, cache_writes_reported)
+            if baseline is previous:
+                cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
+            refines_classification = (
+                baseline["inputTokens"] >= previous["inputTokens"]
+                and baseline["outputTokens"] >= previous["outputTokens"]
+                and baseline["cachedInputTokens"] >= previous["cachedInputTokens"]
+                and baseline["cacheWriteInputTokens"] >= previous["cacheWriteInputTokens"]
+                and (
+                    (not previous_cache_writes_reported and cache_writes_reported)
+                    or baseline["cachedInputTokens"] > previous["cachedInputTokens"]
+                    or baseline["cacheWriteInputTokens"] > previous["cacheWriteInputTokens"]
+                )
+            )
+            previous_cache_writes_reported = cache_writes_reported
             delta = {
-                key: value - previous[key] if value >= previous[key] else value
+                key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
-            previous = snapshot
+            previous = baseline
             if timestamp < started_at:
                 continue
             is_completion_turn = (
@@ -616,8 +640,36 @@ def _read_rollout_usage(
                 continue
             if is_completion_turn:
                 completed_turn_measured = True
-            if delta["totalTokens"] <= 0:
+            delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
+            if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
+            cache_write_capacity = (
+                legacy_usage["inputTokens"]
+                + delta["inputTokens"]
+                - legacy_usage["cachedInputTokens"]
+                - legacy_usage["cacheWriteInputTokens"]
+                if refines_classification
+                else delta["inputTokens"]
+            )
+            # Late cumulative cache details can classify an earlier legacy turn.
+            completed_capacity = (
+                completed_legacy_usage["inputTokens"]
+                - completed_legacy_usage["cachedInputTokens"]
+                - completed_legacy_usage["cacheWriteInputTokens"]
+                if refines_classification and response_usage is None
+                else 0
+            )
+            for key in ("cacheWriteInputTokens", "cachedInputTokens"):
+                current = min(delta[key], cache_write_capacity)
+                completed = min(delta[key] - current, completed_capacity)
+                delta[key] = current
+                cache_write_capacity -= current
+                completed_capacity -= completed
+                completed_legacy_usage[key] += completed
+                total[key] += completed
+            delta["reasoningOutputTokens"] = min(
+                delta["reasoningOutputTokens"], delta["outputTokens"]
+            )
             _add_token_usage(legacy_usage, delta)
 
     _add_token_usage(total, response_usage if response_usage is not None else legacy_usage)
@@ -626,6 +678,33 @@ def _read_rollout_usage(
     if completed_turn_id is not None and not completed_turn_measured:
         warnings.add("completion_turn_unavailable")
     return total, warnings
+
+
+def _cache_writes_reported(payload: Mapping[str, Any]) -> bool:
+    raw_usage = payload.get("info", {}).get("total_token_usage", {})
+    return "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
+
+
+def _retain_cache_baseline(
+    previous: dict[str, int], snapshot: dict[str, int], reported: bool
+) -> dict[str, int]:
+    baseline = snapshot
+    if (
+        not reported
+        and snapshot["inputTokens"] >= previous["inputTokens"]
+        and snapshot["outputTokens"] >= previous["outputTokens"]
+    ):
+        baseline = {**snapshot, "cacheWriteInputTokens": previous["cacheWriteInputTokens"]}
+    if (
+        baseline["inputTokens"] == previous["inputTokens"]
+        and baseline["outputTokens"] == previous["outputTokens"]
+        and (
+            baseline["cachedInputTokens"] < previous["cachedInputTokens"]
+            or baseline["cacheWriteInputTokens"] < previous["cacheWriteInputTokens"]
+        )
+    ):
+        return previous
+    return baseline
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:

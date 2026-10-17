@@ -233,6 +233,7 @@ import {
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
+  resolveScanSessionPaths,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -625,6 +626,7 @@ interface ClientDependencies {
     signal?: AbortSignal,
   ) => Promise<PreparedRuntime>;
   resolvePluginPython?: typeof resolvePluginPython;
+  resolveScanSessionPaths?: typeof resolveScanSessionPaths;
   prepareOutputDir?: typeof prepareOutputDir;
   requirePrivatePolicyOutputDirectory?: typeof requirePrivatePolicyOutputDirectory;
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
@@ -1028,7 +1030,7 @@ export class CodexSecurity {
         onCost:
           options.onCost === undefined
             ? undefined
-            : notifyObserver(options, "onCost"),
+            : (cost) => notifyObserver(options, "onCost")(cost),
         onError: reportTrackingError,
       });
       const thread = codex.startThread({
@@ -1359,30 +1361,38 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
+      const policyConfig = policyCodexConfig(session.sessionConfig);
+      const policySqliteEnvironment = sqliteHomeEnvironment(
+        policyConfig,
+        outputDir,
+        runtime.environment,
+      );
       const policyFilesystem = policyFilesystemPermissions(
         inputs.gitMetadataPaths,
         await codexExecutableReadPaths(this.#codexCommand().command),
       );
-      const { codex } = await this.#createSessionCodex(
-        session,
-        "policy",
-        {
-          CODEX_SECURITY_REPOSITORY: target.repository,
-          CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
-          CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
-          CODEX_SECURITY_SURFACE: this.#surface,
-          ...(knowledgeBase === null
-            ? {}
-            : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
-        },
-        options.auth,
-        undefined,
-        policyCodexConfig(session.sessionConfig),
-        [
-          // CLI override keys split on dots, so keep paths inside the TOML value.
-          `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystem)}`,
-        ],
-      );
+      const { codex, environment: policyEnvironment } =
+        await this.#createSessionCodex(
+          session,
+          "policy",
+          {
+            ...policySqliteEnvironment,
+            CODEX_SECURITY_REPOSITORY: target.repository,
+            CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+            CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
+            CODEX_SECURITY_SURFACE: this.#surface,
+            ...(knowledgeBase === null
+              ? {}
+              : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
+          },
+          options.auth,
+          undefined,
+          policyConfig,
+          [
+            // CLI override keys split on dots, so keep paths inside the TOML value.
+            `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystem)}`,
+          ],
+        );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
         if (completeCost) notifyObserver(options, "onCost")(total);
@@ -1398,6 +1408,11 @@ export class CodexSecurity {
         }
       };
       const outputSchema = securityPolicyStageOutputSchema();
+      const nativeSessionConfig = {
+        command: this.#codexCommand(),
+        config: effectiveConfig,
+        workingDirectory: outputDir,
+      };
       const run = async (
         stage: SecurityPolicyStage,
         prompt: string,
@@ -1416,6 +1431,24 @@ export class CodexSecurity {
           repository: target.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
+          resolveOwnedSessionPaths:
+            options.maxCostUsd === undefined
+              ? undefined
+              : async (threadId) =>
+                  await (
+                    this.#dependencies.resolveScanSessionPaths ??
+                    resolveScanSessionPaths
+                  )(
+                    {
+                      python: session.python,
+                      pluginRoot: runtime.plugin.pluginRoot,
+                      environment: policyEnvironment,
+                      signal,
+                    },
+                    null,
+                    threadId,
+                    nativeSessionConfig,
+                  ),
           onCost:
             options.onCost === undefined && options.maxCostUsd === undefined
               ? undefined
@@ -1566,6 +1599,7 @@ export class CodexSecurity {
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
+    let signaledCostUsage: unknown;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -1798,6 +1832,7 @@ export class CodexSecurity {
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
+        ...(maxCostUsd === undefined ? {} : { drain_session_records: true }),
         responses_api_metadata: {
           ...(isRecord(workerRuntimeConfig["responses_api_metadata"])
             ? workerRuntimeConfig["responses_api_metadata"]
@@ -1884,8 +1919,8 @@ export class CodexSecurity {
         pluginVersion: runtime.plugin.version,
       };
       const { model } = scanModelConfiguration(effectiveConfig);
-      validateScanCostLimit(options.maxCostUsd, model);
-      if (mode === "deep" && options.maxCostUsd !== undefined) {
+      validateScanCostLimit(maxCostUsd, model);
+      if (mode === "deep" && maxCostUsd !== undefined) {
         budgetRecovery = {
           expectation,
           pluginRoot: runtime.plugin.installedRoot,
@@ -1913,7 +1948,7 @@ export class CodexSecurity {
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
-        if (options.maxCostUsd !== undefined) {
+        if (maxCostUsd !== undefined) {
           costAbortController.abort(error);
           return;
         }
@@ -1932,12 +1967,42 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not track scan activity: ${errorMessage(error)}`);
       };
+      const validationThreadIds: string[] = [];
+      const selectedCodexCommand = () => this.#codexCommand();
+      const nativeSessionConfig = {
+        get command() {
+          return selectedCodexCommand();
+        },
+        config: effectiveConfig,
+        workingDirectory: scanDir,
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         repository: repo,
         scanDirectory: scanDir,
-        maxCostUsd: options.maxCostUsd,
+        maxCostUsd: maxCostUsd,
+        resolveOwnedSessionPaths:
+          maxCostUsd === undefined
+            ? undefined
+            : async (threadId) => {
+                const scan = activeScan;
+                if (scan === null) {
+                  throw new CodexSecurityError(
+                    "The scan session ownership could not be verified.",
+                  );
+                }
+                return await (
+                  this.#dependencies.resolveScanSessionPaths ??
+                  resolveScanSessionPaths
+                )(
+                  scan.options,
+                  scan.id,
+                  threadId,
+                  nativeSessionConfig,
+                  validationThreadIds,
+                );
+              },
         onUsage:
           options.onUsage === undefined
             ? undefined
@@ -1957,15 +2022,17 @@ export class CodexSecurity {
         onProgress:
           options.onProgress === undefined ? undefined : reportProgress,
         onCost:
-          options.onCost === undefined && options.maxCostUsd === undefined
+          options.onCost === undefined && maxCostUsd === undefined
             ? undefined
-            : (cost) => {
+            : (cost, usage) => {
                 latestCost = cost;
                 notifyObserver(options, "onCost")(cost, maxCostUsd);
                 if (
                   maxCostUsd !== undefined &&
-                  cost.estimatedUsd > maxCostUsd
+                  cost.estimatedUsd > maxCostUsd &&
+                  !costAbortController.signal.aborted
                 ) {
+                  signaledCostUsage = usage;
                   costAbortController.abort(
                     new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
                   );
@@ -2013,6 +2080,7 @@ export class CodexSecurity {
                     );
                     if (budgetSignal.aborted) return;
                     maxCostUsd = next;
+                    tracker.setMaxCostUsd(next);
                     notifyObserver(options, "onCost")(latestCost!, maxCostUsd);
                   })
                   .catch((error: unknown) => {
@@ -2037,10 +2105,22 @@ export class CodexSecurity {
         mode,
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
-        config: { ...preflightConfig, approval_policy: approvalPolicy },
+        config: {
+          ...preflightConfig,
+          ...Object.fromEntries(
+            [
+              "sqlite_home",
+              "model_context_window",
+              "model_auto_compact_token_limit",
+            ]
+              .filter((key) => workerRuntimeConfig[key] !== undefined)
+              .map((key) => [key, workerRuntimeConfig[key]!]),
+          ),
+          approval_policy: approvalPolicy,
+        },
         failOnSeverity: options.failureSeverity,
         knowledgeBasePaths: knowledgeBase?.sources,
-        maxCostUsd: options.maxCostUsd,
+        maxCostUsd,
         deepScan: deepScanConfiguration?.settings,
         auth: options.auth,
         cyberAccessProgram: options.cyberAccessProgram,
@@ -2062,6 +2142,11 @@ export class CodexSecurity {
         environment: {
           ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
+          ...sqliteHomeEnvironment(
+            session.sessionConfig,
+            scanDir,
+            runtime.environment,
+          ),
         },
         signal,
         failureMessage: "Could not save the Codex Security scan",
@@ -2266,7 +2351,7 @@ export class CodexSecurity {
           typeof registration["userContext"] === "string"
           ? registration["userContext"]
           : options.scanPrompt,
-        options.maxCostUsd !== undefined,
+        maxCostUsd !== undefined,
         discoveryPrompt,
         modelProvider,
       );
@@ -2336,6 +2421,11 @@ export class CodexSecurity {
             )
           : null;
       const runtimePaths = {
+        ...sqliteHomeEnvironment(
+          session.sessionConfig,
+          scanDir,
+          runtime.environment,
+        ),
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT:
           options.resumeScanId !== undefined &&
@@ -2489,6 +2579,8 @@ export class CodexSecurity {
           }
         },
         onFinalize: async (usage) => {
+          // Validation threads are accounted separately from the discovery turn.
+          const discoveryUsage = usage;
           if (options.validationPrompt !== undefined) {
             tracker.recordUsage(usage);
             await tracker.refresh().catch(reportTrackingError);
@@ -2536,6 +2628,8 @@ export class CodexSecurity {
                       "The custom validation turn did not complete.",
                   );
                 budgetAbortController.abort();
+                if (turn.threadId !== null)
+                  validationThreadIds.push(turn.threadId);
                 tracker.recordUsage(turn.usage, turn.threadId);
                 await tracker.refresh().catch(reportTrackingError);
                 checkOpen();
@@ -2545,13 +2639,24 @@ export class CodexSecurity {
             customValidationComplete = true;
           }
           budgetAbortController.abort();
-          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
-            if (options.maxCostUsd !== undefined) throw error;
-            reportTrackingError(error);
-            return { usage, cost: estimateScanCost(model, usage) };
-          });
+          const snapshot = await tracker
+            .stop(discoveryUsage)
+            .catch(async (error: unknown) => {
+              if (maxCostUsd !== undefined) {
+                throwIfAborted(signal, scanDir);
+                try {
+                  return await tracker.stop(discoveryUsage);
+                } catch {
+                  runPostScan = null;
+                  throwIfAborted(signal, scanDir);
+                  throw error;
+                }
+              }
+              reportTrackingError(error);
+              return { usage, cost: estimateScanCost(model, usage) };
+            });
           throwIfAborted(signal, scanDir);
-          if (options.maxCostUsd !== undefined && snapshot.cost === null) {
+          if (maxCostUsd !== undefined && snapshot.cost === null) {
             notifyObserver(
               options,
               "onWarning",
@@ -2815,13 +2920,50 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
-      const snapshot = await costTracker?.stop().catch(() => null);
+      const trackedSnapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
-      const terminalTurnStatus = terminalScanTurnStatus();
-      let failure =
+      const signaledOverage =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
-          : error;
+          : null;
+      const terminalTurnStatus = terminalScanTurnStatus();
+      const trackedCost = trackedSnapshot?.cost;
+      const snapshot =
+        signaledOverage !== null &&
+        (trackedCost === undefined ||
+          trackedCost === null ||
+          signaledOverage.cost.estimatedUsd > trackedCost.estimatedUsd)
+          ? {
+              cost: signaledOverage.cost,
+              usage: signaledCostUsage ?? {
+                input_tokens: signaledOverage.cost.inputTokens,
+                cached_input_tokens: signaledOverage.cost.cachedInputTokens,
+                cache_write_input_tokens:
+                  signaledOverage.cost.cacheWriteInputTokens,
+                output_tokens: signaledOverage.cost.outputTokens,
+                reasoning_output_tokens: 0,
+              },
+            }
+          : trackedSnapshot;
+      const knownCost = snapshot?.cost;
+      let failure: unknown = signaledOverage ?? error;
+      if (
+        maxCostUsd !== undefined &&
+        knownCost !== undefined &&
+        knownCost !== null &&
+        knownCost.estimatedUsd > maxCostUsd &&
+        (signaledOverage !== null ||
+          (!this.#abortController.signal.aborted &&
+            options.signal?.aborted !== true)) &&
+        (signaledOverage === null ||
+          knownCost.estimatedUsd > signaledOverage.cost.estimatedUsd)
+      ) {
+        failure = new ScanCostLimitExceededError(
+          maxCostUsd,
+          knownCost,
+          scanDir,
+        );
+      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         snapshot?.cost &&
@@ -3341,6 +3483,12 @@ export class CodexSecurity {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
+    if (
+      typeof sdkCodexConfig["sqlite_home"] === "string" &&
+      runtimePaths["CODEX_SQLITE_HOME"] !== undefined
+    ) {
+      sdkCodexConfig["sqlite_home"] = runtimePaths["CODEX_SQLITE_HOME"];
+    }
     // This snapshot outlives a Deep Scan when the client reuses its runtime.
     if (runtime.deepScanConfigPath !== undefined) {
       configOverrides = [
@@ -5582,12 +5730,14 @@ function selectedWorkerRuntimeConfig(
       return value === undefined ? [] : [[name, value]];
     }),
   );
-  const instructionsFile = resolved["model_instructions_file"];
-  if (typeof instructionsFile === "string") {
-    resolved["model_instructions_file"] = resolve(
-      workingDirectory,
-      expandHome(instructionsFile, environment),
-    );
+  for (const key of ["model_instructions_file", "sqlite_home"]) {
+    const configuredPath = resolved[key];
+    if (typeof configuredPath === "string") {
+      resolved[key] = resolve(
+        workingDirectory,
+        expandHome(configuredPath, environment),
+      );
+    }
   }
   return {
     ...Object.fromEntries(
@@ -5600,6 +5750,7 @@ function selectedWorkerRuntimeConfig(
         "model_auto_compact_token_limit",
         "model_context_window",
         "model_instructions_file",
+        "sqlite_home",
         "model_verbosity",
         "shell_environment_policy",
         "skills",
@@ -5709,4 +5860,27 @@ export function environmentValue(
     }
   }
   return undefined;
+}
+
+function sqliteHomeEnvironment(
+  config: JsonObject,
+  workingDirectory: string,
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  const configured = resolveCodexProfile(config)["sqlite_home"];
+  const sqliteHome =
+    typeof configured === "string"
+      ? configured
+      : (process.platform === "win32"
+          ? environmentValue(environment, "CODEX_SQLITE_HOME")
+          : environment["CODEX_SQLITE_HOME"]
+        )?.trim() || undefined;
+  return sqliteHome === undefined
+    ? {}
+    : {
+        CODEX_SQLITE_HOME: resolve(
+          workingDirectory,
+          expandHome(sqliteHome, environment),
+        ),
+      };
 }

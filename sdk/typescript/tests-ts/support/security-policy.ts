@@ -13,6 +13,7 @@ import {
 import { PLUGIN_ROOT } from "../plugin-root.js";
 import {
   createTemporaryDirectories,
+  removeTemporaryDirectory,
   temporaryDirectory,
 } from "./temporary-directories.js";
 
@@ -86,7 +87,10 @@ export function stageResult(
 }
 
 export function createPolicyTestFixtures() {
-  const directories = createTemporaryDirectories();
+  const directories = createTemporaryDirectories(
+    false,
+    removeTemporaryDirectory,
+  );
   return {
     async fixture() {
       const root = await temporaryDirectory("codex-security-policy-", true);

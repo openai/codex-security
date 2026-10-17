@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-scan-logs-node-",
@@ -15,22 +16,36 @@ afterEach(cleanup);
 
 let moduleSource: string;
 beforeAll(async () => {
-  const { stdout } = await promisify(execFile)(
-    process.execPath,
-    [
-      "build",
-      fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
-      "--target=node",
-      "--format=esm",
-    ],
-    { encoding: "utf8" },
-  );
-  moduleSource = stdout;
+  const module = join(await temporaryDirectory(), "scan-logs.mjs");
+  try {
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "build",
+        fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
+        "--target=node",
+        "--format=esm",
+        "--outfile",
+        module,
+      ],
+      { encoding: "utf8" },
+    );
+    moduleSource = await readFile(module, "utf8");
+  } finally {
+    await cleanup();
+  }
 });
 
 test.each(["native", "without zstd"])(
   "reads saved logs with Node's %s capabilities",
   async (capabilities) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `reads saved logs with Node's ${capabilities} capabilities`,
+      )
+    )
+      return;
     const root = await temporaryDirectory();
     const home = join(root, "home");
     const sessions = join(home, "sessions");
