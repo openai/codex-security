@@ -504,6 +504,57 @@ describe("scan knowledge bases", () => {
   });
 
   test.each([
+    ["plain text", "Require authorization", "Require authorization"],
+    ["entities", "Read &amp; audit &#65;", "Read & audit A"],
+    [
+      "CDATA between text nodes",
+      "Require <![CDATA[authorization]]> before access",
+      "Require authorization before access",
+    ],
+    [
+      "literal markup and entities in CDATA",
+      "Permit <![CDATA[<reader> &amp; &#65;]]> only",
+      "Permit <reader> &amp; &#65; only",
+    ],
+    [
+      "comments containing markup",
+      "Require<!-- x > hidden <w:tab/> --> authorization",
+      "Require authorization",
+    ],
+    [
+      "processing instructions",
+      "Require<?note x > hidden?> authorization",
+      "Require authorization",
+    ],
+  ])("preserves DOCX text with %s", async (_name, xml, expected) => {
+    const root = await temporaryDirectory();
+    const source = join(root, "guide.docx");
+    await writeFile(source, docx(xml));
+
+    const snapshot = await readKnowledgeBaseSnapshot([source]);
+    expect(Object.values(snapshot.documents)).toEqual([`${expected}\n`]);
+
+    const prepared = await prepareKnowledgeBase([source]);
+    temporaryDirectories.track(prepared.path);
+    expect(await extractedDocuments(prepared.path)).toEqual([`${expected}\n`]);
+  });
+
+  test("keeps quoted XML attributes out of DOCX text", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "guide.docx");
+    await writeFile(
+      source,
+      docx("Authorization", "Review permissions", '<w:br note="x > y"/>'),
+    );
+
+    const prepared = await prepareKnowledgeBase([source]);
+    temporaryDirectories.track(prepared.path);
+    expect(await extractedDocuments(prepared.path)).toEqual([
+      "Authorization\nReview permissions\n",
+    ]);
+  });
+
+  test.each([
     ["preparation", prepareKnowledgeBase],
     ["snapshot extraction", readKnowledgeBaseSnapshot],
   ] as const)(

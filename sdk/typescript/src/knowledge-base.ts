@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
+import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import {
@@ -303,18 +304,25 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     const document = files["word/document.xml"];
     if (document === undefined) throw new Error("Missing word/document.xml.");
     const xml = decodeText(path, document);
-    if (
-      !/<(?:\w+:)?document\b[^>]*>[\s\S]*<\/(?:\w+:)?document\s*>/u.test(xml)
-    ) {
-      throw new Error("Malformed word/document.xml.");
-    }
-    return decodeXml(
-      xml
-        .replace(/<\/(?:\w+:)?p\s*>/gu, "\n")
-        .replace(/<(?:\w+:)?(?:br|cr)\b[^>]*>/gu, "\n")
-        .replace(/<(?:\w+:)?tab\b[^>]*>/gu, "\t")
-        .replace(/<[^>]+>/gu, ""),
-    );
+    const text: string[] = [];
+    const parser = new SaxesParser();
+    let documentElement = false;
+    parser.on("opentag", ({ name }) => {
+      const localName = name.split(":").at(-1);
+      if (localName === "document") documentElement = true;
+      else if (localName === "br" || localName === "cr") text.push("\n");
+      else if (localName === "tab") text.push("\t");
+    });
+    parser.on("closetag", ({ name, isSelfClosing }) => {
+      if (!isSelfClosing && name.split(":").at(-1) === "p") text.push("\n");
+    });
+    parser.on("text", (value) => text.push(decodeXml(value)));
+    parser.on("cdata", (value) => text.push(value.replaceAll("&amp;", "&")));
+    // Keep the existing entity decoder's handling of unusable references.
+    // CDATA is literal text, so only undo this escaping in its handler.
+    parser.write(xml.replaceAll("&", "&amp;")).close();
+    if (!documentElement) throw new Error("Malformed word/document.xml.");
+    return text.join("");
   } catch (error) {
     throw new Error(`Cannot extract text from knowledge base DOCX: ${path}`, {
       cause: error,

@@ -90,6 +90,7 @@
     "papaparse": "5.7.0",
     "pdfjs-dist": "6.4.299",
     "react": "19.3.0",
+    "saxes": "6.0.0",
     "semver": "7.8.5",
     "smol-toml": "1.9.0",
     "string-width": "8.3.0",
@@ -113,7 +114,6 @@
     "json5": "2.2.3",
     "minimatch": "10.2.6",
     "prettier": "3.9.9",
-    "saxes": "6.0.0",
     "typescript": "7.0.2"
   }
 }
