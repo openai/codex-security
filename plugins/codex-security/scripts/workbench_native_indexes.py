@@ -1,6 +1,7 @@
 """Read-only native findings and repository indexes for the Security workbench."""
 
 import argparse
+import os
 import sqlite3
 import sys
 from collections import Counter
@@ -224,7 +225,7 @@ def list_repositories(
     ]
     repositories = [
         {
-            "checkoutAvailable": Path(target["current_path"]).is_dir(),
+            "checkoutAvailable": os.path.isdir(target["current_path"]),
             "displayName": target["display_name"],
             "latestScan": latest_scan_by_target.get(target_id),
             "openFindingsCount": open_findings_by_target.get(target_id, 0),

@@ -265,6 +265,24 @@ def test_repository_index_tracks_workspace_before_and_after_first_scan(tmp_path:
     assert scanned["latestScan"]["scanId"] == scan["scanId"]
 
 
+def test_repository_index_handles_unprobeable_draft_paths(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target_path = "x" * 256
+    create_workspace(
+        state_dir,
+        "20000000-0000-4000-8000-000000000000",
+        "--target-path",
+        target_path,
+    )
+
+    (repository,) = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert repository["targetPath"] == target_path
+    assert repository["checkoutAvailable"] is False
+    assert (
+        run_workbench(state_dir, "list-repositories", "--status", "scanned")["repositories"] == []
+    )
+
+
 def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout(
     tmp_path: Path,
 ) -> None:
