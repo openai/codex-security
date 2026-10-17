@@ -1047,6 +1047,8 @@ def _recover_unsealed_findings(
     schema_dir: Path,
     scan_dir: Path,
     warnings: list[str],
+    *,
+    current_contract: bool = False,
 ) -> list[str]:
     schema = _read_json(schema_dir / "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
@@ -1162,6 +1164,8 @@ def _recover_unsealed_findings(
                         f"Skipped malformed {auxiliary} for finding {index + 1}: {exc}."
                     )
             _validate_schema_node(finding, finding_schema, context, schema)
+            if current_contract:
+                _validate_current_findings({"findings": [finding]}, schema_dir)
         except ContractError as exc:
             warning = f"Skipped malformed finding {index + 1}: {exc}."
             warnings.append(warning)
