@@ -248,6 +248,44 @@ test.each([
   expect(result.locations[0]!.physicalLocation.artifactLocation.uri).toBe(uri);
 });
 
+test.each(["SAST", "SECRETS"])(
+  "Endor SARIF retains distinct reported code lines for %s findings",
+  (category) => {
+    const input = endorSarif();
+    const result = input.runs[0]!.results[0]!;
+    result.properties.categories = [category];
+    result.locations = [1, 42, 42].map((startLine) => ({
+      physicalLocation: {
+        artifactLocation: { uri: "src/my%20module.ts" },
+        region: { startLine },
+      },
+    }));
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "src/my module.ts", line: 1 },
+      { path: "src/my module.ts", line: 42 },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({ result });
+  },
+);
+
+test.each([0, -1, 1.5, "42", null, undefined])(
+  "Endor SARIF keeps unknown or invalid code lines as null (%p)",
+  (startLine) => {
+    const input = endorSarif();
+    const result: any = input.runs[0]!.results[0]!;
+    result.properties.categories = ["SAST"];
+    result.locations[0].physicalLocation.region = { startLine };
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "package.json", line: null },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({ result });
+  },
+);
+
 test("SARIF requires vendor identity, producer and consistent rule references", () => {
   for (const mutate of [
     (r: any) => delete r.results[0].properties["finding-uuid"],

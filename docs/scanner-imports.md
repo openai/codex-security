@@ -54,7 +54,10 @@ JSON preserves the finding's severity and update timestamp. SARIF does not relia
 carry Endor's finding severity: diagnostic levels and CVSS remain original evidence,
 and displayed severity stays unknown. Recommended versions, reachability, dismissals,
 snoozes and other source assertions are retained without becoming Cloud assessments.
-Synthetic SARIF line numbers are not promoted to verified code locations.
+JSON maps reported primary SAST and AI SAST paths and start lines. SARIF maps
+reported source lines for results categorized as SAST or Secrets; other SARIF
+line numbers remain only in the original evidence. Locations remain source claims,
+not verified Cloud assessments.
 
 Imports replace the complete source snapshot for an existing UUID. Preview before
 switching between JSON and SARIF, since the two exports contain different evidence.
