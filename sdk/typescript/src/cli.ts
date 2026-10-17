@@ -297,7 +297,7 @@ import {
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
-import { resolveDeepScanConfig } from "./deep-config.js";
+import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
@@ -3608,6 +3608,7 @@ export async function main(
           mode: ScanSettingsSchema.shape.mode.describe(
             "Scan mode (default: standard); deep supports repository and path targets.",
           ),
+          maxTime: ScanSettingsSchema.shape.maxTimeMinutes,
           ...DEEP_SCAN_OPTION_SCHEMAS,
           ...modelOptions(
             `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
@@ -3713,6 +3714,7 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
+              maxTimeMinutes: options.maxTime,
               codexOverrides: parseCodexOverrides(
                 options.codex,
                 options.model,
@@ -4319,6 +4321,7 @@ export async function main(
             directory,
           );
           const settings = resolved.options;
+          deepScanOptions(settings);
           if (settings.outputDir === undefined)
             throw new ConfigurationError(
               "--output-dir or output.directory is required for component scans.",
@@ -4559,21 +4562,6 @@ export async function main(
             currentDirectory,
           );
           const settings = resolved.options;
-          // A CSV row may choose a different mode; resolve the same file for both
-          // modes so inactive deep defaults remain available to deep rows.
-          const scanOptionsByMode =
-            project === undefined
-              ? undefined
-              : Object.fromEntries(
-                  SCAN_MODES.map((mode) => [
-                    mode,
-                    resolveScanSettings(
-                      project,
-                      { ...overrides, mode },
-                      currentDirectory,
-                    ).options,
-                  ]),
-                );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -4606,6 +4594,19 @@ export async function main(
             inputPath = resolveCliPath(currentDirectory, args.input);
             outputDir = settings.outputDir;
           }
+          const scanOptionsByMode =
+            project === undefined
+              ? undefined
+              : Object.fromEntries(
+                  SCAN_MODES.map((mode) => [
+                    mode,
+                    resolveScanSettings(
+                      project,
+                      { ...overrides, mode },
+                      currentDirectory,
+                    ).options,
+                  ]),
+                );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -5804,6 +5805,7 @@ export async function main(
           dependencies,
         );
         const resolved = resolveScanSettings(project, {}, directory);
+        deepScanOptions(resolved.options);
         const codex = await mergedCodexConfig(resolved.config);
         const deep =
           resolved.options.mode === "deep"
@@ -6445,6 +6447,14 @@ async function prepareScanArgumentsFromRecipe(
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
+  const maxTimeMinutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
+    recipe["maxTimeMinutes"],
+  );
+  if (!maxTimeMinutes.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid investigation time limit.",
+    );
+  }
   if (!deepScan.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid deep scan settings.",
@@ -6527,6 +6537,7 @@ async function prepareScanArgumentsFromRecipe(
       : { ...config, approval_policy: "never" },
     failureSeverity: threshold.data,
     maxCostUsd,
+    maxTimeMinutes: maxTimeMinutes.data,
     dryRun: false,
     parentScanId,
     ...(recipe["mock"] === true ? { mock: true } : {}),
@@ -8306,6 +8317,7 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
+    deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = arguments_.target;
@@ -9375,11 +9387,14 @@ async function readDeepScanStop(
   const elapsedHours =
     (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
   if (elapsedHours >= maxTimeHours) {
+    let maxTimeMinutes = maxTimeHours * 60;
+    const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
+    if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
-      reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,
+      reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
       nextStep:
         maxTimeHours < 96
-          ? "To scan further, rerun with a higher --max-time-hours."
+          ? `To scan further, rerun with --max-time greater than ${maxTimeMinutes}.`
           : "To scan a smaller part of the repository, rerun with --path.",
     };
   }

@@ -23,6 +23,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
+import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
   OutputDirectoryNotEmptyError,
@@ -147,6 +148,9 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
+  for (const mode of new Set(tasks.map((task) => task.mode))) {
+    deepScanOptions({ ...options.scanOptionsByMode?.[mode], mode });
+  }
   if (
     tasks.some(
       (task) =>

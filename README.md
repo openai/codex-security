@@ -84,6 +84,10 @@ cs scan . --diff origin/main
 cs scan . --mode deep
 ```
 
+Use `cs scan . --max-time 15` for an advisory 15-minute Standard investigation
+allowance. See [investigation time](sdk/typescript/docs/cli.md#set-investigation-time)
+for timing semantics and Deep Scan limits.
+
 Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
