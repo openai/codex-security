@@ -91,6 +91,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
+  type ParentProgressSource,
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
@@ -1564,7 +1565,9 @@ export class CodexSecurity {
     let costTracker: ScanCostTracker | null = null;
     let deepProgressTracker: DeepScanProgressTracker | null = null;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
-    let customValidationComplete = false;
+    const customValidation = {
+      status: "pending" as "pending" | "running" | "complete",
+    };
     let completionCost: ScanCost | null = null;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
@@ -1897,19 +1900,54 @@ export class CodexSecurity {
       }
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
-      const reportProgress = (progress: ScanProgress): void => {
+      let lastProgress: string | null = null;
+      const progressKey = (progress: ScanProgress): string =>
+        `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
+      const reportProgress = (
+        progress: ScanProgress,
+        source?: ParentProgressSource,
+      ): void => {
         if (
-          scopeFileCount === null ||
-          progress.filesTotal > scopeFileCount ||
-          progress.filesCompleted < reviewedFileCount
+          source !== undefined &&
+          source.reconciled !== true &&
+          !tracker.recordParentProgress(progress, source.event)
+        )
+          return;
+        const inventory =
+          source?.inventory === true ||
+          (progress.phase === "discovery" &&
+            reviewedFileCount === 0 &&
+            progress.filesCompleted === 0);
+        const filesTotal = inventory ? progress.filesTotal : scopeFileCount;
+        if (
+          filesTotal === null ||
+          progress.filesTotal > filesTotal ||
+          (source?.inventory !== true &&
+            progress.filesCompleted < reviewedFileCount)
         ) {
+          if (source !== undefined && source.reconciled !== true)
+            tracker.deferParentInventory(source.event);
           return;
         }
+        if (inventory) {
+          scopeFileCount = filesTotal;
+          tracker.setExpectedFilesTotal(filesTotal);
+        }
         reviewedFileCount = progress.filesCompleted;
-        notifyObserver(
-          options,
-          "onProgress",
-        )({ ...progress, filesTotal: scopeFileCount });
+        if (source !== undefined && source.reconciled !== true)
+          tracker.acceptParentProgress(progress, source.event);
+        const update = {
+          ...progress,
+          phase:
+            customValidation.status === "running"
+              ? ("validation" as const)
+              : progress.phase,
+          filesTotal,
+        };
+        const key = progressKey(update);
+        if (lastProgress === key) return;
+        lastProgress = key;
+        notifyObserver(options, "onProgress")(update);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
@@ -2421,6 +2459,7 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
       }
+      tracker.beginParentTurn(resumeThreadId !== undefined);
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
             codexOptions,
@@ -2503,6 +2542,7 @@ export class CodexSecurity {
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
+                customValidation.status = "running";
                 if (scopeFileCount !== null)
                   reportProgress({
                     phase: "validation",
@@ -2542,7 +2582,7 @@ export class CodexSecurity {
                 return turn.finalResponse;
               },
             });
-            customValidationComplete = true;
+            customValidation.status = "complete";
           }
           budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
@@ -2599,18 +2639,11 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
-        onProgress: (progress) => {
-          if (
-            progress.phase === "discovery" &&
-            progress.filesCompleted === 0 &&
-            reviewedFileCount === 0 &&
-            progress.filesTotal !== scopeFileCount
-          ) {
-            scopeFileCount = progress.filesTotal;
-            tracker.setExpectedFilesTotal(scopeFileCount);
-          }
-          reportProgress(progress);
-        },
+        onProgressItem:
+          options.onProgress === undefined
+            ? undefined
+            : (event) => tracker.recordParentItem(event),
+        onProgress: reportProgress,
         onWorkerStatus: options.onWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,
@@ -2943,7 +2976,7 @@ export class CodexSecurity {
       if (activeScan !== null && options.resumeScanId === undefined) {
         if (
           options.validationPrompt !== undefined &&
-          !customValidationComplete
+          customValidation.status !== "complete"
         ) {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
@@ -4372,7 +4405,8 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
+  onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
+  onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -4416,8 +4450,15 @@ export async function runScanEvents(
         )) {
           notifyObserver(options, "onActivity")(activity);
         }
+        options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(options, "onProgress")(progress);
+          notifyObserver(
+            {
+              onProgress: (update) => options.onProgress?.(update, { event }),
+              onObserverError: options.onObserverError,
+            },
+            "onProgress",
+          )(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
