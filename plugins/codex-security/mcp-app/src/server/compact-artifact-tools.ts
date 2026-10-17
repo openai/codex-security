@@ -1,5 +1,8 @@
 import { readingAnnotations, writingAnnotations } from "./tool-annotations.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type {
+  McpServer,
+  ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
 import type { JsonObject as JsonRecord } from "../types.js";
 import {
@@ -70,15 +73,6 @@ const semanticFindingGuidance =
 
 const semanticCoverageGuidance =
   " Coverage shape: {surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Exclusions and unresolved review questions do not prevent a terminal result. Omit host-owned coverage documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.";
-
-function signalFromRequestContext(
-  requestContext: unknown,
-): AbortSignal | undefined {
-  if (typeof requestContext !== "object" || requestContext === null)
-    return undefined;
-  const signal = Reflect.get(requestContext, "signal");
-  return signal instanceof AbortSignal ? signal : undefined;
-}
 
 export function registerCompactArtifactTools(
   server: McpServer,
@@ -186,7 +180,7 @@ export function registerCompactArtifactTools(
         await scanContext(input, options, true, requestContext),
         input,
         options.runWorkbench,
-        signalFromRequestContext(requestContext),
+        requestContext.signal,
       );
     },
   });
@@ -329,7 +323,10 @@ interface CompactToolRegistration<Input> {
   description: string;
   inputSchema: ZodType<Input>;
   readOnly: boolean;
-  handler: (value: Input, requestContext: unknown) => Promise<object>;
+  handler: (
+    value: Input,
+    requestContext: Parameters<ToolCallback<ZodType<Input>>>[1],
+  ) => Promise<object>;
 }
 
 function registerCompactTool<Input>(

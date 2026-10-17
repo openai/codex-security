@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -45,7 +45,8 @@
     "docs/cli.md",
     "docs/findings-service.md",
     "docs/dedupe-records.md",
-    "docs/hosted-scans.md"
+    "docs/hosted-scans.md",
+    "docs/validate-records.md"
   ],
   "publishConfig": {
     "access": "public",

@@ -352,7 +352,7 @@ export interface ScanOptions extends ScanSettings {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
   onDeepProgress?: (progress: DeepScanProgress) => void;
-  /** Preflight status and best-effort, model-reported phase dispatch counts. */
+  /** Best-effort, model-reported phase dispatch counts. */
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   /**
    * Reports each persisted worker session once when discovered during this run.
@@ -637,7 +637,8 @@ interface ClientDependencies {
   canRunDirectDeepScan?: () => boolean;
 }
 
-const DEFAULT_DEPENDENCIES: ClientDependencies = {
+/** @internal */
+export const DEFAULT_DEPENDENCIES: ClientDependencies = {
   createCodex: ({ nativeProfile, ...options }) =>
     nativeProfile === undefined
       ? new Codex(options)
@@ -1166,6 +1167,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         hasCommandAuth(configuration),
+        true,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -2259,7 +2261,6 @@ export class CodexSecurity {
         mode,
         skillName,
         scanId,
-        runtime.configPath !== undefined,
         knowledgeBase !== null,
         options.resumeScanId !== undefined &&
           typeof registration["userContext"] === "string"
@@ -4665,7 +4666,6 @@ function scanPrompt(
   mode: ScanMode,
   skillName: string,
   scanId: string,
-  hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
   enforceCostLimit = false,
@@ -4724,11 +4724,6 @@ function scanPrompt(
           'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
           'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
         ]),
-    ...(hasConfigPath
-      ? [
-          `For normal config-preflight helper calls, append --config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
-        ]
-      : []),
     ...(hasKnowledgeBase
       ? [
           `The ${shellEnvironmentReference("CODEX_SECURITY_KNOWLEDGE_BASE")} environment variable contains primary documents about the project and its organization, including their architecture, threat model, and policies. These documents are a source of truth and override conflicting SECURITY.md guidance, generated threat models, and other sources, except explicit user instructions.`,
@@ -4971,6 +4966,7 @@ export function scanAuthentication(
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
   modelProvider?: unknown,
   commandAuth = false,
+  preflight = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -5000,6 +4996,9 @@ export function scanAuthentication(
   const key = environmentApiKeyEntry(environment, modelProvider);
   if (key === null && isExternalModelProvider(modelProvider)) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    if (preflight && auth === "auto") {
+      return { method: "api_key", source: provider.env_key, verified: false };
+    }
     throw new AuthenticationRequiredError(
       `Set ${provider.env_key} to run a scan through ${provider.name}.`,
     );

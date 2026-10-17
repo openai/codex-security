@@ -1,3 +1,6 @@
+import type { z } from "zod";
+import type { candidateSchemaV1 } from "../deep-scan/artifact-contracts.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
 import { discoveryLocationRoles } from "../discovery-location-roles.js";
 import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
@@ -24,32 +27,14 @@ import {
 import { pathText, widePath } from "../../../native/windows-files.mjs";
 
 const roles: readonly string[] = discoveryLocationRoles;
-const fields = new Set([
-  "candidate_id",
-  "cwe_ids",
-  "locations",
-  "summary",
-  "evidence",
-  "context",
-  "instance",
-]);
-const locationFields = new Set(["path", "start_line", "end_line", "role"]);
+const { discoveryCandidate, rawDiscoveryLocation } =
+  artifactSchemaDocuments["definitions/discovery-candidate"].$defs;
+const fields = new Set(Object.keys(discoveryCandidate.shape));
+const locationFields = new Set(Object.keys(rawDiscoveryLocation.shape));
 const jsonFields = [...fields, ...locationFields].sort();
 type Row = Record<string, unknown>;
-interface Location {
-  path: string;
-  start_line: number;
-  end_line: number;
-  role: string;
-}
-interface Candidate {
-  cwe_ids: string[];
-  locations: Location[];
-  summary: string;
-  evidence: string;
-  context?: string;
-  instance?: string;
-}
+type Candidate = Omit<z.infer<typeof candidateSchemaV1>, "candidate_id">;
+type Location = Candidate["locations"][number];
 
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -310,7 +295,7 @@ function normalizeLocations(
       path: name,
       start_line: start,
       end_line: end,
-      role: item.role,
+      role: item.role as Location["role"],
     };
     normalized.set(stableJson(location), location);
   }

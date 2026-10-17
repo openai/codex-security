@@ -103,6 +103,7 @@ function validatePackagePaths(entries) {
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
     "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
     "package/schemas/hosted-scan-v2.fixture.json",
     "package/LICENSE",
     "package/bin/codex-security.mjs",
