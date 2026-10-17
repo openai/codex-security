@@ -368,3 +368,54 @@ test("rejects Endor cursor pages while accepting complete exports and selected a
   }
   expect(normalizeEndorFindings([finding]).findings).toHaveLength(1);
 });
+
+test.each([
+  {
+    artifact: { uri: "src/query.ts", uriBaseId: "ROOT" },
+    base: "file:///outside/",
+  },
+  { artifact: { uri: "src/query.ts", uriBaseId: "ROOT" }, base: "subproject/" },
+  { artifact: { uri: "src/query.ts", index: 0 }, base: "subproject/" },
+  { artifact: { index: 0 }, base: "subproject/" },
+])(
+  "Endor SARIF leaves unsupported artifact references unmapped: %p",
+  ({ artifact, base }) => {
+    const input: any = endorSarif();
+    const run = input.runs[0];
+    run.originalUriBaseIds = { ROOT: { uri: base } };
+    run.artifacts = [{ location: { uri: "src/actual.ts" } }];
+    const result = run.results[0];
+    result.properties.categories = ["SAST"];
+    result.locations = [
+      {
+        physicalLocation: {
+          artifactLocation: artifact,
+          region: { startLine: 42 },
+        },
+      },
+      {
+        physicalLocation: {
+          artifactLocation: { uri: "src/direct.ts" },
+          region: { startLine: 8 },
+        },
+      },
+    ];
+    const original = structuredClone(input);
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.source_finding_id).toBe(
+      result.properties["finding-uuid"],
+    );
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "src/direct.ts", line: 8 },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({
+      result: original.runs[0].results[0],
+      runContext: {
+        originalUriBaseIds: run.originalUriBaseIds,
+        artifacts: run.artifacts,
+      },
+    });
+    expect(input).toEqual(original);
+  },
+);

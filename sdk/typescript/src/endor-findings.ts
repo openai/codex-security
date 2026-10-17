@@ -11,6 +11,27 @@ import {
   text,
 } from "./scanner-import.js";
 
+/** @internal Repository claims retained in the adapter's original SARIF context. */
+export function endorRepositoryUrls(sourceData: unknown): string[] {
+  if (
+    !sourceData ||
+    typeof sourceData !== "object" ||
+    Array.isArray(sourceData)
+  )
+    return [];
+  const run = (sourceData as Record<string, unknown>)["runContext"];
+  if (run == null) return [];
+  return array(
+    record(run, "Endor run context")["versionControlProvenance"] ?? [],
+    "Endor version control provenance",
+  ).map((entry) =>
+    requiredText(
+      record(entry, "Endor repository provenance")["repositoryUri"],
+      "Endor repository URI",
+    ),
+  );
+}
+
 /** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
 export function normalizeEndorFindings(input: unknown): ExternalFindings {
   const root = Array.isArray(input) ? null : record(input, "Endor report");
@@ -234,11 +255,16 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
           record(v, "Endor location")["physicalLocation"] ?? {},
           "Physical location",
         );
-        const uri = text(
-          record(physical["artifactLocation"] ?? {}, "Artifact location")[
-            "uri"
-          ],
+        const artifact = record(
+          physical["artifactLocation"] ?? {},
+          "Artifact location",
         );
+        if (
+          artifact["index"] !== undefined ||
+          artifact["uriBaseId"] !== undefined
+        )
+          return [];
+        const uri = text(artifact["uri"]);
         if (uri === null) return [];
         let path: string | null;
         try {
