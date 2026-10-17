@@ -625,6 +625,13 @@
         "excludePaths": false,
         "receiptRefs": false,
         "inventoryStrategy": false,
+        "reviewedFiles": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+          },
+          "description": "Repository-relative files the model reports investigating beyond searches or excerpts. This is not observed file access or proof of thorough review. Omit when accounting is unavailable; an empty array means no files reported reviewed."
+        },
         "surfaces": {
           "type": "array",
           "items": {

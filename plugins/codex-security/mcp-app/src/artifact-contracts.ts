@@ -32,6 +32,12 @@ const repositoryPath = pattern(
   "^(?:\\./)?(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\/$).+$",
 );
 
+export const reviewedFilesSchema = z
+  .array(repositoryPath)
+  .describe(
+    "Repository-relative files the model reports investigating beyond searches or excerpts. This is not observed file access or proof of thorough review. Omit when accounting is unavailable; an empty array means no files reported reviewed.",
+  );
+
 const candidateId = z
   .string()
   .min(1)
@@ -330,6 +336,7 @@ const draft_coverage = z.looseObject({
   excludePaths: z.never().optional(),
   receiptRefs: z.never().optional(),
   inventoryStrategy: z.never().optional(),
+  reviewedFiles: reviewedFilesSchema.optional(),
   surfaces: z.array(draft_surface),
   explicitExclusions: z.array(
     z.looseObject({ pattern: nonEmptyText, reason: nonEmptyText }),

@@ -1913,9 +1913,13 @@ def _validate_schema_node(
         if "maxItems" in schema and len(value) > schema["maxItems"]:
             raise ContractError(f"{context}: array has too many items")
         if schema.get("uniqueItems") is True:
-            for index, item in enumerate(value):
-                if any(_schema_values_equal(item, candidate) for candidate in value[:index]):
+            if all(isinstance(item, str) for item in value):
+                if len(set(value)) != len(value):
                     raise ContractError(f"{context}: array items must be unique")
+            else:
+                for index, item in enumerate(value):
+                    if any(_schema_values_equal(item, candidate) for candidate in value[:index]):
+                        raise ContractError(f"{context}: array items must be unique")
         contains = schema.get("contains")
         if isinstance(contains, dict):
             matches = 0

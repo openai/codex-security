@@ -23,6 +23,17 @@
     },
     "includePaths": { "type": "array", "items": { "type": "string" } },
     "excludePaths": { "type": "array", "items": { "type": "string" } },
+    "reviewedFiles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": "^(?:\\.\\/)?(?!\\/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|\\/)\\.\\.?(\\/|$))(?!.*\\/\\/)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\/$).+$"
+      },
+      "description": "Repository-relative files the model reports investigating beyond searches or excerpts. This is not observed file access or proof of thorough review. Omit when accounting is unavailable; an empty array means no files reported reviewed.",
+      "uniqueItems": true
+    },
     "surfaces": {
       "type": "array",
       "items": {

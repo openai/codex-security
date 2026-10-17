@@ -304,6 +304,10 @@ export interface CoverageDocument {
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
+  /**
+   * Repository-relative files the model reports investigating beyond searches or excerpts. This is not observed file access or proof of thorough review. Omit when accounting is unavailable; an empty array means no files reported reviewed.
+   */
+  reviewedFiles?: string[];
   surfaces: {
     id: string;
     label: string;

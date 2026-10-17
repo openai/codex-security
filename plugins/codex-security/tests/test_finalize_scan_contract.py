@@ -3146,6 +3146,22 @@ def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
         FINALIZER._validate_schema_node(True, schema, "value")
 
 
+def test_schema_unique_items_accepts_large_file_lists_and_rejects_duplicates() -> None:
+    schema = {"type": "array", "items": {"type": "string"}, "uniqueItems": True}
+    paths = [f"src/file-{index}.ts" for index in range(10_000)]
+    FINALIZER._validate_schema_node(paths, schema, "reviewedFiles")
+    with pytest.raises(FINALIZER.ContractError, match="array items must be unique"):
+        FINALIZER._validate_schema_node([*paths, paths[-1]], schema, "reviewedFiles")
+
+
+@pytest.mark.parametrize("values", [[1, 1.0], [{"a": 1}, {"a": 1.0}], [[1], [1.0]]])
+def test_schema_unique_items_preserves_json_equality(values) -> None:
+    schema = {"type": "array", "uniqueItems": True}
+    with pytest.raises(FINALIZER.ContractError, match="array items must be unique"):
+        FINALIZER._validate_schema_node(values, schema, "value")
+    FINALIZER._validate_schema_node([True, 1, "1"], schema, "value")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
 @pytest.mark.parametrize(
     "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]

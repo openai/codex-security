@@ -17,6 +17,7 @@ import {
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { validateReviewedFiles } from "./artifact-inventory.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
@@ -74,6 +75,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
+  if (parsed.coverage.reviewedFiles !== undefined)
+    parsed.coverage.reviewedFiles = await validateReviewedFiles(
+      context,
+      parsed.coverage.reviewedFiles,
+    );
   const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
   if (finalDeepDraft && resolvedDeferred(parsed.coverage).length > 0) {
     throw new Error(
@@ -224,6 +230,11 @@ export async function recordCodexSecurityWorkerScanDraft(
   }
 
   const includePaths = context.includePaths ?? [context.scope || "."];
+  if (parsed.coverage.reviewedFiles !== undefined)
+    parsed.coverage.reviewedFiles = await validateReviewedFiles(
+      context,
+      parsed.coverage.reviewedFiles,
+    );
   let scoped = {
     ...parsed,
     findings: findingsWithinScope(
@@ -1605,6 +1616,16 @@ function preserveScanCoverage(
   ambiguousDeferredIds = new Set<string>(),
 ): DraftCoverage {
   const result = structuredClone(coverage);
+  if (
+    coverage.reviewedFiles !== undefined ||
+    previous.reviewedFiles !== undefined
+  )
+    result.reviewedFiles = [
+      ...new Set([
+        ...(coverage.reviewedFiles ?? []),
+        ...(previous.reviewedFiles ?? []),
+      ]),
+    ].sort();
   for (const field of [
     "surfaces",
     "explicitExclusions",
@@ -1850,6 +1871,12 @@ export function parsePersistedScanDraft(
 ): ScanDraftInput {
   const parsed = schema.parse(input);
   validateFindingSemantics(parsed.findings);
+  if (parsed.coverage.reviewedFiles !== undefined)
+    parsed.coverage.reviewedFiles = [
+      ...new Set(
+        parsed.coverage.reviewedFiles.map((path) => posix.normalize(path)),
+      ),
+    ].sort();
   delete parsed.coverage.completeness;
   return parsed;
 }

@@ -1569,6 +1569,8 @@ def complete_scan_locked(
                     warnings,
                     stopped=False,
                     reason="",
+                    source_root=Path(scan["target_path"]),
+                    source_scope=scan["scope"],
                 )
                 if merge_parent_draft
                 else None
