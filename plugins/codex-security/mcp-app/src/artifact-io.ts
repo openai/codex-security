@@ -1,5 +1,5 @@
 import { canonicalDirectory } from "./artifact-context.js";
-import { isRecord } from "./record.js";
+import type { ZodType, ZodError } from "zod/v4";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
@@ -39,17 +39,6 @@ export interface ArtifactContext {
 export interface ArtifactPage {
   cursor?: string;
   limit?: number;
-}
-
-export interface ArtifactPageResult<Row> {
-  rows: Row[];
-  nextCursor?: string;
-}
-
-export interface ArtifactRowSchema<Row> {
-  safeParse(
-    value: unknown,
-  ): { success: true; data: Row } | { success: false; error?: unknown };
 }
 
 /**
@@ -148,7 +137,7 @@ export async function readArtifactJsonl<Row>(
   context: ArtifactContext,
   components: readonly string[],
   label: string,
-  rowSchema: ArtifactRowSchema<Row>,
+  rowSchema: ZodType<Row>,
 ): Promise<Row[]> {
   const source = await readArtifactText(context, components, label);
   const rows: Row[] = [];
@@ -185,7 +174,7 @@ export function paginateArtifactRows<Row>(
   rows: readonly Row[],
   page: ArtifactPage,
   label: string,
-): ArtifactPageResult<Row> {
+) {
   // The MCP tool schemas validate cursor syntax and limit bounds.
   const start = Number(page.cursor ?? "0");
   if (!Number.isSafeInteger(start) || start > rows.length) {
@@ -328,16 +317,12 @@ async function inspectOptionalPath(
   }
 }
 
-function formatRowSchemaError(error: unknown): string {
-  if (!isRecord(error) || !Array.isArray(error.issues)) return ".";
-  const issue: unknown = error.issues[0];
-  if (!isRecord(issue)) return ".";
-  const issuePath = Array.isArray(issue.path)
-    ? issue.path.map(String).join(".")
-    : "";
-  const message = typeof issue.message === "string" ? issue.message : "";
-  if (!issuePath && !message) return ".";
-  return ": " + (issuePath ? issuePath + ": " : "") + message;
+function formatRowSchemaError(error: ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return ".";
+  const issuePath = issue.path.map(String).join(".");
+  if (!issuePath && !issue.message) return ".";
+  return ": " + (issuePath ? issuePath + ": " : "") + issue.message;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

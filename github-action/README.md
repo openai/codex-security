@@ -7,8 +7,8 @@ SARIF reports.
 ## Quick start
 
 Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com and an OpenAI API key
-with access to the selected model. For Amazon Bedrock, see the separate
-[workflow example](../examples/github-actions/README.md).
+with access to the selected model. OpenAI is the default provider. See
+[Inference providers](#inference-providers) for Bedrock, OpenRouter, and Fireworks.
 
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
@@ -77,10 +77,121 @@ This setup is specific to the Linux runner. Local macOS scans use the built-in
 Seatbelt sandbox and do not need Bubblewrap. See the
 [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
 
+## Inference providers
+
+`provider` and `model` map to `codex-security scan --provider` and `--model`.
+The CLI configures the provider and validates its model requirements. The Action
+uses the same provider names and forwards only the selected provider's credentials:
+
+| `provider` | Step environment |
+| --- | --- |
+| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback |
+| `amazon-bedrock` | AWS credentials and region; see the OIDC example below |
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `fireworks` | `FIREWORKS_API_KEY` |
+
+OpenAI retains the `gpt-5.6-sol` default. Other providers require an explicit
+model ID your credentials can access. For example, replace the scan step in the
+quick start with:
+
+```yaml
+- name: Scan with OpenRouter
+  uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
+  with:
+    provider: openrouter
+    model: ${{ vars.INFERENCE_MODEL_ID }}
+  env:
+    OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+Use `provider: fireworks` and `FIREWORKS_API_KEY` for Fireworks. These providers
+require a reviewed Action revision containing the `provider` input;
+`action-v0.3.0` supports OpenAI only. Installation and dry runs receive no provider
+credentials. For CLI settings beyond the Action's named inputs, use the
+[CLI workflow](../examples/github-actions/README.md).
+
+## Scan with Amazon Bedrock
+
+Set `provider: amazon-bedrock` and supply the exact Bedrock model ID your AWS
+identity can invoke. No OpenAI API key or Codex login is needed.
+
+This workflow uses GitHub OIDC to assume an AWS role and passes the temporary
+credentials only to the scan step. Configure repository variables `AWS_REGION`,
+`AWS_ROLE_ARN`, and `BEDROCK_MODEL_ID`. The role needs permission to invoke that
+model, and its OIDC trust policy must restrict access to your repository and
+approved branches or environments. See
+[AWS credentials configuration](https://github.com/aws-actions/configure-aws-credentials#oidc-configuration-details)
+for the role and identity-provider setup.
+
+```yaml
+name: Codex Security Bedrock
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up the Ubuntu sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assume the Bedrock role
+        id: aws
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-duration-seconds: 3600
+          output-env-credentials: false
+          output-credentials: true
+      - name: Scan with Bedrock
+        id: security
+        uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
+        with:
+          provider: amazon-bedrock
+          model: ${{ vars.BEDROCK_MODEL_ID }}
+          effort: high
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+```
+
+Replace the Action placeholder with a reviewed commit that includes Bedrock
+support. This example is report-only; the usual severity thresholds, summaries,
+annotations, artifacts, and SARIF outputs also work with Bedrock.
+
+Both `mode: standard` and `mode: deep` use the selected AWS credentials. Allow
+enough time in the AWS role session and job timeout for the scan to finish;
+the Action does not renew exported temporary credentials. For PR scans, apply
+the same trusted-contributor restrictions as [Scan pull requests](#scan-pull-requests).
+
+You can also supply `AWS_BEARER_TOKEN_BEDROCK` and a region directly to the step.
+The Action forwards AWS region, profile, web-identity, and container-credential
+settings used by the CLI. It keeps its private home directories, so profiles
+must specify absolute `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` paths
+instead of relying on the runner's `~/.aws` files. Installation and dry runs
+receive no provider credentials; Bedrock scans receive no OpenAI API key.
+See [Bedrock setup](../docs/bedrock.md) for model access and authentication, or
+the [CLI workflow](../examples/github-actions/README.md) to run without the Action.
+
 ## Daybreak access and refusals
 
 Daybreak is optional. You can use the Action with a general-purpose model your
-API key can access under standard safeguards. Some security tasks may trigger
+credentials can access under standard safeguards. Some security tasks may trigger
 model refusals or API cybersecurity safety blocks. **If a refusal or safety
 block aborts the scan, the Action fails**, even with `fail-on-severity: none`.
 That setting controls failures caused by findings; it does not suppress scanner
@@ -100,6 +211,10 @@ by your model and API project. Leaving it unset preserves CLI defaults.
 Selecting `standard` does not require Daybreak approval. Selecting a Daybreak
 program does not grant access; an unavailable program or incompatible model
 causes the scan to fail.
+
+The API-project instructions above apply to `provider: openai`. For Bedrock,
+use an approved model ID and AWS provisioning as described in
+[Bedrock setup](../docs/bedrock.md#daybreak-blue-and-red).
 
 ## Scan pull requests
 
@@ -263,7 +378,8 @@ Codex uses the system Bubblewrap from `PATH`.
 npm and Python are found on the runner's `PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
 Python helpers preserve the selected virtual environment and library settings.
 The runner's process tracking marker is retained by the scan coordinator and Deep Scan workers.
-Authentication uses `OPENAI_API_KEY`.
+OpenAI authentication uses `OPENAI_API_KEY`. With `provider: amazon-bedrock`,
+only the selected AWS credential and region settings are forwarded to the scan.
 Temporary runtime files are removed after the job; reports remain available to
 downstream steps.
 
@@ -275,7 +391,9 @@ report paths empty; it does not recover unvalidated files from disk.
 
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
   for PRs, and `persist-credentials: false`.
-- **Authentication errors:** check the repository secret and model access.
+- **Authentication errors:** for OpenAI, check the repository secret and model access.
+  For Bedrock, check the AWS identity, session expiry, region, and permission to
+  invoke the exact model ID.
 - **Sandbox startup errors:** on Ubuntu 24.04, include the sandbox setup step
   shown above. Installing Bubblewrap alone does not load the AppArmor profile.
   A `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` error means
@@ -350,7 +468,8 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `paths`                | Unset                     | Newline-delimited literal repository-relative files or folders. Only for repository scope; no glob expansion.                                                                                                                |
 | `diff-base`            | Unset                     | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff.                                                                                                                                  |
 | `mode`                 | `standard`                | standard or deep. Deep supports repository scans, including selected paths; not diff scans.                                                                                                                                  |
-| `model`                | `gpt-5.6-sol`             | Model with access through your API key. Cost limits require CLI pricing support for the model.                                                                                                                               |
+| `provider`             | `openai`                  | Inference provider, matching scan --provider: openai, openrouter, fireworks, or amazon-bedrock. Supply the selected provider's credentials to the step.                                                                      |
+| `model`                | Unset                     | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.                                         |
 | `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
 | `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |

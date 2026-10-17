@@ -73,6 +73,7 @@ interface MultiscanReceipt extends MultiscanTask {
   warnings?: string[];
   policyFailed?: boolean;
   knowledgeBaseFailure?: true;
+  cleanupPending?: "checkout" | "recovery-checkout";
 }
 
 interface MultiscanHistory {
@@ -299,6 +300,31 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
+      if (
+        receipt.status === "completed" &&
+        Number.isSafeInteger(receipt.attempt) &&
+        receipt.attempt > 0
+      ) {
+        try {
+          if (receipt.cleanupPending === "checkout") {
+            await rm(join(output, "checkouts", task.id), {
+              recursive: true,
+              force: true,
+            });
+          } else if (receipt.cleanupPending === "recovery-checkout") {
+            const recoveryRoot = join(output, "recovery-checkouts");
+            await lstat(recoveryRoot);
+            await ensureOutputDirectory(recoveryRoot);
+            const taskRoot = join(recoveryRoot, task.id);
+            await lstat(taskRoot);
+            await ensureOutputDirectory(taskRoot);
+            await rm(join(taskRoot, `attempt-${receipt.attempt}`), {
+              recursive: true,
+              force: true,
+            });
+          }
+        } catch {}
+      }
       if (receipt.status !== "failed" && receipt.warnings?.length) {
         warnings.push({ repository: task.id, warnings: receipt.warnings });
         for (const warning of receipt.warnings) {
@@ -370,6 +396,7 @@ async function runCampaign(
         let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
+        let cleanupFailure: string | undefined;
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let cost: Readonly<ScanCost> | null = null;
@@ -524,9 +551,14 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            await rm(checkout, { recursive: true, force: true });
+            cleanupFailure = await removeCheckout(checkout);
           }
         }
+        const reportedErrors = [failure, cleanupFailure].filter(
+          (message): message is string => message !== undefined,
+        );
+        let reportedError =
+          reportedErrors.length === 0 ? undefined : reportedErrors.join("; ");
         const status = failure !== undefined ? "failed" : "completed";
         if (threatModelPath === undefined)
           threatModelPath = await readThreatModelPath(scanDir, {
@@ -534,33 +566,36 @@ async function runCampaign(
             protectedRoot,
             signal: options.signal,
           });
-        await appendReceipt(
-          ledger,
-          `${JSON.stringify({
-            ...task,
-            status,
-            attempt,
-            outputDir: scanDir,
-            ...(threatModelPath === null ? {} : { threatModelPath }),
-            ...(cost === null ? {} : { cost }),
-            ...(failure === undefined ? {} : { error: failure }),
-            ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
-            ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
-            policyFailed: attemptPolicyFailed,
-          })}\n`,
-        );
-        if (
-          options.recoverScan !== undefined &&
-          failure === undefined &&
-          checkout !== undefined
-        ) {
-          await rm(checkout, { recursive: true, force: true });
+        const recoveryCheckout =
+          options.recoverScan !== undefined && failure === undefined
+            ? checkout
+            : undefined;
+        const receipt: MultiscanReceipt = {
+          ...task,
+          status,
+          attempt,
+          outputDir: scanDir,
+          ...(threatModelPath === null ? {} : { threatModelPath }),
+          ...(cost === null ? {} : { cost }),
+          ...(reportedError === undefined ? {} : { error: reportedError }),
+          ...(recoveryCheckout !== undefined
+            ? { cleanupPending: "recovery-checkout" }
+            : failure === undefined && cleanupFailure !== undefined
+              ? { cleanupPending: "checkout" }
+              : {}),
+          ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
+          ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
+          policyFailed: attemptPolicyFailed,
+        };
+        await appendReceipt(ledger, `${JSON.stringify(receipt)}\n`);
+        if (recoveryCheckout !== undefined) {
+          reportedError = await removeCheckout(recoveryCheckout);
         }
         notifyProgress(options, {
           repository: task.id,
           attempt,
           status,
-          ...(failure === undefined ? {} : { error: failure }),
+          ...(reportedError === undefined ? {} : { error: reportedError }),
         });
         if (failure === undefined) {
           policyFailed ||= attemptPolicyFailed === true;
@@ -601,6 +636,14 @@ function notifyProgress(
   event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
 ): void {
   notify(() => options.onProgress?.(event));
+}
+
+async function removeCheckout(path: string): Promise<string | undefined> {
+  return rm(path, { recursive: true, force: true }).then(
+    () => undefined,
+    (error: unknown) =>
+      `Multiscan checkout cleanup failed: ${errorMessage(error)}`,
+  );
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {

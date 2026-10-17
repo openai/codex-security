@@ -190,11 +190,9 @@ export class DeepScanRemoteCoordinator {
   }
 }
 
-export async function startOrJoinDeepScanCoordinator(input: {
-  run: DeepScanRunState;
-  registry: Pick<DeepScanCoordinatorRegistry, "get" | "start">;
-  options: Omit<CoordinatorOptions, "run" | "observeReplacement">;
-}): Promise<{
+export async function startOrJoinDeepScanCoordinator(
+  input: ConstructorParameters<typeof DeepScanRemoteCoordinator>[0],
+): Promise<{
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
 }> {

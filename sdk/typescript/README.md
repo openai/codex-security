@@ -381,8 +381,14 @@ or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
 `signal` for cancellation. Observer failures go to `onObserverError` without
 stopping the scan.
 
-`onWorkerStatus` remains available for tool-derived preflight status and
-**best-effort** phase dispatch counts from model-emitted text markers. A missing
+`onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
+text markers. The former helper-derived `kind: "preflight"` event is retired;
+scans use available runtime tools and parent fallback without a capability registry.
+The plugin's `config_preflight.py` helper and custom capability registries are no
+longer supported, including the `preflightChecks` progress-tool input and workbench
+`--preflight-issues-json` / `--preflight-issues-json-stdin` arguments. Saved preflight
+history remains readable. Local `preflight()` input checks, authentication,
+sandbox enforcement, and Deep worker configuration still apply. A missing
 dispatch status does not mean delegation was skipped. `onSessionEvent` receives
 saved events with thread IDs and worker numbers and can contain source code or
 credentials. Deep scans additionally expose durable independent-review counts
@@ -431,6 +437,9 @@ and `signal` are also supported.
 To validate GitHub code scanning alerts, first import them with
 `importGitHubCodeScanningAlerts()`. See the
 [import guide](docs/cli.md#import-alerts-from-the-cli) for CLI and SDK examples.
+
+For host-managed model execution, use `validateRecords()` or `validate --records`.
+See [host-provided standalone validation](docs/validate-records.md).
 
 ### Generate and verify a patch
 
