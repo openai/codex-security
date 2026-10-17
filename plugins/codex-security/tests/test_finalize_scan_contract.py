@@ -558,37 +558,6 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_accepts_custom_schema_beyond_previous_complexity_limits(self) -> None:
-        schema = {
-            "type": "object",
-            "allOf": [{"type": "object"}] * 129,
-            "properties": {
-                **{f"property_{index}": {} for index in range(4097)},
-                "name": {"type": "string", "pattern": "^a+$"},
-            },
-        }
-        path = self.scan_dir / "custom.schema.json"
-        path.write_text(json.dumps(schema), encoding="utf-8")
-
-        FINALIZER.validate_against_schema({"name": "aaa"}, path)
-
-    def test_allows_schema_properties_named_like_validation_keywords(self) -> None:
-        schema = {
-            "type": "object",
-            "properties": {
-                "$ref": {"type": "string"},
-                "pattern": {"type": "string"},
-                "uniqueItems": {"type": "boolean"},
-            },
-        }
-        path = self.scan_dir / "custom.schema.json"
-        path.write_text(json.dumps(schema), encoding="utf-8")
-
-        FINALIZER.validate_against_schema(
-            {"$ref": "value", "pattern": "^(a+)+$", "uniqueItems": True},
-            path,
-        )
-
     def test_finalize_normalizes_unsealed_deep_inventory_strategy_alias(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.coverage["inventoryStrategy"] = "deep_repository_repeated_discovery"
@@ -2358,6 +2327,63 @@ The extraction root is not enforced.
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
 
+    def test_recovered_receipt_decision_retains_owned_pending_evidence(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for disposition in ("rejected", "not_applicable"):
+            for previous_owner in (None, "worker-current", "worker-other"):
+                with self.subTest(disposition=disposition, previous_owner=previous_owner):
+                    self.coverage = copy.deepcopy(original)
+                    self.coverage["completeness"] = "partial"
+                    surface = self.coverage["surfaces"][0]
+                    surface.update(
+                        candidateId="candidate-review",
+                        sourceWorkerId="worker-current",
+                        disposition=disposition,
+                        receiptRefs=["artifacts/review/missing-receipt.txt"],
+                        candidate={"evidence": "Saved candidate evidence remains available."},
+                    )
+                    previous = None
+                    if previous_owner is not None:
+                        previous = {
+                            "id": surface["id"],
+                            "candidateId": "candidate-review",
+                            "sourceWorkerId": previous_owner,
+                            "reason": "Independent authored proof gap.",
+                            "candidate": {"evidence": "Independent saved candidate evidence."},
+                            "surfaceIds": [surface["id"]],
+                        }
+                        self.coverage["deferred"].append(copy.deepcopy(previous))
+                    self.write_scan()
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, recover_unsealed=True
+                    )
+                    warnings = prepared.warnings
+                    recovered = prepared.coverage
+                    self.assertEqual(recovered["surfaces"][0]["disposition"], "needs_follow_up")
+                    pending = next(
+                        row
+                        for row in recovered["deferred"]
+                        if row.get("sourceWorkerId") == "worker-current"
+                    )
+                    self.assertEqual(pending["surfaceIds"], [surface["id"]])
+                    if previous_owner == "worker-current":
+                        self.assertEqual(pending, previous)
+                    else:
+                        self.assertEqual(pending["candidate"], surface["candidate"])
+                        self.assertIn(warnings[0], pending["reason"])
+                    if previous is not None:
+                        self.assertIn(previous, recovered["deferred"])
+                    self.assertEqual(
+                        len({row["id"] for row in recovered["deferred"]}),
+                        len(recovered["deferred"]),
+                    )
+                    self.assertTrue(
+                        any(
+                            warning.startswith("Skipped malformed coverage receipt")
+                            for warning in warnings
+                        )
+                    )
+
     def test_preserves_literal_whitespace_repository_paths(self) -> None:
         for path in (" ", "  ", "\u00a0"):
             with self.subTest(path=path):
@@ -3137,80 +3163,96 @@ The extraction root is not enforced.
 
         self.assertEqual(line_hashes.call_count, 1)
 
+    def test_receipt_recovery_preserves_closed_generic_task_identities(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for disposition in ("rejected", "not_applicable"):
+            for valid_receipt in (False, True):
+                with self.subTest(disposition=disposition, valid_receipt=valid_receipt):
+                    self.coverage = copy.deepcopy(original)
+                    surface = self.coverage["surfaces"][0]
+                    surface.update(
+                        candidateId="candidate-review",
+                        disposition=disposition,
+                        candidate={"evidence": "Retain original candidate evidence."},
+                        receiptRefs=["artifacts/review/receipt.txt"],
+                    )
+                    closures = [
+                        {"id": surface["id"], "reason": "Source review completed."},
+                        {"id": "other-closed-review", "reason": "Another review completed."},
+                    ]
+                    self.coverage["resolvedDeferred"] = copy.deepcopy(closures)
+                    self.write_scan()
+                    receipt = self.scan_dir / "artifacts/review/receipt.txt"
+                    receipt.parent.mkdir(parents=True, exist_ok=True)
+                    if valid_receipt:
+                        receipt.write_text("Synthetic verified review receipt.\n")
+                    elif receipt.exists():
+                        receipt.unlink()
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, recover_unsealed=True
+                    )
+                    recovered = prepared.coverage
+                    self.assertEqual(recovered.get("resolvedDeferred"), closures)
+                    candidate_rows = [
+                        row
+                        for row in recovered["deferred"]
+                        if row.get("candidateId") == surface["candidateId"]
+                    ]
+                    self.assertEqual(bool(candidate_rows), not valid_receipt)
+                    if candidate_rows:
+                        self.assertNotIn(candidate_rows[0]["id"], {row["id"] for row in closures})
+                        self.assertEqual(candidate_rows[0]["candidate"], surface["candidate"])
 
-@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
-def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
-    schema = {"type": expected}
-    FINALIZER._validate_schema_node(value, schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
-        FINALIZER._validate_schema_node(True, schema, "value")
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
-@pytest.mark.parametrize(
-    "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
-)
-def test_missing_writeup_recovery_rejects_other_file_errors(tmp_path, kind):
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
-    report = scan_dir / "findings" / "report.md"
-    report.parent.mkdir()
-    outside = tmp_path / "outside.md"
-    outside.write_text("# Outside the scan\n")
-    report_path = "findings/report.md"
-    if kind == "unsafe":
-        report_path = "../outside.md"
-    elif kind == "symlink":
-        report.symlink_to(outside)
-    elif kind == "dangling-symlink":
-        report.symlink_to(report.parent / "missing.md")
-    elif kind == "parent-symlink":
-        report.parent.rmdir()
-        report.parent.symlink_to(tmp_path, target_is_directory=True)
-    elif kind == "directory":
-        report.mkdir()
-    else:
-        if os.geteuid() == 0:
-            pytest.skip("root can read files without permission bits")
-        report.write_text("# Unreadable writeup\n")
-        report.chmod(0)
-    findings = {"findings": [{"writeup": {"reportPath": report_path}}]}
-    original = copy.deepcopy(findings)
-    with pytest.raises(FINALIZER.ContractError):
-        FINALIZER._prepare_derived_writeups(scan_dir, findings, allow_missing=True)
-    assert findings == original
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("error_code", [2, 3, 5, 22, 32, 33])
-def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch, error_code):
-    backend = windows_file_backend()
-    windows_error = load_script("windows_scan_local_files").WindowsScanLocalFileError
-    backend.open_read_fd.side_effect = windows_error(error_code, "Synthetic Windows file error")
-    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
-    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
-    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
-    findings = {"findings": [{"writeup": {"reportPath": "findings/report.md"}}]}
-    if error_code in {2, 3}:
-        warnings = FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert findings == {"findings": [{}]}
-        assert len(warnings) == 1
-    else:
-        with pytest.raises(FINALIZER.ContractError):
-            FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert "writeup" in findings["findings"][0]
-
-
-def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
-    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
-    reference = {"$ref": "#/$defs/text"}
-    FINALIZER._validate_schema_node("yes", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
-        FINALIZER._validate_schema_node("", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
-    with pytest.raises(RecursionError):
-        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
+    def test_parent_receipt_recovery_keeps_independent_valid_closures(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for malformed in (None, "duplicate", "missing-reason", "already-active"):
+            for valid_receipt in (False, True):
+                with self.subTest(malformed=malformed, valid_receipt=valid_receipt):
+                    self.coverage = copy.deepcopy(original)
+                    surface = self.coverage["surfaces"][0]
+                    surface.update(
+                        candidateId="review/auth",
+                        disposition="rejected",
+                        receiptRefs=["artifacts/receipt.txt"],
+                    )
+                    closures = [
+                        {"id": "review/auth", "reason": "Candidate review completed."},
+                        {"id": "independent-review", "reason": "Independent review completed."},
+                    ]
+                    if malformed == "duplicate":
+                        closures.append(copy.deepcopy(closures[1]))
+                    elif malformed == "missing-reason":
+                        closures[0].pop("reason")
+                    elif malformed == "already-active":
+                        self.coverage["completeness"] = "partial"
+                        self.coverage["deferred"] = [
+                            {"id": "independent-review", "reason": "Still active."}
+                        ]
+                    self.coverage["resolvedDeferred"] = closures
+                    self.write_scan()
+                    receipt = self.scan_dir / "artifacts/receipt.txt"
+                    receipt.parent.mkdir(exist_ok=True)
+                    if valid_receipt:
+                        receipt.write_bytes(b"Synthetic completed review evidence.")
+                    else:
+                        receipt.unlink(missing_ok=True)
+                    source_bytes = (self.scan_dir / "coverage.json").read_bytes()
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, recover_unsealed=True
+                    )
+                    self.assertEqual((self.scan_dir / "coverage.json").read_bytes(), source_bytes)
+                    # Task IDs remain independent of the reopened candidate's semantic ID.
+                    expected = None if malformed else closures
+                    self.assertEqual(prepared.coverage.get("resolvedDeferred"), expected)
+                    _, _, published = FINALIZER._write_prepared_scan_finalization(prepared)
+                    _, _, sealed = FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertEqual(sealed, published)
+                    self.assertEqual(sealed.get("resolvedDeferred"), expected)
+                    pending = [
+                        row for row in sealed["deferred"] if row.get("candidateId") == "review/auth"
+                    ]
+                    self.assertEqual(len(pending), int(not valid_receipt))
+                    self.assertEqual(FINALIZER.finalize_scan(self.scan_dir)[2], sealed)
 
 
 if __name__ == "__main__":

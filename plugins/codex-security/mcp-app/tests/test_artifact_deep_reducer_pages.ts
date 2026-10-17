@@ -111,12 +111,25 @@ try {
     scanId,
     findings: [fresh],
     scope: { summary: largeText },
-    coverage: workerDraft([]).coverage,
+    coverage: {
+      ...workerDraft([]).coverage,
+      completeness: "partial",
+      deferred: [
+        { candidateId: "pending-review", reason: "Review remains pending." },
+      ],
+    },
   };
   const previous = {
     scanId,
     findings: [canonical, legacyCanonical, noRefs],
     threatModel: { summary: largeText },
+    unresolvedCandidates: [
+      {
+        candidateId: "earlier-review",
+        sourceWorkerId: "previous-worker",
+        reason: "Earlier review remains pending.",
+      },
+    ],
   };
   const workerPath = path.join(workerRoot, "result.json");
   const previousPath = path.join(previousRoot, "result.json");
@@ -136,6 +149,16 @@ try {
 
   const full = await getCodexSecurityDeepReducerInputs(context);
   const projected = await readDocument(context);
+  assert.equal(full.discoveries[0].result.unresolvedCandidates.length, 1);
+  assert.equal(full.previous.unresolvedCandidates.length, 1);
+  assert.equal(
+    Object.hasOwn(projected.discoveries[0].result, "unresolvedCandidates"),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(projected.previous, "unresolvedCandidates"),
+    false,
+  );
   assert.equal(projected.discoveries[0].result.findings[0].summary, largeText);
   assert.deepEqual(projected.discoveries[0].result.scope, worker.scope);
   assert.deepEqual(projected.previous.threatModel, previous.threatModel);

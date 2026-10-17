@@ -3,12 +3,15 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
   aggregateDiscoveryCoverage,
+  collectUnresolvedCandidates,
+  deepReductionScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -362,10 +365,11 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
         ? {
-            ...structuredClone(schedulerResult.result),
+            ...deepReductionScanDraft(schedulerResult.result),
             coverage: aggregateDiscoveryCoverage(
               this.artifacts,
               schedulerResult.discoveries,
+              schedulerResult.result.unresolvedCandidates ?? [],
             ),
           }
         : scanDraftInputSchema.parse({
@@ -947,6 +951,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousUnresolvedCandidates: latestResult?.unresolvedCandidates,
             }),
           );
           observe(reducer);
@@ -1110,7 +1115,9 @@ export class DeepScanCoordinator {
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[],
   ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
-    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
+    const discoveriesById = new Map(
+      discoveries.map((worker) => [worker.id, worker]),
+    );
     const inputs = this.state.persistedDedupInputs ?? [];
     let resultPath: string | undefined;
     let latestResult: DeepReductionInput | undefined;
@@ -1141,7 +1148,7 @@ export class DeepScanCoordinator {
       }
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) => discoveryIds.has(input.discoveryWorkerId));
+        .map((input) => discoveriesById.get(input.discoveryWorkerId));
       if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
@@ -1157,6 +1164,28 @@ export class DeepScanCoordinator {
         },
         this.state.scanId,
       );
+      if (result.unresolvedCandidates === undefined) {
+        // Older reducers saved findings only. Recover their host-owned candidate
+        // state from the accepted inputs without changing historical artifacts.
+        const sources = await getCodexSecurityDeepReducerInputs({
+          root: worker.artifactDir,
+          repoRoot: this.state.targetPath,
+          scanId: this.state.scanId,
+          layout: "reducer",
+          deepReducer: {
+            scanRoot: this.artifacts.scanDir,
+            claimedWorkers: consumed.map((source) => ({
+              id: source!.id,
+              resultPath: source!.resultPath,
+            })),
+          },
+        });
+        const pending = collectUnresolvedCandidates(
+          sources.discoveries,
+          latestResult ?? null,
+        );
+        if (pending.length > 0) result.unresolvedCandidates = pending;
+      }
       latestResult = result;
       resultPath = worker.resultManifestPath;
     }

@@ -7,6 +7,7 @@ const distModules = [
   "artifact-export",
   "auth",
   "bulk-scan-discovery",
+  "candidates",
   "cli",
   "cli-help",
   "cli-scan-logs-json",
