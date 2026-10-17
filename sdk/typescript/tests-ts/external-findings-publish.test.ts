@@ -2718,3 +2718,120 @@ test("normalized SDK publication rejects nonfinite raw evidence without JSON coe
   expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
 });
+
+test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input = snykSarif();
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "snyk" as const,
+    sourceKey: "organization/project/main",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  const second = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(second.counts.unchanged).toBe(1);
+  input.runs[0]!.results[0]!.message.text = "Updated source evidence";
+  await writeFile(f.file, JSON.stringify(input));
+  const third = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(third.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.version).toBe(2);
+});
+
+test("Snyk CLI dry run selects its adapter without writing an import", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const f = await fixture(snykSarif());
+  const command = [...f.command, "--dry-run"];
+  command[command.indexOf("--provider") + 1] = "snyk";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each([
+  { uris: ["https://github.com/other/project"] },
+  {
+    uris: [
+      "https://github.com/example/project",
+      "https://github.com/other/project",
+    ],
+  },
+  { uris: ["https://github.com:443/example/project"] },
+])(
+  "Snyk source repository provenance binds both publication entrypoints: %p",
+  async ({ uris }) => {
+    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+    const { normalizeSnykSarif } = await import("../src/snyk-findings.js");
+    const input: any = snykSarif();
+    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
+      repositoryUri,
+    }));
+    const f = await fixture(input);
+    const selected = { ...options, provider: "snyk" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeSnykSarif(input),
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(f.reports.size).toBe(0);
+  },
+);
+
+test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input: any = snykSarif();
+  input.runs[0].versionControlProvenance = [
+    {
+      repositoryUri: "https://GITHUB.COM/EXAMPLE/PROJECT.git",
+      revisionId: "synthetic-revision",
+    },
+  ];
+  const original = structuredClone(input);
+  const f = await fixture(input);
+  const selected = { ...options, provider: "snyk" as const };
+  const first = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(first.verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    run: {
+      versionControlProvenance: original.runs[0].versionControlProvenance,
+    },
+  });
+  const changedDestination = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.endsWith("/repositories")) {
+        const body = await response.json();
+        body.data[0].url = "https://github.com/other/project";
+        return Response.json(body);
+      }
+      return response;
+    },
+  };
+  const posted = f.posts.length;
+  await expect(
+    prepareExternalPublication(f.file, selected, changedDestination),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(posted);
+  expect(input).toEqual(original);
+});

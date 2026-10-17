@@ -272,3 +272,5 @@ export type {
   ValidateRecordsOptions,
   ValidationReviewRequest,
 } from "./validation-records.js";
+
+export { normalizeSnykSarif, readSnykFindings } from "./snyk-findings.js";
