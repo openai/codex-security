@@ -354,13 +354,15 @@ SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
 explicit unsupported binary files are rejected. Bulk scans share this context
 with every repository.
 
-Output directories must be empty and outside the scanned directory and enclosing
-Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`).
+Use `--output-dir DIR` to choose where a scan saves its results. The directory
+must be empty and outside the scanned directory and enclosing Git worktree. On
+macOS/Linux, existing directories must be private (`chmod 700`).
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
-SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`. To require
-SARIF at a custom path, use the offline [export command](#exports-and-ci) after
-completion.
+
+Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
+optional export fails, the scan can still complete. Use the
+[export command](#export-findings) to write or retry SARIF from the saved results.
 
 Completed scans exit with `0` by default. Configure `--fail-on-severity high`
 to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
@@ -1377,34 +1379,80 @@ Progress callback failures do not stop matching.
 
 ## Exports and CI
 
-`export` reads saved results without Codex or credentials. It defaults to the
-current repository's latest completed scan. Choose either a positional result
-directory or `--scan ID`. Findings require sealed results and support
-`--export-format csv|json|sarif` (default SARIF). `--source-root PATH` adds SARIF
-source-line fingerprints; use the checkout unchanged from the scan, before
-applying patches. For a required SARIF export, choose an existing destination
-directory; export failures return `2` and can be retried from the saved results.
+Export saved findings and threat models without rerunning a scan or signing in.
+
+### Export findings
+
+To save a completed scan's findings as SARIF, run:
+
+```bash
+codex-security export /path/to/scan-results --output results.sarif
+```
+
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+The command writes `results.sarif` in the current directory. The output directory
+must already exist.
+
+SARIF is the default format, and `./results.sarif` is the default output path.
+Use `--export-format json` or `--export-format csv` to choose another format.
+To select a saved scan by its ID and export JSON, run:
+
+```bash
+codex-security export --scan SCAN_ID --export-format json --output findings.json
+```
+
+Replace `SCAN_ID` with the ID printed by `scan`. If you omit both the results
+directory and `--scan`, `export` uses the current repository's latest completed
+scan.
+
+JSON preserves the saved findings. CSV marks them open, omits local triage state,
+and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
+leading apostrophes; import removes the escape. Use JSON to recover ambiguous
+apostrophes from older CSV exports.
+
+For SARIF, `--source-root` adds source-line fingerprints that help tools match
+findings across scans. Before changing the scanned files or applying patches,
+run the export from the scanned repository's root:
 
 ```bash
 codex-security export /path/to/scan-results --source-root . --output results.sarif
-codex-security export --scan SCAN_ID --export-format json --output findings.json
-codex-security export --artifact threat-model --output docs/threatmodel.md
-codex-security export /path/to/policy-results --artifact threat-model --output -
 ```
 
-Threat-model exports use Markdown and default to `./threatmodel.md`. Standard,
-Deep, Diff, and policy workflows retain models when available; component/bulk
-runs save one per child. Explicit results may expose a model before completion
-or after later failure. Missing models return an error rather than generating
-or substituting one. Historical models in sealed scans need a matching manifest
-digest.
+The `.` selects the current directory as the source root. Its source files must
+be unchanged since the scan. `--source-root` is supported only for SARIF.
+
+If export fails, it exits with `2`. Fix the reported error and rerun the export;
+the saved scan remains available, so you don't need to run another scan.
+
+### Export a threat model
+
+To save a scan's threat model as Markdown, run:
+
+```bash
+codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+```
+
+Threat-model exports default to `./threatmodel.md`. Standard, Deep, Diff, and
+policy workflows retain models when available; component/bulk runs save one per
+child. With an explicit results directory, you can export a saved threat model
+even if the workflow has not completed or later failed. Missing models return
+an error rather than generating or substituting one. Historical models in sealed
+scans need a matching manifest digest.
+
+To print a policy workflow's saved threat model, pass its results directory and
+`--output -`:
+
+```bash
+codex-security export /path/to/policy-results --artifact threat-model --output -
+```
 
 `--output -` emits only artifact content, with diagnostics on stderr. Markdown
 and CSV stdout cannot combine with JSON command output. Exporting into a checkout
 does not make the model scan input; pass it with `--knowledge-base`.
 
-`ScanResult.threatModel` and `threatModelPath` expose the retained model and
-document, or null. Export still works if the document could not be written.
+### Export with the SDK
+
+Use `exportArtifact()` to export saved results from TypeScript:
 
 ```ts
 import { exportArtifact } from "@openai/codex-security";
@@ -1421,12 +1469,12 @@ Use `artifact: "findings"` with `format: "csv" | "json" | "sarif"` for findings.
 `output: "-"` streams stdout and returns null path/provenance. `pythonPath`
 selects an interpreter; `signal` cancels.
 
-JSON preserves sealed findings. CSV marks them open, omits local triage state,
-and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
-leading apostrophes; import removes the escape. Use JSON to recover ambiguous
-apostrophes from older CSV exports.
+`ScanResult.threatModel` and `threatModelPath` expose the retained model and
+document, or null. Export still works if the document could not be written.
 
-For CI, place output outside the checkout and set a severity threshold:
+### Use exports in CI
+
+Save each scan's results outside the checkout and set a severity threshold:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
@@ -1442,10 +1490,20 @@ codex-security scan . --diff origin/main \
 | `2`           | Invalid input, runtime error, target change, or required-output failure. |
 | `130` / `143` | Interrupt / termination.                                                 |
 
-In automation, export or upload only after scan exit `0` or `1`; skip these
-steps after `2`, `130`, or `143`. Require the export step to succeed before
-uploading a custom SARIF file. Pass the scan's explicit results directory to
-`export` so concurrent scans cannot change which result is selected.
+If the scan exits with `2`, `130`, or `143`, skip export and upload. After a scan
+exits with `0` or `1`, use these steps:
+
+1. Export from that run's results directory. Using the explicit directory keeps
+   concurrent scans from changing which results are selected:
+
+   ```bash
+   codex-security export "$SCAN_ROOT/results" --source-root . \
+     --output "$SCAN_ROOT/results.sarif"
+   ```
+
+2. If export succeeds, upload the SARIF file.
+3. If the scan exited with `1`, keep the CI job failed so the severity threshold
+   remains enforced.
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
 `--json`. Use `validate --output-schema FILE` for a schema-checked JSON assessment.

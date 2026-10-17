@@ -557,28 +557,18 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
-`scan --output-dir DIR` selects the saved results directory. SARIF, when
-produced, is saved at `DIR/exports/results.sarif`. To require a SARIF file at a
-custom path, export the completed scan's saved findings:
+Export a completed scan's findings to a SARIF file:
 
 ```bash
-cs export /path/to/scan-results --source-root . --output results.sarif
+cs export /path/to/scan-results --output results.sarif
 ```
 
-SARIF is the default export format. `--source-root` adds source-line
-fingerprints; use the checkout unchanged from the scan. Export can be retried
-without running another analysis or authenticating.
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+Export reads saved results, so you don't need to rerun the scan or sign in.
 
-Export saved findings or a threat model by scan ID:
-
-```bash
-cs export --scan SCAN_ID --export-format sarif --output results.sarif
-cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
-```
-
-The SDK provides `exportArtifact()` for the same offline operations. See
-[exports and CI](docs/cli.md#exports-and-ci) for details. For repository or pull
-request scans in GitHub Actions, use the
+See [exports and CI](docs/cli.md#exports-and-ci) for source fingerprints, other
+formats, threat models, and the `exportArtifact()` SDK method. For repository or
+pull request scans in GitHub Actions, use the
 [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md).
 Separate examples cover
 [GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
