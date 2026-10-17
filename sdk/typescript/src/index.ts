@@ -274,3 +274,9 @@ export type {
 } from "./validation-records.js";
 
 export { normalizeSnykSarif, readSnykFindings } from "./snyk-findings.js";
+
+export {
+  normalizeEndorFindings,
+  normalizeEndorSarif,
+  readEndorFindings,
+} from "./endor-findings.js";

@@ -21,6 +21,7 @@ const distModules = [
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",
+  "endor-findings",
   "scanner-import",
   "snyk-findings",
   "wiz-findings",

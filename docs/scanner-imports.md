@@ -43,3 +43,36 @@ truncated. Review the preview's exclusions before proceeding.
 Tests use synthetic vendor-shaped fixtures, including repeated imports, changed
 evidence, duplicate identities, 500 findings and malformed inputs. These tests do
 not establish live Snyk tenant or deployed Cloud compatibility.
+
+## Endor Labs
+
+Use the same command with `--provider endor`. Input may be an Endor Finding object,
+an array, an unmasked `ListFindingsResponse` with `list.objects`, or endorctl SARIF
+2.1.0. Choose a stable namespace/project/context source key and the matching Cloud
+repository. JSON/SARIF detection is automatic; no additional flags or defaults change.
+
+Identity uses the native finding UUID, including SARIF's `properties.finding-uuid`.
+The mapper follows the public [Finding model](https://github.com/endorlabs/endorlabs-sdk/blob/8a41756890c2dee3bb089fee881cae4f2adbde03/src/endorlabs/generated/models/finding_service.py)
+and [endorctl SARIF sample](https://github.com/endorlabs/endor-azure-pipelines-task/blob/2333a2f4548c2a1012a7e5219fa836627a466e0f/task/scan_results.sarif).
+Masked records lacking identity or project fields are excluded.
+
+JSON preserves the finding's severity and update timestamp. SARIF does not reliably
+carry Endor's finding severity: diagnostic levels and CVSS remain original evidence,
+and displayed severity stays unknown. Recommended versions, reachability, dismissals,
+snoozes and other source assertions are retained without becoming Cloud assessments.
+JSON maps reported primary SAST and AI SAST paths and start lines. SARIF maps
+reported source lines for results categorized as SAST or Secrets; other SARIF
+line numbers remain only in the original evidence. Indexed and base-relative SARIF
+artifact references remain in the original evidence without being mapped to a
+repository file. Locations remain source claims, not verified Cloud assessments.
+
+For new uploads, every declared SARIF repository URI must match the selected Cloud
+repository. Saved requests remain bound to their original repository ID and can
+resume after a repository rename.
+
+Imports replace the complete source snapshot for an existing UUID. Preview before
+switching between JSON and SARIF, since the two exports contain different evidence.
+Synthetic QA covers both formats and 500-record exports; live tenant verification
+is separate.
+
+Endor list responses with a continuation cursor or token are rejected. Finish fetching the export or provide an explicitly selected array; a single unfinished page is not a complete import. Fractional timestamps are rounded down to Cloud epoch seconds while their original precision remains in source evidence.

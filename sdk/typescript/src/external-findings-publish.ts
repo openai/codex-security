@@ -26,6 +26,7 @@ import {
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -57,7 +58,7 @@ function cloudRepositoryUrlKey(value: string): string {
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {
   repository: string;
-  provider: "wiz" | "github" | "snyk";
+  provider: "wiz" | "github" | "snyk" | "endor";
   sourceKey: string;
 }
 
@@ -288,6 +289,12 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  if (options.provider === "endor")
+    return prepareNormalizedExternalPublication(
+      await readEndorFindings(path),
+      options,
+      dependencies,
+    );
   if (options.provider === "snyk")
     return prepareNormalizedExternalPublication(
       await readSnykFindings(path),
@@ -361,8 +368,8 @@ async function preparePublicationInput(
     throw new CodexSecurityError(
       options.provider === "wiz"
         ? "The source key must contain 1–512 UTF-8 bytes. Use a stable Wiz tenant/finding namespace, such as TENANT_ID/vulnerability-finding, across exports."
-        : options.provider === "snyk"
-          ? "The source key must contain 1–512 UTF-8 bytes. Use a stable Snyk organization/project/branch namespace across exports."
+        : options.provider === "snyk" || options.provider === "endor"
+          ? "The source key must contain 1–512 UTF-8 bytes. Use a stable scanner organization/project/branch namespace across exports."
           : "The source key must contain 1–512 UTF-8 bytes. Use a stable GitHub host/repository/finding namespace across imports.",
     );
   }
@@ -660,6 +667,9 @@ async function preparePublicationInput(
         finding.evidence.details?.repository?.url,
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(finding.evidence.source_data)
+          : []),
+        ...(options.provider === "endor"
+          ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
       ];
       for (const sourceRepository of sourceRepositories)
