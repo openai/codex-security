@@ -46,6 +46,113 @@ test("arrays and ListFindingsResponse use the same identities and empty lists ar
   });
 });
 
+test.each(["sast_data", "ai_sast_data"])(
+  "Endor %s preserves the primary source location and original evidence",
+  (field) => {
+    const base = endorFinding();
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        target_dependency_name: "",
+        dependency_file_paths: ["src/example.ts", "package.json"],
+        finding_metadata: {
+          [field]: {
+            location: {
+              relative_path: "src/example.ts",
+              start_line: 12,
+              end_line: 14,
+            },
+          },
+        },
+      },
+    };
+    const original = structuredClone(input);
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.source_finding_id).toBe(input.uuid);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "package.json", line: null },
+      { path: "src/example.ts", line: 12 },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toEqual(original);
+    expect(input).toEqual(original);
+  },
+);
+
+test.each([12, 24])(
+  "Endor retains distinct code locations without duplicating identical locations (line %i)",
+  (secondLine) => {
+    const base = endorFinding();
+    const location = { relative_path: "src/example.ts", start_line: 12 };
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        dependency_file_paths: [],
+        finding_metadata: {
+          sast_data: { location },
+          ai_sast_data: { location: { ...location, start_line: secondLine } },
+        },
+      },
+    };
+    const expected = [{ path: "src/example.ts", line: 12 }];
+    if (secondLine !== 12)
+      expected.push({ path: "src/example.ts", line: secondLine });
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual(expected);
+  },
+);
+
+test.each([null, 0, -1, 1.5, "12"])(
+  "Endor retains a code path without inventing a line from %p",
+  (start_line) => {
+    const base = endorFinding();
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        dependency_file_paths: [],
+        finding_metadata: {
+          ai_sast_data: {
+            location: { relative_path: "src/example.ts", start_line },
+          },
+        },
+      },
+    };
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "src/example.ts", line: null },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toEqual(input);
+  },
+);
+
+test("unsafe code locations remain only in the original Endor evidence", () => {
+  const base = endorFinding();
+  const input = {
+    ...base,
+    spec: {
+      ...base.spec,
+      dependency_file_paths: [],
+      finding_metadata: {
+        sast_data: {
+          location: { relative_path: "../outside.ts", start_line: 12 },
+        },
+        ai_sast_data: {
+          location: { relative_path: "C:\\private\\source.ts", start_line: 24 },
+        },
+      },
+    },
+  };
+  const output = normalizeEndorFindings(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings[0]!.evidence.locations).toEqual([]);
+  expect(output.findings[0]!.evidence.source_data).toEqual(input);
+});
+
 test("changed severity, reachability, dismissal and dependency version retain UUID", () => {
   const input = endorFinding();
   const original = normalizeEndorFindings(input).findings[0]!;
@@ -118,6 +225,66 @@ test("Endor SARIF UUID matches JSON and retains all source assertions without pr
     },
   });
 });
+
+test.each([
+  ["packages/my%20app/package.json", "packages/my app/package.json"],
+  ["packages/%E6%97%A5%E6%9C%AC/package.json", "packages/日本/package.json"],
+  ["packages/my%23app/package.json", "packages/my#app/package.json"],
+  ["packages/my%2520app/package.json", "packages/my%20app/package.json"],
+  ["%2e%2e/outside/package.json", null],
+  ["%2Ftmp/package.json", null],
+  ["C%3A%5Cprivate%5Cpackage.json", null],
+  ["packages/invalid%ZZ/package.json", null],
+])("Endor SARIF decodes safe repository paths once (%s)", (uri, path) => {
+  const input = endorSarif();
+  const result = input.runs[0]!.results[0]!;
+  result.locations[0]!.physicalLocation.artifactLocation.uri = uri!;
+  const output = normalizeEndorFindings(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings[0]!.evidence.locations).toEqual(
+    path === null ? [] : [{ path, line: null }],
+  );
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({ result });
+  expect(result.locations[0]!.physicalLocation.artifactLocation.uri).toBe(uri);
+});
+
+test.each(["SAST", "SECRETS"])(
+  "Endor SARIF retains distinct reported code lines for %s findings",
+  (category) => {
+    const input = endorSarif();
+    const result = input.runs[0]!.results[0]!;
+    result.properties.categories = [category];
+    result.locations = [1, 42, 42].map((startLine) => ({
+      physicalLocation: {
+        artifactLocation: { uri: "src/my%20module.ts" },
+        region: { startLine },
+      },
+    }));
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "src/my module.ts", line: 1 },
+      { path: "src/my module.ts", line: 42 },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({ result });
+  },
+);
+
+test.each([0, -1, 1.5, "42", null, undefined])(
+  "Endor SARIF keeps unknown or invalid code lines as null (%p)",
+  (startLine) => {
+    const input = endorSarif();
+    const result: any = input.runs[0]!.results[0]!;
+    result.properties.categories = ["SAST"];
+    result.locations[0].physicalLocation.region = { startLine };
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "package.json", line: null },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({ result });
+  },
+);
 
 test("SARIF requires vendor identity, producer and consistent rule references", () => {
   for (const mutate of [

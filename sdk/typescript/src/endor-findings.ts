@@ -55,6 +55,35 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
         spec["finding_metadata"] ?? {},
         "Endor finding_metadata",
       );
+      const codeLocations = ["sast_data", "ai_sast_data"].flatMap((field) => {
+        const data = record(metadata[field] ?? {}, `Endor ${field}`);
+        const location = record(
+          data["location"] ?? {},
+          `Endor ${field} location`,
+        );
+        const path = relativePath(location["relative_path"]);
+        if (path === null) return [];
+        const line = location["start_line"];
+        return [
+          {
+            path,
+            line:
+              typeof line === "number" && Number.isSafeInteger(line) && line > 0
+                ? line
+                : null,
+          },
+        ];
+      });
+      const locations = [
+        ...paths
+          .filter(
+            (path) => !codeLocations.some((location) => location.path === path),
+          )
+          .map((path) => ({ path })),
+        ...new Map(
+          codeLocations.map((location) => [JSON.stringify(location), location]),
+        ).values(),
+      ];
       const vulnerability = record(
         metadata["vulnerability"] ?? {},
         "Endor vulnerability",
@@ -108,7 +137,7 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
             ...new Set([...(advisory ? [advisory] : []), ...aliases]),
           ],
           packages,
-          locations: paths.map((path) => ({ path })),
+          locations,
           source_data: structuredClone(finding),
         }),
       };
@@ -194,19 +223,43 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
         "Endor fullDescription",
       );
       const help = record(rule["help"] ?? {}, "Endor help");
-      const paths = array(result["locations"] ?? [], "Endor locations")
-        .map((v) => {
-          const physical = record(
-            record(v, "Endor location")["physicalLocation"] ?? {},
-            "Physical location",
-          );
-          return relativePath(
-            record(physical["artifactLocation"] ?? {}, "Artifact location")[
-              "uri"
-            ],
-          );
-        })
-        .filter((p): p is string => p !== null);
+      const hasCodeLocations = strings(properties["categories"]).some(
+        (category) => category === "SAST" || category === "SECRETS",
+      );
+      const locations = array(
+        result["locations"] ?? [],
+        "Endor locations",
+      ).flatMap((v) => {
+        const physical = record(
+          record(v, "Endor location")["physicalLocation"] ?? {},
+          "Physical location",
+        );
+        const uri = text(
+          record(physical["artifactLocation"] ?? {}, "Artifact location")[
+            "uri"
+          ],
+        );
+        if (uri === null) return [];
+        let path: string | null;
+        try {
+          path = relativePath(decodeURIComponent(uri));
+        } catch {
+          return [];
+        }
+        if (path === null) return [];
+        const line = hasCodeLocations
+          ? record(physical["region"] ?? {}, "Endor region")["startLine"]
+          : null;
+        return [
+          {
+            path,
+            line:
+              typeof line === "number" && Number.isSafeInteger(line) && line > 0
+                ? line
+                : null,
+          },
+        ];
+      });
       return {
         source_finding_id: id,
         evidence: validateExternalEvidence({
@@ -220,7 +273,11 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
             .join("\n\n"),
           // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
           severity: "unknown",
-          locations: [...new Set(paths)].map((path) => ({ path })),
+          locations: [
+            ...new Map(
+              locations.map((location) => [JSON.stringify(location), location]),
+            ).values(),
+          ],
           source_data: structuredClone({ ...context, rule, result }),
         }),
       };
