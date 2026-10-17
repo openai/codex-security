@@ -12,6 +12,7 @@
 - update Bedrock workflow to CLI 0.3.0 ([#1675](https://github.com/openai/codex-security/pull/1675))
 - avoid copying unused dictionary items ([#1661](https://github.com/openai/codex-security/pull/1661))
 - normalize hostnames before credential lookup and API routing ([#1069](https://github.com/openai/codex-security/pull/1069))
+- clean up imports and expected test exceptions ([#1665](https://github.com/openai/codex-security/pull/1665))
 
 <!-- release-section: highlights:end -->
 

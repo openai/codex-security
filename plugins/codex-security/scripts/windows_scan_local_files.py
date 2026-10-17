@@ -23,13 +23,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import ctypes.wintypes as wintypes
 import errno
 import importlib
 import ntpath
 import os
 import secrets
 from collections.abc import Iterator
-from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 

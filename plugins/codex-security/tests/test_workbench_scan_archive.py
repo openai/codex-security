@@ -304,7 +304,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
             second.archive_existing, second.parent_scan_id = False, None
             try:
                 outcomes.append(register(connection, second))
-            except BaseException as error:
+            except SystemExit as error:
                 outcomes.append(error)
 
     mkdir = Path.mkdir
