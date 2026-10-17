@@ -157,14 +157,16 @@ test("requires source identity and rejects conflicting SARIF repository provenan
 });
 
 test.each([true, false])(
-  "SARIF decodes source paths once and matches JSON identity (fingerprint=%s)",
+  "direct SARIF URIs decode once and match JSON identity (fingerprint=%s)",
   (fingerprint) => {
     for (const path of ["src/my file.ts", "src/my%20file.ts"]) {
       const json: any = semgrepJson();
       const sarif: any = semgrepSarif();
       json.results[0].path = path;
-      sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri =
-        path.split("/").map(encodeURIComponent).join("/");
+      const artifact =
+        sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation;
+      delete artifact.uriBaseId;
+      artifact.uri = path.split("/").map(encodeURIComponent).join("/");
       if (!fingerprint) {
         delete json.results[0].extra.fingerprint;
         delete sarif.runs[0].results[0].fingerprints;
@@ -183,6 +185,78 @@ test.each([true, false])(
   },
 );
 
+test.each([true, false])(
+  "native SARIF preserves literal percent paths (fingerprint=%s)",
+  (fingerprint) => {
+    for (const path of [
+      "src/my file.ts",
+      "src/my%20file.ts",
+      "src/100%.ts",
+      "src/%2Ffile.ts",
+      "src/literal%2e%2e.ts",
+      "src/caf%C3%A9.ts",
+      "src/café.ts",
+    ]) {
+      const json: any = semgrepJson();
+      const sarif: any = semgrepSarif();
+      json.results[0].path = path;
+      sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri =
+        path;
+      if (!fingerprint) {
+        delete json.results[0].extra.fingerprint;
+        delete sarif.runs[0].results[0].fingerprints;
+      }
+      const original = structuredClone(sarif);
+      const output = normalizeSemgrepSarif(sarif);
+      expect(output.excluded).toEqual([]);
+      expect(output.findings).toHaveLength(1);
+      const finding = output.findings[0]!;
+      expect(finding.evidence.locations).toEqual([{ path, line: 3 }]);
+      expect(finding.source_finding_id).toBe(
+        normalizeSemgrepFindings(json).findings[0]!.source_finding_id,
+      );
+      expect(finding.evidence.source_data).toMatchObject({
+        result: original.runs[0].results[0],
+      });
+      expect(sarif).toEqual(original);
+    }
+  },
+);
+
+test("native SARIF keeps CE percent paths distinct after reordering", () => {
+  const paths = [
+    "src/my file.ts",
+    "src/my%20file.ts",
+    "src/100%.ts",
+    "src/100%25.ts",
+  ];
+  const json: any = semgrepJson();
+  const sarif: any = semgrepSarif();
+  delete json.results[0].extra.fingerprint;
+  delete sarif.runs[0].results[0].fingerprints;
+  json.results = paths.map((path) => ({ ...json.results[0], path }));
+  const run = sarif.runs[0];
+  run.results = paths.map((path) => {
+    const result = structuredClone(run.results[0]);
+    result.locations[0].physicalLocation.artifactLocation.uri = path;
+    return result;
+  });
+  const expected = normalizeSemgrepFindings(json).findings;
+  expect(expected).toHaveLength(paths.length);
+  for (const results of [run.results, run.results.toReversed()]) {
+    run.results = results;
+    const output = normalizeSemgrepSarif(sarif);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings).toHaveLength(paths.length);
+    expect(output.findings.map((x) => x.source_finding_id).sort()).toEqual(
+      expected.map((x) => x.source_finding_id).sort(),
+    );
+    expect(
+      output.findings.map((x) => x.evidence.locations?.[0]?.path).sort(),
+    ).toEqual(paths.toSorted());
+  }
+});
+
 test.each([
   "%2e%2e/outside.ts",
   "%2Foutside.ts",
@@ -191,9 +265,11 @@ test.each([
 ])(
   "SARIF retains encoded unsafe URI %s without a repository location",
   (uri) => {
-    const input = semgrepSarif();
-    input.runs[0]!.results[0]!.locations[0]!.physicalLocation.artifactLocation.uri =
-      uri;
+    const input: any = semgrepSarif();
+    const artifact =
+      input.runs[0].results[0].locations[0].physicalLocation.artifactLocation;
+    delete artifact.uriBaseId;
+    artifact.uri = uri;
     const output = normalizeSemgrepSarif(input);
     expect(output.excluded).toEqual([]);
     expect(output.findings[0]!.evidence.locations).toEqual([]);

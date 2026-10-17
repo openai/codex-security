@@ -3003,6 +3003,67 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
   });
 });
 
+test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
+  const { semgrepJson, semgrepSarif } =
+    await import("./support/semgrep-import-fixtures.js");
+  const paths = [
+    "src/my file.ts",
+    "src/my%20file.ts",
+    "src/100%.ts",
+    "src/100%25.ts",
+  ];
+  const json: any = semgrepJson();
+  const sarif: any = semgrepSarif();
+  delete json.results[0].extra.fingerprint;
+  delete sarif.runs[0].results[0].fingerprints;
+  json.results = paths.map((path) => ({ ...json.results[0], path }));
+  const run = sarif.runs[0];
+  run.results = paths.map((path) => {
+    const result = structuredClone(run.results[0]);
+    result.locations[0].physicalLocation.artifactLocation.uri = path;
+    return result;
+  });
+  const f = await fixture(json);
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(paths.length);
+  expect(first.verified).toBe(paths.length);
+  const originalIds = [...f.reports.values()]
+    .map((report) => [report.id, report.canonical_finding_id])
+    .sort();
+  await writeFile(f.file, JSON.stringify(sarif));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.created).toBe(0);
+  expect(changed.counts.updated).toBe(paths.length);
+  expect(changed.verified).toBe(paths.length);
+  expect(
+    [...f.reports.values()]
+      .map((report) => [report.id, report.canonical_finding_id])
+      .sort(),
+  ).toEqual(originalIds);
+  expect(
+    [...f.reports.values()]
+      .map((report) => report.evidence.locations?.[0]?.path)
+      .sort(),
+  ).toEqual(paths.toSorted());
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(paths.length);
+});
+
 test("Semgrep publication retains unsupported SARIF bases without repository locations", async () => {
   const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
   const input: any = semgrepSarif();

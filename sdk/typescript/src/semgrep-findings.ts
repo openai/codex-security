@@ -126,9 +126,9 @@ function sarifArtifactUri(
         ] !== undefined))
   )
     return null;
-  return decodeURIComponent(
-    requiredText(artifact["uri"], "Semgrep artifact URI"),
-  );
+  const uri = requiredText(artifact["uri"], "Semgrep artifact URI");
+  // Semgrep's native formatter copies filesystem paths without URI encoding.
+  return base === "%SRCROOT%" ? uri : decodeURIComponent(uri);
 }
 
 function sarifIdentity(
