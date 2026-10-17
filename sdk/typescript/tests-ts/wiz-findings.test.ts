@@ -158,7 +158,7 @@ test("SAST maps source range, CWE, scanner verdict, and repository inventory wit
     evidence: {
       severity: "high",
       locations: [{ path: "src/query.ts", line: 10 }],
-      branch: "feature/parser",
+      branch: "example/project/feature/parser",
       code_revision: null,
       source_scan_id: null,
       source_updated_at: null,
@@ -881,7 +881,7 @@ test("custom GitHub Enterprise binding preserves branch case and exact source ev
   );
   expect((await prepared.publish()).verified).toBe(1);
   const evidence = f.posts[0]!.items[0]!.evidence;
-  expect(evidence.branch).toBe("Feature/Parser/More");
+  expect(evidence.branch).toBe(record.repositoryBranch.name);
   expect(evidence.details!.repository.url).toBe(record.repository.url);
   expect(evidence.source_data).toEqual(record);
 });
@@ -894,7 +894,7 @@ test.each([
   ["iacFindings", "Team/Project", "team/project"],
   ["iacFindings", "team/project", "Team/Project"],
 ])(
-  "%s custom GitHub URL-only branch qualifiers preserve suffix case (%s, %s)",
+  "%s custom GitHub URL-only branches preserve the supplied name (%s, %s)",
   async (collection, repositoryPath, qualifier) => {
     const sourceRepository = {
       id: "wiz-repository",
@@ -926,7 +926,7 @@ test.each([
     );
     expect((await prepared.publish()).verified).toBe(1);
     const evidence = f.posts[0]!.items[0]!.evidence;
-    expect(evidence.branch).toBe("Feature/Parser/More");
+    expect(evidence.branch).toBe(branch.name);
     expect(evidence.details!.repository.url).toBe(sourceRepository.url);
     expect(evidence.source_data).toEqual(record);
   },
@@ -1457,57 +1457,39 @@ test.each([undefined, "toon", "yaml", "md"])(
 
 for (const kind of ["sast", "secret", "iac"] as const) {
   test.each([
-    [repositoryUrl, "example/project/feature/parser", "feature/parser", null],
+    [repositoryUrl, "example/project/feature/parser", null],
+    [repositoryUrl, "example/project/fix", null],
     [
       "https://GitHub.com/Example/Project.git/",
       "EXAMPLE/PROJECT/Feature/Parser/More",
-      "Feature/Parser/More",
       null,
     ],
     [
       "https://GitHub.com/Example/Project.git/",
       "EXAMPLE/PROJECT.git/Feature/Parser/More",
-      "Feature/Parser/More",
       null,
     ],
-    [
-      repositoryUrl,
-      "example/project.git/Feature/Parser",
-      "Feature/Parser",
-      null,
-    ],
-    [
-      "https://github.com/demo/demo",
-      "demo/demo/Feature/Parser/More",
-      "Feature/Parser/More",
-      "demo",
-    ],
+    [repositoryUrl, "example/project.git/Feature/Parser", null],
+    ["https://github.com/demo/demo", "demo/demo/Feature/Parser/More", "demo"],
     [
       "https://github.com/Demo/Demo.git/",
       "DEMO/DEMO.git/Feature/Parser/More",
-      "Feature/Parser/More",
       "demo",
     ],
     [
       "https://github.example.test/team/project",
       "PROJECT/Feature/Parser",
-      "PROJECT/Feature/Parser",
       "project",
     ],
-    [repositoryUrl, "project/fix", "project/fix", "project"],
-    [repositoryUrl, "other/project/fix", "other/project/fix", "other/project"],
-    [repositoryUrl, "Feature/Parser", "Feature/Parser", null],
-    [
-      repositoryUrl,
-      "fix/example/project/Parser",
-      "fix/example/project/Parser",
-      null,
-    ],
-    [repositoryUrl, "example/project", "example/project", null],
-    ["https://github.com/", "example/project/feature/parser", null, null],
+    [repositoryUrl, "project/fix", "project"],
+    [repositoryUrl, "other/project/fix", "other/project"],
+    [repositoryUrl, "Feature/Parser", null],
+    [repositoryUrl, "fix/example/project/Parser", null],
+    [repositoryUrl, "example/project", null],
+    ["https://github.com/", "example/project/feature/parser", null],
   ])(
-    kind + " repository qualifiers preserve the branch from %s: %s",
-    async (url, branch, expected, name) => {
+    kind + " preserves the reported branch from %s: %s",
+    async (url, branch, name) => {
       const repository = { url, ...(name ? { name } : {}) };
       const record =
         kind === "sast"
@@ -1538,7 +1520,7 @@ for (const kind of ["sast", "secret", "iac"] as const) {
             : "iacFindings";
       const parsed = await parse(envelope(root, [record], false));
       expect(parsed.excluded).toEqual([]);
-      expect(parsed.findings[0]!.evidence.branch).toBe(expected);
+      expect(parsed.findings[0]!.evidence.branch).toBe(branch);
       expect(parsed.findings[0]!.evidence.details!.repository).toEqual({
         url,
         name,
@@ -1715,7 +1697,7 @@ for (const kind of ["sast", "secret", "iac"] as const) {
       );
       expect((await publication.publish()).verified).toBe(1);
       const evidence = f.posts[0]!.items[0]!.evidence;
-      expect(evidence.branch).toBe("Feature/Parser/More");
+      expect(evidence.branch).toBe(branch.name);
       expect(evidence.details!.repository).toEqual({
         id: repository.id,
         name: null,
@@ -1773,7 +1755,9 @@ test.each([0, 1, 2])(
       },
     });
     expect(parsed.excluded).toEqual([]);
-    expect(parsed.findings[0]!.evidence.branch).toBe("Feature/Parser");
+    expect(parsed.findings[0]!.evidence.branch).toBe(
+      record.repositoryBranch.name,
+    );
     expect(parsed.findings[0]!.evidence.details!.repository).toEqual({
       id: repository.id,
       name: null,
@@ -1859,7 +1843,9 @@ test.each(["raw", "normalized"])(
     expect(changed.preview.requests[0]!.request_id).not.toBe(
       original.preview.requests[0]!.request_id,
     );
-    expect(changed.preview.findings[0]!.evidence.branch).toBe("changed");
+    expect(changed.preview.findings[0]!.evidence.branch).toBe(
+      kind === "raw" ? "example/project/changed" : "changed",
+    );
   },
 );
 
@@ -1947,12 +1933,12 @@ test.each([
         CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
       },
     };
-    if (scenario === "qualifier") {
-      const historical = (await readVendorFindingsForPublication(f.file))
-        .legacy;
-      expect(historical.findings[0]!.evidence.branch).toBe("component/Feature");
-      await writeFile(f.file, JSON.stringify(historical.findings));
-    }
+    // Stage the old branch projection explicitly; new imports retain names.
+    const historical = (await readVendorFindingsForPublication(f.file)).legacy;
+    expect(historical.findings[0]!.evidence.branch).toBe(
+      scenario === "qualifier" ? "component/Feature" : "feature/parser",
+    );
+    await writeFile(f.file, JSON.stringify(historical.findings));
     const original = await prepareExternalPublication(f.file, f.options, deps);
     f.state.failReadback = true;
     let originalPath = "";
@@ -2171,6 +2157,8 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
       CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
     },
   };
+  const historical = await readVendorFindingsForPublication(f.file);
+  await writeFile(f.file, JSON.stringify(historical.legacy.findings));
   const original = await prepareExternalPublication(f.file, f.options, deps);
   f.state.failReadback = true;
   let originalPath = "";
@@ -2204,6 +2192,11 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     f.environment.CODEX_SECURITY_STATE_DIR,
     "external-finding-publications",
   );
+  saved.inputProjection.inputDigest = hash(
+    "sha256",
+    encode(historical.legacyIdentity, false),
+  );
+  await writeFile(originalPath, JSON.stringify(saved));
   const oldKey = hash(
     "sha256",
     encode([...identity, original.preview.findings], true),

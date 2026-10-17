@@ -189,10 +189,11 @@ function sourceBranch(
 ): string | null {
   const name = text(branch?.["name"]);
   if (!name) return null;
-  // Display names can also be literal branch prefixes. Keep their old mapping
-  // only when reconstructing an already approved publication checkpoint.
-  const qualifiers = legacy ? [...inventoryNames] : [];
-  if (legacy && repository.name) qualifiers.push(repository.name);
+  // Repository names and URL paths can both be literal branch prefixes. Keep
+  // the old mapping only for an already approved publication checkpoint.
+  if (!legacy) return name;
+  const qualifiers = [...inventoryNames];
+  if (repository.name) qualifiers.push(repository.name);
 
   // Include the URL qualifier before selecting the longest repository prefix.
   // Keep URL normalization and the branch suffix's original case and slashes.
