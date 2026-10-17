@@ -18,7 +18,6 @@ import {
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
-  isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDedupPrompt, renderDiscoveryPrompt } from "./templates.js";
 import type {
@@ -456,16 +455,12 @@ export class DeepScanWorkerRunner {
         }
         const normalized = asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
-        const policyRefusal =
-          retryable && isCodexCybersecurityPolicyRefusal(normalized);
-        if (policyRefusal || !retryable || attempt === maximumAttempts) {
+        if (!retryable || attempt === maximumAttempts) {
           const replaceableFailureKind =
             input.kind === "discovery" && retryable
-              ? policyRefusal
-                ? "policy_refusal"
-                : validationStarted
-                  ? "invalid_discovery_artifacts"
-                  : "transient_error"
+              ? validationStarted
+                ? "invalid_discovery_artifacts"
+                : "transient_error"
               : undefined;
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
