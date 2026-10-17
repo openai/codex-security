@@ -101,10 +101,16 @@ import {
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
+import {
+  publishPatchReview,
+  resolvePatchReviewPublisher,
+} from "./patch-publication.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runRecordsProtocol } from "./deduplication/records-protocol.js";
+import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
+import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   classifyScanSeverityInternal,
   classifyScanDirectorySeverityInternal,
@@ -1759,15 +1765,19 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   if (
-    argv[0] === "dedupe" &&
-    argv.includes("--records") &&
+    (((argv[0] === "dedupe" || argv[0] === "validate") &&
+      argv.includes("--records")) ||
+      (argv[0] === "scan" &&
+        argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
     !argv.includes("--schema")
   ) {
-    if (argv.length !== 2) {
+    if (argv.length !== 2 || (argv[0] === "scan" && argv[1] !== "--host")) {
       errorOutput.write(
-        "codex-security: --records must be used alone with dedupe.\n",
+        argv[0] === "scan"
+          ? "codex-security: --host must be used alone with scan.\n"
+          : `codex-security: --records must be used alone with ${argv[0]}.\n`,
       );
       return 2;
     }
@@ -1775,7 +1785,13 @@ export async function main(
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
-      const code = await runRecordsProtocol(
+      const runProtocol =
+        argv[0] === "scan"
+          ? runHostedScanProtocol
+          : argv[0] === "validate"
+            ? runValidationRecordsProtocol
+            : runRecordsProtocol;
+      const code = await runProtocol(
         dependencies.recordsInput ?? process.stdin,
         output,
         controller.signal,
@@ -3844,6 +3860,12 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          host: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Run one hosted Standard scan over JSON-RPC stdin/stdout; use alone.",
+            ),
           workflowId: optionValue("--workflow-id")
             .optional()
             .describe(
@@ -3974,6 +3996,8 @@ export async function main(
         ),
       output: scanOutputSchema("SCAN_FAILED"),
       async run({ args, error: incurError, format, options }) {
+        if (options.host)
+          throw new CodexSecurityError("Use scan --host alone.");
         if (format === "md") {
           errorOutput.write(
             "codex-security: Markdown output is not supported for scan results.\n",
@@ -4488,7 +4512,7 @@ export async function main(
               }\n`,
             );
             exitCode = interruptedExitCode(controller.signal) ?? 2;
-            return undefined;
+            throw error;
           } finally {
             removeSignals();
           }
@@ -5187,6 +5211,7 @@ export async function main(
       },
     })
     .command("validate", {
+      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       description:
         "Assess candidate security findings using source evidence only.",
       destructive: false,
@@ -5198,6 +5223,12 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
+        records: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run the versioned validation JSON-RPC protocol on stdin/stdout; use alone.",
+          ),
         auth: SKILL_AUTH_OPTION,
         ...SKILL_CONFIG_OPTIONS.shape,
         context: optionValue("--context")
@@ -5221,6 +5252,8 @@ export async function main(
       async run({ options }) {
         let knowledgeBase: PreparedKnowledgeBase | undefined;
         try {
+          if (options.records)
+            throw new CodexSecurityError("Use validate --records alone.");
           if (options.knowledgeBase.length > 0) {
             knowledgeBase = await prepareKnowledgeBase(
               options.knowledgeBase.map((path) =>
@@ -7151,93 +7184,25 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<{ branch: string; url: string }> {
-  const run = (command: "git" | "gh" | "glab", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab", args: readonly string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
     const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
-    const host = patchRemoteHost(remote);
-    const gitlabHost =
-      dependencies.environment["GITLAB_HOST"] ||
-      dependencies.environment["GITLAB_URI"] ||
-      dependencies.environment["GL_HOST"];
-    const gitlab =
-      host === "gitlab.com" ||
-      (host !== undefined &&
-        gitlabHost !== undefined &&
-        host ===
-          patchRemoteHost(
-            gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
-          ));
-    const command = gitlab ? "glab" : "gh";
-    const gitlabRepository = remote.includes("://")
-      ? remote
-      : `ssh://${remote.replace(":", "/")}`;
-    let url = await run(
-      command,
-      gitlab
-        ? [
-            "mr",
-            "list",
-            "--all",
-            "--source-branch",
-            branch,
-            "--output",
-            "json",
-            "--jq",
-            "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
-            "--repo",
-            gitlabRepository,
-          ]
-        : [
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "url",
-            "--jq",
-            ".[0].url // empty",
-          ],
+    const publisher = resolvePatchReviewPublisher(
+      remote,
+      dependencies.environment,
+      run,
     );
-    if (!url) {
-      await run("git", ["push", "--set-upstream", "origin", branch]);
-      url = await run(
-        command,
-        gitlab
-          ? [
-              "mr",
-              "create",
-              "--draft",
-              "--head",
-              gitlabRepository,
-              "--source-branch",
-              branch,
-              "--title",
-              PATCH_PR_TITLE,
-              "--description",
-              gitlabPatchDescription(body),
-              "--yes",
-              "--repo",
-              gitlabRepository,
-            ]
-          : [
-              "pr",
-              "create",
-              "--draft",
-              "--head",
-              branch,
-              "--title",
-              PATCH_PR_TITLE,
-              "--body",
-              body,
-            ],
-      );
-    }
-    stderr.write(
-      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
-    );
+    const url = await publishPatchReview({
+      branch,
+      title: PATCH_PR_TITLE,
+      body,
+      publisher,
+      pushBranch: async (branch) => {
+        await run("git", ["push", "--set-upstream", "origin", branch]);
+      },
+    });
+    stderr.write(`${publisher.label}: ${safePatchText(url)}\n`);
     return { branch, url };
   } catch (error) {
     stderr.write(
@@ -7245,21 +7210,6 @@ async function publishPatchBranch(
     );
     throw error;
   }
-}
-
-function gitlabPatchDescription(body: string): string {
-  // GitLab ignores quick actions inside its native fenced blockquotes. Choose
-  // a fence the report cannot close after quick-action CR removal; preserve its
-  // original bytes and end the outer quote at EOF.
-  let fenceLength = 3;
-  for (const match of body.replaceAll("\r", "").matchAll(/^[ \t]*(>+)/gmu))
-    fenceLength = Math.max(fenceLength, match[1]!.length + 1);
-  return `${">".repeat(fenceLength)}\n${body}`;
-}
-
-function patchRemoteHost(remote: string): string | undefined {
-  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
-  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
@@ -8734,6 +8684,7 @@ async function executeScan(
           auth,
           provider,
           hasCommandAuth(effectiveConfiguration),
+          arguments_.dryRun,
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
@@ -9081,31 +9032,19 @@ async function executeScan(
         progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
-        const update =
-          status.kind === "preflight"
-            ? `preflight:${status.delegation}:${status.configuredSlots}`
-            : `dispatch:${status.phase}:${status.planned}:${status.started}`;
+        const update = `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
-        if (status.kind === "preflight") {
-          diagnostic("worker.preflight", {
-            delegation: status.delegation,
-            configured_slots: status.configuredSlots,
-          });
-        } else {
-          diagnostic("worker.phase", {
-            phase: status.phase,
-            planned: status.planned,
-            started: status.started,
-          });
-          workerCapacity = { planned: status.planned, started: status.started };
-          phase = scanPhase(status.phase);
-        }
+        diagnostic("worker.phase", {
+          phase: status.phase,
+          planned: status.planned,
+          started: status.started,
+        });
+        workerCapacity = { planned: status.planned, started: status.started };
+        phase = scanPhase(status.phase);
         const message = workerStatusMessage(status);
         if (dashboard !== null) {
-          if (status.kind === "dispatch") {
-            dashboard.setStage(scanPhase(status.phase));
-          }
+          dashboard.setStage(scanPhase(status.phase));
           dashboard.note(message);
           return;
         }
@@ -10186,17 +10125,6 @@ export function parseCodexOverrides(
 }
 
 function workerStatusMessage(status: ScanWorkerStatus): string {
-  if (status.kind === "preflight") {
-    if (status.delegation === "unavailable") {
-      return "Preflight: worker delegation unavailable; continuing without delegated workers.";
-    }
-    if (status.delegation === "unknown") {
-      return "Preflight: worker delegation could not be confirmed; continuing scan.";
-    }
-    return status.configuredSlots === null
-      ? "Preflight: worker delegation supported."
-      : `Preflight: worker delegation supported (up to ${status.configuredSlots} worker slots).`;
-  }
   if (status.started === status.planned) {
     return `Scan phase: ${scanPhase(status.phase)} (${status.started} ${status.started === 1 ? "worker" : "workers"}).`;
   }

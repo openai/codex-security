@@ -57,11 +57,20 @@ jobs:
           if-no-files-found: error
 
   smoke:
-    name: Hosted Action smoke test
+    name: Hosted Action smoke test (${{ matrix.name }})
     # Fork PRs are unsupported; their push workflows exercise the Action instead.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - name: OpenAI default
+            provider: ""
+            model: ""
+          - name: Bedrock
+            provider: amazon-bedrock
+            model: openai.gpt-5.6-luna
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,6 +82,8 @@ jobs:
         id: smoke
         uses: ./
         with:
+          provider: ${{ matrix.provider }}
+          model: ${{ matrix.model }}
           dry-run: "true"
       - name: Verify dry-run outputs
         env:

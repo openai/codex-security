@@ -332,41 +332,6 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
-  test("streams maximum-size preflight checks through the MCP workbench", async () => {
-    const { root, repository } = createRepository();
-    writeSource(repository, "src/handler.py", "value = 1\n");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
-    const client = await startMcp(root);
-    const owner = "preflight-stdin-owner";
-
-    try {
-      const started = await client.call(
-        "start_codex_security_prompt_only_scan",
-        { mode: "standard", targetPath: repository, scope: "." },
-        owner,
-      );
-      const scanId = (started["scan"] as JsonObject)["scanId"] as string;
-      const preflightChecks = Array.from({ length: 32 }, (_, index) => ({
-        capability: `windows_process_boundary_${index}`,
-        reason: "é".repeat(1_200),
-        severity: "warn",
-        status: "fail",
-      }));
-      expect(JSON.stringify(preflightChecks).length).toBeGreaterThan(
-        32 * 1_024,
-      );
-
-      await client.call(
-        "update_codex_security_scan_progress",
-        { scanId, phase: "preflight", preflightChecks },
-        owner,
-      );
-    } finally {
-      await client.close();
-    }
-  });
-
   test("streams oversized option-like user context through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");

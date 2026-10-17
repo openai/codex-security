@@ -15,12 +15,11 @@ packages and releases. Do not edit or commit files in that directory. See the
 [SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
 commands.
 
-Compact artifact contracts are authored in `plugins/codex-security/mcp-app/src/artifact-contracts.ts`,
-with shared finding and threat-model definitions in `finding-detail-schemas.ts` and
-`threat-model-schema.ts`. The JSON files under `schemas/definitions` and `schemas/tools`
-are generated compatibility resources for JSON consumers. After editing the contracts,
-run `node plugins/codex-security/mcp-app/scripts/generate-artifact-schemas.mjs`.
-The MCP `typecheck` command checks that the generated resources are current.
+Compact artifact contracts are authored in `plugins/codex-security/mcp-app/src/artifact-contracts.ts`, with shared finding and threat-model definitions in `finding-detail-schemas.ts` and `threat-model-schema.ts`.
+Canonical findings, scan-manifest, and coverage exports are defined in `mcp-app/scripts/canonical-schemas.mts`; patch-risk exports and their static type are defined in `mcp-app/src/patch-risk-schema.ts`.
+The corresponding JSON schemas are generated compatibility resources. Canonical runtime validation continues to use the selected plugin's JSON schemas.
+After editing the contracts, run `node plugins/codex-security/mcp-app/scripts/generate-artifact-schemas.mjs`.
+The MCP `typecheck` command checks that the generated resources are current. SDK model generation remains based on the canonical JSON exports.
 
 `pnpm --dir sdk/typescript run generate:models` also copies workbench argument
 encoding and executable path handling from the plugin source into the SDK. Edit the
