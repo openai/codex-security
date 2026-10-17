@@ -137,7 +137,7 @@ function main(): number {
       "Check tracked plugin source for deterministic import compatibility.\n",
     );
     console.log(
-      "Usage: node check_plugin_source_compatibility.mjs [--plugin-root PATH]",
+      "Usage: node --experimental-strip-types check_plugin_source_compatibility.mts [--plugin-root PATH]",
     );
     console.log(
       "\n--plugin-root PATH  plugin source root (default: plugins/codex-security in this repository)",
