@@ -7,6 +7,8 @@
 - support host-provided standalone reviews ([#1682](https://github.com/openai/codex-security/pull/1682))
 - retire advisory capability preflight ([#1609](https://github.com/openai/codex-security/pull/1609))
 - support scan CLI inference providers ([#1677](https://github.com/openai/codex-security/pull/1677))
+- do not report a successful envelope for a failed dedupe ([#1071](https://github.com/openai/codex-security/pull/1071))
+- separate Git transport from review providers ([#1551](https://github.com/openai/codex-security/pull/1551))
 
 <!-- release-section: highlights:end -->
 
