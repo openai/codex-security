@@ -1661,6 +1661,8 @@ Both candidate IDs remain in the output, including the unresolved claim.
 `--scan latest` uses the current repository's latest completed scan. Patching
 supports JSON for saved findings, literal text, and files. Each finding gets a
 saved Codex desktop task. `--model` and `--effort` control the model.
+Saved-scan patching and fix verification use the complete sealed finding evidence
+and exclude findings that are currently closed in triage.
 
 `--validation-prompt-file PATH` supplies setup, authorized targets, expected
 results, and cleanup for dynamic validation. It works with saved findings,

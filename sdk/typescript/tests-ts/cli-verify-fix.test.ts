@@ -334,6 +334,7 @@ describe("read-only finding verification", () => {
           "--json",
         ],
         dependencies({
+          result,
           onWorkbench: (args) => {
             expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
             return {

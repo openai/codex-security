@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { main, runCodexSkillCommand } from "../src/cli.js";
+import type { Finding } from "../src/models.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -199,19 +200,20 @@ lines.on("line", (line) => {
 
   test("rejects a verified saved-finding result when no files change", async () => {
     await using fixture = await repositoryFixture();
+    const finding = {
+      occurrenceId: "occ_1",
+      findingId: "csf_1",
+      title: "Synthetic finding",
+      severity: { level: "high" },
+      locations: [{ path: "app.ts", startLine: 1 }],
+    };
     const outcome = await fixture.patch(["--scan", "scan-1"], {
+      readSavedFindings: async () => [finding as Finding],
       onWorkbench: () => ({
         scan: {
           scanId: "scan-1",
           targetPath: fixture.directory,
-          findings: [
-            {
-              occurrenceId: "occ_1",
-              title: "Synthetic finding",
-              severity: { level: "high" },
-              locations: [{ path: "app.ts", startLine: 1 }],
-            },
-          ],
+          findings: [finding],
         },
       }),
       onCodex: (_args, output) => {
