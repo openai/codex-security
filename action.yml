@@ -38,7 +38,7 @@ inputs:
     description: Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.
     default: 'true'
   dry-run:
-    description: Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.
+    description: 'Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job.'
     default: 'false'
   summary:
     description: Write a human-readable job summary.
@@ -47,7 +47,7 @@ inputs:
     description: Emit up to 50 source finding annotations; complete findings remain in reports.
     default: 'true'
   upload-artifacts:
-    description: Upload an allowlist of validated reports. Reports may contain source and vulnerability details.
+    description: Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details.
     default: 'false'
   artifact-name:
     description: Report artifact name; choose distinct names for matrix jobs and multiple invocations.

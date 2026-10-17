@@ -141,12 +141,15 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         if (checkoutError) result.errors.unshift(checkoutError);
         if (interrupted) result.errors.unshift('Scan was interrupted or exceeded its execution limit.');
         let reportsValidated = false;
+        let artifactUrl: string | undefined;
         try {
           const reports = await collectReports(result);
           reportsValidated = true;
           if (inputs.uploadArtifacts) {
             core.info('Uploading validated report artifacts.');
-            await uploadReports(reports, inputs, tempRoot);
+            const artifactId = await uploadReports(reports, inputs, tempRoot);
+            if (artifactId !== undefined && process.env.GITHUB_RUN_ID)
+              artifactUrl = `${event.serverUrl}/${event.repository}/actions/runs/${process.env.GITHUB_RUN_ID}/artifacts/${artifactId}`;
           }
         } catch (error) {
           result.reportStatus = 'failed';
@@ -160,7 +163,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         core.info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
         core.info(`Estimated cost: ${result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
-        finalSummary = resultSummary(result, inputs, target);
+        finalSummary = resultSummary(result, inputs, target, artifactUrl);
         if (inputs.annotations) emitAnnotations(result);
         success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
