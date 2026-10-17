@@ -2399,6 +2399,14 @@ async function testWorkerCyberAccessSettings() {
       },
     },
     {
+      name: "profile-disables-program",
+      // The SDK copies the selected profile's gate to the root for workers.
+      configuration:
+        'profile = "selected"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\n[profiles.selected.features]\napi_key_cyber_access_programs = false\n',
+      program: "daybreak_blue",
+      features: { api_key_cyber_access_programs: false },
+    },
+    {
       name: "other-program",
       configuration:
         'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',

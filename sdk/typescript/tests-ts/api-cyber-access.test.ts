@@ -17,11 +17,15 @@ async function* deniedEvents(): AsyncGenerator<ThreadEvent> {
 }
 
 test.each([
-  [undefined, {}],
-  ["standard", {}],
-  ["daybreak_blue", {}],
-  ["daybreak_red", {}],
-  ["daybreak_blue", { features: { api_key_cyber_access_programs: false } }],
+  [undefined, {}, {}],
+  ["standard", {}, { api_key_cyber_access_programs: true }],
+  ["daybreak_blue", {}, { api_key_cyber_access_programs: true }],
+  ["daybreak_red", {}, { api_key_cyber_access_programs: true }],
+  [
+    "daybreak_blue",
+    { features: { api_key_cyber_access_programs: false } },
+    { api_key_cyber_access_programs: false },
+  ],
   [
     "daybreak_blue",
     {
@@ -29,10 +33,56 @@ test.each([
       features: { api_key_model_discovery: true },
       profiles: { selected: { features: { api_key_model_discovery: false } } },
     },
+    { api_key_cyber_access_programs: true, api_key_model_discovery: false },
+  ],
+  [
+    "daybreak_blue",
+    {
+      profile: "selected",
+      features: { api_key_cyber_access_programs: true },
+      profiles: {
+        selected: { features: { api_key_cyber_access_programs: false } },
+      },
+    },
+    { api_key_cyber_access_programs: false },
+  ],
+  [
+    "daybreak_blue",
+    {
+      profile: "selected",
+      features: { api_key_cyber_access_programs: false },
+      profiles: {
+        selected: { features: { api_key_cyber_access_programs: true } },
+      },
+    },
+    { api_key_cyber_access_programs: true },
+  ],
+  [
+    "daybreak_blue",
+    {
+      profile: "selected",
+      features: { api_key_cyber_access_programs: false },
+      profiles: {
+        selected: { features: { api_key_model_discovery: false } },
+        unselected: { features: { api_key_cyber_access_programs: true } },
+      },
+    },
+    { api_key_cyber_access_programs: false, api_key_model_discovery: false },
+  ],
+  [
+    "daybreak_blue",
+    {
+      profile: "selected",
+      features: { api_key_cyber_access_programs: false },
+      profiles: {
+        selected: { features: { api_key_cyber_access_programs: null } },
+      },
+    },
+    { api_key_cyber_access_programs: false },
   ],
 ] as const)(
   "forwards %s and preserves API-key gates %j",
-  async (program, overrides) => {
+  async (program, overrides, expectedFeatures) => {
     const root = await fixtures.temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -81,34 +131,26 @@ test.each([
       expect(recipe?.["cyberAccessProgram"]).toBe(program);
       expect(clientOptions?.apiKey).toBe("synthetic-api-key");
       const config = parseToml(await readFile(runtime.configPath, "utf8"));
+      for (const features of [
+        config["features"],
+        resolveCodexProfile(clientOptions!.config as JsonObject)["features"],
+      ]) {
+        expect(features).toMatchObject(expectedFeatures);
+        for (const key of [
+          "api_key_cyber_access_programs",
+          "api_key_model_discovery",
+        ]) {
+          if (!(key in expectedFeatures)) {
+            expect(features).not.toHaveProperty(key);
+          }
+        }
+      }
       if (program === undefined) {
         expect(config).not.toHaveProperty("codex_security");
-        expect(config["features"]).not.toHaveProperty(
-          "api_key_cyber_access_programs",
-        );
-        expect(clientOptions?.config?.["features"]).not.toHaveProperty(
-          "api_key_cyber_access_programs",
-        );
       } else {
-        const expected = {
-          api_key_cyber_access_programs: !(
-            "features" in overrides &&
-            "api_key_cyber_access_programs" in overrides.features
-          ),
-          ...("profile" in overrides ? { api_key_model_discovery: false } : {}),
-        };
         expect(config["codex_security"]).toEqual({
           cyber_access_program: program,
         });
-        expect(config["features"]).toMatchObject(expected);
-        expect(
-          resolveCodexProfile(clientOptions!.config as JsonObject)["features"],
-        ).toMatchObject(expected);
-        if (!("profile" in overrides)) {
-          expect(config["features"]).not.toHaveProperty(
-            "api_key_model_discovery",
-          );
-        }
         expect(recipe?.["config"]).not.toHaveProperty("codex_security");
       }
     } finally {
