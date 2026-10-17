@@ -25,6 +25,7 @@ from workbench_test_support import (
     saved_draft,
     scan_command,
     start_delivered_scan,
+    worker_coverage_id,
     write_checkpoint,
     write_completed_contract,
 )
@@ -58,7 +59,7 @@ def test_late_head_changes_require_explicit_recovery(
     tmp_path: Path, selection: str, has_result: bool
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     reopened = write_checkpoint(result.parent / "checkpoints", pending)
     completed = write_checkpoint(result.parent / "checkpoints", closed)
@@ -78,7 +79,7 @@ def test_late_head_changes_require_explicit_recovery(
     assert any("/checkpoint-heads/" in path for path in frozen)
     assert not any(path.endswith("checkpoint-head.json") for path in frozen)
     assert not any(
-        row["id"] == "review"
+        row["id"] == worker_coverage_id(worker_id, "review")
         for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
     )
     assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
@@ -92,7 +93,9 @@ def test_late_head_changes_require_explicit_recovery(
     recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"]) is (selection == "reopened")
+    assert any(
+        row["id"] == worker_coverage_id(worker_id, "review") for row in coverage["deferred"]
+    ) is (selection == "reopened")
     published = manifest_path.read_bytes()
     scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert manifest_path.read_bytes() == published
@@ -925,7 +928,11 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         json.loads((scan_dir / "coverage.json").read_text()),
     )
     for findings, coverage in (first[0], replay):
-        assert child_work in coverage["deferred"]
+        assert {
+            **child_work,
+            "id": worker_coverage_id(worker_id, child_work["id"]),
+            "workerId": worker_id,
+        } in coverage["deferred"]
         if evidence == "deferred":
             assert (parent_work in coverage["deferred"]) is (head_time <= 100)
         else:

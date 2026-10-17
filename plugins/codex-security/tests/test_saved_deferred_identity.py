@@ -16,6 +16,7 @@ from workbench_test_support import (
     preserve_scan_results,
     saved_discovery_worker,
     saved_draft,
+    worker_coverage_id,
     write_checkpoint,
 )
 
@@ -346,7 +347,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     outcome: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     candidate = {
         "id": "caller-review",
         "reason": "Caller needs validation.",
@@ -401,8 +402,9 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     head.write_text(json.dumps({"checkpoint": checkpoints[2 if rejected_here else 1].name}))
     observed = 300 if rejected_here else 200
     os.utime(head, ns=(observed, observed))
+    rejection_worker_id = worker_id
     if outcome == "other_worker":
-        _, other_result = accepted_standard_worker(
+        rejection_worker_id, other_result = accepted_standard_worker(
             state, codex_home, scan_dir, scan_id, name="other-worker"
         )
         other_result.write_text(
@@ -414,16 +416,28 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
     for coverage in (first_coverage, recovered):
-        api_surfaces = [row for row in coverage["surfaces"] if row["id"] == "api"]
+        api_surfaces = [
+            row for row in coverage["surfaces"] if row["id"] == worker_coverage_id(worker_id, "api")
+        ]
         assert len(api_surfaces) == 1
         expected_disposition = "no_issue_found" if rejected_here else "needs_follow_up"
         assert api_surfaces[0]["disposition"] == expected_disposition
-        assert not any(row["id"] == generic["id"] for row in coverage["deferred"])
-        assert (
-            any(row["id"] == candidate["id"] for row in coverage["deferred"]) is not rejected_here
+        assert not any(
+            row["id"] == worker_coverage_id(worker_id, generic["id"])
+            for row in coverage["deferred"]
         )
+        assert (
+            any(
+                row["id"] == worker_coverage_id(worker_id, candidate["id"])
+                for row in coverage["deferred"]
+            )
+        ) is not rejected_here
         if outcome != "unresolved":
-            assert rejection in coverage["surfaces"]
+            assert {
+                **rejection,
+                "id": worker_coverage_id(rejection_worker_id, rejection["id"]),
+                "workerId": rejection_worker_id,
+            } in coverage["surfaces"]
     assert recovered["surfaces"] == first_coverage["surfaces"]
     assert recovered["deferred"] == first_coverage["deferred"]
 
@@ -443,7 +457,7 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     close_first: bool,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     combined = {
         "id": "combined-review",
         "reason": "Review remains.",
@@ -491,8 +505,10 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
         assert len(retained) == (1 if close_first and explicit_ids else 2)
         assert len({row["id"] for row in retained}) == len(retained)
         if explicit_ids:
-            assert {row["id"] for row in retained} == expected_ids
-        assert all(row["id"] != combined["id"] for row in retained)
+            assert {row["id"] for row in retained} == {
+                worker_coverage_id(worker_id, identity) for identity in expected_ids
+            }
+        assert all(row["id"] != worker_coverage_id(worker_id, combined["id"]) for row in retained)
         if payload_field:
             assert all(row[payload_field] == combined[payload_field] for row in retained)
     assert replay == first_coverage
@@ -510,7 +526,7 @@ def test_unnamed_observation_does_not_replace_saved_context(
     observation: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     broad = {
         "id": "caller-review",
         "reason": "Review the caller paths.",
@@ -548,12 +564,18 @@ def test_unnamed_observation_does_not_replace_saved_context(
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
+    expected_output = (
+        {**expected, "id": worker_coverage_id(worker_id, expected["id"]), "workerId": worker_id}
+        if layout == "worker"
+        else expected
+    )
+    expected_raw = {**raw_row, "workerId": worker_id} if layout == "worker" else raw_row
     for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
-        assert expected in pending
-        unnamed = [row for row in pending if row.get("id") != expected["id"]]
+        assert expected_output in pending
+        unnamed = [row for row in pending if row.get("id") != expected_output["id"]]
         assert len(unnamed) == 1
-        assert {key: value for key, value in unnamed[0].items() if key != "id"} == raw_row
+        assert {key: value for key, value in unnamed[0].items() if key != "id"} == expected_raw
         assert "candidateId" not in unnamed[0]
     assert replay == first_coverage
 

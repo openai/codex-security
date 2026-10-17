@@ -94,6 +94,10 @@ def saved_binding(coverage_mode="repository", *, repository="test", status="inte
     }
 
 
+def worker_coverage_id(worker_id: str, local_id: str) -> str:
+    return f"{worker_id}/{local_id}"
+
+
 def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int = 1) -> dict:
     return {
         "id": worker_id,
