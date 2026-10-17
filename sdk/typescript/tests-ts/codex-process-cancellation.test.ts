@@ -5,7 +5,7 @@ import {
 } from "node:child_process";
 import { getEventListeners } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   setImmediate as nextTurn,
@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { sendFeedback } from "../src/feedback.js";
+import { runCodexCommand } from "../src/runtime.js";
 import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -24,6 +25,128 @@ const fixture = fileURLToPath(
   new URL("fixtures/inherited-codex-pipes.mjs", import.meta.url),
 );
 const node = nodeCommand().command;
+
+for (const mode of [
+  "command-success",
+  "command-failure",
+  "command-active",
+  "command-late",
+  "archive-pending",
+  "archive-committed",
+]) {
+  test(`command settles inherited pipes: ${mode}`, async () => {
+    const root = await temporaryDirectory();
+    const release = join(root, "release");
+    const controller = new AbortController();
+    const deadline = new AbortController();
+    const bounded = <T>(operation: Promise<T>): Promise<T> =>
+      Promise.race([
+        operation,
+        delay(5000, undefined, { signal: deadline.signal }).then(() => {
+          throw new Error("Command did not settle before holder release");
+        }),
+      ]);
+    const until = async (ready: () => boolean) => {
+      while (!ready()) await delay(10, undefined, { signal: deadline.signal });
+    };
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+    };
+    let settled = false;
+    const result = runCodexCommand(
+      { command: node },
+      [fixture, mode, release],
+      {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+      },
+      undefined,
+      controller.signal,
+      mode.startsWith("archive-"),
+    ).then(
+      (value) => {
+        settled = true;
+        return { value, error: undefined };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { value: undefined, error };
+      },
+    );
+    let parentPid: number | undefined;
+    let holderPid: number | undefined;
+    let parentExited = false;
+    try {
+      await bounded(
+        Promise.race([
+          until(() => existsSync(`${release}.ready`)),
+          result.then((outcome) => {
+            throw outcome.error ?? new Error("Fixture did not start");
+          }),
+        ]),
+      );
+      ({ parentPid, holderPid } = JSON.parse(
+        await readFile(`${release}.ready`, "utf8"),
+      ) as { parentPid: number; holderPid: number });
+      if (mode === "command-active" || mode === "archive-pending") {
+        expect(alive(parentPid)).toBe(true);
+        controller.abort({ mode });
+      }
+      await bounded(until(() => !alive(parentPid!)));
+      parentExited = true;
+      if (mode === "command-success" || mode === "command-failure")
+        controller.abort({ mode });
+      if (mode === "command-late" || mode === "archive-committed") {
+        if (mode === "archive-committed") controller.abort({ mode });
+        await nextTurn();
+        expect(settled).toBe(false);
+        await writeFile(release, "released");
+      }
+      const outcome = await bounded(result);
+      if (mode === "command-active" || mode === "archive-pending") {
+        expect(outcome.error).toMatchObject({ name: "AbortError" });
+      } else {
+        expect(outcome.error).toBeUndefined();
+        expect(outcome.value).toMatchObject({
+          success: mode !== "command-failure",
+          exitCode: mode === "command-failure" ? 7 : 0,
+          stdout: mode === "archive-committed" ? "committed\n" : "",
+        });
+        if (mode === "command-late" || mode === "archive-committed") {
+          expect(outcome.value!.stderr).toContain("initial diagnostic");
+          expect(outcome.value!.stderr).toContain("late café 日本語 😀");
+        }
+      }
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    } finally {
+      await writeFile(release, "released");
+      controller.abort();
+      if (parentPid !== undefined && !parentExited && alive(parentPid))
+        process.kill(parentPid, "SIGKILL");
+      try {
+        await bounded(result);
+        if (holderPid !== undefined)
+          await bounded(until(() => existsSync(`${release}.done`)));
+      } finally {
+        if (holderPid !== undefined && !existsSync(`${release}.done`)) {
+          try {
+            process.kill(holderPid, "SIGKILL");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+          await bounded(result);
+        }
+        deadline.abort();
+      }
+    }
+  });
+}
 
 for (const surface of ["review", "feedback"] as const) {
   for (const mode of [
