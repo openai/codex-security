@@ -111,7 +111,30 @@ function jsonIdentity(value: unknown): string {
   );
 }
 
-function sarifIdentity(value: unknown): string {
+function sarifArtifactUri(
+  artifact: Record<string, unknown>,
+  runContext: Record<string, unknown>,
+): string | null {
+  const base = artifact["uriBaseId"];
+  // Native Semgrep uses %SRCROOT% without defining a base. Keep other references raw.
+  if (
+    artifact["index"] !== undefined ||
+    (base !== undefined &&
+      (base !== "%SRCROOT%" ||
+        record(runContext["originalUriBaseIds"] ?? {}, "SARIF URI bases")[
+          base
+        ] !== undefined))
+  )
+    return null;
+  return decodeURIComponent(
+    requiredText(artifact["uri"], "Semgrep artifact URI"),
+  );
+}
+
+function sarifIdentity(
+  value: unknown,
+  runContext: Record<string, unknown>,
+): string {
   const result = record(value, "Semgrep result");
   const supplied = ungatedText(
     record(result["fingerprints"] ?? {}, "Semgrep fingerprints")[
@@ -126,18 +149,21 @@ function sarifIdentity(value: unknown): string {
     record(locations[0], "Location")["physicalLocation"],
     "Physical location",
   );
+  const uri = sarifArtifactUri(
+    record(physical["artifactLocation"], "Artifact location"),
+    runContext,
+  );
+  if (uri === null)
+    throw new Error(
+      "Cannot derive a Semgrep CE identity from an indexed or unresolved base-relative artifact URI.",
+    );
   const region = record(physical["region"], "Semgrep region");
   const line = position(region["startLine"], "Start line");
   const column = position(region["startColumn"] ?? 1, "Start column");
   return identity(
     null,
     requiredText(result["ruleId"], "Semgrep ruleId"),
-    decodeURIComponent(
-      requiredText(
-        record(physical["artifactLocation"], "Artifact location")["uri"],
-        "Semgrep artifact URI",
-      ),
-    ),
+    uri,
     line,
     column,
     position(region["endLine"] ?? line, "End line"),
@@ -332,7 +358,7 @@ export function normalizeSemgrepSarif(
         physical["artifactLocation"],
         "Artifact location",
       );
-      const rawPath = requiredText(artifact["uri"], "Semgrep artifact URI");
+      const rawPath = sarifArtifactUri(artifact, context.runContext);
       const region = record(physical["region"], "Semgrep region");
       const line = position(region["startLine"], "Start line");
       const column = position(region["startColumn"] ?? 1, "Start column");
@@ -355,9 +381,9 @@ export function normalizeSemgrepSarif(
             : level === "note"
               ? "low"
               : "unknown";
-      const path = relativePath(decodeURIComponent(rawPath));
+      const path = rawPath === null ? null : relativePath(rawPath);
       return {
-        source_finding_id: sarifIdentity(result),
+        source_finding_id: sarifIdentity(result, context.runContext),
         evidence: validateExternalEvidence({
           title: ruleId,
           description:
@@ -389,7 +415,7 @@ export function normalizeSemgrepSarif(
         }),
       };
     },
-    ({ result }) => sarifIdentity(result),
+    ({ result, runContext }) => sarifIdentity(result, runContext),
   );
 }
 

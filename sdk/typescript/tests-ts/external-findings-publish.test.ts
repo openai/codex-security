@@ -3003,6 +3003,55 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
   });
 });
 
+test("Semgrep publication retains unsupported SARIF bases without repository locations", async () => {
+  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
+  const input: any = semgrepSarif();
+  const run = input.runs[0];
+  run.results[0].locations[0].physicalLocation.artifactLocation.uriBaseId =
+    "ROOT";
+  run.originalUriBaseIds = { ROOT: { uri: "file:///outside/" } };
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original.evidence.locations).toEqual([]);
+  expect(original.evidence.source_data).toMatchObject({
+    result: run.results[0],
+    runContext: { originalUriBaseIds: run.originalUriBaseIds },
+  });
+  expect(JSON.parse(f.posts[0]!).items[0].evidence.locations).toEqual([]);
+
+  run.originalUriBaseIds.ROOT.uri = "subproject/";
+  await writeFile(f.file, JSON.stringify(input));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.locations).toEqual([]);
+  expect(updated.evidence.source_data).toMatchObject({
+    runContext: { originalUriBaseIds: run.originalUriBaseIds },
+  });
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+});
+
 test("Semgrep refuses missing source identity and a conflicting Cloud destination without uploads", async () => {
   const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
   const f = await fixture(semgrepJson());

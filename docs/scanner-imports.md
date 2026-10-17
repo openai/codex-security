@@ -102,6 +102,11 @@ the upload. Semgrep requires a Cloud version that accepts the `semgrep` provider
   the rule, literal path, and range. Moving a CE finding creates a new identity.
   Keep a stable source key and review changed exports; this adapter cannot infer
   cross-export equivalence for moved CE findings.
+- SARIF supports direct artifact URIs and Semgrep's native `%SRCROOT%` marker
+  without a base definition. Indexed artifacts, other URI bases and redefined
+  source roots remain in the original evidence without repository locations.
+  CE records with those references are excluded because a reliable fallback
+  identity cannot be derived. See the [native SARIF formatter](https://github.com/semgrep/semgrep/blob/51602ad27f09ef9342a5620601de5ef8f572fbc6/src/osemgrep/reporting/Sarif_output.ml#L410).
 - Prefer JSON for original severity. Semgrep SARIF combines Critical and High
   into diagnostic `error`, which this mapper displays as High. Both representations
   retain the complete selected source evidence.

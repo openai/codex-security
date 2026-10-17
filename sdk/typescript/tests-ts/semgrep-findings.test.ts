@@ -225,6 +225,120 @@ test("SARIF matches custom GitHub Enterprise repository casing without merging p
   }
 });
 
+test.each([
+  [
+    "external base",
+    { uri: "src/example.ts", uriBaseId: "ROOT" },
+    { ROOT: { uri: "file:///outside/" } },
+  ],
+  [
+    "subdirectory base",
+    { uri: "src/example.ts", uriBaseId: "PACKAGE" },
+    { PACKAGE: { uri: "project-a/", uriBaseId: "%SRCROOT%" } },
+  ],
+  [
+    "redefined source root",
+    { uri: "src/example.ts", uriBaseId: "%SRCROOT%" },
+    { "%SRCROOT%": { uri: "project-a/", uriBaseId: "ROOT" } },
+  ],
+  [
+    "explicit source-root URI",
+    { uri: "src/example.ts", uriBaseId: "%SRCROOT%" },
+    { "%SRCROOT%": { uri: "file:///repo/subproject/" } },
+  ],
+  ["indexed URI", { uri: "src/example.ts", index: 0 }, {}],
+  ["index only", { index: 0 }, {}],
+] as const)(
+  "SARIF retains unsupported %s without inventing a path or CE identity",
+  (_label, artifact, bases) => {
+    const input: any = semgrepSarif();
+    const expectedId =
+      normalizeSemgrepSarif(input).findings[0]!.source_finding_id;
+    const run = input.runs[0];
+    run.originalUriBaseIds = structuredClone(bases);
+    run.artifacts = [{ location: { uri: "nested/actual.ts" } }];
+    run.results[0].locations[0].physicalLocation.artifactLocation =
+      structuredClone(artifact);
+    const original = structuredClone(input);
+    const output = normalizeSemgrepSarif(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings).toHaveLength(1);
+    expect(output.findings[0]!.source_finding_id).toBe(expectedId);
+    expect(output.findings[0]!.evidence.locations).toEqual([]);
+    expect(output.findings[0]!.evidence.details?.code?.end_line).toBeNull();
+    expect(output.findings[0]!.evidence.source_data).toMatchObject({
+      result: original.runs[0].results[0],
+      runContext: {
+        originalUriBaseIds: bases,
+        artifacts: original.runs[0].artifacts,
+      },
+    });
+    expect(input).toEqual(original);
+
+    delete run.results[0].fingerprints;
+    const ce = normalizeSemgrepSarif(input);
+    expect(ce.findings).toEqual([]);
+    expect(ce.excluded).toHaveLength(1);
+    expect(ce.excluded[0]!.source_finding_id).toBeNull();
+    expect(ce.excluded[0]!.reason).toContain("indexed or unresolved");
+  },
+);
+
+test("SARIF unresolved bases cannot collide with a valid CE location", () => {
+  const input: any = semgrepSarif();
+  const run = input.runs[0];
+  delete run.results[0].fingerprints;
+  const expected = normalizeSemgrepSarif(input).findings[0]!;
+  const first = structuredClone(run.results[0]);
+  const second = structuredClone(run.results[0]);
+  first.locations[0].physicalLocation.artifactLocation.uriBaseId = "A";
+  second.locations[0].physicalLocation.artifactLocation.uriBaseId = "B";
+  run.originalUriBaseIds = {
+    A: { uri: "project-a/", uriBaseId: "%SRCROOT%" },
+    B: { uri: "project-b/", uriBaseId: "%SRCROOT%" },
+  };
+  run.results.unshift(first, second);
+  for (const results of [run.results, run.results.toReversed()]) {
+    run.results = results;
+    const output = normalizeSemgrepSarif(input);
+    expect(output.findings).toHaveLength(1);
+    expect(output.findings[0]!.source_finding_id).toBe(
+      expected.source_finding_id,
+    );
+    expect(output.findings[0]!.evidence.locations).toEqual(
+      expected.evidence.locations,
+    );
+    expect(output.excluded).toHaveLength(2);
+    for (const excluded of output.excluded) {
+      expect(excluded.source_finding_id).toBeNull();
+      expect(excluded.reason).toContain("indexed or unresolved");
+    }
+  }
+});
+
+test.each([undefined, "%SRCROOT%"])(
+  "SARIF native root %s preserves CE identity across JSON and SARIF",
+  (base) => {
+    const json: any = semgrepJson();
+    const input: any = semgrepSarif();
+    delete json.results[0].extra.fingerprint;
+    delete input.runs[0].results[0].fingerprints;
+    input.runs[0].originalUriBaseIds = { OTHER: { uri: "file:///outside/" } };
+    const artifact =
+      input.runs[0].results[0].locations[0].physicalLocation.artifactLocation;
+    if (base === undefined) delete artifact.uriBaseId;
+    else artifact.uriBaseId = base;
+    const output = normalizeSemgrepSarif(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "src/example.ts", line: 3 },
+    ]);
+    expect(output.findings[0]!.source_finding_id).toBe(
+      normalizeSemgrepFindings(json).findings[0]!.source_finding_id,
+    );
+  },
+);
+
 test("gated CE fingerprint placeholders use independent location identities", () => {
   const input: any = semgrepSarif();
   delete input.runs[0].tool.driver.rules;
