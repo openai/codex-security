@@ -8,11 +8,13 @@ import {
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
-  aggregateDiscoveryCoverage,
+  aggregateSourceCoverage,
+  deepReductionToScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
 } from "./artifact-validation.js";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   scanDraftInputSchema,
   type DeepScanPublication,
@@ -361,13 +363,7 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            coverage: aggregateDiscoveryCoverage(
-              this.artifacts,
-              schedulerResult.discoveries,
-            ),
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -947,6 +943,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
           observe(reducer);
@@ -1102,6 +1099,7 @@ export class DeepScanCoordinator {
         resultPath: worker.resultManifestPath,
         result,
         completionSequence: worker.completionSequence,
+        attempt: worker.attempt,
       });
     }
     return recovered.sort(compareCompletionSequence);
@@ -1110,7 +1108,9 @@ export class DeepScanCoordinator {
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[],
   ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
-    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
+    const discoveriesById = new Map(
+      discoveries.map((worker) => [worker.id, worker]),
+    );
     const inputs = this.state.persistedDedupInputs ?? [];
     let resultPath: string | undefined;
     let latestResult: DeepReductionInput | undefined;
@@ -1141,12 +1141,14 @@ export class DeepScanCoordinator {
       }
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) => discoveryIds.has(input.discoveryWorkerId));
+        .sort((left, right) => left.inputOrder - right.inputOrder)
+        .map((input) => discoveriesById.get(input.discoveryWorkerId));
       if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
         );
       }
+      const accepted = consumed as AcceptedDiscovery[];
       const { result } = await validateReducerArtifacts(
         {
           artifacts: this.artifacts,
@@ -1157,6 +1159,27 @@ export class DeepScanCoordinator {
         },
         this.state.scanId,
       );
+      if (result.sourceCoverage === undefined) {
+        const context = {
+          root: worker.artifactDir,
+          repoRoot: this.state.targetPath,
+          scanId: this.state.scanId,
+          layout: "reducer" as const,
+          deepReducer: {
+            scanRoot: this.artifacts.scanDir,
+            claimedWorkers: accepted.map((source) => ({
+              id: source.id,
+              resultPath: source.resultPath,
+              attempt: source.attempt,
+            })),
+          },
+        };
+        const sources = await readDeepReductionSources(context);
+        result.sourceCoverage = aggregateSourceCoverage(
+          sources.discoveries,
+          latestResult ?? null,
+        );
+      }
       latestResult = result;
       resultPath = worker.resultManifestPath;
     }

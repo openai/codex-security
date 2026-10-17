@@ -12,7 +12,8 @@ type Finding = ReturnType<typeof finding>;
 const {
   deepReducerInputsInputSchema,
   deepReductionInputSchema,
-  getCodexSecurityDeepReducerInputs,
+  getCodexSecurityDeepReducerInputs: getModelInputs,
+  readDeepReductionSources: getCodexSecurityDeepReducerInputs,
   recordCodexSecurityDeepReduction,
 } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
@@ -120,6 +121,7 @@ try {
     layout: "reducer",
     deepReducer: {
       scanRoot,
+      persistSourceCoverage: true,
       claimedWorkers: [first, second],
     },
   };
@@ -164,13 +166,50 @@ try {
     /evidenceRefs must refer/,
     "live reducer submissions reject unknown evidence references instead of silently removing them",
   );
-  assert.deepEqual(inputs, {
-    discoveries: [
-      { workerId: first.id, result: withSourceRefs(first) },
-      { workerId: second.id, result: withSourceRefs(second) },
-    ],
-    previous: null,
+  assert.deepEqual(
+    {
+      ...inputs,
+      discoveries: inputs.discoveries.map(
+        ({
+          coverage,
+          ...source
+        }: import("../src/deep-scan/artifact-validation.js").DeepReductionSources["discoveries"][number]) =>
+          source,
+      ),
+    },
+    {
+      discoveries: [
+        { workerId: first.id, result: withSourceRefs(first) },
+        { workerId: second.id, result: withSourceRefs(second) },
+      ],
+      previous: null,
+    },
+  );
+  assert.equal(inputs.discoveries[0].coverage.completeness, undefined);
+  assert.equal(inputs.discoveries[1].coverage.completeness, undefined);
+  assert.deepEqual(
+    await getModelInputs(context),
+    {
+      discoveries: inputs.discoveries.map(
+        ({
+          workerId,
+          result,
+        }: import("../src/deep-scan/artifact-validation.js").DeepReductionSources["discoveries"][number]) => ({
+          workerId,
+          result,
+        }),
+      ),
+      previous: null,
+    },
+    "coverage accounting does not change reducer model inputs",
+  );
+  assert.deepEqual(inputs.discoveries[0].coverage.deferred[0].provenance, {
+    workerId: first.id,
+    candidateId: "candidate-upload",
   });
+  assert.deepEqual(inputs.discoveries[0].coverage.surfaces[0].receiptRefs, [
+    "artifacts/deep_discovery/workers/discovery-0001/output/artifacts/missing-worker-receipt.md",
+  ]);
   assert.equal(JSON.stringify(inputs).includes(root), false);
   assert.equal(JSON.stringify(inputs).includes("result.json"), false);
 
@@ -194,6 +233,13 @@ try {
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
+    sourceCoverage: {
+      ...inputs.discoveries[0].coverage,
+      reviews: [
+        ...inputs.discoveries[0].coverage.reviews,
+        ...inputs.discoveries[1].coverage.reviews,
+      ],
+    },
     findings: [
       retainedFinding(shared, [
         { id: "worker-001:0", finding: shared },
@@ -217,7 +263,7 @@ try {
   assert.deepEqual(
     await readJson(outputRoot, "checkpoints", checkpointNames[0]),
     mergedWithSources,
-    "reducer checkpoints retain the accepted findings and scope without coverage",
+    "reducer checkpoints retain accepted findings, scope and source coverage",
   );
 
   assert.deepEqual(
@@ -317,15 +363,34 @@ try {
     layout: "reducer",
     deepReducer: {
       scanRoot,
+      persistSourceCoverage: true,
       claimedWorkers: [third],
       previousReducerResultPath: path.join(outputRoot, "result.json"),
     },
   };
   const nextInputs = await getCodexSecurityDeepReducerInputs(nextContext);
-  assert.deepEqual(nextInputs, {
-    discoveries: [{ workerId: third.id, result: withSourceRefs(third) }],
-    previous: mergedWithSources,
-  });
+  const { sourceCoverage, ...previousModelInput } = mergedWithSources;
+  assert.deepEqual(
+    (await getModelInputs(nextContext)).previous,
+    previousModelInput,
+    "host coverage metadata is excluded from the previous model input too",
+  );
+  assert.deepEqual(
+    {
+      ...nextInputs,
+      discoveries: nextInputs.discoveries.map(
+        ({
+          coverage,
+          ...source
+        }: import("../src/deep-scan/artifact-validation.js").DeepReductionSources["discoveries"][number]) =>
+          source,
+      ),
+    },
+    {
+      discoveries: [{ workerId: third.id, result: withSourceRefs(third) }],
+      previous: mergedWithSources,
+    },
+  );
   await assert.rejects(
     recordCodexSecurityDeepReduction(nextContext, reduction([shared])),
     (error: NodeJS.ErrnoException) =>
@@ -337,6 +402,13 @@ try {
   );
   assert.deepEqual(await readJson(nextOutputRoot, "result.json"), {
     ...mergedWithSources,
+    sourceCoverage: {
+      ...mergedWithSources.sourceCoverage,
+      reviews: [
+        ...mergedWithSources.sourceCoverage.reviews,
+        ...nextInputs.discoveries[0].coverage.reviews,
+      ],
+    },
     findings: [
       retainedFinding(shared, [
         { id: "worker-003:0", finding: shared },
@@ -353,7 +425,32 @@ try {
   enrichedPrevious.findings[0].validation = {
     summary: "Both output routes bypass the same encoding control.",
   };
-  await writeJson(path.join(outputRoot, "result.json"), enrichedPrevious);
+  for (const legacyCoverage of [
+    rejectedCoverage,
+    {
+      completeness: "outdated",
+      surfaces: [null],
+      explicitExclusions: false,
+      deferred: 42,
+    },
+    "legacy coverage is no longer structured",
+  ]) {
+    const previousArtifact = JSON.stringify({
+      ...enrichedPrevious,
+      coverage: legacyCoverage,
+    });
+    await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
+    assert.deepEqual(
+      (await getCodexSecurityDeepReducerInputs(nextContext)).previous,
+      enrichedPrevious,
+      "previous reducer coverage is ignored even when malformed; findings and scope remain intact",
+    );
+    assert.equal(
+      await readFile(path.join(outputRoot, "result.json"), "utf8"),
+      previousArtifact,
+      "reading a previous reduction does not rewrite its legacy coverage",
+    );
+  }
   const previousArtifact = await readFile(
     path.join(outputRoot, "result.json"),
     "utf8",

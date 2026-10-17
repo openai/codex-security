@@ -1,3 +1,8 @@
+import {
+  nativeConfigOverrides,
+  assertWorkerSubagentPolicy,
+  assertConfigOverrides,
+} from "./support/worker-config.ts";
 import { fakeCodexSource } from "./support/fake-codex-source.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
@@ -141,6 +146,7 @@ try {
     await testBedrockCredentialsReachWorker("oidc");
     await testExternalProviderCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
+    await testReducerCoveragePersistenceBinding();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
@@ -2929,6 +2935,68 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
   });
 }
 
+async function testReducerCoveragePersistenceBinding() {
+  return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    await writeFile(promptPath, "fixture reducer prompt\n");
+    for (const resume of [false, true]) {
+      for (const persistSourceCoverage of [false, true]) {
+        const deepReducer = {
+          scanRoot: path.join(fixture.root, "scans"),
+          claimedWorkers: [
+            {
+              id: "worker-1",
+              resultPath: path.join(fixture.root, "worker", "result.json"),
+              attempt: 2,
+            },
+          ],
+          persistSourceCoverage,
+        };
+        await new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+          artifactContext: {
+            pluginRoot: fixture.root,
+            scanRoot: deepReducer.scanRoot,
+            repoRoot: fixture.root,
+            scanId: "fixture-scan-id",
+          },
+        }).run({
+          kind: "dedup",
+          promptPath,
+          workingDirectory,
+          subagents: 0,
+          signal: new AbortController().signal,
+          ...(resume
+            ? {
+                resumeThreadId: "fixture-existing-thread",
+                continuationPrompt: "continue the reducer\n",
+              }
+            : {}),
+          artifactContext: {
+            root: workingDirectory,
+            layout: "reducer",
+            deepReducer,
+          },
+        });
+        const invocation = await readJson(fixture.markerPath);
+        const encoded = nativeConfigOverrides(invocation.argv)
+          .map((value) => parseToml(value))
+          .map((config) => {
+            const servers = config.mcp_servers as
+              Record<string, { env?: Record<string, string> }> | undefined;
+            return servers?.cs_artifacts?.env
+              ?.CODEX_SECURITY_REDUCER_CONTEXT_JSON;
+          })
+          .findLast((value) => value !== undefined);
+        assert.ok(
+          encoded,
+          "the launched reducer receives its host-bound artifact context",
+        );
+        assert.deepEqual(JSON.parse(encoded), deepReducer);
+      }
+    }
+  });
+}
+
 async function testSdkResumesExistingThread() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "original worker prompt\n");
@@ -3802,63 +3870,9 @@ function workerPermissionProfileOverride(args: readonly string[]) {
   return overrides[0];
 }
 
-function assertWorkerSubagentPolicy(
-  args: readonly string[],
-  subagents: number,
-) {
-  assertConfigOverrides(args, {
-    "features.multi_agent_v2.enabled": false,
-    "features.multi_agent_v2.max_concurrent_threads_per_session": subagents + 1,
-    "features.multi_agent": undefined,
-    "features.code_mode.excluded_tool_namespaces": undefined,
-    ...(subagents === 0
-      ? {
-          "agents.max_threads": undefined,
-          "features.enable_fanout": false,
-          "features.code_mode.enabled": undefined,
-        }
-      : {
-          "agents.max_threads": subagents,
-          "features.enable_fanout": undefined,
-        }),
-  });
-  assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
-}
-
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
-}
-
-function nativeConfigOverrides(args: readonly string[]) {
-  return args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
-  );
-}
-
-function assertConfigOverrides(
-  args: readonly string[],
-  values: Record<string, string | number | boolean | undefined>,
-) {
-  const overrides = nativeConfigOverrides(args).map((value) =>
-    parseToml(value),
-  );
-  for (const [key, value] of Object.entries(values)) {
-    const supplied = overrides.map((config) =>
-      key
-        .split(".")
-        .reduce<unknown>(
-          (current, part) =>
-            (current as Record<string, unknown> | undefined)?.[part],
-          config,
-        ),
-    );
-    assert.deepEqual(
-      supplied.findLast((item) => item !== undefined),
-      value,
-      key,
-    );
-  }
 }
 
 async function withWorkerFixture<Result>(

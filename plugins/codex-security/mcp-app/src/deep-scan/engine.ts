@@ -69,6 +69,7 @@ export function startDeepScanEngine(options: {
           runWorkbench,
           signal,
           publication,
+          draft.coverage.resolvedDeferred,
         );
       },
       onStopped: async (stopped) => {

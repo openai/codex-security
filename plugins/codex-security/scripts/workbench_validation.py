@@ -7,6 +7,7 @@ import json
 import math
 import re
 import sqlite3
+import stat
 import sys
 import uuid
 from datetime import datetime
@@ -22,6 +23,28 @@ from workbench_scan_usage import (
 )
 
 reject_non_finite_json = finalizer._reject_non_finite_json
+
+
+def _children(scan_dir: Path, relative: str) -> list[str]:
+    cursor = scan_dir
+    for part in Path(relative).parts:
+        if part in {"..", "."}:
+            return []
+        cursor = cursor / part
+        try:
+            if not stat.S_ISDIR(cursor.lstat().st_mode):
+                return []
+        except FileNotFoundError:
+            return []
+    return sorted(child.name for child in cursor.iterdir())
+
+
+def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
+    return [
+        f"{directory}/{name}"
+        for name in _children(scan_dir, directory)
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
+    ]
 
 
 def timestamp_key(value: str) -> datetime:

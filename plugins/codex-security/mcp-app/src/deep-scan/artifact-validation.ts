@@ -1,10 +1,11 @@
+import { isRecord } from "../record.js";
+import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { dirname, relative, sep } from "node:path";
-import type { JsonObject } from "../types.js";
 import { artifactSchemaDocuments } from "../artifact-contracts.js";
 import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
   parsePersistedScanDraft,
+  matchesSavedCoverageSource,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
@@ -18,13 +19,21 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
+  /** Host projection of accepted source coverage; never supplied by the reducer. */
+  sourceCoverage?: ScanDraftInput["coverage"];
+};
+
 export const deepReductionInputSchema = projectArtifactToolSchema(
   artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
 );
 
 export interface DeepReductionSources {
-  discoveries: { workerId: string; result: DeepReductionInput }[];
+  discoveries: {
+    workerId: string;
+    coverage?: ScanDraftInput["coverage"];
+    result: DeepReductionInput;
+  }[];
   previous: DeepReductionInput | null;
 }
 
@@ -33,59 +42,53 @@ export interface ReducerArtifactValidation {
   result: DeepReductionInput;
 }
 
-/** Reduction combines findings; it does not complete the source workers' review. */
-export function aggregateDiscoveryCoverage(
-  artifacts: DeepScanArtifacts,
-  discoveries: { id: string; resultPath: string; result: ScanDraftInput }[],
-): ScanDraftInput["coverage"] {
-  const coverage: ScanDraftInput["coverage"] = {
-    surfaces: [],
-    explicitExclusions: [],
-    deferred: [],
-  };
-  for (const worker of discoveries) {
-    const source = structuredClone(worker.result.coverage);
-    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
-      .split(sep)
-      .join("/");
-    const scopedId = (id: string) => `${worker.id}/${id}`;
-    for (const field of [
-      "surfaces",
-      "explicitExclusions",
-      "deferred",
-    ] as const) {
-      for (const [index, row] of (source[field] as JsonObject[]).entries()) {
-        const retained: JsonObject = { ...row, workerId: worker.id };
-        // Independent reviews reuse local IDs. Preserve their links without
-        // allowing one worker's disposition to stand in for another's work.
-        retained.id = scopedId(
-          typeof row.id === "string" ? row.id : String(index),
-        );
-        if (Array.isArray(row.surfaceIds)) {
-          retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
-        }
-        if (Array.isArray(row.receiptRefs)) {
-          retained.receiptRefs = (row.receiptRefs as string[]).map(
-            (ref) => `${prefix}/${ref}`,
-          );
-        }
-        (coverage[field] as JsonObject[]).push(retained);
-      }
-    }
-    for (const question of source.openQuestions ?? []) {
-      (coverage.openQuestions ??= []).push({
-        ...(typeof question === "string" ? { question } : question),
-        workerId: worker.id,
-      });
-    }
-  }
-  return coverage;
+export function deepReductionToScanDraft(
+  result: DeepReductionInput,
+): ScanDraftInput {
+  const { sourceCoverage, ...draft } = structuredClone(result);
+  return { ...draft, coverage: sourceCoverage ?? unknownSourceCoverage() };
 }
 
-export function parseDeepReduction(input: unknown): DeepReductionInput {
-  const parsed = deepReductionInputSchema.parse(input);
+/** Older workflow readers reject the host field; retain their persisted shape. */
+export function deepReductionForPersistence(
+  result: DeepReductionInput,
+  persistSourceCoverage = false,
+): DeepReductionInput {
+  if (persistSourceCoverage) return result;
+  const { sourceCoverage: _coverage, ...legacy } = result;
+  return legacy;
+}
+
+/** Validate reducer findings while retaining host-owned persisted coverage. */
+export function parseDeepReduction(
+  input: unknown,
+  persisted = false,
+): DeepReductionInput {
+  const sourceCoverage = isRecord(input) ? input.sourceCoverage : undefined;
+  const submitted = isRecord(input)
+    ? Object.fromEntries(
+        Object.entries(input).filter(([key]) => key !== "sourceCoverage"),
+      )
+    : input;
+  const parsed = deepReductionInputSchema.parse(submitted);
   validateFindingSemantics(parsed.findings);
+  if (persisted && sourceCoverage !== undefined) {
+    return {
+      ...parsed,
+      sourceCoverage: parsePersistedScanDraft({
+        ...parsed,
+        coverage: sourceCoverage,
+      }).coverage,
+    };
+  }
   return parsed;
+}
+
+/** Older accepted reducers may contain coverage that was never source accounting. */
+export function parsePreviousDeepReduction(input: unknown): DeepReductionInput {
+  if (!isRecord(input)) return parseDeepReduction(input, true);
+  const { coverage: _legacyCoverage, ...previous } = input;
+  return parseDeepReduction(previous, true);
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -117,6 +120,7 @@ export async function validateReducerArtifacts(
     reducerId: string;
     previousReducerResultPath?: string;
     sources?: DeepReductionSources;
+    persistSourceCoverage?: boolean;
   },
   expectedScanId?: string,
 ): Promise<ReducerArtifactValidation> {
@@ -133,7 +137,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    parseDeepReduction,
+    (value) => parseDeepReduction(value, true),
   );
   if (result.complete === false)
     throw new Error(
@@ -147,7 +151,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      parseDeepReduction,
+      parsePreviousDeepReduction,
     );
   }
 
@@ -157,11 +161,15 @@ export async function validateReducerArtifacts(
       input.sources.discoveries,
       input.sources.previous,
     );
+    const persisted = deepReductionForPersistence(
+      result,
+      input.persistSourceCoverage,
+    );
     await saveScanDraftCheckpoint(
       { root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" },
-      result,
+      persisted,
     );
-    await writeJsonAtomic(resultPath, result);
+    await writeJsonAtomic(resultPath, persisted);
   } else {
     validateRetainedFindings(result, [], previous);
   }
@@ -189,6 +197,11 @@ export function reconcileDeepReduction(
   previous: DeepReductionInput | null,
 ): DeepReductionInput {
   const result = structuredClone(input);
+  result.sourceCoverage = aggregateSourceCoverage(discoveries, previous);
+  if (result.complete === false)
+    throw new Error(
+      "Deep reduction is only a checkpoint, not a complete result.",
+    );
   for (const source of [
     ...discoveries.map((discovery) => discovery.result),
     ...(previous ? [previous] : []),
@@ -242,6 +255,227 @@ export function reconcileDeepReduction(
     }
   }
   return result;
+}
+
+/** Keep independent reviews separate: matching labels do not resolve another pass's proof gap. */
+export function aggregateSourceCoverage(
+  discoveries: DeepReductionSources["discoveries"],
+  previous: DeepReductionInput | null,
+): ScanDraftInput["coverage"] {
+  const sources = [
+    ...(previous ? [previous.sourceCoverage ?? unknownSourceCoverage()] : []),
+    ...discoveries.map((source) => source.coverage ?? unknownSourceCoverage()),
+  ];
+  const result: ScanDraftInput["coverage"] = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
+    reviews: [],
+  };
+  for (const field of [
+    "surfaces",
+    "explicitExclusions",
+    "deferred",
+    "resolvedDeferred",
+    "openQuestions",
+    "reviews",
+  ]) {
+    const entries = sources.flatMap(
+      (source) => (source[field] as unknown[] | undefined) ?? [],
+    );
+    if (
+      entries.length ||
+      !["openQuestions", "resolvedDeferred"].includes(field)
+    )
+      result[field] = structuredClone(entries);
+  }
+  return result;
+}
+
+function unknownSourceCoverage(): ScanDraftInput["coverage"] {
+  return {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
+  };
+}
+
+export { matchesSavedCoverageSource } from "../artifact-scan-draft.js";
+
+/** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
+export function projectDiscoveryCoverage(
+  coverage: ScanDraftInput["coverage"],
+  worker: { id: string; attempt?: number },
+  artifactPrefix: string,
+  archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
+  originalCoverage:
+    ScanDraftInput["coverage"] | ScanDraftInput["coverage"][] = coverage,
+  receiptDigests?: ReadonlyMap<string, string>,
+): ScanDraftInput["coverage"] {
+  const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
+  const provenance = {
+    workerId: worker.id,
+    ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
+  };
+  const reviews = [
+    {
+      ...provenance,
+      ...(coverage.completeness === undefined
+        ? {}
+        : { completeness: coverage.completeness }),
+    },
+  ];
+  const history = [...archived].sort(
+    (left, right) => left.attempt - right.attempt,
+  );
+  // Each historical occurrence accounts for one current row in its collection.
+  const matchedHistoricalRows = new Map<
+    string,
+    Map<(typeof history)[number], Set<number>>
+  >();
+  const surfaces = coverage.surfaces;
+  const prefix = (item: Record<string, unknown>) =>
+    `${worker.id}-attempt-${(item.provenance as Record<string, unknown>).attempt ?? "unknown"}`;
+  const project = <T extends Record<string, unknown>>(
+    field: string,
+    item: T,
+  ) => {
+    const matches = (saved: unknown) =>
+      matchesSavedCoverageSource(
+        field,
+        item,
+        saved,
+        archivePrefix,
+        receiptDigests,
+      );
+    let original: (typeof history)[number] | undefined;
+    const matchedHistory = matchedHistoricalRows.get(field) ?? new Map();
+    matchedHistoricalRows.set(field, matchedHistory);
+    for (const historical of history) {
+      const rows = (historical.coverage[field] as unknown[] | undefined) ?? [];
+      const matched = matchedHistory.get(historical) ?? new Set<number>();
+      const index = rows.findIndex(
+        (saved, index) => !matched.has(index) && matches(saved),
+      );
+      if (index < 0) continue;
+      matched.add(index);
+      matchedHistory.set(historical, matched);
+      original ??= historical;
+    }
+    const currentSources = (
+      Array.isArray(originalCoverage) ? originalCoverage : [originalCoverage]
+    ).flatMap((source) => (source[field] as unknown[] | undefined) ?? []);
+    const savedSource =
+      currentSources.find(
+        (saved) =>
+          isRecord(saved) &&
+          typeof saved.id === "string" &&
+          saved.id === item.id,
+      ) ??
+      currentSources.find(matches) ??
+      ((original?.coverage[field] as unknown[] | undefined) ?? []).find(
+        matches,
+      );
+    const source = isRecord(savedSource) ? savedSource : {};
+    const origin = original
+      ? { workerId: worker.id, attempt: original.attempt }
+      : provenance;
+    if (
+      original &&
+      !reviews.some((review) => review.attempt === original.attempt)
+    )
+      reviews.push({
+        ...origin,
+        ...(original.coverage.completeness === undefined
+          ? {}
+          : { completeness: original.coverage.completeness }),
+      });
+    const result = structuredClone(item);
+    const descriptions = result.provenance;
+    const projected =
+      typeof descriptions === "object" &&
+      descriptions !== null &&
+      !Array.isArray(descriptions)
+        ? (descriptions as Record<string, unknown>)
+        : {};
+    for (const key of ["workerId", "attempt", "sourceId", "candidateId"])
+      delete projected[key];
+    return {
+      ...result,
+      provenance: {
+        ...projected,
+        ...origin,
+        // Normalized IDs help compare history; provenance describes the saved source.
+        ...(source.id === undefined ? {} : { sourceId: source.id }),
+        ...(item.candidateId === undefined
+          ? {}
+          : { candidateId: item.candidateId }),
+      },
+    };
+  };
+  const projectedSurfaces = surfaces.map((surface, index) => {
+    const item = project("surfaces", surface);
+    return {
+      ...item,
+      id: `${prefix(item)}-surface-${index + 1}`,
+      receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
+        (ref) =>
+          ref.startsWith(archivePrefix) ? ref : `${artifactPrefix}/${ref}`,
+      ),
+    };
+  });
+  const surfaceIds = new Map<unknown, string[]>();
+  for (const [index, surface] of surfaces.entries()) {
+    surfaceIds.set(surface.id, [
+      ...(surfaceIds.get(surface.id) ?? []),
+      projectedSurfaces[index]!.id,
+    ]);
+  }
+  return {
+    reviews,
+    surfaces: projectedSurfaces,
+    explicitExclusions: coverage.explicitExclusions.map((item) =>
+      project("explicitExclusions", item),
+    ),
+    deferred: coverage.deferred.map((item, index) => {
+      const projected = project("deferred", item);
+      return {
+        ...projected,
+        id: `${prefix(projected)}-deferred-${index + 1}`,
+        ...(item.candidateId === undefined
+          ? {}
+          : { candidateId: `${prefix(projected)}-candidate-${index + 1}` }),
+        ...(item.surfaceIds === undefined
+          ? {}
+          : {
+              surfaceIds: (item.surfaceIds as string[]).flatMap(
+                (id) => surfaceIds.get(id) ?? [id],
+              ),
+            }),
+      };
+    }),
+    ...(coverage.resolvedDeferred === undefined
+      ? {}
+      : {
+          resolvedDeferred: coverage.resolvedDeferred.map((item) => {
+            const projected = project("resolvedDeferred", item);
+            return {
+              ...item,
+              id: `${prefix(projected)}-resolved-${item.id}`,
+            };
+          }),
+        }),
+    ...(coverage.openQuestions === undefined
+      ? {}
+      : {
+          openQuestions: coverage.openQuestions.map((question) =>
+            project(
+              "openQuestions",
+              typeof question === "string" ? { question } : question,
+            ),
+          ),
+        }),
+  };
 }
 
 function findingSourceIds(finding: Record<string, unknown>): string[] {

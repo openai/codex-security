@@ -1,12 +1,11 @@
 import { execFile as nodeExecFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
 import {
   artifactDestination,
-  artifactSourcePath,
   paginateArtifactRows,
+  readArtifactBytes,
   type ArtifactContext,
   type ArtifactPage,
 } from "./artifact-io.js";
@@ -134,13 +133,7 @@ export async function listCodexSecurityReviewItems(
 async function readReviewItems(
   context: ArtifactContext,
 ): Promise<ReviewItem[]> {
-  const path = await artifactSourcePath(context, inventoryComponents, label);
-  const contents = await readFile(path).catch((error: unknown) => {
-    throw new Error(
-      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
-  });
+  const contents = await readArtifactBytes(context, inventoryComponents, label);
   const source =
     process.platform === "win32"
       ? decodeUtf8(contents)

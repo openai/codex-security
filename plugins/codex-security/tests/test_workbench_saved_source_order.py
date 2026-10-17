@@ -99,19 +99,19 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         result.write_bytes(result.read_bytes())
         os.utime(result, ns=(300, 300))
     directory = (output / "checkpoints").relative_to(scan_dir).as_posix()
-    children = saved._children
+    checkpoint_paths = saved._checkpoint_paths
     published = []
 
     def publish_after_listing(root, relative):
-        names = children(root, relative)
+        paths = checkpoint_paths(root, relative)
         if relative == directory and not published:
             checkpoint = write_checkpoint(output / "checkpoints", pending)
             os.utime(checkpoint, ns=(200, 200))
             select(output, checkpoint, 200)
             published.append(checkpoint)
-        return names
+        return paths
 
-    monkeypatch.setattr(saved, "_children", publish_after_listing)
+    monkeypatch.setattr(saved, "_checkpoint_paths", publish_after_listing)
     call_workbench(
         monkeypatch,
         state,

@@ -22,6 +22,7 @@ import {
 import path from "node:path";
 import {
   testDeepScanLifecycle,
+  testSuccessfulDeepCoveragePreservesWorkerReviewStatus,
   testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
 } from "./deep_scan_lifecycle_cases.ts";
 import {
@@ -1274,6 +1275,21 @@ async function testMissingDiscoveryResultResumesExistingThread(
       : {}),
   });
   const sleeps: number[] = [];
+  const execute = executor.run.bind(executor);
+  executor.run = async (request) => {
+    if (request.kind === "discovery") {
+      const note = path.join(request.workingDirectory, "saved-analysis.txt");
+      if (request.resumeThreadId) {
+        assert.equal(
+          await readFile(note, "utf8"),
+          "Synthetic saved analysis.\n",
+        );
+      } else {
+        await writeFile(note, "Synthetic saved analysis.\n");
+      }
+    }
+    return execute(request);
+  };
   const terminal = await runCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
@@ -1301,20 +1317,29 @@ async function testMissingDiscoveryResultResumesExistingThread(
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
-  await assert.rejects(
-    realpath(
-      path.join(
-        fixture.run.scanDir,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "discovery-0001",
-        "attempts",
-        "attempt-01",
-      ),
-    ),
-    { code: "ENOENT" },
-    "same-thread completion must preserve the Standard scan workspace instead of archiving it",
+  const workspace = [...executor.discoveryWorkingDirectories][0];
+  const attempt = path.join(path.dirname(workspace), "attempts", "attempt-01");
+  assert.equal(await realpath(workspace), workspace);
+  assert.equal(await realpath(attempt), attempt);
+  assert.equal(
+    await readFile(path.join(workspace, "saved-analysis.txt"), "utf8"),
+    "Synthetic saved analysis.\n",
+  );
+  assert.equal(
+    await readFile(path.join(attempt, "saved-analysis.txt"), "utf8"),
+    "Synthetic saved analysis.\n",
+  );
+  assert.equal(
+    executor.discoveryWorkingDirectories.size,
+    1,
+    "same-thread completion keeps its original Standard scan workspace",
+  );
+  await assert.rejects(readFile(path.join(attempt, "result.json")), {
+    code: "ENOENT",
+  });
+  assert.equal(
+    (await readJson(path.join(workspace, "result.json"))).coverage.completeness,
+    undefined,
   );
 }
 
@@ -3756,6 +3781,8 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 6,
   });
+  Object.assign(fixture.run, { workflowVersion: "deep-security-scan/v2" });
+  Object.assign(store.run, { workflowVersion: "deep-security-scan/v2" });
   const executor = new FakeExecutor({
     blockDiscoveryAfterCalls: 2,
   });
@@ -3856,7 +3883,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   );
   const { coverage, ...publishedReduction } = completed[0];
   assert.deepEqual(
-    publishedReduction,
+    { ...publishedReduction, sourceCoverage: coverage },
     await readJson(acceptedReducer!.resultManifestPath!),
     "the accepted aggregate still reaches publication when redundant cancellation writes fail",
   );
@@ -4249,6 +4276,7 @@ try {
   await testCompletionOrdering();
   await testSaturationPreservesFindingAlreadyBuffered();
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
+  await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
   await testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);

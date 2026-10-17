@@ -1,7 +1,13 @@
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { readArtifactBytes } from "./artifact-io.js";
+import type { JsonObject } from "./types.js";
+import { dirname, join, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
+  normalizeSavedScanCoverage,
   parsePersistedScanDraft,
+  preserveScanDraft,
+  readArchivedWorkerCheckpoints,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
@@ -13,7 +19,12 @@ import {
   writeJsonAtomic,
 } from "./deep-scan/artifacts.js";
 import {
+  deepReductionForPersistence,
+  deepReductionInputSchema,
+  parsePreviousDeepReduction,
   parseDeepReduction,
+  projectDiscoveryCoverage,
+  matchesSavedCoverageSource,
   parseStoredScanDraft,
   reconcileDeepReduction,
   type DeepReductionInput,
@@ -28,6 +39,22 @@ export { deepReductionInputSchema } from "./deep-scan/artifact-validation.js";
 export async function getCodexSecurityDeepReducerInputs(
   context: ArtifactContext,
 ): Promise<DeepReductionSources> {
+  const inputs = await readDeepReductionSources(context);
+  const { sourceCoverage: _coverage, ...previous } = inputs.previous ?? {};
+  return {
+    discoveries: inputs.discoveries.map(({ workerId, result }) => ({
+      workerId,
+      result,
+    })),
+    previous:
+      inputs.previous === null ? null : (previous as DeepReductionInput),
+  };
+}
+
+/** Capture host coverage alongside the reducer's immutable finding inputs. */
+export async function readDeepReductionSources(
+  context: ArtifactContext,
+): Promise<DeepReductionSources> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
     const discoveries = await Promise.all(
@@ -36,7 +63,7 @@ export async function getCodexSecurityDeepReducerInputs(
           worker.resultPath,
           bound.artifacts.workersRoot,
         );
-        const result = parseStoredScanDraft(
+        let result = parseStoredScanDraft(
           await readJsonObject(worker.resultPath),
           "Accepted Standard worker " + worker.id,
           bound.scanId,
@@ -48,12 +75,148 @@ export async function getCodexSecurityDeepReducerInputs(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
+        // Accepted direct-file results may follow an unreadable failed checkpoint.
+        const archived = await readArchivedWorkerCheckpoints(
+          {
+            ...context,
+            root: dirname(worker.resultPath),
+            layout: "worker",
+            scanId: result.scanId,
+          },
+          true,
+        ).catch(() => []);
+        const originalArchivedCoverage = archived.map(({ input }) =>
+          structuredClone(input.coverage),
+        );
+        const originalCoverage = structuredClone(result.coverage);
+        const artifactPrefix = relative(
+          bound.artifacts.scanDir,
+          dirname(worker.resultPath),
+        )
+          .split(sep)
+          .join("/");
+        const archivePrefix =
+          artifactPrefix.slice(0, artifactPrefix.lastIndexOf("/")) +
+          "/attempts/";
+        const receiptDigests = new Map<string, string>();
+        const readReceiptDigests = async (
+          sources: (typeof originalCoverage)[],
+        ) => {
+          const receiptRefs = new Set(
+            sources.flatMap((source) =>
+              (source.surfaces as JsonObject[]).flatMap(
+                (surface) =>
+                  (surface.receiptRefs as string[] | undefined) ?? [],
+              ),
+            ),
+          );
+          await Promise.all(
+            [...receiptRefs].map(async (ref) => {
+              try {
+                const bytes = await readArtifactBytes(
+                  {
+                    ...context,
+                    root: ref.startsWith(archivePrefix)
+                      ? bound.artifacts.scanDir
+                      : dirname(worker.resultPath),
+                  },
+                  ref
+                    .split("/")
+                    .filter(
+                      (component, index) =>
+                        component !== "." && (component !== "" || index === 0),
+                    ),
+                  "Saved discovery receipt",
+                );
+                receiptDigests.set(
+                  ref,
+                  createHash("sha256").update(bytes).digest("hex"),
+                );
+              } catch {
+                // Unreadable evidence cannot establish an earlier receipt origin.
+              }
+            }),
+          );
+        };
+        await readReceiptDigests([
+          originalCoverage,
+          ...originalArchivedCoverage,
+        ]);
+        const normalizedCurrent = structuredClone(result);
+        normalizeSavedScanCoverage([normalizedCurrent]);
+        for (const { input } of archived) {
+          const matchedCurrentSurfaces = new Set<number>();
+          for (const surface of input.coverage.surfaces as JsonObject[]) {
+            if (surface.id !== undefined) continue;
+            const currentIndex = (
+              originalCoverage.surfaces as JsonObject[]
+            ).findIndex(
+              (current, index) =>
+                !matchedCurrentSurfaces.has(index) &&
+                matchesSavedCoverageSource(
+                  "surfaces",
+                  current,
+                  surface,
+                  archivePrefix,
+                  receiptDigests,
+                ),
+            );
+            if (currentIndex !== -1) {
+              matchedCurrentSurfaces.add(currentIndex);
+              surface.id = (
+                normalizedCurrent.coverage.surfaces as JsonObject[]
+              )[currentIndex]!.id;
+            }
+          }
+        }
+        normalizeSavedScanCoverage([
+          result,
+          ...archived.map(({ input }) => input),
+        ]);
+        let currentCheckpointCoverage: (typeof originalCoverage)[] = [];
+        if (archived.length) {
+          const preserved = await preserveScanDraft(
+            {
+              ...context,
+              root: dirname(worker.resultPath),
+              layout: "worker",
+              scanId: result.scanId,
+            },
+            result,
+            false,
+            archived,
+          );
+          result = preserved.input;
+          currentCheckpointCoverage = preserved.originalCurrentCoverage;
+          await readReceiptDigests(currentCheckpointCoverage);
+        }
         for (const [index, finding] of result.findings.entries()) {
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage: _coverage, ...reduction } = result;
-        return { workerId: worker.id, result: reduction };
+        const { coverage, ...reduction } = result;
+        return {
+          workerId: worker.id,
+          coverage: projectDiscoveryCoverage(
+            coverage,
+            worker,
+            artifactPrefix,
+            archived.flatMap(({ attempt }, index) => {
+              const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
+              return number === undefined
+                ? []
+                : [
+                    {
+                      attempt: Number(number),
+                      coverage: originalArchivedCoverage[index],
+                    },
+                  ];
+            }),
+            [originalCoverage, ...currentCheckpointCoverage],
+            receiptDigests,
+          ),
+          result: reduction,
+        };
       }),
     );
     const previous = await readPreviousReduction(bound);
@@ -83,12 +246,12 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    let reduction = parseDeepReduction(input);
+    let reduction = parseDeepReduction(deepReductionInputSchema.parse(input));
     if (reduction.complete === false)
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",
       );
-    const inputs = await getCodexSecurityDeepReducerInputs(context);
+    const inputs = await readDeepReductionSources(context);
     const expectedScanId =
       bound.scanId ??
       inputs.previous?.scanId ??
@@ -104,8 +267,12 @@ export async function recordCodexSecurityDeepReduction(
       inputs.previous,
     );
 
-    await saveScanDraftCheckpoint(context, reduction);
-    await writeJsonAtomic(bound.resultPath, reduction);
+    const persisted = deepReductionForPersistence(
+      reduction,
+      bound.state.persistSourceCoverage,
+    );
+    await saveScanDraftCheckpoint(context, persisted);
+    await writeJsonAtomic(bound.resultPath, persisted);
     const documentWarning = await saveThreatModelDocument(
       context,
       reduction.threatModel,
@@ -169,7 +336,7 @@ async function readPreviousReduction(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
     bound.scanId,
-    parseDeepReduction,
+    parsePreviousDeepReduction,
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

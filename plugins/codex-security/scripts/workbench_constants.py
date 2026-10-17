@@ -18,6 +18,18 @@ FINDING_STATUSES = ("open", "closed")
 FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
 REMEDIATION_UPDATE_STATES = ("generated", "applied", "verifying", "verified", "failed")
 EXPORT_FORMATS = ("csv", "json", "sarif")
+_PUBLISHED_OUTPUTS = (
+    "findings.json",
+    "coverage.json",
+    "scan-manifest.json",
+    "report.md",
+    "threatmodel.md",
+    "report.html",
+    "exports/results.sarif",
+)
+_PUBLICATION_FOLLOW_UP_WARNING = (
+    "Saved scan evidence remains on disk; result publication needs follow-up:"
+)
 ARTIFACTS = {
     "coverage": "coverage.json",
     "findings": "findings.json",
