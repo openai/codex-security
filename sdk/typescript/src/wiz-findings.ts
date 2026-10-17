@@ -185,11 +185,14 @@ function sourceBranch(
   branch: Record<string, unknown> | undefined,
   repository: RepositoryMetadata,
   inventoryNames: readonly string[] = [],
+  legacy = false,
 ): string | null {
   const name = text(branch?.["name"]);
   if (!name) return null;
-  const qualifiers = [...inventoryNames];
-  if (repository.name) qualifiers.push(repository.name);
+  // Display names can also be literal branch prefixes. Keep their old mapping
+  // only when reconstructing an already approved publication checkpoint.
+  const qualifiers = legacy ? [...inventoryNames] : [];
+  if (legacy && repository.name) qualifiers.push(repository.name);
 
   // Include the URL qualifier before selecting the longest repository prefix.
   // Keep URL normalization and the branch suffix's original case and slashes.
@@ -234,6 +237,7 @@ function repositoryFinding(
   kind: RepositoryFindingKind,
   record: Record<string, unknown>,
   repositories: FindingInput["repositories"],
+  legacy = false,
 ): VendorFinding {
   const id = sourceFindingId(record["id"]);
   const resource = object(record["resource"]);
@@ -323,6 +327,7 @@ function repositoryFinding(
         text(suppliedRepository?.["name"])
           ? []
           : repositories.get(repository.id ?? "")?.names,
+        legacy,
       ),
       code_revision: null,
       source_scan_id: null,
@@ -489,12 +494,11 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
   const input = await readFindingInput(path);
   const normalized = new WeakSet<VendorFinding>();
   const current = normalizeFindings(input, normalized);
-  const legacy = input.legacyRepositories
-    ? normalizeFindings(
-        { ...input, repositories: input.legacyRepositories },
-        normalized,
-      )
-    : current;
+  const legacy = normalizeFindings(
+    { ...input, repositories: input.legacyRepositories ?? input.repositories },
+    normalized,
+    true,
+  );
   const identity = (parsed: VendorFindings) =>
     parsed.findings.map((finding) => {
       if (normalized.has(finding)) return finding;
@@ -556,6 +560,7 @@ async function readFindingInput(path: string): Promise<FindingInput> {
 function normalizeFindings(
   input: FindingInput,
   normalized?: WeakSet<VendorFinding>,
+  legacy = false,
 ): VendorFindings {
   const result: VendorFindings = {
     read: input.records.length,
@@ -587,7 +592,12 @@ function normalizeFindings(
           "Cloud configuration findings require a resource-scoped import and cannot be published to a repository.",
         );
       } else if (item.kind && item.kind !== "sca") {
-        finding = repositoryFinding(item.kind, record, input.repositories);
+        finding = repositoryFinding(
+          item.kind,
+          record,
+          input.repositories,
+          legacy,
+        );
       } else {
         if (
           !item.kind &&
