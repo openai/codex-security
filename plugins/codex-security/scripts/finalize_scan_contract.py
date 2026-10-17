@@ -845,16 +845,20 @@ def write_scan_local_bytes(
         os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = None
     finally:
-        if temp_name is not None and parent_fd is not None:
+        try:
+            if temp_name is not None and parent_fd is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    # The temporary file is already gone, so cleanup is complete.
+                    pass
+        finally:
             try:
-                os.unlink(temp_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                # The temporary file is already gone, so cleanup is complete.
-                pass
-        if parent_fd is not None:
-            os.close(parent_fd)
-        if root_fd is not None:
-            os.close(root_fd)
+                if parent_fd is not None:
+                    os.close(parent_fd)
+            finally:
+                if root_fd is not None:
+                    os.close(root_fd)
 
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
