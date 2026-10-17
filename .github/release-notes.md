@@ -6,6 +6,7 @@
 
 - support host-provided standalone reviews ([#1682](https://github.com/openai/codex-security/pull/1682))
 - retire advisory capability preflight ([#1609](https://github.com/openai/codex-security/pull/1609))
+- support scan CLI inference providers ([#1677](https://github.com/openai/codex-security/pull/1677))
 
 <!-- release-section: highlights:end -->
 
