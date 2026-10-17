@@ -1,0 +1,70 @@
+{
+  "results": [
+    {
+      "source": {
+        "path": "package-lock.json",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "name": "@sca-fixtures/depth-parser",
+            "version": "1.4.0",
+            "ecosystem": "npm"
+          },
+          "vulnerabilities": [
+            {
+              "id": "SCA-FIXTURE-001",
+              "aliases": [
+                "SCA-ALIAS-001"
+              ],
+              "modified": "2026-01-01T00:00:00Z",
+              "published": "2026-01-01T00:00:00Z",
+              "summary": "Fictional depth-parser advisory",
+              "details": "A null maxDepth leaves nesting unbounded in decode. A positive maxDepth bounds nesting and is the documented application workaround. Resource exhaustion is possible when arbitrary request bodies reach decode with no bound.",
+              "affected": [
+                {
+                  "package": {
+                    "ecosystem": "npm",
+                    "name": "@sca-fixtures/depth-parser"
+                  },
+                  "ranges": [
+                    {
+                      "type": "SEMVER",
+                      "events": [
+                        {
+                          "introduced": "0"
+                        },
+                        {
+                          "fixed": "1.4.1"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "references": [
+                {
+                  "type": "ADVISORY",
+                  "url": "https://example.invalid/advisories/SCA-FIXTURE-001"
+                }
+              ]
+            }
+          ],
+          "groups": [
+            {
+              "ids": [
+                "SCA-FIXTURE-001",
+                "SCA-ALIAS-001"
+              ],
+              "aliases": [
+                "SCA-FIXTURE-001",
+                "SCA-ALIAS-001"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

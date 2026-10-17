@@ -1,0 +1,57 @@
+{
+  "input_id": "sca-011-match",
+  "source_type": "advisory",
+  "component": {
+    "source": "package-lock.json",
+    "ecosystem": "npm",
+    "name": "@sca-fixtures/pattern-filter",
+    "version": "1.4.0"
+  },
+  "advisory_ids": [
+    "SCA-FIXTURE-004",
+    "SCA-ALIAS-004"
+  ],
+  "advisories": [
+    {
+      "id": "SCA-FIXTURE-004",
+      "aliases": [
+        "SCA-ALIAS-004"
+      ],
+      "modified": "2026-01-01T00:00:00Z",
+      "published": "2026-01-01T00:00:00Z",
+      "summary": "Fictional pattern-filter advisory",
+      "details": "filter can consume unbounded work for user-supplied patterns when bounded is false. bounded true selects the documented bounded-work implementation. This dependency is used by a build-preview service even though it is declared in devDependencies.",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "npm",
+            "name": "@sca-fixtures/pattern-filter"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0"
+                },
+                {
+                  "fixed": "1.4.1"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "type": "ADVISORY",
+          "url": "https://example.invalid/advisories/SCA-FIXTURE-004"
+        }
+      ]
+    }
+  ],
+  "preconditions": [
+    "bounded is false"
+  ],
+  "scanner_evidence": "osv.json"
+}

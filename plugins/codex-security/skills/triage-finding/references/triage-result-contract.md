@@ -112,3 +112,5 @@ prefer `needs_review` for unclear boundary cases.
 array, and set `rationale` to a short explanation such as `not actionable`.
 
 Use empty arrays for unavailable optional evidence lists. Use `null` for `fix_finding_handoff` unless the verdict is `confirmed`.
+
+The machine-readable runtime contract is `../../../schemas/triage-result.schema.json`. The SCA SDK and evaluation harness share this schema.
