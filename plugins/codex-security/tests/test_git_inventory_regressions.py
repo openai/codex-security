@@ -103,8 +103,10 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
         "diff_target_kind": "commit",
     }
     assert (
-        load_script("workbench_source_excerpt").scanned_source_text(scan, nested, "app.py")
-        == "package version\n"
+        load_script("workbench_source_excerpt").finding_source_excerpt(
+            scan, nested, [{"path": "app.py", "startLine": 1}], ["."]
+        )
+        == "1  package version"
     )
 
 
@@ -120,7 +122,9 @@ def test_working_tree_excerpt_declines_uncommitted_line_content(tmp_path: Path) 
         "diff_content_digest": load_script("workbench_target").worktree_content_digest(target),
     }
     assert (
-        load_script("workbench_source_excerpt").scanned_source_text(scan, target, "README.md")
+        load_script("workbench_source_excerpt").finding_source_excerpt(
+            scan, target, [{"path": "README.md", "startLine": 1}], ["."]
+        )
         is None
     )
 
