@@ -209,7 +209,10 @@ for (const completed of [true, false]) {
       );
       writeFileSync(
         join(directory, "invoice-desk-scan/coverage.json"),
-        JSON.stringify({ completeness: "partial" }),
+        JSON.stringify({
+          includePaths: ["app/"],
+          excludePaths: ["app/generated/"],
+        }),
       );
     }
     const result = runStep(
@@ -223,6 +226,7 @@ for (const completed of [true, false]) {
       readFileSync(join(directory, "invoice-desk-metrics.json"), "utf8"),
     );
     expect(saved).toMatchObject({
+      schemaVersion: 2,
       sourceSha,
       workflowSha: "b".repeat(40),
       pullRequest: 7,
@@ -233,14 +237,24 @@ for (const completed of [true, false]) {
       packageCacheRestoredForScan: true,
       findings: completed ? 2 : null,
       findingsBySeverity: completed ? { high: 1, low: 1 } : {},
-      coverage: completed ? "partial" : null,
+      scope: {
+        includePaths: completed ? ["app/"] : [],
+        excludePaths: completed ? ["app/generated/"] : [],
+      },
       tokenUsage: completed ? { input_tokens: 23, output_tokens: 5 } : null,
       estimatedUsdRange: completed ? { min: 0.01, max: 0.02 } : null,
       seedRecall: null,
     });
+    expect(saved).not.toHaveProperty("coverage");
     const summary = readFileSync(join(directory, "summary.md"), "utf8");
     expect(summary).toContain(sourceSha);
-    if (!completed) expect(summary).toContain("did not complete");
+    expect(summary).not.toContain("Coverage:");
+    if (completed) {
+      expect(summary).toContain("Scan completed.");
+      expect(summary).toContain("Scope:");
+      expect(summary).toContain('"includePaths": [');
+      expect(summary).toContain('"app/"');
+    } else expect(summary).toContain("did not complete");
     const upload = steps.find(
       (step) => step.name === "Save reports and metrics",
     )!;

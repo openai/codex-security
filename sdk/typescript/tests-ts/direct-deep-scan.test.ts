@@ -1,6 +1,14 @@
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test } from "node:test";
+import { setTimeout } from "node:timers/promises";
 import { runDeepScan } from "../src/deep-scan.js";
 import { ScanCostTracker } from "../src/cost.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -49,6 +57,7 @@ const lines = createInterface({input: process.stdin});
 const request = JSON.parse((await lines[Symbol.asyncIterator]().next()).value);
 writeFileSync(process.env.SYNTHETIC_RECEIPT, JSON.stringify({
   request, argv: process.argv.slice(2), key: process.env.CODEX_API_KEY,
+  execPath: process.execPath, bun: process.versions.bun,
   awsProfile: process.env.AWS_PROFILE, snapshot: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
 }));
 if (process.env.SYNTHETIC_WAIT === '1') {
@@ -73,7 +82,7 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       const receipt = join(root, `${name}.json`);
       await mkdir(scanDir);
       const environment = {
-        PATH: process.env["PATH"]!,
+        PATH: process.versions["bun"] ? process.env["PATH"]! : "",
         CODEX_HOME: join(root, "codex-home"),
         SYNTHETIC_RECEIPT: receipt,
         SYNTHETIC_THREAD_ID: `thread-${name}`,
@@ -108,33 +117,39 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       }))
         collected.push(event);
       const saved = JSON.parse(await readFile(receipt, "utf8"));
-      expect(saved).toMatchObject({
+      assert.partialDeepStrictEqual(saved, {
         key: `synthetic-key-${name}`,
         awsProfile: `profile-${name}`,
         snapshot: environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-        argv: ["--deep-scan-engine"],
         request: {
           scanId: `scan-${name}`,
           threadId: `thread-${name}`,
-          permissionProfile: {
-            commandArgs: ["--config", `model_provider="provider_${name}"`],
-            configOverrides: [
-              'model="synthetic-model"',
-              'permissions.scan.filesystem={":root"="read"}',
-              "features.plugins=false",
-            ],
-          },
         },
       });
-      expect(environment).toEqual(before);
+      assert.deepEqual(saved.argv, ["--deep-scan-engine"]);
+      assert.deepEqual(saved.request.permissionProfile, {
+        commandArgs: ["--config", `model_provider="provider_${name}"`],
+        configOverrides: [
+          'model="synthetic-model"',
+          'permissions.scan.filesystem={":root"="read"}',
+          "features.plugins=false",
+        ],
+      });
+      assert.equal(saved.bun, undefined);
+      if (!process.versions["bun"])
+        assert.equal(
+          await realpath(saved.execPath),
+          await realpath(process.execPath),
+        );
+      assert.deepEqual(environment, before);
       return collected;
     }),
   );
   for (const run of events)
-    expect(run.map((event) => event.type)).toEqual([
-      "thread.started",
-      "turn.completed",
-    ]);
+    assert.deepEqual(
+      run.map((event) => event.type),
+      ["thread.started", "turn.completed"],
+    );
 });
 
 test("preserves complete worker usage and cost after direct engine completion", async () => {
@@ -198,7 +213,7 @@ test("preserves complete worker usage and cost after direct engine completion", 
     signal: new AbortController().signal,
     codexOptions: {
       env: {
-        PATH: process.env["PATH"]!,
+        PATH: process.versions["bun"] ? process.env["PATH"]! : "",
         CODEX_HOME: codexHome,
         CODEX_SECURITY_SCAN_DIR: scanDir,
         SYNTHETIC_RECEIPT: join(root, "engine.json"),
@@ -206,7 +221,7 @@ test("preserves complete worker usage and cost after direct engine completion", 
       },
     },
   });
-  expect((await events.next()).value).toMatchObject({
+  assert.partialDeepStrictEqual((await events.next()).value, {
     type: "thread.started",
     thread_id: "engine-session",
   });
@@ -218,9 +233,9 @@ test("preserves complete worker usage and cost after direct engine completion", 
   tracker.start("engine-session");
   const running = await tracker.refresh();
   const completed = (await events.next()).value;
-  expect(completed?.type).toBe("turn.completed");
+  assert.equal(completed?.type, "turn.completed");
   const final = await tracker.stop(completed?.["usage"]);
-  expect(running.usage).toEqual({
+  assert.deepEqual(running.usage, {
     input_tokens: 1_500,
     cached_input_tokens: 250,
     cache_write_input_tokens: 140,
@@ -228,10 +243,10 @@ test("preserves complete worker usage and cost after direct engine completion", 
     reasoning_output_tokens: 0,
     total_tokens: 1_660,
   });
-  expect(running.cost).not.toBeNull();
-  expect(final).toEqual(running);
-  expect(final.cost?.cacheWriteInputTokensReported).toBeUndefined();
-  expect((await events.next()).done).toBe(true);
+  assert.notEqual(running.cost, null);
+  assert.deepEqual(final, running);
+  assert.equal(final.cost?.cacheWriteInputTokensReported, undefined);
+  assert.equal((await events.next()).done, true);
 });
 
 test("waits for the direct engine to stop when the scan is canceled", async () => {
@@ -249,7 +264,7 @@ test("waits for the direct engine to stop when the scan is canceled", async () =
     codexOptions: {
       codexPathOverride: "/synthetic/codex",
       env: {
-        PATH: process.env["PATH"]!,
+        PATH: process.versions["bun"] ? process.env["PATH"]! : "",
         CODEX_HOME: join(root, "codex-home"),
         SYNTHETIC_RECEIPT: receipt,
         SYNTHETIC_THREAD_ID: "cancel-session",
@@ -257,7 +272,9 @@ test("waits for the direct engine to stop when the scan is canceled", async () =
       },
     },
   });
-  expect((await events.next()).value).toMatchObject({ type: "thread.started" });
+  assert.partialDeepStrictEqual((await events.next()).value, {
+    type: "thread.started",
+  });
   const running = events.next();
   const outcome = running.then(
     () => undefined,
@@ -265,10 +282,10 @@ test("waits for the direct engine to stop when the scan is canceled", async () =
   );
   try {
     while (!(await readFile(receipt).catch(() => undefined)))
-      await Bun.sleep(10);
+      await setTimeout(10);
     controller.abort();
-    expect(await outcome).toBeInstanceOf(Error);
-    expect(await readFile(receipt + ".stopped", "utf8")).toBe("stopped");
+    assert.ok((await outcome) instanceof Error);
+    assert.equal(await readFile(receipt + ".stopped", "utf8"), "stopped");
   } finally {
     controller.abort();
     await outcome;

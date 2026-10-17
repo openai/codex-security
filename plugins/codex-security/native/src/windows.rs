@@ -14,7 +14,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, LocalFree, SetLastError, ERROR_INVALID_HANDLE, HANDLE, INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
+        ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
@@ -121,9 +122,9 @@ pub struct WindowsProcessResult {
     pub status: i32,
 }
 
-fn windows_command_line(executable: &OsStr, arguments: &[OsString]) -> Vec<u16> {
+fn windows_command_line(argv0: &OsStr, arguments: &[OsString]) -> Vec<u16> {
     let mut line = vec![b'"' as u16];
-    line.extend(executable.encode_wide());
+    line.extend(argv0.encode_wide());
     line.push(b'"' as u16);
     for argument in arguments {
         line.push(b' ' as u16);
@@ -172,7 +173,8 @@ fn windows_application_path(executable: &OsStr) -> io::Result<Vec<u16>> {
         bytes.starts_with(br"\\?\") || bytes.starts_with(br"\\.\") || bytes.starts_with(br"\??\")
     };
     let terminated = |path: &OsStr| path.encode_wide().chain([0]).collect::<Vec<_>>();
-    if namespaced(executable) {
+    // DOS-device paths still need Win32 normalization; only verbatim paths skip it.
+    if namespaced(executable) && !executable.as_encoded_bytes().starts_with(br"\\.\") {
         return Ok(terminated(executable));
     }
     // Resolve lexically, without canonicalizing the selected file or changing argv.
@@ -182,7 +184,7 @@ fn windows_application_path(executable: &OsStr) -> io::Result<Vec<u16>> {
     }
     let units = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
     if units.len() < MAX_PATH as usize {
-        return Ok(terminated(executable));
+        return Ok(terminated(absolute.as_os_str()));
     }
     // CreateProcessW needs a namespace for an ordinary long application path.
     let (prefix, tail) = if units.starts_with(&[b'\\' as u16; 2]) {
@@ -197,7 +199,100 @@ fn windows_application_path(executable: &OsStr) -> io::Result<Vec<u16>> {
         .collect())
 }
 
-fn run_exact_com_process(executable: &OsStr, arguments: &[OsString]) -> io::Result<i32> {
+fn windows_search_paths(paths: &OsStr) -> Vec<OsString> {
+    let units = paths.encode_wide().collect::<Vec<_>>();
+    let mut remaining = units.as_slice();
+    let mut directories = Vec::new();
+    while !remaining.is_empty() {
+        // Like Node, a leading quote protects separators until its closing quote.
+        let quoted = matches!(remaining[0], 34 | 39);
+        let start = if quoted {
+            remaining[1..]
+                .iter()
+                .position(|&unit| unit == remaining[0])
+                .map_or(remaining.len(), |index| index + 1)
+        } else {
+            0
+        };
+        let end = remaining[start..]
+            .iter()
+            .position(|&unit| unit == b';' as u16)
+            .map_or(remaining.len(), |index| start + index);
+        let mut directory = &remaining[..end];
+        remaining = remaining.get(end + 1..).unwrap_or_default();
+        if directory.is_empty() {
+            continue;
+        }
+        if quoted {
+            directory = &directory[1..];
+        }
+        if matches!(directory.last(), Some(34 | 39)) {
+            directory = &directory[..directory.len() - 1];
+        }
+        directories.push(OsString::from_wide(directory));
+    }
+    directories
+}
+
+fn resolve_windows_executable(executable: &OsStr) -> io::Result<OsString> {
+    use std::path::Path;
+    use windows_sys::Win32::System::Environment::NeedCurrentDirectoryForExePathW;
+
+    let missing = || io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND as i32);
+    if executable.is_empty() || executable == "." {
+        return Err(missing());
+    }
+    let filename = Path::new(executable).file_name();
+    let has_directory = filename != Some(executable);
+    let bytes = filename.unwrap_or(executable).as_encoded_bytes();
+    let has_extension = bytes
+        .iter()
+        .position(|&byte| byte == b'.')
+        .is_some_and(|index| index + 1 < bytes.len());
+    let mut candidates = Vec::new();
+    if has_extension {
+        candidates.push(executable.to_os_string());
+    }
+    for extension in ["com", "exe"] {
+        let mut candidate = executable.to_os_string();
+        if bytes.last() != Some(&b'.') {
+            candidate.push(".");
+        }
+        candidate.push(extension);
+        candidates.push(candidate);
+    }
+    let cwd = std::env::current_dir()?;
+    let find = |directory: &Path| {
+        candidates
+            .iter()
+            .map(|candidate| directory.join(candidate))
+            .find_map(|path| {
+                let path = windows_application_path(path.as_os_str()).ok()?;
+                // Select, classify and launch the same path without following file symlinks.
+                let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+                (attributes != INVALID_FILE_ATTRIBUTES
+                    && attributes & FILE_ATTRIBUTE_DIRECTORY == 0)
+                    .then(|| OsString::from_wide(&path[..path.len() - 1]))
+            })
+    };
+    if has_directory || unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0 {
+        if let Some(path) = find(&cwd) {
+            return Ok(path);
+        }
+    }
+    if !has_directory {
+        if let Some(paths) = std::env::var_os("PATH") {
+            for directory in windows_search_paths(&paths) {
+                if let Some(path) = find(&cwd.join(directory)) {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    Err(missing())
+}
+
+fn run_exact_process(executable: &OsStr, argv0: &OsStr, arguments: &[OsString]) -> io::Result<i32> {
     use windows_sys::Win32::{
         Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, WAIT_OBJECT_0},
         System::Threading::{
@@ -248,7 +343,7 @@ fn run_exact_com_process(executable: &OsStr, arguments: &[OsString]) -> io::Resu
         .as_ref()
         .map_or(null_mut(), AsRawHandle::as_raw_handle);
     let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    let mut command_line = windows_command_line(executable, arguments);
+    let mut command_line = windows_command_line(argv0, arguments);
     if unsafe {
         CreateProcessW(
             application.as_ptr(),
@@ -279,6 +374,17 @@ fn run_exact_com_process(executable: &OsStr, arguments: &[OsString]) -> io::Resu
     Ok(exit_code as i32)
 }
 
+fn windows_batch_file(executable: &OsStr) -> bool {
+    let bytes = executable.as_encoded_bytes();
+    // Node recognizes batch extensions after trailing dots and ASCII whitespace.
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(byte, b'.' | b' ' | b'\t' | b'\n' | b'\r' | 11 | 12))
+        .map_or(0, |index| index + 1);
+    let extension = &bytes[end.saturating_sub(4)..end];
+    extension.eq_ignore_ascii_case(b".cmd") || extension.eq_ignore_ascii_case(b".bat")
+}
+
 /// Run only inside the Node subprocess shim: blocking here keeps pipe ownership in that process.
 #[napi]
 pub fn run_windows_process(
@@ -287,8 +393,6 @@ pub fn run_windows_process(
     cwd: Option<Buffer>,
     environment: Option<Vec<WindowsEnvironmentValue>>,
 ) -> napi::Result<WindowsProcessResult> {
-    use std::process::{Command, Stdio};
-
     let executable = os_string(executable)?;
     let arguments = arguments
         .into_iter()
@@ -301,22 +405,19 @@ pub fn run_windows_process(
         .map(|entry| Ok((os_string(entry.name)?, os_string(entry.value)?)))
         .collect::<napi::Result<Vec<_>>>()?;
     fn run(
-        mut executable: OsString,
+        executable: OsString,
         arguments: Vec<OsString>,
         cwd: Option<OsString>,
         environment: Vec<(OsString, OsString)>,
     ) -> io::Result<i32> {
-        use std::path::Path;
-        use windows_sys::Win32::System::Environment::{
-            NeedCurrentDirectoryForExePathW, SetEnvironmentVariableW,
-        };
+        use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
             SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
         // Restore target settings inside the one-command shim after Node startup.
-        // Lookup must use the exact environment, including Rust's parent-PATH fallback.
+        // Lookup and the target must use the same exact environment.
         for (name, value) in environment {
             let name = name.encode_wide().chain([0]).collect::<Vec<_>>();
             let value = value.encode_wide().chain([0]).collect::<Vec<_>>();
@@ -329,33 +430,10 @@ pub fn run_windows_process(
         if let Some(directory) = cwd {
             std::env::set_current_dir(directory)?;
         }
-        // Rust searches PATH but omits Node's current-directory lookup for bare names.
-        if Path::new(&executable).file_name() == Some(executable.as_os_str())
-            && unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0
-        {
-            let bytes = executable.as_encoded_bytes();
-            let has_extension = bytes
-                .iter()
-                .position(|&byte| byte == b'.')
-                .is_some_and(|index| index + 1 < bytes.len());
-            let mut candidates = Vec::new();
-            if has_extension {
-                candidates.push(executable.clone());
-            }
-            for extension in ["com", "exe"] {
-                let mut candidate = executable.clone();
-                if bytes.last() != Some(&b'.') {
-                    candidate.push(".");
-                }
-                candidate.push(extension);
-                candidates.push(candidate);
-            }
-            if let Some(candidate) = candidates
-                .into_iter()
-                .find(|path| Path::new(path).is_file())
-            {
-                executable = std::env::current_dir()?.join(candidate).into_os_string();
-            }
+        let application = resolve_windows_executable(&executable)?;
+        // CreateProcessW can dispatch batch files through a shell without CRT escaping.
+        if windows_batch_file(&application) {
+            return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
         }
         let raw_job = unsafe { CreateJobObjectW(null(), null()) };
         if raw_job.is_null() {
@@ -382,27 +460,8 @@ pub fn run_windows_process(
         // process exit, so descendants inherit membership before they can run.
         // Closing the handle on return would terminate the shim before reporting status.
         std::mem::forget(job);
-        // Rust otherwise prefers a sibling .com.exe over an explicitly selected .com.
-        let path = Path::new(&executable);
-        let bytes = executable.as_encoded_bytes();
-        if path.file_name() != Some(executable.as_os_str())
-            && bytes[bytes.len().saturating_sub(4)..].eq_ignore_ascii_case(b".com")
-        {
-            return run_exact_com_process(&executable, &arguments);
-        }
-        let mut command = Command::new(executable);
-        // Explicit PATH is searched before the shim's executable and system directories.
-        if let Some(path) = std::env::var_os("PATH") {
-            command.env("PATH", path);
-        }
-        command.args(arguments);
-        Ok(command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()?
-            .code()
-            .unwrap_or(1))
+        // Launch the selected image without Rust performing another extension search.
+        run_exact_process(&application, &executable, &arguments)
     }
     match run(executable, arguments, cwd, environment) {
         Ok(status) => Ok(WindowsProcessResult {

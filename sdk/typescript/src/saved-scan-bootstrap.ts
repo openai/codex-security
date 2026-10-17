@@ -1,3 +1,4 @@
+import { isRecord } from "./record.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
@@ -137,12 +138,7 @@ export async function savedScanWorkbench(
     );
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
       const workflow = result["workflow"];
-      if (
-        typeof workflow !== "object" ||
-        workflow === null ||
-        Array.isArray(workflow) ||
-        workflow["scanId"] !== targets[0]!.id
-      )
+      if (!isRecord(workflow) || workflow["scanId"] !== targets[0]!.id)
         throw new CodexSecurityError(
           "Saved workflow changed during lookup. Retry the command.",
         );
@@ -150,9 +146,7 @@ export async function savedScanWorkbench(
     if (target) {
       const scan = result["scan"];
       if (
-        typeof scan !== "object" ||
-        scan === null ||
-        Array.isArray(scan) ||
+        !isRecord(scan) ||
         scan["scanId"] !== target.id ||
         typeof scan["targetPath"] !== "string" ||
         resolve(scan["targetPath"]) !== resolve(target.target_path)

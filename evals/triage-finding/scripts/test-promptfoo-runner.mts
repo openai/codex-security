@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { stageSkillRuntime } from "./run-promptfoo.mts";
 
 test("runtime contains checkout skill and fixtures without calibration labels", () => {
@@ -28,6 +29,62 @@ test("runtime contains checkout skill and fixtures without calibration labels", 
       );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initializes native providers only in the Promptfoo child", async () => {
+  const driver = `
+    const cp = require('node:child_process');
+    const spawn = cp.spawn;
+    const calls = [];
+    cp.spawn = (command, args, options) => {
+      calls.push({ command, args, sameNodeOptions: options.env.NODE_OPTIONS === process.env.NODE_OPTIONS });
+      return spawn(command, ['--eval', ''], options);
+    };
+    import(${JSON.stringify(new URL("./run-promptfoo.mts", import.meta.url).href)}).then(({ runPromptfoo }) => runPromptfoo(['view', '--no'])).then(code => {
+      console.log(JSON.stringify({ code, calls }));
+    });
+  `;
+  const child = spawn(
+    process.execPath,
+    ["--experimental-strip-types", "--eval", driver],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  assert.equal(code, 0, stderr);
+  const result = JSON.parse(stdout) as {
+    code: number;
+    calls: { command: string; args: string[]; sameNodeOptions: boolean }[];
+  };
+  assert.equal(result.code, 0);
+  assert.equal(result.calls.length, 2);
+  const [helper, promptfoo] = result.calls;
+  assert.ok(helper!.args[0]!.endsWith("build_mcp_app.mjs"));
+  assert.equal(helper!.args.includes("--import"), false);
+  assert.equal(promptfoo!.args[0], "--import");
+  const initializer = promptfoo!.args[1]!;
+  assert.equal(
+    initializer.startsWith("file:")
+      ? initializer
+      : pathToFileURL(initializer).href,
+    new URL("./initialize-provider.mts", import.meta.url).href,
+  );
+  assert.ok(promptfoo!.args[2]!.endsWith("entrypoint.js"));
+  assert.deepEqual(promptfoo!.args.slice(3), ["view", "--no"]);
+  for (const call of result.calls) {
+    assert.equal(call.command, process.execPath);
+    assert.equal(call.sameNodeOptions, true);
   }
 });
 

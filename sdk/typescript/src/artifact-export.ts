@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { spawn } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -309,16 +310,14 @@ export async function resolveSavedArtifactDirectory(
 ): Promise<string> {
   // Reuse the workbench's recorded digest and scan binding checks without
   // requiring a writable saved-scan directory for stdout or external exports.
-  const context = await workbench([
-    "export-findings",
-    "--scan-id",
-    scanId,
-    "--artifact",
-    artifact,
-    "--format",
-    format,
-    "--validate-only",
-  ]);
+  const context = await workbench(
+    workbenchArgs("export-findings", {
+      scanId,
+      artifact,
+      format,
+      validateOnly: true,
+    }),
+  );
   const scan = context["scan"] as JsonObject | undefined;
   if (typeof scan?.["scanDir"] !== "string")
     throw new CodexSecurityError(

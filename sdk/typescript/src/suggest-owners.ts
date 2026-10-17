@@ -17,6 +17,7 @@ import {
   type ReadOnlyCodexOptions,
 } from "./scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
+import type { CodeownerIdentity } from "./codeowners.js";
 
 const text = z.string().refine((value) => value.trim().length > 0);
 const locationSchema = z
@@ -46,19 +47,20 @@ export type SuggestOwnersOptions = Omit<
   "auth" | "workingDirectory"
 >;
 export type { OwnerIdentity } from "./owner-evidence.js";
+export type { CodeownerIdentity } from "./codeowners.js";
 
 export interface OwnerSuggestion {
   findingId: string;
   occurrenceId: string | null;
   status: "identified" | "abstained" | "error";
-  owner: OwnerIdentity | null;
+  owner: OwnerIdentity | CodeownerIdentity | null;
   reason: string;
   evidence: Omit<OwnerEvidence, "identityIndex" | "content">[];
   limitations: string[];
 }
 
 export interface OwnerSuggestions extends ScanModelConfiguration {
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: string;
   results: OwnerSuggestion[];
 }
@@ -98,7 +100,7 @@ export async function suggestOwnersInternal(
   const model = options.model ?? configured.model;
   const reasoningEffort = options.reasoningEffort ?? configured.reasoningEffort;
   const report: OwnerSuggestions = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: git.revision,
     model,
     reasoningEffort,
@@ -119,6 +121,16 @@ export async function suggestOwnersInternal(
     try {
       const context = await collectOwnerEvidence(finding, git);
       result.limitations = context.limitations;
+      if (context.codeowner !== null) {
+        result.owner = context.codeowner;
+        result.status = "identified";
+        result.reason = "Declared owner of an affected file in CODEOWNERS.";
+        result.evidence = context.evidence.map(
+          ({ content: _content, identityIndex: _index, ...citation }) =>
+            citation,
+        );
+        continue;
+      }
       if (
         context.identities.length === 0 ||
         !context.evidence.some(({ kind }) => kind === "source")
