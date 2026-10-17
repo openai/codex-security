@@ -3256,14 +3256,14 @@ export async function main(
   publication.command("findings", {
     description:
       "Preview and import selected Wiz, GitHub, Snyk, Endor, or Semgrep SAST findings to Cloud.",
-    hint: "For Semgrep SAST, supply JSON or SARIF and --source-repository-url identifying the source repository. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For Snyk, supply self-contained Open Source SARIF 2.1.0. For GitHub, supply unfiltered JSON/JSONL saved by import github or import github-advisories. For Wiz, supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+    hint: "For Semgrep SAST, supply JSON or SARIF and --source-repository-url identifying the source repository. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For Snyk, supply self-contained Open Source SARIF 2.1.0. For GitHub, supply unfiltered JSON/JSONL saved by import github or import github-advisories. For Wiz, supply a Wiz Code vulnerability CSV for GitHub repositories, a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; other CSV profiles, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
         .describe(
-          "Semgrep SAST or Endor JSON/SARIF, Snyk Open Source SARIF, saved GitHub import output, Wiz finding collections, or normalized Wiz JSONL.",
+          "Semgrep SAST or Endor JSON/SARIF, Snyk Open Source SARIF, saved GitHub import output, Wiz Code vulnerability CSV, Wiz finding collections, or normalized Wiz JSONL.",
         ),
     }),
     options: z.object({
