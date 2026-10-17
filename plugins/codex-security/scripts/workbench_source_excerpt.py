@@ -65,6 +65,8 @@ def finding_source_excerpt(
 def scanned_source_text(scan: sqlite3.Row, target: Path, path: str) -> str | None:
     if safe_source_path(target, path) is None:
         return None
+    if scan["diff_target_kind"] is None and scan["mode"] == "diff":
+        return None
     revision = scan["target_revision"]
     if revision == "unversioned":
         return None
