@@ -1,0 +1,199 @@
+import { Octokit } from "@octokit/core";
+import { expect, mock, test } from "bun:test";
+import {
+  importGitHubAdvisories,
+  type GitHubAdvisoryImportOptions,
+} from "../src/github-advisories.js";
+import { main } from "../src/cli.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
+import { captureCli, runCapturedCli } from "./support/cli-run.js";
+import { importedAdvisory } from "./support/github-import-fixtures.js";
+
+function client(respond: (url: URL) => Response): Octokit {
+  return new Octokit({
+    auth: "SYNTHETIC_ADVISORY_TOKEN",
+    request: {
+      fetch: async (
+        resource: Parameters<typeof fetch>[0],
+        init?: Parameters<typeof fetch>[1],
+      ) => {
+        expect(init?.method).toBe("GET");
+        expect(init?.redirect).toBe("error");
+        return respond(
+          new URL(resource instanceof Request ? resource.url : resource),
+        );
+      },
+    },
+  });
+}
+
+test("repository advisory lists default to published and paginate cursors with full evidence", async () => {
+  const paths: string[] = [];
+  const github = client((url) => {
+    paths.push(url.toString());
+    expect(url.pathname).toBe("/repos/example/project/security-advisories");
+    expect(url.searchParams.get("state")).toBe("published");
+    expect(url.searchParams.get("per_page")).toBe("100");
+    return Response.json(
+      [importedAdvisory().advisory],
+      url.searchParams.has("after")
+        ? undefined
+        : {
+            headers: {
+              link: '<https://api.github.com/repos/example/project/security-advisories?after=cursor-2>; rel="next"',
+            },
+          },
+    );
+  });
+  const imported = await importGitHubAdvisories(
+    { repository: "example/project" },
+    { createGitHub: async () => github },
+  );
+  expect(paths).toHaveLength(2);
+  expect(new URL(paths[1]!).searchParams.get("after")).toBe("cursor-2");
+  expect(imported[0]).toEqual(importedAdvisory());
+  expect(JSON.stringify(imported)).not.toContain("SYNTHETIC_ADVISORY_TOKEN");
+});
+
+test("global advisory selection uses only explicit deduplicated IDs and preserves the source family", async () => {
+  const selected = importedAdvisory("global");
+  const paths: string[] = [];
+  const github = client((url) => {
+    paths.push(url.pathname);
+    return Response.json(selected.advisory);
+  });
+  const imported = await importGitHubAdvisories(
+    {
+      repository: "example/project",
+      source: "global",
+      advisoryIds: [selected.ghsaId.toLowerCase(), selected.ghsaId],
+    },
+    { createGitHub: async () => github },
+  );
+  expect(paths).toEqual([`/advisories/${selected.ghsaId}`]);
+  expect(imported).toEqual([selected]);
+});
+
+test("explicit repository IDs allow private drafts without listing other advisories", async () => {
+  const selected = importedAdvisory();
+  const draft = { ...selected.advisory, state: "draft" as const };
+  const github = client((url) => {
+    expect(url.pathname).toBe(
+      `/repos/example/project/security-advisories/${selected.ghsaId}`,
+    );
+    expect(url.searchParams.has("state")).toBe(false);
+    return Response.json(draft);
+  });
+  const imported = await importGitHubAdvisories(
+    { repository: "example/project", advisoryIds: [selected.ghsaId] },
+    { createGitHub: async () => github },
+  );
+  expect(imported[0]!.advisory).toEqual(draft);
+});
+
+test("global crawl and misleading exact-ID state filters fail before GitHub authentication", async () => {
+  const createGitHub = mock(async () => client(() => Response.json([])));
+  await expect(
+    importGitHubAdvisories(
+      { repository: "example/project", source: "global" },
+      { createGitHub },
+    ),
+  ).rejects.toThrow("explicit GHSA IDs");
+  await expect(
+    importGitHubAdvisories(
+      {
+        repository: "example/project",
+        advisoryIds: [importedAdvisory().ghsaId],
+        state: "draft",
+      },
+      { createGitHub },
+    ),
+  ).rejects.toThrow("only filters repository lists");
+  expect(createGitHub).not.toHaveBeenCalled();
+});
+
+test("a later advisory page failure returns no incomplete selection", async () => {
+  const github = client((url) =>
+    url.searchParams.has("after")
+      ? Response.json({ message: "Rate limit" }, { status: 429 })
+      : Response.json([importedAdvisory().advisory], {
+          headers: {
+            link: '<https://api.github.com/repos/example/project/security-advisories?after=next>; rel="next"',
+          },
+        }),
+  );
+  await expect(
+    importGitHubAdvisories(
+      { repository: "example/project" },
+      { createGitHub: async () => github },
+    ),
+  ).rejects.toThrow("rate limited");
+});
+
+test("GitHub advisory CLI exposes separate selection defaults and exact public IDs", async () => {
+  let options: GitHubAdvisoryImportOptions | undefined;
+  const output = captureCli(main, "stdout");
+  expect(
+    await output.run(
+      [
+        "import",
+        "github-advisories",
+        "example/project",
+        "--github-advisory",
+        importedAdvisory().ghsaId,
+        "--github-advisory-source",
+        "global",
+        "--format",
+        "json",
+      ],
+      dependencies({
+        importGitHubAdvisories: async (value) => {
+          options = value;
+          return [importedAdvisory("global")];
+        },
+      }),
+    ),
+  ).toBe(0);
+  expect(options).toMatchObject({
+    repository: "example/project",
+    source: "global",
+    state: "published",
+    advisoryIds: [importedAdvisory().ghsaId],
+  });
+  expect(JSON.parse(output.text())).toEqual([importedAdvisory("global")]);
+  const schema = captureCli(main, "stdout");
+  expect(
+    await schema.run(
+      ["import", "github-advisories", "--schema", "--format", "json"],
+      dependencies(),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(schema.text())).toMatchObject({
+    options: {
+      properties: {
+        githubAdvisorySource: { default: "repository" },
+        githubState: { default: "published" },
+      },
+    },
+  });
+});
+
+test("advisory CLI cancellation removes handlers and preserves its exit code", async () => {
+  const signals = new FakeSignals();
+  expect(
+    await runCapturedCli(
+      main,
+      ["import", "github-advisories", "example/project"],
+      dependencies({
+        signals,
+        importGitHubAdvisories: async ({ signal }) => {
+          signals.emit("SIGINT");
+          signal!.throwIfAborted();
+          return [];
+        },
+      }),
+    ),
+  ).toBe(130);
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+});

@@ -1736,6 +1736,106 @@ record absolute Node/CLI paths. If those change, back up and remove the verified
 generated hook, then reinstall with the same threshold. Restore the backup if
 installation fails. The installer respects `core.hooksPath`.
 
+## Import GitHub findings to Cloud
+
+Save code-scanning alerts with the existing read-only importer, then inspect the
+Cloud publication preview:
+
+```bash
+codex-security import github example/project --format json > /path/outside/repository/alerts.json
+codex-security publish findings /path/outside/repository/alerts.json \
+  --to cloud --provider github --repository https://github.com/example/project \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+```
+
+After reviewing the destination, source, exclusions and evidence, repeat the
+publication command without `--dry-run` and confirm it, or add `--yes` for a
+previously reviewed input. Authentication, batching, saved receipts, partial
+results and interrupted-upload recovery follow the [Wiz publication flow](#import-wiz-findings).
+JSON, JSONL and gzip are supported. Save complete import output without field or
+token filters.
+
+Use a stable source key for the GitHub host, repository and finding family.
+Code-scanning identities also include the selected ref, so an import from another
+branch cannot replace an existing branch's evidence. GitHub's source state and
+full original alert stay attached to the source report. An alert-wide dismissal
+applies to every branch; otherwise the selected instance supplies the open/fixed
+state. Dismissal or a fixed state does not create a Codex assessment. Alerts without
+a security severity are reported as `unknown`; SARIF error/warning/note levels are not vulnerability ratings.
+
+The SDK offers the same preview and publication boundary:
+
+```ts
+import {
+  importGitHubCodeScanningAlerts,
+  normalizeGitHubCodeScanningAlerts,
+  prepareNormalizedExternalPublication,
+} from "@openai/codex-security";
+
+const alerts = await importGitHubCodeScanningAlerts({
+  repository: "example/project",
+});
+const prepared = await prepareNormalizedExternalPublication(
+  normalizeGitHubCodeScanningAlerts(alerts),
+  {
+    provider: "github",
+    repository: "https://github.com/example/project",
+    sourceKey: "github.com/example/project/code-scanning",
+  },
+);
+console.log(prepared.preview);
+// After reviewing the preview:
+const receipt = await prepared.publish();
+```
+
+### Import GHSA advisories separately
+
+Repository advisories describe disclosures maintained by a repository. Global
+advisories describe affected software in GitHub's public advisory database; they
+do not establish that your repository installs that software.
+
+```bash
+# Read only published advisories for this repository.
+codex-security import github-advisories example/project --format json > /path/outside/repository/advisories.json
+
+# Select individual public database records without enumerating the database.
+codex-security import github-advisories example/project \
+  --github-advisory-source global --github-advisory GHSA-2345-6789-cfgh \
+  --format json > /path/outside/repository/advisories.json
+
+codex-security publish findings /path/outside/repository/advisories.json \
+  --to cloud --provider github --repository https://github.com/example/project \
+  --source-key github.com/example/project/security-advisories --dry-run --format json
+```
+
+`--github-advisory-source` defaults to `repository`. Repeat `--github-advisory`
+to select exact IDs from that API, regardless of advisory state. Repository
+lists default to `--github-state published`; `draft`, `triage`, and `closed`
+require explicit selection. A nondefault state cannot be combined with exact
+IDs. Global selection requires at least one ID and never lists the advisory
+database. Both readers use `GH_HOST` and GitHub CLI authentication by default;
+the SDK also accepts `githubHost` and `githubToken`.
+
+Review the saved evidence before publication, including any selected private
+advisories. Import failure returns no partial selection. Publication reports
+invalid records as exclusions and retains acknowledged receipts if a later
+batch or readback fails.
+
+Advisory evidence retains GHSA/CVE IDs, affected version ranges, available
+patched versions, source status and original JSON. It does not infer an installed
+version or source location. Global advisories omit a source repository; the
+explicit Cloud destination binds the import for investigation. Repository
+advisories retain and check their source repository. Withdrawal remains vendor
+state, and all imported evidence remains not assessed by Codex. Use a separate
+source key from code-scanning alerts; shared advisory IDs do not combine source
+records from different providers.
+
+In the SDK, call `importGitHubAdvisories()` and `normalizeGitHubAdvisories()`
+with `prepareNormalizedExternalPublication()` as shown above. The former defaults
+to `{ source: "repository", state: "published" }`; use
+`{ source: "global", advisoryIds: ["GHSA-2345-6789-cfgh"] }` for selected database
+records. Both forms require `repository: "OWNER/REPO"` as source or target context.
+
 ## Import alerts from the CLI
 
 ```bash

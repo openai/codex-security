@@ -378,7 +378,7 @@
       "additionalProperties": false,
       "properties": {
         "provider": {
-          "enum": ["wiz", "endor", "snyk"],
+          "enum": ["wiz", "endor", "snyk", "github"],
           "title": "Provider",
           "type": "string"
         },
@@ -391,6 +391,20 @@
       },
       "required": ["provider", "source_key"],
       "title": "ImportSource",
+      "type": "object"
+    },
+    "ImportedAdvisoryContext": {
+      "additionalProperties": false,
+      "description": "Where the advisory was read; applicability is assessed separately.",
+      "properties": {
+        "source": {
+          "enum": ["repository", "global"],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": ["source"],
+      "title": "ImportedAdvisoryContext",
       "type": "object"
     },
     "ImportedAssessment": {
@@ -506,12 +520,29 @@
       "description": "Typed repository evidence; vendor state is not a Codex assessment.",
       "properties": {
         "kind": {
-          "enum": ["sast", "secret", "iac"],
+          "enum": ["sast", "secret", "iac", "advisory"],
           "title": "Kind",
           "type": "string"
         },
         "repository": {
-          "$ref": "#/$defs/ImportedRepositoryReference"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedRepositoryReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "advisory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedAdvisoryContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "source_status": {
           "anyOf": [
@@ -637,7 +668,7 @@
           "title": "File Url"
         }
       },
-      "required": ["kind", "repository"],
+      "required": ["kind"],
       "title": "ImportedFindingDetails",
       "type": "object"
     },
@@ -651,7 +682,14 @@
           "type": "string"
         },
         "severity": {
-          "enum": ["critical", "high", "medium", "low", "informational"],
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "informational",
+            "unknown"
+          ],
           "title": "Severity",
           "type": "string"
         },
@@ -909,6 +947,19 @@
           ],
           "default": null,
           "title": "Installed Version"
+        },
+        "vulnerable_version_range": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Vulnerable Version Range"
         },
         "manifest_path": {
           "anyOf": [
@@ -1285,7 +1336,14 @@
           "type": "string"
         },
         "severity": {
-          "enum": ["critical", "high", "medium", "low", "informational"],
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "informational",
+            "unknown"
+          ],
           "title": "Severity",
           "type": "string"
         },

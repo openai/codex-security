@@ -23,13 +23,16 @@ import {
   codexSecurityStateDirectory,
   validatePreparedOutputDir,
 } from "./runtime.js";
-import {
-  readVendorFindingsForPublication,
-  type VendorFindings,
-} from "./wiz-findings.js";
+import { readVendorFindingsForPublication } from "./wiz-findings.js";
+import { readGitHubFindings } from "./github-findings.js";
+import type {
+  ExternalFindings,
+  ExternalPublicationInput,
+} from "./external-findings.js";
 import {
   repositoryUrlKey,
   validateImportRequest,
+  validateExternalEvidence,
   validateImportReceipt,
   validateRepositories,
   validateSourceReports,
@@ -53,11 +56,11 @@ function cloudRepositoryUrlKey(value: string): string {
 /** CLI and plugin callers prepare the same immutable request before approval. */
 export interface ExternalPublicationOptions {
   repository: string;
-  provider: "wiz";
+  provider: "wiz" | "github";
   sourceKey: string;
 }
 
-/** @internal Injectable transport and account for offline integration tests. */
+/** Optional transport, account, cancellation, and progress hooks. */
 export interface ExternalPublicationDependencies {
   environment?: NodeJS.ProcessEnv;
   fetch?: (url: string, options: RequestInit) => Promise<Response>;
@@ -85,7 +88,7 @@ export interface ExternalPublicationResult {
   status: "complete" | "partial" | "interrupted";
   read: number;
   ready: number;
-  excluded: VendorFindings["excluded"];
+  excluded: ExternalFindings["excluded"];
   receipts: FindingImportReceipt[];
   counts: Required<FindingImportReceipt["counts"]>;
   failures: { source_finding_id: string; code: string; message: string }[];
@@ -113,7 +116,7 @@ interface SavedSubmission {
   inputProjection?: { inputDigest: string; savedEvidenceDigest: string };
 }
 
-export interface ExternalPublicationPreview extends VendorFindings {
+export interface ExternalPublicationPreview extends ExternalFindings {
   cloudApiUrl: string;
   cloudUrl?: string;
   accountId: string;
@@ -176,7 +179,7 @@ function sameSubmission(
 
 function submissionFindings(
   requests: readonly FindingImportRequest[],
-): VendorFindings["findings"] {
+): ExternalFindings["findings"] {
   return requests.flatMap((batch) =>
     batch.items.map(({ source_finding_id, evidence }) => ({
       source_finding_id,
@@ -186,8 +189,8 @@ function submissionFindings(
 }
 
 function sameFindingSelection(
-  left: VendorFindings["findings"],
-  right: VendorFindings["findings"],
+  left: ExternalFindings["findings"],
+  right: ExternalFindings["findings"],
 ): boolean {
   return (
     left.length === right.length &&
@@ -284,6 +287,62 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  if (options.provider === "github")
+    return prepareNormalizedExternalPublication(
+      await readGitHubFindings(path),
+      options,
+      dependencies,
+    );
+  const input = await readVendorFindingsForPublication(path);
+  return preparePublicationInput(input, options, dependencies);
+}
+
+/** Prepare normalized provider evidence without reading a vendor export. */
+export async function prepareNormalizedExternalPublication(
+  input: ExternalFindings,
+  options: ExternalPublicationOptions,
+  dependencies: ExternalPublicationDependencies = {},
+): Promise<PreparedExternalPublication> {
+  // Validation adds Cloud defaults; leave the caller's objects unchanged.
+  const current = structuredClone(input);
+  // structuredClone preserves aliases. Detach every raw record before adding
+  // typed defaults, including aliases shared with another finding's evidence.
+  for (const finding of current.findings)
+    if (finding.evidence.source_data !== undefined)
+      finding.evidence.source_data = structuredClone(
+        finding.evidence.source_data,
+      );
+  const identities = new Set<string>();
+  for (const finding of current.findings) {
+    const id = finding.source_finding_id;
+    if (!id.trim() || id.includes("\0") || Buffer.byteLength(id) > 512)
+      throw new CodexSecurityError(
+        "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
+      );
+    if (identities.has(id))
+      throw new CodexSecurityError(
+        `Duplicate source finding id ${JSON.stringify(id)}.`,
+      );
+    identities.add(id);
+    finding.evidence = validateExternalEvidence(finding.evidence);
+  }
+  return preparePublicationInput(
+    {
+      current,
+      legacy: current,
+      currentIdentity: current.findings,
+      legacyIdentity: current.findings,
+    },
+    options,
+    dependencies,
+  );
+}
+
+async function preparePublicationInput(
+  input: ExternalPublicationInput,
+  options: ExternalPublicationOptions,
+  dependencies: ExternalPublicationDependencies,
+): Promise<PreparedExternalPublication> {
   const progress = (event: ExternalPublicationProgress): void => {
     try {
       dependencies.onProgress?.(event);
@@ -293,7 +352,9 @@ export async function prepareExternalPublication(
   };
   if (!options.sourceKey.trim() || Buffer.byteLength(options.sourceKey) > 512) {
     throw new CodexSecurityError(
-      "The source key must contain 1–512 UTF-8 bytes. Use a stable Wiz tenant/finding namespace, such as TENANT_ID/vulnerability-finding, across exports.",
+      options.provider === "wiz"
+        ? "The source key must contain 1–512 UTF-8 bytes. Use a stable Wiz tenant/finding namespace, such as TENANT_ID/vulnerability-finding, across exports."
+        : "The source key must contain 1–512 UTF-8 bytes. Use a stable GitHub host/repository/finding namespace across imports.",
     );
   }
   progress({ phase: "reading", completed: 0 });
@@ -302,7 +363,7 @@ export async function prepareExternalPublication(
     legacy: legacyParsed,
     currentIdentity,
     legacyIdentity,
-  } = await readVendorFindingsForPublication(path);
+  } = input;
   if (parsed.findings.length === 0) {
     throw new CodexSecurityError(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,

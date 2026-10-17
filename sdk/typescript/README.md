@@ -604,6 +604,15 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
+The SDK also exposes `prepareExternalPublication(file, options)` for saved Wiz or GitHub
+imports and `prepareNormalizedExternalPublication(findings, options)` for
+normalized external evidence. Both resolve the Cloud repository and return a
+`preview` plus a separate `publish()` operation. Inspect the preview before
+calling `publish()`. Imported evidence remains not assessed by Codex, and saved
+requests and receipts support retries after interruption. GitHub code-scanning
+alerts and GHSA advisories have [separate readers and mappings](docs/cli.md#import-github-findings-to-cloud);
+advisory imports preserve affected ranges without claiming an installed dependency.
+
 ## Findings storage and deduplication
 
 Saved-scan deduplication uses local SQLite directly:

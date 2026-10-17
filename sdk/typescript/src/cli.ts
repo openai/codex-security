@@ -186,6 +186,10 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import {
+  GITHUB_ADVISORY_STATES,
+  importGitHubAdvisories,
+} from "./github-advisories.js";
+import {
   GITHUB_ALERT_STATES,
   importGitHubCodeScanningAlerts,
 } from "./github.js";
@@ -596,7 +600,7 @@ function renderExternalPublicationSummary(
     ...(result.status === "interrupted"
       ? []
       : [
-          "Imported Wiz evidence remains not assessed by Codex.",
+          "Imported evidence remains not assessed by Codex.",
           result.cloudUrl
             ? `View findings: ${diagnosticValue(result.cloudUrl)}\nSearch indexing can lag an accepted import.`
             : "Open the Codex Security Cloud app's Findings view and select this repository. Search indexing can lag an accepted import.",
@@ -1211,6 +1215,7 @@ interface CliDependencies {
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
+  importGitHubAdvisories?: typeof importGitHubAdvisories;
   importScan?: typeof importScan;
   runWorkbench(
     args: readonly string[],
@@ -3249,16 +3254,15 @@ export async function main(
     },
   });
   publication.command("findings", {
-    description:
-      "Preview and import selected Wiz repository findings to Cloud.",
-    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+    description: "Preview and import selected Wiz or GitHub findings to Cloud.",
+    hint: "For GitHub, supply unfiltered JSON/JSONL saved by import github or import github-advisories. For Wiz, supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
         .describe(
-          "Saved Wiz finding collections, package vulnerability JSON, or normalized JSONL.",
+          "Saved GitHub import output, Wiz finding collections, or normalized Wiz JSONL.",
         ),
     }),
     options: z.object({
@@ -3267,8 +3271,8 @@ export async function main(
         "Authorized Cloud repository ID or repository URL copied from Cloud.",
       ),
       provider: z
-        .literal("wiz")
-        .describe("Vendor that produced these findings."),
+        .enum(["wiz", "github"])
+        .describe("Provider that produced these findings."),
       sourceKey: optionValue("--source-key").describe(
         "Stable vendor tenant and finding namespace; not a project selection filter.",
       ),
@@ -3467,7 +3471,7 @@ export async function main(
     },
   });
   const imports = Cli.create("import", {
-    description: "Read GitHub code scanning alerts.",
+    description: "Read GitHub code scanning alerts and security advisories.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
     hint: "To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
@@ -3537,6 +3541,93 @@ export async function main(
           exitCode = signal === "SIGINT" ? 130 : 143;
           errorOutput.write(
             `codex-security: GitHub import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
+          );
+        } else {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+        }
+        return undefined;
+      } finally {
+        removeSignals();
+      }
+    },
+  });
+  imports.command("github-advisories", {
+    description: "Read GitHub security advisories without changing GitHub.",
+    hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish that the selected repository has an installed vulnerable dependency.",
+    destructive: false,
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .min(1)
+        .describe(
+          "Source repository, or target context for global IDs, in OWNER/REPO form.",
+        ),
+    }),
+    options: z.object({
+      githubAdvisory: z
+        .array(
+          optionValue("--github-advisory").regex(
+            /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+            "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
+          ),
+        )
+        .default([])
+        .describe(
+          "Exact GHSA ID; repeat to select a subset. Required for global advisories.",
+        ),
+      githubAdvisorySource: z
+        .enum(["repository", "global"])
+        .default("repository")
+        .describe(
+          "Advisory API to read; global requires exact IDs and never lists the database.",
+        ),
+      githubState: z
+        .enum(GITHUB_ADVISORY_STATES)
+        .default("published")
+        .describe(
+          "Repository advisory list state; omit when selecting exact GHSA IDs.",
+        ),
+    }),
+    output: z
+      .array(
+        z.object({
+          source: z.literal("github-security-advisory"),
+          selection: z.enum(["repository", "global"]),
+          repository: z.string(),
+          githubHost: z.string(),
+          ghsaId: z.string(),
+          url: z.string(),
+          advisory: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .optional(),
+    async run({ args, options }) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        return await (
+          dependencies.importGitHubAdvisories ?? importGitHubAdvisories
+        )(
+          {
+            repository: args.repository,
+            advisoryIds: options.githubAdvisory,
+            source: options.githubAdvisorySource,
+            state: options.githubState,
+            signal: controller.signal,
+          },
+          {
+            environment: dependencies.environment,
+            currentDirectory: dependencies.currentDirectory(),
+          },
+        );
+      } catch (error) {
+        const signal = controller.signal.reason;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          exitCode = signal === "SIGINT" ? 130 : 143;
+          errorOutput.write(
+            `codex-security: GitHub advisory import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
           );
         } else {
           exitCode = 2;

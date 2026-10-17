@@ -703,7 +703,7 @@ test("saved typed requests resume by repository ID after a repository rename", a
   expect((await resumed.publish()).verified).toBe(1);
   expect(f.posts).toHaveLength(1);
   expect(
-    f.reports.get("sast:occurrence-1")!.evidence.details!.repository.url,
+    f.reports.get("sast:occurrence-1")!.evidence.details!.repository!.url,
   ).toBe(repositoryUrl);
 });
 
@@ -768,7 +768,7 @@ test("GitHub repository metadata accepts case variants without changing source U
   });
   expect(parsed.excluded).toEqual([]);
   expect(parsed.findings[0]!.evidence.source_data).toEqual(supplied);
-  expect(parsed.findings[0]!.evidence.details!.repository.url).toBe(
+  expect(parsed.findings[0]!.evidence.details!.repository!.url).toBe(
     supplied.repository.url,
   );
 });
@@ -882,7 +882,7 @@ test("custom GitHub Enterprise binding preserves branch case and exact source ev
   expect((await prepared.publish()).verified).toBe(1);
   const evidence = f.posts[0]!.items[0]!.evidence;
   expect(evidence.branch).toBe(record.repositoryBranch.name);
-  expect(evidence.details!.repository.url).toBe(record.repository.url);
+  expect(evidence.details!.repository!.url).toBe(record.repository.url);
   expect(evidence.source_data).toEqual(record);
 });
 
@@ -927,7 +927,7 @@ test.each([
     expect((await prepared.publish()).verified).toBe(1);
     const evidence = f.posts[0]!.items[0]!.evidence;
     expect(evidence.branch).toBe(branch.name);
-    expect(evidence.details!.repository.url).toBe(sourceRepository.url);
+    expect(evidence.details!.repository!.url).toBe(sourceRepository.url);
     expect(evidence.source_data).toEqual(record);
   },
 );
@@ -2046,7 +2046,7 @@ test.each([
       expect(replay.preview.resumed).toBe(true);
       expect(replay.preview.requests).toEqual(original.preview.requests);
       expect(
-        replay.preview.findings[0]!.evidence.details!.repository.name,
+        replay.preview.findings[0]!.evidence.details!.repository!.name,
       ).toBe("EXAMPLE/PROJECT");
     }
     const newer = f.reports.get("sast:occurrence-1")!;
