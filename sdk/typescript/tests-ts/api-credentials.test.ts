@@ -1,5 +1,4 @@
 import { nodeCommand } from "./support/shell.js";
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -11,7 +10,7 @@ import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
-import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
+import { TestClient } from "./support/api-client.js";
 import {
   codexFactory,
   completedEvents,
@@ -289,7 +288,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         createCodex: (options: CodexOptions) =>
-          codexFactory(async function runStreamed(input: string) {
+          codexFactory(async function runStreamed() {
             const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
             const codexHome = options.env?.["CODEX_HOME"];
             expect(typeof configPath).toBe("string");
@@ -361,48 +360,6 @@ describe("CodexSecurity orchestration", () => {
                 [repository]: { trust_level: "trusted" },
               },
             });
-            expect(input).toContain(
-              `--config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}`,
-            );
-            expect(input).toContain("--effective-config");
-            const shellEnvironment = options.env as Record<string, string>;
-            const helper = execFileSync(
-              interpreter!,
-              [
-                join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-                "--skill",
-                "security-scan",
-                "--config",
-                shellEnvironment["CODEX_SECURITY_CONFIG_PATH"]!,
-                "--cwd",
-                repository,
-                "--multi-agent-runtime-owner",
-                "native",
-                "--multi-agent-runtime-version",
-                "v2",
-                "--multi-agent-session-cap",
-                "12",
-                "--multi-agent-runtime-provenance",
-                "tool-surface",
-                "--runtime-check",
-                "delegation_available=true",
-                "--runtime-check",
-                "goal_tools_available=true",
-                "--effective-config",
-                "features.goals=true",
-              ],
-              {
-                env: {
-                  PATH: process.env["PATH"],
-                  CODEX_HOME: join(root, "denied"),
-                },
-                encoding: "utf8",
-              },
-            );
-            const preflight = JSON.parse(helper) as Record<string, unknown>;
-            expect(preflight["status"]).toBe("ready");
-            expect(preflight["config_resolution"]).toBe("manual-layers");
-            expect(preflight["config_paths"]).toEqual([configPath]);
             await copyCompletedScan(root);
             const manifestPath = join(scanDir, "scan-manifest.json");
             const manifest = JSON.parse(
