@@ -176,19 +176,30 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
 
 
 @pytest.mark.parametrize("earlier_identity", [None, "restored"])
-def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(tmp_path, earlier_identity):
+@pytest.mark.parametrize("colliding_candidate", [False, True])
+def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
+    tmp_path, earlier_identity, colliding_candidate
+):
     surface = {"label": "API", "disposition": "needs_follow_up"}
-    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface])
+    surfaces = [surface]
+    published_id = "first/0"
+    if colliding_candidate:
+        surface["candidateId"] = "api"
+        surfaces.insert(0, {"id": "api", "label": "Other", "disposition": "needs_follow_up"})
+        published_id = "first/1"
+    draft = saved_draft("coverage-scan", complete=True, surfaces=surfaces)
     source = worker(tmp_path, "first", draft)
     if earlier_identity is not None:
         older = copy.deepcopy(draft)
-        older["coverage"]["surfaces"][0]["id"] = earlier_identity
+        older["coverage"]["surfaces"][-1]["id"] = earlier_identity
         checkpoint = write_checkpoint(Path(source["artifact_dir"]) / "checkpoints", older)
         os.utime(checkpoint, ns=(50, 50))
     parent = copy.deepcopy(draft)
-    parent["coverage"]["surfaces"] = [{**surface, "id": "first/0", "workerId": "first"}]
+    parent["coverage"]["surfaces"][-1].update(id=published_id, workerId="first")
+    if colliding_candidate:
+        parent["coverage"]["surfaces"][0].update(id="first/api", workerId="first")
     parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0"]}
+        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": [published_id]}
     ]
     write_saved_parent(tmp_path, parent, 200)
     originals = {p: p.read_bytes() for p in tmp_path.rglob("result.json")}
@@ -196,14 +207,76 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(tmp_path, ea
     replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
     assert replay[2] == result[2]
     for coverage in (result[2], replay[2]):
-        assert len(coverage["surfaces"]) == 1
-        recovered_surface = coverage["surfaces"][0]
+        assert len(coverage["surfaces"]) == len(surfaces)
+        recovered_surface = next(row for row in coverage["surfaces"] if row["label"] == "API")
         task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
         assert task["surfaceIds"] == [recovered_surface["id"]]
         assert recovered_surface["workerId"] == "first"
         if earlier_identity is not None:
             assert recovered_surface["id"] == f"first/{earlier_identity}"
+        if colliding_candidate:
+            other = next(row for row in coverage["surfaces"] if row["label"] == "Other")
+            assert task["surfaceIds"] != [other["id"]]
     assert all(p.read_bytes() == contents for p, contents in originals.items())
+
+
+def test_parent_only_task_remaps_anonymous_surface_links_once(tmp_path):
+    draft = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[
+            {"candidateId": "1", "label": "API", "disposition": "needs_follow_up"},
+            {"label": "Other", "disposition": "needs_follow_up"},
+        ],
+    )
+    source = worker(tmp_path, "first", draft)
+    parent = copy.deepcopy(draft)
+    parent["coverage"]["surfaces"][0].update(id="first/0", workerId="first")
+    parent["coverage"]["surfaces"][1].update(id="first/1", workerId="first")
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0", "first/1"]}
+    ]
+    write_saved_parent(tmp_path, parent, 200)
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+    assert replay[2] == result[2]
+    for coverage in (result[2], replay[2]):
+        surfaces = {row["label"]: row["id"] for row in coverage["surfaces"]}
+        task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == [surfaces["API"], surfaces["Other"]]
+        assert surfaces["API"] != surfaces["Other"]
+
+
+def test_parent_only_task_links_to_surface_with_retained_finding_history(tmp_path):
+    template = tmp_path / "template"
+    template.mkdir()
+    write_completed_contract(template, "coverage-scan", tmp_path, target_kind="git_revision")
+    finding = json.loads((template / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(workerId="first", candidateId="review")
+    draft = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[{"candidateId": "review", "label": "API", "disposition": "rejected"}],
+    )
+    source = worker(tmp_path, "first", draft)
+    parent = copy.deepcopy(draft)
+    parent["findings"] = [finding]
+    parent["coverage"]["surfaces"][0].update(id="first/0", workerId="first")
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0"]}
+    ]
+    write_saved_parent(tmp_path, parent, 200)
+    manifest = tmp_path / "scan-manifest.json"
+    parent_manifest = json.loads((template / "scan-manifest.json").read_text())
+    parent_manifest["scan"].update(
+        complete=True, sealedAt="2026-01-01T00:00:00Z", status="interrupted"
+    )
+    manifest.write_text(json.dumps(parent_manifest))
+    result = recover(tmp_path, [source])
+    surface = result[2]["surfaces"][0]
+    task = next(row for row in result[2]["deferred"] if row["id"] == "parent-review")
+    assert len(surface["previousFindings"]) == 1
+    assert task["surfaceIds"] == [surface["id"]]
 
 
 @pytest.mark.parametrize("worker_metadata", ["first", ["first"], {"hint": "first"}])

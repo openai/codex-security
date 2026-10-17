@@ -1450,6 +1450,9 @@ def merge_saved_results(
     project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
         sources, parent, enabled=project_worker_coverage
     )
+    # Keep the actual retained row even when recovery adds previous findings.
+    linked_surface_sources = {id(surface) for _, _, surface in surface_links}
+    linked_surface_outputs: dict[int, dict[str, Any]] = {}
 
     def retained_coverage_row(item: Any, owner: str | None, field: str) -> Any:
         return _project_worker_coverage_row(item, owner if project_worker_coverage else None, field)
@@ -1498,15 +1501,6 @@ def merge_saved_results(
                 if identity is not None:
                     row["id"] = identity
                     reserved.add(identity)
-
-    # Aggregate IDs can differ from the reconciled identity of an anonymous
-    # worker row. Keep parent-only review tasks linked to the recovered surface.
-    for task, published_id, surface in surface_links:
-        recovered_id = retained_coverage_row(surface, surface["workerId"], "surfaces")["id"]
-        task["surfaceIds"] = [
-            recovered_id if identity == published_id else identity
-            for identity in task["surfaceIds"]
-        ]
 
     if parent is None and not sources:
         return None
@@ -2237,6 +2231,7 @@ def merge_saved_results(
                 # recovery and warnings rather than silently changing its contract.
                 continue
             for item in items:
+                source_item = item
                 if not coverage_row_is_retained(field, item, worker_id, selection):
                     continue
                 if id(item) in replaced_rows.get(field, ()):
@@ -2273,16 +2268,25 @@ def merge_saved_results(
                     item = {**item, "receiptRefs": item.get("receiptRefs", [])}
                 if isinstance(item, dict) and "id" not in item:
                     semantic_item = dict(item)
-                    if any(
-                        isinstance(existing, dict)
-                        and {key: value for key, value in existing.items() if key != "id"}
-                        == semantic_item
-                        for existing in output
-                    ):
+                    existing = next(
+                        (
+                            row
+                            for row in output
+                            if isinstance(row, dict)
+                            and {key: value for key, value in row.items() if key != "id"}
+                            == semantic_item
+                        ),
+                        None,
+                    )
+                    if existing is not None:
+                        if field == "surfaces" and id(source_item) in linked_surface_sources:
+                            linked_surface_outputs[id(source_item)] = existing
                         continue
                 retained = retained_coverage_row(item, worker_id, field)
                 if retained not in output:
                     output.append(retained)
+                if field == "surfaces" and id(source_item) in linked_surface_sources:
+                    linked_surface_outputs[id(source_item)] = output[output.index(retained)]
 
     identities: dict[str, str] = {}
     for finding in findings:
@@ -2297,6 +2301,19 @@ def merge_saved_results(
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
             identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
         identities[key] = variant
+    # Bind links to retained output objects before their IDs become unique.
+    # Candidate metadata can give an anonymous row the same preliminary ID as
+    # another surface, so only the final surface ID can be used for its links.
+    retained_surface_links: dict[int, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
+    output_tasks = coverage.get("deferred", [])
+    for task, published_id, surface in surface_links:
+        retained_surface = linked_surface_outputs.get(id(surface))
+        if retained_surface is None or not isinstance(retained_surface.get("id"), str):
+            continue
+        for retained_task in output_tasks if isinstance(output_tasks, list) else []:
+            if retained_task == task:
+                _, links = retained_surface_links.setdefault(id(retained_task), (retained_task, {}))
+                links[published_id] = retained_surface
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
@@ -2328,6 +2345,11 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
+    for task, links in retained_surface_links.values():
+        task["surfaceIds"] = [
+            links[identity]["id"] if isinstance(identity, str) and identity in links else identity
+            for identity in task["surfaceIds"]
+        ]
     coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
