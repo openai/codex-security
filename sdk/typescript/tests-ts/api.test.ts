@@ -7284,6 +7284,7 @@ describe("CodexSecurity orchestration", () => {
     const inheritedTools = join(root, "operator-tools");
     await mkdir(bundledTools, { recursive: true });
     await mkdir(dirname(executable));
+    await writeFile(executable, "synthetic executable; never launched\n");
     await mkdir(inheritedTools);
     const originalPlatform = Object.getOwnPropertyDescriptor(
       process,
