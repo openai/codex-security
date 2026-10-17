@@ -10,6 +10,7 @@
 - do not report a successful envelope for a failed dedupe ([#1071](https://github.com/openai/codex-security/pull/1071))
 - separate Git transport from review providers ([#1551](https://github.com/openai/codex-security/pull/1551))
 - update Bedrock workflow to CLI 0.3.0 ([#1675](https://github.com/openai/codex-security/pull/1675))
+- avoid copying unused dictionary items ([#1661](https://github.com/openai/codex-security/pull/1661))
 
 <!-- release-section: highlights:end -->
 
