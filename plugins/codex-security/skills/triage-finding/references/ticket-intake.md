@@ -14,22 +14,22 @@ For Linear, fetch exact URLs or identifiers directly. Search team, project, or p
 
 ## Linear parents and sub-issues
 
-Fetch the supplied parent, then list its direct children with the parent filter, exhausting pagination.
+Fetch the supplied parent. When the request includes its sub-issues or a finding collection organized under it, list the relevant descendants with the parent filter, exhausting pagination.
 
-At each depth, show the child identifiers, titles, and count, grouped by parent. Ask whether to include that level before fetching full child content. Fetch approved children and repeat for the next depth. Approval for one level does not include deeper descendants; skip further questions when none exist.
+Honor the requested collection scope across depths. If it is unclear whether descendants are included, show the available set and clarify once rather than asking at every level. Fetch each selected issue's full content before triage.
 
-Include the parent when it has an independent vulnerability claim. Exclude an organizing summary. If its role is ambiguous, ask whether to include it before normalization.
+Include the parent when it has an independent vulnerability claim. Use an organizing summary as context rather than inventing a separate finding. Ask only if an ambiguous claim would change the selected set.
 
-Keep one result per selected issue in deterministic breadth-first tree order: parent first when selected, then each approved depth by creation time with identifier as tiebreaker. Preserve parent relationships in references. Do not truncate or drop selected findings.
+Keep one result per selected issue in deterministic breadth-first tree order: parent first when selected, then each selected depth by creation time with identifier as tiebreaker. Preserve parent relationships in references. Do not truncate or drop selected findings.
 
 ## Retrieval failures
 
 - Missing connector or authentication: state which source is unavailable and ask to connect or reauthorize it.
 - Insufficient permission: report the access error and ask the user to request access or choose an account with access.
 - Not found or inaccessible: ask to verify the identifier and workspace. Do not claim the issue does not exist when it may be hidden.
-- Transient failure: retry the identical read once without broadening the query or changing sources. If it fails, report both errors.
+- Transient failure: retry when likely to help, keeping the same source and scope. Report unresolved errors.
 
-Offer to continue with complete finding content pasted by the user. After an unresolved failure, do not inspect the repository, normalize findings, assign verdicts, or emit `triage-finding/v0`.
+Offer to continue with complete finding content pasted by the user. Do not infer an inaccessible ticket's claim or assign it a verdict. For collections, continue with findings that were retrieved and report the inaccessible items separately. If no finding content was retrieved or supplied, stop before repository inspection or emitting `triage-finding/v0`.
 
 ## Normalization and result
 
