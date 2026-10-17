@@ -62,6 +62,16 @@ async function savedEvidence() {
       counterEvidence: ["A mitigation remains unverified. ".repeat(300)],
     };
     finding.writeup = { reportPath };
+    Object.assign(finding, {
+      createdAt: "2000-01-01T00:00:00Z",
+      remediationState: { status: "fixed" },
+      matches: [{ occurrenceId: "stale-occurrence" }],
+      knownSince: "2000-01-01T00:00:00Z",
+      knownScanIds: ["stale-scan"],
+      related: [{ occurrenceId: "stale-related-occurrence" }],
+      sourceExcerpt: "Stale source excerpt.",
+      artifactPaths: ["stale-report.md"],
+    });
     const closed = structuredClone(finding);
     closed.identity.anchor = "closed-synthetic-finding";
     delete closed.writeup;
@@ -113,7 +123,7 @@ async function savedEvidence() {
   }
 }
 
-test("saved patch and verification tasks receive complete sealed evidence and live triage", async () => {
+test("saved patch and verification tasks receive complete sealed evidence and live workbench state", async () => {
   await using fixture = await savedEvidence();
   const full = fixture.canonical.findings[0]!;
   expect(full.codeEvidence).toHaveLength(9);
@@ -177,6 +187,18 @@ test("saved patch and verification tasks receive complete sealed evidence and li
       writeup: full.writeup,
       triage: { status: "open" },
     });
+    for (const key of [
+      "createdAt",
+      "remediationState",
+      "matches",
+      "knownSince",
+      "knownScanIds",
+      "related",
+      "sourceExcerpt",
+      "artifactPaths",
+    ]) {
+      expect(received[0]![key]).toEqual(previewFinding[key]);
+    }
   }
 });
 

@@ -6821,13 +6821,23 @@ async function selectSavedFindings(
           `Finding ${finding.occurrenceId} is missing from the saved scan artifacts.`,
         );
       }
-      return {
-        ...finding,
-        ...full,
-        ...(finding["triage"] === undefined
-          ? {}
-          : { triage: finding["triage"] }),
-      };
+      const hydrated = { ...finding, ...full };
+      // Sealed artifacts supply evidence; the workbench owns live and derived state.
+      for (const key of [
+        "createdAt",
+        "triage",
+        "remediationState",
+        "matches",
+        "knownSince",
+        "knownScanIds",
+        "related",
+        "sourceExcerpt",
+        "artifactPaths",
+      ]) {
+        if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
+        else delete hydrated[key];
+      }
+      return hydrated;
     }),
   };
 }
