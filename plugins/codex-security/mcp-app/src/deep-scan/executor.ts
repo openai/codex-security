@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   accessSync,
+  type BigIntStats,
   constants as fsConstants,
   existsSync,
   promises as fs,
@@ -69,6 +70,11 @@ export interface CodexSdkWorkerArtifactContext {
   pythonCommand?: string;
 }
 
+interface BoundCodexExecutable {
+  readonly path: string;
+  readonly identity: BigIntStats;
+}
+
 interface CodexSdkWorkerRuntimeSettings {
   environment?: Record<string, string>;
   config: Record<string, unknown>;
@@ -79,6 +85,8 @@ interface CodexSdkWorkerRuntimeSettings {
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
+  // Each live coordinator keeps the executable selected for its first worker.
+  private codexExecutable?: Promise<BoundCodexExecutable>;
 
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
@@ -152,15 +160,18 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "CODEX_API_KEY",
         process.platform,
       )?.trim();
-      const codexPath = resolveCodexPath(
+      const executable = await (this.codexExecutable ??= bindCodexExecutable(
         childEnv,
-        process.platform,
-        process.arch,
         originalCwd,
-      );
+      ).catch((error) => {
+        // A failed first lookup has not pinned an executable yet; allow startup retries.
+        this.codexExecutable = undefined;
+        throw error;
+      }));
+      await verifyBoundCodexExecutable(executable);
       const { useOpenAiApiKey } =
         await preflightDeepScanWorkerPermissionProfile({
-          codexPath,
+          codexPath: executable.path,
           cwd: request.workingDirectory,
           configOverrides,
           providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
@@ -171,7 +182,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         });
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
-        codexPathOverride: executablePathForSpawn(codexPath),
+        codexPathOverride: executablePathForSpawn(executable.path),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
         // Keep native credentials unless the worker has no configured account.
@@ -213,6 +224,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
 
       try {
+        // Detect updates during preflight before starting a fresh or resumed worker.
+        await verifyBoundCodexExecutable(executable);
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
           cyberAccessProgram: runtimeSettings.cyberAccessProgram,
@@ -516,6 +529,57 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function bindCodexExecutable(
+  env: NodeJS.ProcessEnv,
+  originalCwd: string,
+): Promise<BoundCodexExecutable> {
+  const path = resolveCodexPath(
+    env,
+    process.platform,
+    process.arch,
+    originalCwd,
+  );
+  return { path, identity: await codexExecutableIdentity(path) };
+}
+
+async function verifyBoundCodexExecutable(
+  executable: BoundCodexExecutable,
+): Promise<void> {
+  let identity: BigIntStats;
+  try {
+    identity = await codexExecutableIdentity(executable.path);
+  } catch (error) {
+    throw codexExecutableChangedError(executable.path, error);
+  }
+  if (
+    identity.dev !== executable.identity.dev ||
+    identity.ino !== executable.identity.ino ||
+    identity.size !== executable.identity.size ||
+    identity.mtimeNs !== executable.identity.mtimeNs ||
+    identity.ctimeNs !== executable.identity.ctimeNs
+  ) {
+    throw codexExecutableChangedError(executable.path);
+  }
+}
+
+async function codexExecutableIdentity(path: string): Promise<BigIntStats> {
+  const metadata = await fs.stat(path, { bigint: true });
+  if (!metadata.isFile() || metadata.size === 0n) {
+    throw new Error("Codex executable is not a non-empty file.");
+  }
+  return metadata;
+}
+
+function codexExecutableChangedError(path: string, cause?: unknown): Error {
+  return new DeepScanNonRetryableError(
+    "Deep Scan cannot start this worker because the Codex executable " +
+      `"${path}" changed after this Deep Scan started or is no longer available. ` +
+      "This usually means Codex updated while the scan was running. Retry after the update " +
+      "finishes; completed work remains in the retained partial scan.",
+    { cause },
+  );
+}
+
 async function workerRuntimeSettings(
   environment: Record<string, string>,
 ): Promise<CodexSdkWorkerRuntimeSettings> {
@@ -694,7 +758,21 @@ export function resolveCodexPath(
           : resolveFromSearchPath(searchPath, executableName, originalCwd);
       if (fromSearchPath) return fromSearchPath;
     }
-    return absoluteCodexPath(configured, platform, originalCwd);
+    const configuredPath = absoluteCodexPath(configured, platform, originalCwd);
+    if (platform === "win32") {
+      // Match Node's spawn lookup before binding the actual file's identity.
+      const suffixBase = configuredPath.endsWith(".")
+        ? configuredPath
+        : `${configuredPath}.`;
+      const hasExtension = /\.[^.]+$/u.test(win32.basename(configuredPath));
+      const candidates = [
+        ...(hasExtension ? [configuredPath] : []),
+        `${suffixBase}com`,
+        `${suffixBase}exe`,
+      ];
+      return candidates.find(isExecutableFile) ?? configuredPath;
+    }
+    return configuredPath;
   }
 
   if (platform !== "win32") {
