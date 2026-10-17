@@ -3,6 +3,37 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("shows canonical scope separately from the saved recipe without changing execution status", () => {
+    const scan = {
+      targetPath: "/synthetic/repository",
+      scanId: "synthetic-scan",
+      mode: "standard",
+      progress: { status: "complete" },
+      findings: [],
+      recipe: { target: { kind: "paths", paths: ["src"] } },
+    };
+    const text = renderScanHistory(
+      {
+        ...scan,
+        coverage: {
+          mode: "scoped_path",
+          includePaths: ["src/a  b.ts", "src/trailing "],
+          excludePaths: ["generated/**"],
+          explicitExclusions: [{ pattern: "fixtures", reason: "Fixtures" }],
+        },
+      },
+      "show",
+      { color: false, columns: 120 },
+    );
+    expect(text).toContain("COMPLETE");
+    expect(text).toContain('scoped paths: "src/a  b.ts", "src/trailing ";');
+    expect(text).toContain("excluding generated/**, fixtures");
+    expect(text).toContain("SAVED SCOPE");
+    const historical = renderScanHistory(scan, "show", { color: false });
+    expect(historical).toContain("COMPLETE");
+    expect(historical).not.toContain("scoped paths:");
+  });
+
   test("counts singleton sides when the other side is grouped", () => {
     const text = renderScanHistory(
       {

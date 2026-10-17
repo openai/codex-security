@@ -344,6 +344,11 @@ codex-security scan . --working-tree
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+`--path` selects files or directories. The scan summary and saved scan details
+show requested paths and exclusions. `coverage.deferred` records unfinished
+requested work separately from optional `coverage.openQuestions` follow-up.
+Human-readable output quotes ambiguous paths, while JSON retains their original strings.
+
 `--diff` scans committed changes; `--working-tree` scans staged and unstaged
 changes. Deep scans support whole repositories and path scopes. Working-tree
 snapshots include untracked nested Git repositories. Initialized submodules must
