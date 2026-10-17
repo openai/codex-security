@@ -226,6 +226,28 @@ test("Endor SARIF UUID matches JSON and retains all source assertions without pr
   });
 });
 
+test.each([
+  ["packages/my%20app/package.json", "packages/my app/package.json"],
+  ["packages/%E6%97%A5%E6%9C%AC/package.json", "packages/日本/package.json"],
+  ["packages/my%23app/package.json", "packages/my#app/package.json"],
+  ["packages/my%2520app/package.json", "packages/my%20app/package.json"],
+  ["%2e%2e/outside/package.json", null],
+  ["%2Ftmp/package.json", null],
+  ["C%3A%5Cprivate%5Cpackage.json", null],
+  ["packages/invalid%ZZ/package.json", null],
+])("Endor SARIF decodes safe repository paths once (%s)", (uri, path) => {
+  const input = endorSarif();
+  const result = input.runs[0]!.results[0]!;
+  result.locations[0]!.physicalLocation.artifactLocation.uri = uri!;
+  const output = normalizeEndorFindings(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings[0]!.evidence.locations).toEqual(
+    path === null ? [] : [{ path, line: null }],
+  );
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({ result });
+  expect(result.locations[0]!.physicalLocation.artifactLocation.uri).toBe(uri);
+});
+
 test("SARIF requires vendor identity, producer and consistent rule references", () => {
   for (const mutate of [
     (r: any) => delete r.results[0].properties["finding-uuid"],

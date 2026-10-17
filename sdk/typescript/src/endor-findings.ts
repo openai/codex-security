@@ -229,11 +229,17 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
             record(v, "Endor location")["physicalLocation"] ?? {},
             "Physical location",
           );
-          return relativePath(
+          const uri = text(
             record(physical["artifactLocation"] ?? {}, "Artifact location")[
               "uri"
             ],
           );
+          if (uri === null) return null;
+          try {
+            return relativePath(decodeURIComponent(uri));
+          } catch {
+            return null;
+          }
         })
         .filter((p): p is string => p !== null);
       return {
