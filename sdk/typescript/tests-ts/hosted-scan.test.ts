@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
@@ -277,24 +277,6 @@ test.each(sealedScopes)(
       });
       for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY"])
         expect(request.runtime.environment).not.toHaveProperty(key);
-      const preflight = JSON.parse(
-        execFileSync(
-          request.runtime.environment["PYTHON"]!,
-          [
-            join(request.runtime.pluginRoot, "scripts/config_preflight.py"),
-            "--profile",
-            "security_scan",
-            "--cwd",
-            request.runtime.outputDirectory,
-            "--runtime-check",
-            "delegation_available=true",
-            "--config",
-            request.runtime.environment["CODEX_SECURITY_CONFIG_PATH"]!,
-          ],
-          { encoding: "utf8", env: request.runtime.environment },
-        ),
-      );
-      expect(preflight.status).toBe("ready");
     });
     const result = await runHostedScan(input, { executor });
     expect(result.status, JSON.stringify(result)).toBe("completed");

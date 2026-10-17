@@ -138,6 +138,8 @@ try {
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
+    await testBedrockCredentialsReachWorker("oidc");
+    await testExternalProviderCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
@@ -2532,38 +2534,72 @@ async function testWorkerCyberAccessSettings() {
   }
 }
 
-async function testBedrockCredentialsReachWorker() {
+async function testBedrockCredentialsReachWorker(
+  credentials: "all" | "oidc" = "all",
+) {
   const fixture = await fakeCodexFixture();
   const mcpConfig = await readJson(import.meta.dirname, "../../.mcp.json");
+  const awsNames: string[] = mcpConfig.mcpServers[
+    "codex-security"
+  ].env_vars.filter((name: string) => name.startsWith("AWS_"));
+  const oidcNames = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+  ];
   const awsEnvironment = Object.fromEntries(
-    mcpConfig.mcpServers["codex-security"].env_vars
-      .filter((name: string) => name.startsWith("AWS_"))
+    awsNames
+      .filter((name) => credentials === "all" || oidcNames.includes(name))
       .map((name: string) => [name, `synthetic-bedrock-${name.toLowerCase()}`]),
   );
-  assert.ok(awsEnvironment.AWS_BEARER_TOKEN_BEDROCK);
+  if (credentials === "all") assert.ok(awsEnvironment.AWS_BEARER_TOKEN_BEDROCK);
   assert.ok(awsEnvironment.AWS_ACCESS_KEY_ID);
   assert.ok(awsEnvironment.AWS_SECRET_ACCESS_KEY);
+  assert.ok(awsEnvironment.AWS_SESSION_TOKEN);
+  const configPath = path.join(fixture.root, "bedrock.toml");
+  await writeFile(
+    configPath,
+    'model_provider = "amazon-bedrock"\nmodel_reasoning_summary = "none"\n',
+  );
+  const deepConfigPath = path.join(fixture.root, "bedrock-workers.toml");
+  await writeFile(
+    deepConfigPath,
+    '[worker_runtime]\nmodel_provider = "amazon-bedrock"\nmodel_reasoning_summary = "none"\n',
+  );
   const environment = {
-    ...awsEnvironment,
+    ...Object.fromEntries(awsNames.map((name) => [name, awsEnvironment[name]])),
+    OPENAI_API_KEY: undefined,
+    CODEX_API_KEY: undefined,
+    CODEX_SECURITY_CONFIG_PATH: configPath,
+    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepConfigPath,
     CODEX_CLI_PATH: fixture.executablePath,
-    FAKE_CODEX_BEDROCK_ENV_KEYS: JSON.stringify(Object.keys(awsEnvironment)),
+    FAKE_CODEX_BEDROCK_ENV_KEYS: JSON.stringify(awsNames),
   };
   const previousEnvironment = Object.keys(environment).map(
     (name) => [name, process.env[name]] as const,
   );
-  Object.assign(process.env, environment);
+  for (const [name, value] of Object.entries(environment))
+    restoreEnv(name, value);
 
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const workingDirectory = path.join(fixture.root, "artifacts");
     await mkdir(workingDirectory);
-    await writeFile(promptPath, "CAPTURE_SYNTHETIC_BEDROCK_AUTH\n");
+    await writeFile(
+      promptPath,
+      "CAPTURE_SYNTHETIC_BEDROCK_AUTH\nCAPTURE_SYNTHETIC_OPENAI_AUTH\n",
+    );
     const executor = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
     });
     for (const kind of ["discovery", "dedup"] as const) {
       for (const resumeThreadId of [undefined, "fixture-bedrock-resume"]) {
-        awsEnvironment.AWS_BEARER_TOKEN_BEDROCK = `synthetic-${kind}-${resumeThreadId ?? "fresh"}`;
+        awsEnvironment[
+          credentials === "oidc"
+            ? "AWS_SESSION_TOKEN"
+            : "AWS_BEARER_TOKEN_BEDROCK"
+        ] = `synthetic-${kind}-${resumeThreadId ?? "fresh"}`;
         awsEnvironment.AWS_REGION = resumeThreadId ? "us-west-2" : "us-east-2";
         Object.assign(process.env, awsEnvironment);
         const result = await executor.run(
@@ -2572,12 +2608,15 @@ async function testBedrockCredentialsReachWorker() {
         assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
         const invocation = await readJson(fixture.markerPath);
         assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
+        assert.deepEqual(invocation.openaiAuthentication, {});
         assert.equal(
           invocation.argv.includes("resume"),
           resumeThreadId !== undefined,
         );
         assertConfigOverrides(invocation.argv, {
           "mcp_servers.codex-security.enabled": false,
+          model_provider: "amazon-bedrock",
+          model_reasoning_summary: "none",
         });
       }
     }
@@ -2585,6 +2624,114 @@ async function testBedrockCredentialsReachWorker() {
     for (const [name, value] of previousEnvironment) {
       restoreEnv(name, value);
     }
+  }
+}
+
+async function testExternalProviderCredentialsReachWorker() {
+  for (const [provider, key] of [
+    ["openrouter", "OPENROUTER_API_KEY"],
+    ["fireworks", "FIREWORKS_API_KEY"],
+  ]) {
+    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+      const configPath = path.join(fixture.root, "provider.toml");
+      const deepPath = path.join(fixture.root, "workers.toml");
+      const profile = `scan-${provider}`;
+      const selectedKey = `synthetic-${provider}-scan-key`;
+      const settings = {
+        model_provider: provider,
+        native_profile: profile,
+        environment: { [key]: selectedKey },
+      };
+      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
+      await writeFile(
+        path.join(fixture.root, `${profile}.config.toml`),
+        stringifyToml({
+          model_provider: provider,
+          model_providers: {
+            [provider]: {
+              name: provider,
+              base_url: `https://${provider}.example.test/v1`,
+              wire_api: "responses",
+              env_key: key,
+            },
+          },
+        }),
+      );
+      await writeFile(promptPath, "synthetic provider credential fixture");
+      const environment = {
+        CODEX_HOME: fixture.root,
+        CODEX_SECURITY_CONFIG_PATH: configPath,
+        CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepPath,
+        OPENAI_API_KEY: undefined,
+        CODEX_API_KEY: undefined,
+        OPENROUTER_API_KEY: undefined,
+        FIREWORKS_API_KEY: undefined,
+      };
+      const saved = Object.keys(environment).map(
+        (name) => [name, process.env[name]] as const,
+      );
+      const originalSpawn = childProcess.spawn;
+      const launches: {
+        args: readonly string[];
+        environment: NodeJS.ProcessEnv;
+      }[] = [];
+      try {
+        for (const [name, value] of Object.entries(environment))
+          restoreEnv(name, value);
+        childProcess.spawn = ((
+          command: string,
+          args: readonly string[],
+          options: SpawnOptions,
+        ) => {
+          if (args[0] === "exec")
+            launches.push({ args, environment: { ...options.env } });
+          return originalSpawn(command, args, options);
+        }) as typeof childProcess.spawn;
+        syncBuiltinESMExports();
+        const executor = new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        });
+        for (const kind of ["discovery", "dedup"] as const)
+          for (const resumeThreadId of [undefined, "fixture-provider-resume"]) {
+            launches.length = 0;
+            process.env[key] = "changed-ambient-key";
+            await executor.run(
+              workerRequest(promptPath, workingDirectory, {
+                kind,
+                resumeThreadId,
+              }),
+            );
+            assert.equal(launches.length, 1);
+            const launch = launches[0];
+            assert.equal(launch.environment[key], selectedKey);
+            assert.equal(launch.environment.OPENAI_API_KEY, undefined);
+            assert.equal(launch.environment.CODEX_API_KEY, undefined);
+            assertFlagPair(launch.args, "--profile", profile);
+            assertConfigOverrides(launch.args, {
+              model_provider: provider,
+              "mcp_servers.codex-security.enabled": false,
+            });
+            assert.equal(
+              launch.args.includes("resume"),
+              resumeThreadId !== undefined,
+            );
+            await writeFile(
+              deepPath,
+              stringifyToml({
+                worker_runtime: {
+                  ...settings,
+                  environment: { [key]: "changed-snapshot-key" },
+                },
+              }),
+            );
+          }
+      } finally {
+        childProcess.spawn = originalSpawn;
+        syncBuiltinESMExports();
+        for (const [name, value] of saved) restoreEnv(name, value);
+      }
+    });
   }
 }
 
