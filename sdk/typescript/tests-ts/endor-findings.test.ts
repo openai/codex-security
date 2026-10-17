@@ -46,6 +46,113 @@ test("arrays and ListFindingsResponse use the same identities and empty lists ar
   });
 });
 
+test.each(["sast_data", "ai_sast_data"])(
+  "Endor %s preserves the primary source location and original evidence",
+  (field) => {
+    const base = endorFinding();
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        target_dependency_name: "",
+        dependency_file_paths: ["src/example.ts", "package.json"],
+        finding_metadata: {
+          [field]: {
+            location: {
+              relative_path: "src/example.ts",
+              start_line: 12,
+              end_line: 14,
+            },
+          },
+        },
+      },
+    };
+    const original = structuredClone(input);
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.source_finding_id).toBe(input.uuid);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "package.json", line: null },
+      { path: "src/example.ts", line: 12 },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toEqual(original);
+    expect(input).toEqual(original);
+  },
+);
+
+test.each([12, 24])(
+  "Endor retains distinct code locations without duplicating identical locations (line %i)",
+  (secondLine) => {
+    const base = endorFinding();
+    const location = { relative_path: "src/example.ts", start_line: 12 };
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        dependency_file_paths: [],
+        finding_metadata: {
+          sast_data: { location },
+          ai_sast_data: { location: { ...location, start_line: secondLine } },
+        },
+      },
+    };
+    const expected = [{ path: "src/example.ts", line: 12 }];
+    if (secondLine !== 12)
+      expected.push({ path: "src/example.ts", line: secondLine });
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual(expected);
+  },
+);
+
+test.each([null, 0, -1, 1.5, "12"])(
+  "Endor retains a code path without inventing a line from %p",
+  (start_line) => {
+    const base = endorFinding();
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        dependency_file_paths: [],
+        finding_metadata: {
+          ai_sast_data: {
+            location: { relative_path: "src/example.ts", start_line },
+          },
+        },
+      },
+    };
+    const output = normalizeEndorFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings[0]!.evidence.locations).toEqual([
+      { path: "src/example.ts", line: null },
+    ]);
+    expect(output.findings[0]!.evidence.source_data).toEqual(input);
+  },
+);
+
+test("unsafe code locations remain only in the original Endor evidence", () => {
+  const base = endorFinding();
+  const input = {
+    ...base,
+    spec: {
+      ...base.spec,
+      dependency_file_paths: [],
+      finding_metadata: {
+        sast_data: {
+          location: { relative_path: "../outside.ts", start_line: 12 },
+        },
+        ai_sast_data: {
+          location: { relative_path: "C:\\private\\source.ts", start_line: 24 },
+        },
+      },
+    },
+  };
+  const output = normalizeEndorFindings(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings[0]!.evidence.locations).toEqual([]);
+  expect(output.findings[0]!.evidence.source_data).toEqual(input);
+});
+
 test("changed severity, reachability, dismissal and dependency version retain UUID", () => {
   const input = endorFinding();
   const original = normalizeEndorFindings(input).findings[0]!;
