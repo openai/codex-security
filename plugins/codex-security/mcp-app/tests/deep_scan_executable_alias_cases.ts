@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { bundledCodexSdkEnvironment as BundledEnvironment } from "../../../../sdk/typescript/src/codex-sdk-environment.js";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
 import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
 import { readJson } from "./support/json.ts";
@@ -22,7 +21,10 @@ export async function testConcurrentWorkerExecutableAliases({
     preflightMarkerPath: string;
   }>;
   parentSandbox: DeepWorkerParentSandbox;
-  bundledCodexSdkEnvironment: typeof BundledEnvironment;
+  bundledCodexSdkEnvironment: (
+    command: string,
+    environment: Record<string, string>,
+  ) => Record<string, string>;
   assertConfigOverrides: (
     args: readonly string[],
     values: Record<string, string>,
