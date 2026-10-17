@@ -7250,7 +7250,16 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
 ): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
-  const environment = { GIT_INDEX_FILE: join(root, "index") };
+  const environment = {
+    GIT_INDEX_FILE: join(root, "index"),
+    GIT_LITERAL_PATHSPECS: "0",
+  };
+  const sourcePathspecs = [
+    "--",
+    ":/",
+    ":(top,glob,exclude)**/.svn",
+    ":(top,glob,exclude)**/.svn/**",
+  ];
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository, {
       environment,
@@ -7267,14 +7276,7 @@ async function snapshotPatchTree(
     }
     if (hasHead) {
       await run(["read-tree", "HEAD"]);
-      await run(["--literal-pathspecs", "add", "--all"]);
     } else {
-      const sourcePathspecs = [
-        "--",
-        ":/",
-        ":(top,glob,exclude)**/.svn",
-        ":(top,glob,exclude)**/.svn/**",
-      ];
       // Preserve tracked paths, including ignored and intent-to-add files, without
       // copying cached stat data or flags that can hide working-tree changes.
       // Git's quoted format preserves raw filename bytes through string transport.
@@ -7298,13 +7300,8 @@ async function snapshotPatchTree(
         repository,
         { environment, input: entries },
       );
-      await dependencies.runRepositoryCommand(
-        "git",
-        ["add", "--all", ...sourcePathspecs],
-        repository,
-        { environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" } },
-      );
     }
+    await run(["add", "--all", ...sourcePathspecs]);
     return await run(["write-tree"]);
   } finally {
     await rm(root, { recursive: true, force: true });

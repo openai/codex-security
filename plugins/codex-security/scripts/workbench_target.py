@@ -445,10 +445,16 @@ def worktree_content_digest_for_context(
 ) -> str:
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    source_pathspecs = [
+        f":(literal){pathspec}",
+        ":(top,glob,exclude)**/.svn",
+        ":(top,glob,exclude)**/.svn/**",
+    ]
     tracked_ok = _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
+        "--no-literal-pathspecs",
         "diff",
         "--binary",
         "--full-index",
@@ -457,18 +463,19 @@ def worktree_content_digest_for_context(
         "--ignore-submodules=none",
         "HEAD",
         "--",
-        pathspec,
+        *source_pathspecs,
         git_dir=git_dir,
         work_tree=work_tree,
     )
     untracked = git_bytes(
         repository,
+        "--no-literal-pathspecs",
         "ls-files",
         "--others",
         "--exclude-standard",
         "-z",
         "--",
-        pathspec,
+        *source_pathspecs,
         git_dir=git_dir,
         work_tree=work_tree,
     )

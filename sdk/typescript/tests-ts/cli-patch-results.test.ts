@@ -228,14 +228,20 @@ lines.on("line", (line) => {
   );
 
   test.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
+    [false, false, false],
+    [false, false, true],
+    [false, true, false],
+    [false, true, true],
+    [true, false, false],
+    [true, false, true],
+    [true, true, false],
+    [true, true, true],
   ])(
-    "ignores SVN metadata in unborn Git with tracked metadata: %j and source edits: %j",
-    async (tracked, apply) => {
-      await using fixture = await repositoryFixture({ initialCommit: false });
+    "ignores SVN metadata in Git with commits: %j, tracked metadata: %j and source edits: %j",
+    async (committed, tracked, apply) => {
+      await using fixture = await repositoryFixture({
+        initialCommit: committed,
+      });
       const metadata = [".svn", "nested/.svn"];
       for (const directory of metadata) {
         await mkdir(join(fixture.directory, directory), { recursive: true });
@@ -248,6 +254,10 @@ lines.on("line", (line) => {
       await mkdir(join(fixture.directory, "nested", ".svn-backup"));
       await writeFile(source, "original source\n");
       if (tracked) await fixture.git("add", ".");
+      if (committed) {
+        await fixture.git("add", "nested/.svn-backup/app.ts");
+        await fixture.git("commit", "-m", "Synthetic source and metadata");
+      }
       const indexPath = join(fixture.directory, ".git", "index");
       const index = await readFile(indexPath);
 
