@@ -2881,3 +2881,86 @@ test("Endor CLI dry-run recognizes SARIF without writing imports", async () => {
   expect(await cli.runCli(command, f.cliDeps)).toBe(0);
   expect(f.posts).toHaveLength(0);
 });
+
+test.each([
+  { uris: ["https://github.com/other/project"] },
+  {
+    uris: [
+      "https://github.com/example/project",
+      "https://github.com/other/project",
+    ],
+  },
+  { uris: ["https://github.com:443/example/project"] },
+])(
+  "Endor source repository provenance binds both publication entrypoints: %p",
+  async ({ uris }) => {
+    const { endorSarif } = await import("./support/endor-import-fixtures.js");
+    const { normalizeEndorFindings } = await import("../src/endor-findings.js");
+    const input: any = endorSarif();
+    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
+      repositoryUri,
+    }));
+    const f = await fixture(input);
+    const selected = { ...options, provider: "endor" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeEndorFindings(input),
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(f.reports.size).toBe(0);
+  },
+);
+
+test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
+  const { endorSarif } = await import("./support/endor-import-fixtures.js");
+  const input: any = endorSarif();
+  input.runs[0].versionControlProvenance = [
+    {
+      repositoryUri: "https://GITHUB.COM/EXAMPLE/PROJECT.git",
+      revisionId: "synthetic-revision",
+    },
+  ];
+  const original = structuredClone(input);
+  const f = await fixture(input);
+  const selected = { ...options, provider: "endor" as const };
+  f.state.loseResponse = true;
+  const first = await prepareExternalPublication(f.file, selected, f.deps);
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const changedDestination = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.endsWith("/repositories")) {
+        const body = await response.json();
+        body.data[0].url = "https://github.com/other/project";
+        return Response.json(body);
+      }
+      return response;
+    },
+  };
+  const retry = await prepareExternalPublication(
+    f.file,
+    selected,
+    changedDestination,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).status).toBe("complete");
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    runContext: {
+      versionControlProvenance: original.runs[0].versionControlProvenance,
+    },
+  });
+  const posted = f.posts.length;
+  await expect(
+    prepareExternalPublication(f.file, selected, changedDestination),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(posted);
+  expect(input).toEqual(original);
+});

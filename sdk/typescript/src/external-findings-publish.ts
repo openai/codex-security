@@ -26,7 +26,7 @@ import {
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readEndorFindings } from "./endor-findings.js";
+import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -667,6 +667,9 @@ async function preparePublicationInput(
         finding.evidence.details?.repository?.url,
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(finding.evidence.source_data)
+          : []),
+        ...(options.provider === "endor"
+          ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
       ];
       for (const sourceRepository of sourceRepositories)

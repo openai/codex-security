@@ -62,8 +62,13 @@ and displayed severity stays unknown. Recommended versions, reachability, dismis
 snoozes and other source assertions are retained without becoming Cloud assessments.
 JSON maps reported primary SAST and AI SAST paths and start lines. SARIF maps
 reported source lines for results categorized as SAST or Secrets; other SARIF
-line numbers remain only in the original evidence. Locations remain source claims,
-not verified Cloud assessments.
+line numbers remain only in the original evidence. Indexed and base-relative SARIF
+artifact references remain in the original evidence without being mapped to a
+repository file. Locations remain source claims, not verified Cloud assessments.
+
+For new uploads, every declared SARIF repository URI must match the selected Cloud
+repository. Saved requests remain bound to their original repository ID and can
+resume after a repository rename.
 
 Imports replace the complete source snapshot for an existing UUID. Preview before
 switching between JSON and SARIF, since the two exports contain different evidence.
