@@ -5080,7 +5080,11 @@ export function selectedScanEnvironment(
   return Object.fromEntries(
     Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
       const key = name.toUpperCase();
-      if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
+      if (
+        key === "OPENROUTER_API_KEY" ||
+        key === "FIREWORKS_API_KEY" ||
+        key === "CHEAPER_INFERENCE_API_KEY"
+      ) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null || key === selectedProviderKey)
@@ -5122,7 +5126,8 @@ function environmentApiKeyEntry(
     | "OPENAI_API_KEY"
     | "CODEX_API_KEY"
     | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
+    | "FIREWORKS_API_KEY"
+    | "CHEAPER_INFERENCE_API_KEY";
   value: string;
 } | null {
   const keys = isExternalModelProvider(modelProvider)

@@ -36,9 +36,17 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const CHEAPERINFERENCE_CODEX_PROVIDER = {
+  name: "Cheaper Inference",
+  base_url: "https://api.cheaperinference.com/v1",
+  env_key: "CHEAPER_INFERENCE_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
+  cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;

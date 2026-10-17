@@ -50,6 +50,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -320,6 +321,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "FIREWORKS_API_KEY",
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
   ],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [

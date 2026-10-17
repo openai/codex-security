@@ -169,6 +169,9 @@ codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
+codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
 ### Amazon Bedrock
