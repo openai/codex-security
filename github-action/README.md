@@ -13,8 +13,8 @@ with access to the selected model. OpenAI is the default provider. See
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
 Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
-The matching `action-vX.Y.Z` tag and distribution commit are listed in each
-product release after the CLI and Action have both passed release checks.
+The matching `action-vX.Y.Z` release lists the full distribution commit SHA
+and links to the product changelog after the Action has passed release checks.
 When using a fork, replace `openai` with the fork owner.
 
 This example requests Daybreak Blue. Use an API key from a project with Blue
@@ -429,9 +429,10 @@ Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
 SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
 audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
-`runtime/package.json` is the installed CLI version source. Main keeps the last
-published CLI pin so its checks remain runnable while a release PR prepares the
-next product version. To upgrade that development pin, update it and regenerate
+`runtime/package.json` is the installed CLI version source. Main keeps an already
+published CLI baseline so its checks remain runnable while a release PR prepares
+the next product version. This development pin does not necessarily track the
+latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
 Releases use the product version from `sdk/typescript/package.json`. Before npm
@@ -445,12 +446,16 @@ runs the Action checks in a job with read-only repository permissions.
 A fresh publisher takes only the tested runtime lock, rebuilds
 from the same source, and verifies the bundle hashes without executing the CLI.
 It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`.
+same version as `npm-vX.Y.Z`. The companion Action release includes the manifest
+and SBOM before publication, lists the full distribution commit SHA, and links
+to the npm release's canonical changelog. It is never marked Latest.
 
 The Action distribution commit differs from the CLI source commit because the
 registry integrity lock is finalized after publication. Release metadata records
 both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm. Existing version tags are never moved.
+can be rerun without republishing npm or changing its immutable release assets.
+Recovery verifies existing Action assets and can finish a partial draft release.
+Existing version tags are never moved.
 See [the release process](../RELEASING.md) for the orchestration and recovery flow.
 
 <!-- prettier-ignore-start -->
