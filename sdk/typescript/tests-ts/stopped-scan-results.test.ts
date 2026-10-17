@@ -113,14 +113,15 @@ const stoppedScanProbe = [
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
   "    connection.close()",
-  "    frozen_sources = json.loads(frozen_after_success)",
+  "    frozen_state = json.loads(frozen_after_success)",
+  "    frozen_sources = frozen_state['sources'] if isinstance(frozen_state.get('sources'), dict) else frozen_state",
   "    head_relative = next(path for path in frozen_sources if path.startswith('checkpoint-heads/'))",
   "    head_path = scan_dir / head_relative",
   "    head = json.loads(head_path.read_text(encoding='utf-8'))",
   "    snapshot_bytes = (scan_dir / 'checkpoints' / head['checkpoint']).read_bytes()",
   "    snapshot = json.loads(snapshot_bytes)",
   "    head_evidence = head_path.read_bytes()",
-  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_evidence).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
+  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': frozen_state, 'frozenSources': frozen_sources, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_evidence).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
   "    raise SystemExit(0)",
   "if source == 'late-checkpoint':",
   "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
@@ -233,7 +234,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(recovered.headPath).toBe(
     `checkpoint-heads/${recovered.headDigest}.json`,
   );
-  expect(recovered.frozenAfterSuccess).toMatchObject({
+  expect(recovered.frozenSources).toMatchObject({
     [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
     [recovered.headPath]: recovered.headDigest,
   });

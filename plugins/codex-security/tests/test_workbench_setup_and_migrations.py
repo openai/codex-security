@@ -91,6 +91,7 @@ EXPECTED_MIGRATIONS = [
     (47, "snapshot deep scan discovery context"),
     (48, "share finding issue receipts across trackers"),
     (49, "index finding issue receipt ownership"),
+    (50, "freeze stopped scan checkpoint selections"),
 ]
 
 

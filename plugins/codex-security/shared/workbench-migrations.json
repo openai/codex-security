@@ -410,5 +410,12 @@
     "statements": [
       "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
     ]
+  },
+  {
+    "version": 50,
+    "name": "freeze stopped scan checkpoint selections",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
+    ]
   }
 ]
