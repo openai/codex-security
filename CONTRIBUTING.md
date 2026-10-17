@@ -15,9 +15,17 @@ packages and releases. Do not edit or commit files in that directory. See the
 [SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
 commands.
 
-`pnpm --dir sdk/typescript run generate:models` also copies shared finding
-normalization from the plugin source into the SDK. Edit the plugin helper, then
-regenerate its SDK copy. `pnpm --dir sdk/typescript run types` checks freshness.
+Compact artifact contracts are authored in `plugins/codex-security/mcp-app/src/artifact-contracts.ts`, with shared finding and threat-model definitions in `finding-detail-schemas.ts` and `threat-model-schema.ts`.
+Canonical findings, scan-manifest, and coverage exports are defined in `mcp-app/scripts/canonical-schemas.mts`; patch-risk exports and their static type are defined in `mcp-app/src/patch-risk-schema.ts`.
+The corresponding JSON schemas are generated compatibility resources. Canonical runtime validation continues to use the selected plugin's JSON schemas.
+After editing the contracts, run `node plugins/codex-security/mcp-app/scripts/generate-artifact-schemas.mjs`.
+The MCP `typecheck` command checks that the generated resources are current. SDK model generation remains based on the canonical JSON exports.
+
+`pnpm --dir sdk/typescript run generate:models` also copies workbench argument
+encoding and executable path handling from the plugin source into the SDK. Edit the
+plugin helper, then regenerate its SDK copy. Historical finding normalization is
+maintained in the SDK.
+`pnpm --dir sdk/typescript run types` checks freshness.
 
 Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
 source. Deterministic triage checks and the MCP reducer IPC regression remain

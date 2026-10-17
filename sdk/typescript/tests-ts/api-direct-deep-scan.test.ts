@@ -2,10 +2,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { delimiter, join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
-import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScan } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import {
   completedEvents,
@@ -44,7 +44,7 @@ test.each([undefined, "Summarize the completed scan."])(
     const started = mock();
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      supportsDirectDeepScan: async () => true,
+      canRunDirectDeepScan: () => true,
       environment: {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
         CODEX_API_KEY: "synthetic-direct-scan-key",
@@ -220,16 +220,16 @@ test.each(["configured", "managed"] as const)(
   },
 );
 
-test("Node retains the direct Deep Scan capability", async () => {
+test("Node runs the direct Deep Scan contracts", async () => {
   if (
     runTestInSubprocess(
       import.meta.path,
-      "Node retains the direct Deep Scan capability",
+      "Node runs the direct Deep Scan contracts",
     )
   )
     return;
   const root = await temporaryDirectory();
-  const source = new URL("../src/deep-scan.ts", import.meta.url);
+  const source = new URL("./direct-deep-scan.test.ts", import.meta.url);
   const built = await Bun.build({
     entrypoints: [fileURLToPath(source)],
     target: "node",
@@ -239,11 +239,8 @@ test("Node retains the direct Deep Scan capability", async () => {
   expect(built.success).toBe(true);
   const module = join(root, "deep-scan.mjs");
   await writeFile(module, await built.outputs[0]!.text());
-  await promisify(execFile)("node", [
-    "--input-type=module",
-    "--eval",
-    `import assert from "node:assert/strict";
-     const { supportsDirectDeepScan } = await import(${JSON.stringify(pathToFileURL(module).href)});
-     assert.equal(await supportsDirectDeepScan(${JSON.stringify(PLUGIN_ROOT)}), true);`,
-  ]);
+  await promisify(execFile)("node", ["--test", module], {
+    timeout: Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
+    windowsHide: true,
+  });
 });

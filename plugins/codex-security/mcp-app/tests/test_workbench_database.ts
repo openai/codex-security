@@ -269,7 +269,7 @@ test(
   },
 );
 
-for (const previewVersion of [34, 40, 41, 42, 43, 44]) {
+for (const previewVersion of [34, 40, 41, 42, 43, 44, 48]) {
   test(`database-info upgrades source-scope preview ${previewVersion} without losing scan data`, async () => {
     const directory = await temporary.create("workbench-source-preview-");
     const databasePath = join(directory, "workbench.sqlite3");
@@ -281,7 +281,7 @@ for (const previewVersion of [34, 40, 41, 42, 43, 44]) {
       ),
     );
     insertScan(old);
-    const sourceScope = migrations.find((item) => item.version === 48)!;
+    const sourceScope = migrations.find((item) => item.version === 50)!;
     old.exec(sourceScope.statements.join("\n"));
     old
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
@@ -295,11 +295,25 @@ for (const previewVersion of [34, 40, 41, 42, 43, 44]) {
     assert.equal((await databaseInfo(directory)).databasePath, databasePath);
     const upgraded = new DatabaseSync(databasePath);
     try {
-      assertMigrationNames(upgraded, 34, 40, 41, 42, 43, 44, 45, 46, 47, 48);
+      assertMigrationNames(
+        upgraded,
+        34,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+      );
       assert.equal(
         upgraded
           .prepare(
-            "SELECT applied_at FROM schema_migrations WHERE version = 48",
+            "SELECT applied_at FROM schema_migrations WHERE version = 50",
           )
           .get()?.applied_at,
         "original",
@@ -349,7 +363,7 @@ test("database-info retains scan names from installed migration 42", async () =>
   await databaseInfo(directory);
   const upgraded = new DatabaseSync(databasePath);
   try {
-    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48);
+    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50);
     assert.equal(
       upgraded.prepare("SELECT name FROM scans").get()?.name,
       "Original scan",
@@ -407,7 +421,7 @@ test("database-info repairs recorded scan-name and source-scope columns", async 
   }
 });
 
-for (const version of [43, 48]) {
+for (const version of [43, 50]) {
   test(`database-info rejects unsupported source-scope history ${version} without changing it`, async () => {
     const directory = await temporary.create("workbench-source-unknown-");
     const databasePath = join(directory, "workbench.sqlite3");

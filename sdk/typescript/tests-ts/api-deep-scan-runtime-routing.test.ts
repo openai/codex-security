@@ -105,7 +105,7 @@ test.each([
         environment: runtimeEnvironment,
       }),
       // Keep the host's Bun fallback and account advisory out of this check.
-      supportsDirectDeepScan: async () => true,
+      canRunDirectDeepScan: () => true,
       createCodex,
       runDeepScan: directRun,
     },

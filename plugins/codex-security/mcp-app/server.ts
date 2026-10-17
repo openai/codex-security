@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./src/workbench-arguments.js";
 import {
   readingAnnotations,
   writingAnnotations,
@@ -17,6 +18,7 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
+import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
 import {
   DeepScanCoordinatorRegistry,
   AsyncLock,
@@ -32,9 +34,10 @@ import type { DeepScanRunState } from "./src/deep-scan/types.js";
 import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
 
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
-
-const userContextSchema = z.string().trim().min(1);
-const editableUserContextSchema = z.string().trim();
+const trimmedText = z.string().trim();
+const requiredText = trimmedText.min(1);
+const nonnegativeInteger = z.number().int().nonnegative();
+const positiveInteger = z.number().int().positive();
 const pathSchema = z
   .string()
   .min(1)
@@ -88,27 +91,21 @@ const daybreakEntitlementContextSchema = z.object({
 const diffTargetSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("working_tree"),
-    baseRevision: z.string().trim().min(1).max(512).optional(),
-    contentDigest: z.string().trim().min(1).max(128).optional(),
-    headRevision: z.string().trim().min(1).max(512).optional(),
+    baseRevision: requiredText.max(512).optional(),
+    contentDigest: requiredText.max(128).optional(),
+    headRevision: requiredText.max(512).optional(),
   }),
   z.strictObject({
     kind: z.literal("commit"),
-    baseRevision: z.string().trim().min(1).max(512).optional(),
-    headRevision: z.string().trim().min(1).max(512),
+    baseRevision: requiredText.max(512).optional(),
+    headRevision: requiredText.max(512),
   }),
   z.strictObject({
     kind: z.literal("range"),
-    baseRevision: z.string().trim().min(1).max(512),
-    headRevision: z.string().trim().min(1).max(512),
+    baseRevision: requiredText.max(512),
+    headRevision: requiredText.max(512),
   }),
 ]);
-const currentScanPreflightCheckSchema = z.strictObject({
-  capability: z.string().trim().min(1).max(128),
-  reason: z.string().trim().min(1).max(1200),
-  severity: z.enum(["block", "warn", "suggest"]),
-  status: z.enum(["pass", "fail", "unknown"]),
-});
 const openSchema = {
   diffTarget: diffTargetSchema
     .optional()
@@ -132,29 +129,23 @@ const openSchema = {
   targetPath: pathSchema
     .optional()
     .describe("Optional resolved local target path."),
-  targetSummary: z
-    .string()
-    .trim()
-    .min(1)
+  targetSummary: requiredText
     .max(2400)
     .optional()
     .describe("Optional bounded target/security context."),
-  targetTitle: z
-    .string()
-    .trim()
-    .min(1)
+  targetTitle: requiredText
     .max(200)
     .optional()
     .describe("Optional human-readable target name."),
-  userContext: userContextSchema
+  userContext: requiredText
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
 const sessionSchema = { sessionId: z.string().uuid() };
 const startScanSchema = {
   ...sessionSchema,
-  model: z.string().trim().min(1).max(200).optional(),
-  reasoningEffort: z.string().trim().min(1).max(32).optional(),
+  model: requiredText.max(200).optional(),
+  reasoningEffort: requiredText.max(32).optional(),
 };
 const startPromptOnlyScanSchema = {
   diffTarget: diffTargetSchema
@@ -169,14 +160,11 @@ const startPromptOnlyScanSchema = {
     "Directory inside targetPath. Use '.' for the whole target.",
   ),
   targetPath: pathSchema.describe("Resolved local target path."),
-  targetSummary: z
-    .string()
-    .trim()
-    .min(1)
+  targetSummary: requiredText
     .max(2400)
     .optional()
     .describe("Optional bounded target or change-set context."),
-  userContext: userContextSchema
+  userContext: requiredText
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
@@ -187,31 +175,24 @@ const startHeadlessStandardScanSchema = {
     .describe(
       "Optional directory inside targetPath. Omit it or use '.' for the whole target.",
     ),
-  targetSummary: z
-    .string()
-    .trim()
+  targetSummary: trimmedText
     .max(2400)
     .optional()
     .describe("Optional bounded target context."),
-  userContext: editableUserContextSchema
+  userContext: trimmedText
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
-type PromptOnlyScanInput = {
-  diffTarget?: z.output<typeof diffTargetSchema>;
-  mode: "diff" | "standard";
-  scope: string;
-  targetPath: string;
-  targetSummary?: string;
-  userContext?: string;
-};
+type PromptOnlyScanInput = z.output<
+  z.ZodObject<typeof startPromptOnlyScanSchema>
+>;
 const userInputOptionSchema = z.strictObject({
-  description: z.string().trim().min(1).max(1200),
-  label: z.string().trim().min(1).max(200),
+  description: requiredText.max(1200),
+  label: requiredText.max(200),
 });
 const userInputQuestionSchema = z
   .strictObject({
-    header: z.string().trim().min(1).max(64),
+    header: requiredText.max(64),
     id: z
       .string()
       .regex(
@@ -223,7 +204,7 @@ const userInputQuestionSchema = z
         "Question IDs must not use reserved object property names.",
       ),
     options: z.array(userInputOptionSchema).min(2).max(3),
-    question: z.string().trim().min(1).max(1200),
+    question: requiredText.max(1200),
   })
   .superRefine((question, context) => {
     const labels = new Set<string>();
@@ -269,8 +250,8 @@ const submissionSchema = {
   scope: pathSchema,
   sessionId: z.string().uuid(),
   targetPath: pathSchema,
-  targetSummary: z.string().trim().max(2400).optional(),
-  userContext: editableUserContextSchema.optional(),
+  targetSummary: trimmedText.max(2400).optional(),
+  userContext: trimmedText.optional(),
 };
 const setupInspectionSchema = {
   diffTarget: diffTargetSchema.optional(),
@@ -295,7 +276,7 @@ const startDeepScanSchema = {
     .describe(
       "Scope inside targetPath. Deep Scan currently requires the whole target.",
     ),
-  userContext: editableUserContextSchema
+  userContext: trimmedText
     .optional()
     .describe("Optional security focus supplied by the user."),
   handoffClaimToken: handoffClaimTokenSchema
@@ -314,13 +295,13 @@ const continuationMutationClaimSchema = {
 const scanContextUpdateSchema = {
   ...scanSchema,
   ...continuationMutationClaimSchema,
-  userContext: editableUserContextSchema.describe(
+  userContext: trimmedText.describe(
     "Complete replacement context for the running scan. Pass an empty string to clear it.",
   ),
 };
 const appScanContextUpdateSchema = {
   ...scanSchema,
-  userContext: editableUserContextSchema,
+  userContext: trimmedText,
 };
 const phaseProgressUnitSchema = z.enum([
   "checks",
@@ -331,10 +312,7 @@ const phaseProgressUnitSchema = z.enum([
   "report_artifacts",
 ]);
 const progressSchema = {
-  deepReviewPass: z
-    .number()
-    .int()
-    .positive()
+  deepReviewPass: positiveInteger
     .optional()
     .describe(
       "Current Deep Scan discovery pass. Send it when starting each pass together with that pass's total and zero completed items.",
@@ -352,18 +330,12 @@ const progressSchema = {
     .describe(
       "Current workflow phase. Send it immediately when the scan enters a new phase so persisted progress advances.",
     ),
-  phaseItemsCompleted: z
-    .number()
-    .int()
-    .nonnegative()
+  phaseItemsCompleted: nonnegativeInteger
     .optional()
     .describe(
       "Completed authoritative coverage, receipts, or artifacts for the current phase. Increase it only after the corresponding work product exists.",
     ),
-  phaseItemsTotal: z
-    .number()
-    .int()
-    .nonnegative()
+  phaseItemsTotal: nonnegativeInteger
     .optional()
     .describe(
       "Expected authoritative coverage, receipts, or artifacts for the current phase. Increase it before newly discovered work begins.",
@@ -373,26 +345,13 @@ const progressSchema = {
     .describe(
       "What phaseItemsTotal and phaseItemsCompleted count for the current phase.",
     ),
-  preflightChecks: z
-    .array(currentScanPreflightCheckSchema)
-    .max(32)
-    .optional()
-    .describe(
-      "Current standard or diff scan preflight results. Project every helper results entry to capability, reason, severity, and status only. The server derives the item counts and visible block/warn attention items.",
-    ),
-  reportableFindingsCount: z.number().int().nonnegative().optional(),
-  reviewItemsCompleted: z
-    .number()
-    .int()
-    .nonnegative()
+  reportableFindingsCount: nonnegativeInteger.optional(),
+  reviewItemsCompleted: nonnegativeInteger
     .optional()
     .describe(
       "Cumulative completed reviews or coverage surfaces in the current discovery pass. Increment only after the corresponding review is complete.",
     ),
-  reviewItemsTotal: z
-    .number()
-    .int()
-    .nonnegative()
+  reviewItemsTotal: nonnegativeInteger
     .optional()
     .describe(
       "Expected reviews or coverage surfaces in the current discovery pass. Increase it before assigning newly discovered work.",
@@ -402,14 +361,14 @@ const progressSchema = {
 };
 const failSchema = {
   ...continuationMutationClaimSchema,
-  message: z.string().trim().min(1).max(2400),
+  message: requiredText.max(2400),
   scanId: z.string().uuid(),
 };
 const completeScanSchema = {
   ...scanSchema,
   ...continuationMutationClaimSchema,
 };
-const occurrenceIdSchema = z.string().trim().min(1).max(256);
+const occurrenceIdSchema = requiredText.max(256);
 const scanReadSchema = {
   ...scanSchema,
   occurrenceId: occurrenceIdSchema
@@ -430,14 +389,14 @@ const findingTriageSchema = {
   closeReason: z
     .enum(["already_fixed", "wont_fix", "false_positive"])
     .optional(),
-  note: z.string().trim().max(2400).optional(),
+  note: trimmedText.max(2400).optional(),
   occurrenceId: occurrenceIdSchema,
   status: z.enum(["open", "closed"]),
 };
 const findingRemediationSchema = {
   actionToken: z.string().uuid(),
-  baseRevision: z.string().trim().min(1).max(512).optional(),
-  expectedVersion: z.number().int().positive(),
+  baseRevision: requiredText.max(512).optional(),
+  expectedVersion: positiveInteger,
   occurrenceId: occurrenceIdSchema,
   patchDigest: z
     .string()
@@ -446,13 +405,13 @@ const findingRemediationSchema = {
   patchPath: pathSchema.optional(),
   requestId: z.string().uuid(),
   state: z.enum(["generated", "applied", "verifying", "verified", "failed"]),
-  summary: z.string().trim().max(2400).optional(),
-  verificationSummary: z.string().trim().max(2400).optional(),
+  summary: trimmedText.max(2400).optional(),
+  verificationSummary: trimmedText.max(2400).optional(),
 };
 const findingRemediationActionRequestSchema = {
   action: z.enum(["apply", "verify"]),
   actionToken: z.string().uuid(),
-  expectedVersion: z.number().int().positive(),
+  expectedVersion: positiveInteger,
   occurrenceId: occurrenceIdSchema,
   requestId: z.string().uuid(),
 };
@@ -467,19 +426,19 @@ const findingsExportSchema = {
   scanId: z.string().uuid(),
 };
 const collectionPageSchema = {
-  limit: z.number().int().positive().max(50).optional(),
-  offset: z.number().int().nonnegative().optional(),
+  limit: positiveInteger.max(50).optional(),
+  offset: nonnegativeInteger.optional(),
 };
 const findingCollectionFiltersSchema = {
-  query: z.string().trim().max(512).optional(),
+  query: trimmedText.max(512).optional(),
   severity: z
     .enum(["critical", "high", "medium", "low", "informational"])
     .optional(),
   status: z.enum(["open", "closed"]).optional(),
 };
 const targetCollectionFiltersSchema = {
-  query: z.string().trim().max(512).optional(),
-  targetId: z.string().trim().min(1).max(256).optional(),
+  query: trimmedText.max(512).optional(),
+  targetId: requiredText.max(256).optional(),
 };
 const findingsPageSchema = {
   ...collectionPageSchema,
@@ -488,9 +447,9 @@ const findingsPageSchema = {
 };
 const globalFindingsPageSchema = {
   ...findingCollectionFiltersSchema,
-  limit: z.number().int().positive().max(20).optional(),
-  offset: z.number().int().nonnegative().optional(),
-  targetId: z.string().trim().min(1).max(256).optional(),
+  limit: positiveInteger.max(20).optional(),
+  offset: nonnegativeInteger.optional(),
+  targetId: requiredText.max(256).optional(),
 };
 const scanListSchema = {
   ...collectionPageSchema,
@@ -505,7 +464,11 @@ const repositoryListSchema = {
 };
 export function createCodexSecurityServer(): McpServer {
   const server = new McpServer(
-    { name: "codex-security", version: MCP_APP_VERSION },
+    {
+      name: "codex-security",
+      title: "Codex Security",
+      version: MCP_APP_VERSION,
+    },
     {
       capabilities: {
         experimental: { [CODEX_SANDBOX_STATE_META_CAPABILITY]: {} },
@@ -670,7 +633,7 @@ export function createCodexSecurityServer(): McpServer {
           scanDir,
           handoffClaimToken,
         },
-        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, complete security_scan preflight before reviewing the target or creating a goal. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
+        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, follow references/scan-runtime.md, then advance to threat_model before reviewing the target. Use available workers or parent fallback. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
       );
     },
   );
@@ -826,11 +789,9 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ targetPath }) => {
-      const target = await runWorkbench([
-        "inspect-target",
-        "--target-path",
-        targetPath,
-      ]);
+      const target = await runWorkbench(
+        workbenchArgs("inspect-target", { targetPath }),
+      );
       return scanActionResult(
         { target },
         "Validated the local Codex Security target.",
@@ -1083,7 +1044,7 @@ export function createCodexSecurityServer(): McpServer {
       },
     );
     if (workspace === undefined && canceledLocally) {
-      workspace = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+      workspace = (await runWorkbench(workbenchArgs("get-scan", { scanId })))[
         "workspace"
       ] as JsonObject;
     }
@@ -1144,7 +1105,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ scanId }) =>
       scanActionResult(
-        await runWorkbench(["recover-scan-results", "--scan-id", scanId]),
+        await runWorkbench(workbenchArgs("recover-scan-results", { scanId })),
         "Recovered retained Codex Security scan results.",
       ),
   );
@@ -1387,7 +1348,7 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ scanId, userContext }) => {
-      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      const current = await runWorkbench(workbenchArgs("get-scan", { scanId }));
       const workspace = isJsonObject(current.workspace)
         ? current.workspace
         : undefined;
@@ -1422,7 +1383,6 @@ export function createCodexSecurityServer(): McpServer {
         phaseItemsTotal,
         phaseItemsCompleted,
         phaseProgressUnit,
-        preflightChecks,
         reviewItemsTotal,
         reviewItemsCompleted,
         reportableFindingsCount,
@@ -1431,7 +1391,7 @@ export function createCodexSecurityServer(): McpServer {
       extra,
     ) => {
       const modelSettings = codexModelSettingsFromExtra(extra);
-      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      const current = await runWorkbench(workbenchArgs("get-scan", { scanId }));
       const scan = isJsonObject(current.scan) ? current.scan : undefined;
       const progress =
         scan && isJsonObject(scan.progress) ? scan.progress : undefined;
@@ -1454,66 +1414,32 @@ export function createCodexSecurityServer(): McpServer {
           "Deep Scan is still preparing. Discovery progress begins after its setup worker succeeds.",
         );
       }
-      if (
-        preflightChecks !== undefined &&
-        (phaseItemsTotal !== undefined ||
-          phaseItemsCompleted !== undefined ||
-          phaseProgressUnit !== undefined)
-      ) {
-        throw new Error(
-          "preflightChecks derives phaseItemsTotal, phaseItemsCompleted, and phaseProgressUnit; omit those fields.",
-        );
-      }
-      const preflightIssues = preflightChecks?.filter(
-        (check) =>
-          (check.severity === "block" || check.severity === "warn") &&
-          (check.status === "fail" || check.status === "unknown"),
-      );
-      const derivedPhaseItemsTotal = preflightChecks?.length ?? phaseItemsTotal;
-      const derivedPhaseItemsCompleted = preflightChecks
-        ? preflightChecks.filter((check) => check.status !== "unknown").length
-        : phaseItemsCompleted;
-      const derivedPhaseProgressUnit = preflightChecks
-        ? "checks"
-        : phaseProgressUnit;
-      const serializedPreflightIssues = preflightIssues
-        ? JSON.stringify(preflightIssues)
-        : undefined;
       return scanActionResult(
-        await runWorkbench(
-          [
-            "update-progress",
-            "--scan-id",
-            scanId,
-            ...(scan?.mode === "deep"
-              ? deepScanStore.coordinatorLeaseArgs(scanId)
-              : []),
-            ...optionalArg("--model", modelSettings.model),
-            ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
-            ...optionalArg("--claim-token", handoffClaimToken),
-            ...optionalNumberArg("--deep-review-pass", deepReviewPass),
-            ...optionalArg("--phase", phase),
-            ...optionalNumberArg("--phase-items-total", derivedPhaseItemsTotal),
-            ...optionalNumberArg(
-              "--phase-items-completed",
-              derivedPhaseItemsCompleted,
-            ),
-            ...optionalArg("--phase-progress-unit", derivedPhaseProgressUnit),
-            ...(serializedPreflightIssues
-              ? ["--preflight-issues-json-stdin"]
-              : []),
-            ...optionalNumberArg("--review-items-total", reviewItemsTotal),
-            ...optionalNumberArg(
-              "--review-items-completed",
-              reviewItemsCompleted,
-            ),
-            ...optionalNumberArg(
-              "--reportable-findings-count",
-              reportableFindingsCount,
-            ),
-          ],
-          serializedPreflightIssues,
-        ),
+        await runWorkbench([
+          "update-progress",
+          "--scan-id",
+          scanId,
+          ...(scan?.mode === "deep"
+            ? deepScanStore.coordinatorLeaseArgs(scanId)
+            : []),
+          ...optionalArg("--model", modelSettings.model),
+          ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
+          ...optionalArg("--claim-token", handoffClaimToken),
+          ...optionalNumberArg("--deep-review-pass", deepReviewPass),
+          ...optionalArg("--phase", phase),
+          ...optionalNumberArg("--phase-items-total", phaseItemsTotal),
+          ...optionalNumberArg("--phase-items-completed", phaseItemsCompleted),
+          ...optionalArg("--phase-progress-unit", phaseProgressUnit),
+          ...optionalNumberArg("--review-items-total", reviewItemsTotal),
+          ...optionalNumberArg(
+            "--review-items-completed",
+            reviewItemsCompleted,
+          ),
+          ...optionalNumberArg(
+            "--reportable-findings-count",
+            reportableFindingsCount,
+          ),
+        ]),
         "Updated Codex Security scan progress.",
       );
     },
@@ -1529,7 +1455,12 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ scanId, handoffClaimToken }) => {
+    async ({ scanId, handoffClaimToken }, extra) => {
+      const turnMetadata = codexTurnMetadataFromExtra(extra);
+      const turnId =
+        turnMetadata?.thread_source === "security_scan"
+          ? turnMetadata.turn_id
+          : undefined;
       try {
         return scanActionResult(
           await runWorkbench([
@@ -1537,6 +1468,11 @@ export function createCodexSecurityServer(): McpServer {
             "--scan-id",
             scanId,
             ...optionalArg("--claim-token", handoffClaimToken),
+            ...optionalArg("--thread-id", threadIdFromExtra(extra)),
+            ...optionalArg(
+              "--turn-id",
+              typeof turnId === "string" ? turnId : undefined,
+            ),
           ]),
           "Validated and indexed the completed Codex Security scan.",
         );
@@ -1544,6 +1480,35 @@ export function createCodexSecurityServer(): McpServer {
         throw new Error(completionFailureMessage(error));
       }
     },
+  );
+
+  server.registerTool(
+    "finalize_codex_security_scan_usage",
+    {
+      title: "Finalize Codex Security Scan Usage",
+      description:
+        "App-only. Record final measured usage after the scan's completion turn has finished. Pass the exact thread and turn returned in usage.completion; do not call while that turn is running.",
+      inputSchema: {
+        ...scanSchema,
+        threadId: z.string().trim().min(1),
+        turnId: z.string().trim().min(1),
+        turnStatus: z.enum(["completed", "interrupted", "failed"]),
+      },
+      annotations: writingAnnotations,
+      _meta: appMeta,
+    },
+    async ({ scanId, threadId, turnId, turnStatus }) =>
+      scanActionResult(
+        await runWorkbench(
+          workbenchArgs("finalize-scan-usage", {
+            scanId,
+            threadId,
+            turnId,
+            turnStatus,
+          }),
+        ),
+        "Recorded final Codex Security scan usage.",
+      ),
   );
 
   server.registerTool(
@@ -1612,15 +1577,13 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ occurrenceId, requestId, actionToken }) =>
       scanActionResult(
-        await runWorkbench([
-          "request-finding-remediation",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
+        await runWorkbench(
+          workbenchArgs("request-finding-remediation", {
+            occurrenceId,
+            requestId,
+            actionToken,
+          }),
+        ),
         "Queued the local Codex Security finding remediation request.",
       ),
   );
@@ -1637,19 +1600,15 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ occurrenceId, requestId, expectedVersion, action, actionToken }) =>
       scanActionResult(
-        await runWorkbench([
-          "request-finding-remediation-action",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--expected-version",
-          String(expectedVersion),
-          "--action",
-          action,
-          "--action-token",
-          actionToken,
-        ]),
+        await runWorkbench(
+          workbenchArgs("request-finding-remediation-action", {
+            occurrenceId,
+            requestId,
+            expectedVersion: String(expectedVersion),
+            action,
+            actionToken,
+          }),
+        ),
         `Queued the local Codex Security finding remediation ${action} request.`,
       ),
   );
@@ -1814,6 +1773,7 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
+  registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
@@ -2221,18 +2181,25 @@ function threadIdFromExtra(extra: unknown): string | undefined {
   const thread = isJsonObject(metadata?.thread) ? metadata.thread : undefined;
   if (typeof thread?.id === "string" && thread.id.trim())
     return thread.id.trim();
-  return undefined;
+  const threadId = codexTurnMetadataFromExtra(extra)?.thread_id;
+  return typeof threadId === "string" && threadId.trim()
+    ? threadId.trim()
+    : undefined;
+}
+
+function codexTurnMetadataFromExtra(extra: unknown): JsonObject | undefined {
+  const metadata = requestMetadataFromExtra(extra);
+  return isJsonObject(metadata?.["x-codex-turn-metadata"])
+    ? metadata["x-codex-turn-metadata"]
+    : undefined;
 }
 
 function codexModelSettingsFromExtra(extra: unknown): {
   model?: string;
   reasoningEffort?: string;
 } {
-  const metadata = requestMetadataFromExtra(extra);
   // Codex supplies the already-resolved runtime model and effective effort on every MCP call.
-  const turnMetadata = isJsonObject(metadata?.["x-codex-turn-metadata"])
-    ? metadata["x-codex-turn-metadata"]
-    : undefined;
+  const turnMetadata = codexTurnMetadataFromExtra(extra);
   const model =
     typeof turnMetadata?.model === "string"
       ? turnMetadata.model.trim()
@@ -2285,7 +2252,7 @@ function deepScanFailureMessage(run: DeepScanRunState): string {
       run.manifestPath ? ` Failure manifest: ${run.manifestPath}.` : ""
     }`,
     "This is a terminal failure of this logical Deep Scan; no successful discovery manifest was returned.",
-    "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with incomplete coverage.",
+    "Stop further scanning and surface this exact stable MCP failure. Read the existing scan context to report saved findings and pending candidates separately, with the reason execution stopped.",
     "Do not call start_codex_security_deep_scan again in this response.",
     "Do not call complete_codex_security_scan in this response.",
     "Do not start a replacement Deep Scan, call cancel for this terminal scan, claim a successful or no-findings scan, satisfy a successful-scan output schema, or emit benchmark JSON.",

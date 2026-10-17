@@ -1,3 +1,4 @@
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
@@ -59,13 +60,7 @@ export interface SeverityClassificationCheckpoint {
   ): Promise<void>;
 }
 
-const levelSchema = z.enum([
-  "critical",
-  "high",
-  "medium",
-  "low",
-  "informational",
-]);
+const levelSchema = z.enum(SCAN_SEVERITIES);
 const textSchema = z
   .string()
   .min(1)

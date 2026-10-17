@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { sha256Text as digest } from "./contract.js";
@@ -690,13 +691,11 @@ export async function resolveSecurityPolicyGuidance(
     process.execPath,
     [
       join(pluginRoot, "mcp", "helpers.mjs"),
-      "resolve-security-md",
-      "--repo",
-      target.repository,
-      "--scope",
-      dirname(target.targetPath),
-      "--out",
-      "-",
+      ...workbenchArgs("resolve-security-md", {
+        repo: target.repository,
+        scope: dirname(target.targetPath),
+        out: "-",
+      }),
     ],
     { encoding: "utf8", maxBuffer: Infinity, env: environment, signal },
   );

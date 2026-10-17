@@ -1162,7 +1162,41 @@ def complete_scan(
             cost_json,
             prepare_only=prepare_only,
             thread_id=getattr(args, "thread_id", None),
+            turn_id=getattr(args, "turn_id", None),
         )
+
+
+def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    with scan_completion_lock(scan_id):
+        scan = require_scan(connection, scan_id)
+        stored = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
+        usage = stored.get("usage", {})
+        completion = usage.get("completion")
+        if scan["status"] != "complete" or not completion:
+            raise SystemExit("The scan has no pending completion usage.")
+        if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
+            raise SystemExit("The scan usage belongs to a different completion turn.")
+        if not completion["finalized"]:
+            usage = scan_usage.collect_scan_usage(
+                connection,
+                scan,
+                thread_id=args.thread_id,
+                completed_turn_id=args.turn_id,
+            )
+            if usage["coverage"] == "unavailable":
+                return scan_context(connection, scan_id)
+            if args.turn_status != "completed":
+                if usage["coverage"] == "complete":
+                    usage["coverage"] = "partial"
+                usage["warnings"] = [*usage.get("warnings", []), f"scan_turn_{args.turn_status}"]
+            usage["completion"] = {**completion, "finalized": True}
+            cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
+                )
+        return scan_context(connection, scan_id)
 
 
 def complete_budget_exhausted_scan(
@@ -1340,12 +1374,11 @@ def budget_exhausted_draft(
         manifest = {
             "scan": {
                 "target": target,
-                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+                "scope": {"limitations": [warning]},
             }
         }
         findings = {"findings": []}
         coverage = {
-            "completeness": "partial",
             "inventoryStrategy": (
                 "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
             ),
@@ -1431,7 +1464,7 @@ def budget_exhausted_draft(
                 "reason": "Validation was deferred because the scan reached its cost limit.",
             }
         )
-    coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     for name, payload in (
         ("findings.json", findings),
         ("coverage.json", coverage),
@@ -1455,6 +1488,7 @@ def complete_scan_locked(
     *,
     prepare_only: bool = False,
     thread_id: str | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1552,11 +1586,21 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                recover_unsealed=scan["mode"] != "deep",
+                allow_missing_writeups=True,
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
+        if prepared.warnings:
+            # Save the explanation before publication removes the broken reference,
+            # so a retry after failed publication retains it.
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                    (json.dumps(warnings), scan_id),
+                )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
@@ -1601,6 +1645,18 @@ def complete_scan_locked(
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
+        if thread_id is not None and turn_id is not None:
+            measured_usage["completion"] = {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "finalized": False,
+            }
+            if measured_usage["coverage"] == "complete":
+                measured_usage["coverage"] = "partial"
+            measured_usage["warnings"] = [
+                *measured_usage.get("warnings", []),
+                "turn_in_progress",
+            ]
         cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
@@ -3371,10 +3427,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
-    if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(
-            _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
-        )
+    if args.command == "finding-issues":
+        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3398,6 +3452,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "register-cli-scan": partial(register_cli_scan, before_archive=before_archive),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
+            "finalize-scan-usage": finalize_scan_usage,
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
             "list-findings": list_findings,
@@ -3427,21 +3482,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "attach-scan-continuation-thread": partial(
                 handoff.attach_scan_continuation_thread, command_context
             ),
-            "prepare-linear-publication": partial(
-                publication.prepare_linear_publication, _WORKBENCH_PUBLICATION_CONTEXT
-            ),
-            "record-linear-publications": partial(
-                publication.record_linear_publications, _WORKBENCH_PUBLICATION_CONTEXT
-            ),
             "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
         }
         if handler := handlers.get(args.command):
-            payload = (
-                read_json_object(Path(args.input_file))
-                if args.command in {"prepare-linear-publication", "record-linear-publications"}
-                else args
-            )
-            result = handler(connection, payload)
+            result = handler(connection, args)
         elif args.command == "get-workspace":
             result = workspace_state(
                 connection,

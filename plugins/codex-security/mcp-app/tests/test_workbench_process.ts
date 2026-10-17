@@ -56,6 +56,7 @@ try {
     "fail-scan",
     "preserve-scan-results",
     "complete-scan",
+    "finding-issues",
     "start-prompt-only-scan",
   ]) {
     await executeWorkbench("fixture-python", [command, "--scan-id", "fixture"]);
@@ -169,7 +170,7 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
 
       const executeFixture = await fixtureWorkbench(
         root,
-        'import json\ndef main():\n    print(json.dumps({"scans": []}))\n',
+        'import json, sys\nassert sys.dont_write_bytecode\ndef main():\n    print(json.dumps({"scans": []}))\n',
       );
       const result = await executeFixture(
         python,
@@ -217,7 +218,7 @@ await test("workbench can import dependencies installed in the Python user site"
     assert.equal(imported.trim(), "user-site dependency");
     const executeFixture = await fixtureWorkbench(
       root,
-      'import json\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
     );
     assert.deepEqual(await executeFixture(python, ["list-scans"]), {
       dependency: "user-site dependency",

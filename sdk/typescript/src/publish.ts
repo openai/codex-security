@@ -65,18 +65,17 @@ import {
   type CodexCommand,
 } from "./runtime.js";
 
-export interface PublishScanOptions {
+export interface PublishScanOptions extends Pick<
+  PrepareScanPublicationOptions,
+  "destination" | "teamId" | "projectId" | "signal"
+> {
   findingIds?: PrepareScanPublicationOptions["findingIds"];
   classification?: PrepareScanPublicationOptions["classification"];
   expectedScanId?: string;
-  destination: "linear";
-  teamId: string;
-  projectId?: string;
   linearApiKey?: string;
   assigneeId?: string;
   dryRun?: boolean;
   skipExisting?: boolean;
-  signal?: AbortSignal;
   onProgress?: (event: PublishScanProgress) => void;
 }
 
@@ -217,12 +216,6 @@ type PublicationHandoffEvidence = {
 
 type PublicationEvidence =
   PublicationEventEvidence | PublicationHandoffEvidence;
-
-interface ReconciledPublication {
-  created: PublishedScanIssue[];
-  failed: FailedScanPublication[];
-  indeterminate?: boolean;
-}
 
 interface FindingReconciliation {
   issue: PreparedPublicationIssue;
@@ -1092,7 +1085,7 @@ function reconcilePublicationEvidence(
   publication: PreparedScanPublication,
   evidence: readonly PublicationEvidence[],
   failureMessage: string,
-): ReconciledPublication {
+) {
   const byOwner = Map.groupBy(evidence, (item) => item.ownerFindingId);
   const claimLedger = new Map<
     string,

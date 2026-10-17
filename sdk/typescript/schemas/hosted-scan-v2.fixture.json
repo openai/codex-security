@@ -1,0 +1,145 @@
+{
+  "run": {
+    "jsonrpc": "2.0",
+    "id": "run",
+    "method": "run",
+    "params": {
+      "version": 2,
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "outputDirectory": "/scan/output",
+      "stateDirectory": "/scan/state",
+      "model": "fixture-model",
+      "reasoningEffort": "medium",
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      }
+    }
+  },
+  "execution": {
+    "jsonrpc": "2.0",
+    "id": "request-1",
+    "method": "execution.run",
+    "params": {
+      "version": 2,
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      },
+      "model": "fixture-model",
+      "reasoningEffort": "medium",
+      "requestId": "request-1",
+      "scanId": "scan-1",
+      "prompt": "Scan the selected paths.",
+      "runtime": {
+        "pluginRoot": "/opt/runtime/cli/_bundled_plugin",
+        "pluginVersion": "0.1.95",
+        "stateDirectory": "/scan/state",
+        "outputDirectory": "/scan/output",
+        "environment": {
+          "CODEX_SECURITY_STATE_DIR": "/scan/state",
+          "CODEX_SECURITY_CONFIG_PATH": "/scan/tmp/config-preflight.toml",
+          "CODEX_SECURITY_TARGET_PATHS_FILE": "/scan/tmp/target-paths.json"
+        }
+      }
+    }
+  },
+  "progress": {
+    "jsonrpc": "2.0",
+    "method": "execution.progress",
+    "params": {
+      "requestId": "request-1",
+      "event": {
+        "type": "progress",
+        "progress": {
+          "phase": "discovery",
+          "filesCompleted": 1,
+          "filesTotal": 2
+        }
+      }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": "request-1",
+    "result": {
+      "requestId": "request-1",
+      "status": "completed",
+      "sessionId": "session-1",
+      "usage": {
+        "input_tokens": 12,
+        "output_tokens": 6,
+        "cached_input_tokens": 0
+      }
+    }
+  },
+  "terminal": {
+    "jsonrpc": "2.0",
+    "id": "run",
+    "result": {
+      "version": 2,
+      "repository": "/workspace/repository",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": {
+        "paths": ["service-a", "service-b"]
+      },
+      "identity": {
+        "runId": "run-1",
+        "attemptId": "attempt-1",
+        "buildId": "fixture-build"
+      },
+      "outputDirectory": "/scan/output",
+      "status": "completed",
+      "scanId": "scan-1",
+      "pluginVersion": "0.1.95",
+      "provenance": {
+        "cliVersion": "0.2.0",
+        "pluginVersion": "0.1.95",
+        "buildId": "fixture-build"
+      },
+      "execution": {
+        "requestId": "request-1",
+        "status": "completed",
+        "sessionId": "session-1",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 6,
+          "cached_input_tokens": 0
+        }
+      },
+      "artifacts": [
+        {
+          "path": "scan-manifest.json",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "bytes": 1024
+        },
+        {
+          "path": "findings.json",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "bytes": 256
+        },
+        {
+          "path": "coverage.json",
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "bytes": 512
+        },
+        {
+          "path": "report.md",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "bytes": 768
+        }
+      ]
+    }
+  }
+}

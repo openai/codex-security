@@ -23195,7 +23195,7 @@ var require_package = __commonJS({
   "node_modules/@actions/artifact/package.json"(exports2, module2) {
     module2.exports = {
       name: "@actions/artifact",
-      version: "6.2.1",
+      version: "6.3.1",
       preview: true,
       description: "Actions artifact lib",
       keywords: [
@@ -23242,26 +23242,27 @@ var require_package = __commonJS({
         url: "https://github.com/actions/toolkit/issues"
       },
       dependencies: {
-        "@actions/core": "^3.0.0",
-        "@actions/github": "^9.0.0",
-        "@actions/http-client": "^4.0.0",
-        "@azure/storage-blob": "^12.30.0",
+        "@actions/core": "^3.0.1",
+        "@actions/github": "^9.1.1",
+        "@actions/http-client": "^4.0.1",
+        "@azure/storage-blob": "^12.31.0",
         "@octokit/core": "^7.0.6",
         "@octokit/plugin-request-log": "^6.0.0",
-        "@octokit/plugin-retry": "^8.0.0",
-        "@octokit/request": "^10.0.7",
+        "@octokit/plugin-retry": "^8.1.0",
+        "@octokit/request": "^10.0.8",
         "@octokit/request-error": "^7.1.0",
-        "@protobuf-ts/plugin": "^2.2.3-alpha.1",
-        "@protobuf-ts/runtime": "^2.9.4",
+        "@protobuf-ts/runtime": "^2.11.1",
+        "@protobuf-ts/runtime-rpc": "^2.11.1",
         archiver: "^7.0.1",
         "jwt-decode": "^4.0.0",
         "unzip-stream": "^0.3.1"
       },
       devDependencies: {
+        "@protobuf-ts/plugin": "^2.11.1",
         "@types/archiver": "^7.0.0",
         "@types/unzip-stream": "^0.3.4",
-        typedoc: "^0.28.16",
-        "typedoc-plugin-markdown": "^4.9.0",
+        typedoc: "^0.28.19",
+        "typedoc-plugin-markdown": "^4.11.0",
         typescript: "^5.9.3"
       },
       overrides: {
@@ -55585,6 +55586,8 @@ function parseInputs(read, workspace) {
   const maxTimeHours = num("max-time-hours", false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== void 0 && mode !== "deep") throw new Error("max-time-hours requires mode: deep.");
   const dryRun = bool("dry-run", false);
+  const provider = choice("provider", ["openai", "openrouter", "fireworks", "amazon-bedrock"], "openai");
+  const model = str("model", provider === "openai" ? "gpt-5.6-sol" : "");
   const cyberAccessProgram = str("cyber-access-program") ? choice("cyber-access-program", ["standard", "daybreak_blue", "daybreak_red"], "standard") : void 0;
   return {
     repository: str("repository", workspace),
@@ -55593,7 +55596,8 @@ function parseInputs(read, workspace) {
     diffBase,
     mode,
     cyberAccessProgram,
-    model: str("model", "gpt-5.6-sol"),
+    provider,
+    model,
     effort: choice("effort", ["minimal", "low", "medium", "high", "xhigh", "max"], "xhigh"),
     maxCost: num("max-cost", false, Number.MIN_VALUE),
     maxTimeHours,
@@ -55608,16 +55612,17 @@ function parseInputs(read, workspace) {
   };
 }
 function scanArguments(inputs, target, resultsDirectory) {
+  const auth2 = inputs.dryRun || inputs.provider === "amazon-bedrock" ? "auto" : "api-key";
   const args = [
     "scan",
     target.repository,
     "--auth",
-    inputs.dryRun ? "auto" : "api-key",
+    auth2,
     "--provider",
-    "openai",
+    inputs.provider,
     "--mode",
     inputs.mode,
-    `--model=${inputs.model}`,
+    ...inputs.model ? [`--model=${inputs.model}`] : [],
     "--effort",
     inputs.effort,
     "--headless",
@@ -55889,7 +55894,39 @@ var package_default = {
 // src/runtime.ts
 var SUPPORTED_CLI_VERSION = package_default.dependencies["@openai/codex-security"];
 var REGISTRY = "https://registry.npmjs.org/";
-function runtimeEnvironment(paths, apiKey) {
+var AWS_ENVIRONMENT_VARIABLES = [
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_PROFILE",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"
+];
+var API_KEY_ENVIRONMENT_VARIABLES = {
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  fireworks: "FIREWORKS_API_KEY"
+};
+function scanCredentials(provider, source) {
+  if (provider !== "amazon-bedrock") return {
+    provider,
+    apiKey: source[API_KEY_ENVIRONMENT_VARIABLES[provider]] || (provider === "openai" ? source.CODEX_API_KEY : void 0) || ""
+  };
+  const environment = {};
+  for (const name of AWS_ENVIRONMENT_VARIABLES) if (source[name] !== void 0) environment[name] = source[name];
+  return { provider, environment };
+}
+function runtimeEnvironment(paths, credentials) {
   const env = {
     PATH: `${(0, import_node_path4.join)(paths.root, "bin")}:${paths.runnerPath ?? "/usr/bin:/bin"}`,
     HOME: paths.home,
@@ -55930,9 +55967,13 @@ function runtimeEnvironment(paths, apiKey) {
     env.CODEX_MCP_NODE_PATH = (0, import_node_path4.join)(paths.root, "bin", "node");
   }
   if (paths.runnerLibraryPath !== void 0) env.LD_LIBRARY_PATH = paths.runnerLibraryPath;
-  if (apiKey !== void 0) {
-    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error("OPENAI_API_KEY must be a nonempty single-line value.");
-    env.OPENAI_API_KEY = apiKey;
+  if (credentials?.provider === "amazon-bedrock") {
+    Object.assign(env, credentials.environment);
+  } else if (credentials) {
+    const { apiKey } = credentials;
+    const name = API_KEY_ENVIRONMENT_VARIABLES[credentials.provider];
+    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error(`${name} must be a nonempty single-line value.`);
+    env[name] = apiKey;
   }
   return env;
 }
@@ -56010,7 +56051,7 @@ async function setupRuntime(options) {
     const cliPath = await regularFile((0, import_node_path4.join)(destination, "node_modules", "@openai", "codex-security", "bin", "codex-security.mjs"));
     const resultsDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path4.join)(tempRoot, "codex-security-reports-"));
     await (0, import_promises3.chmod)(resultsDirectory, 448);
-    return { ...paths, nodePath, cliPath, resultsDirectory, env: (apiKey) => runtimeEnvironment(paths, apiKey) };
+    return { ...paths, nodePath, cliPath, resultsDirectory, env: (credentials) => runtimeEnvironment(paths, credentials) };
   } catch (error2) {
     await cleanupRuntime(root, tempRoot);
     throw error2;
@@ -56163,18 +56204,11 @@ async function analyzeResults(options) {
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
-  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0) {
+  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0 || options.exitCode !== 0 && options.exitCode !== 1) {
     result.errors.push("CLI did not complete successfully. See the CLI diagnostics.");
-  } else if (value.coverage.completeness === "partial" && (options.exitCode === 0 || options.exitCode === 2)) {
-    result.scanStatus = "incomplete";
-  } else if (value.coverage.completeness === "complete" && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else {
     result.scanStatus = "completed";
     result.policyStatus = options.exitCode === 1 ? "failed" : "passed";
-  } else result.errors.push(value.coverage.completeness === "unknown" ? "CLI could not determine scan coverage. See the CLI diagnostics." : "CLI did not complete successfully. See the CLI diagnostics.");
-  if (value.coverage.completeness !== "complete") {
-    for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === "string") result.errors.push(`Deferred work: ${item.reason}`);
-    for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === "needs_follow_up" && typeof item.label === "string")
-      result.errors.push(`Needs follow-up: ${item.label}`);
   }
   result.errors.push(...warnings);
   const sarifPath = (0, import_node_path5.join)(options.resultsDirectory, "exports/results.sarif");
@@ -58178,8 +58212,9 @@ var __awaiter6 = function(thisArg, _arguments, P, generator) {
 var ArtifactHttpClient = class {
   constructor(userAgent2, maxAttempts, baseRetryIntervalMilliseconds, retryMultiplier) {
     this.maxAttempts = 5;
-    this.baseRetryIntervalMilliseconds = 3e3;
+    this.baseRetryIntervalMilliseconds = 8e3;
     this.retryMultiplier = 1.5;
+    this.retryTimeoutMilliseconds = 12e4;
     const token = getRuntimeToken();
     this.baseUrl = getResultsServiceUrl();
     if (maxAttempts) {
@@ -58219,11 +58254,16 @@ var ArtifactHttpClient = class {
       let attempt = 0;
       let errorMessage = "";
       let rawBody = "";
+      let totalRetryWaitMilliseconds = 0;
       while (attempt < this.maxAttempts) {
         let isRetryable = false;
+        let retryAfterSeconds;
         try {
           const response = yield operation();
           const statusCode = response.message.statusCode;
+          if (statusCode === HttpCodes.TooManyRequests) {
+            retryAfterSeconds = this.getRetryAfterSeconds(response);
+          }
           rawBody = yield response.readBody();
           debug(`[Response] - ${response.message.statusCode}`);
           debug(`Headers: ${JSON.stringify(response.message.headers, null, 2)}`);
@@ -58260,9 +58300,13 @@ var ArtifactHttpClient = class {
         if (attempt + 1 === this.maxAttempts) {
           throw new Error(`Failed to make request after ${this.maxAttempts} attempts: ${errorMessage}`);
         }
-        const retryTimeMilliseconds = this.getExponentialRetryTimeMilliseconds(attempt);
+        const retryTimeMilliseconds = retryAfterSeconds !== void 0 ? retryAfterSeconds * 1e3 : this.getExponentialRetryTimeMilliseconds(attempt);
+        if (totalRetryWaitMilliseconds + retryTimeMilliseconds > this.retryTimeoutMilliseconds) {
+          throw new Error(`Retry wait of ${retryTimeMilliseconds} ms would exceed the maximum total retry wait of ${this.retryTimeoutMilliseconds} ms: ${errorMessage}`);
+        }
         info(`Attempt ${attempt + 1} of ${this.maxAttempts} failed with error: ${errorMessage}. Retrying request in ${retryTimeMilliseconds} ms...`);
         yield this.sleep(retryTimeMilliseconds);
+        totalRetryWaitMilliseconds += retryTimeMilliseconds;
         attempt++;
       }
       throw new Error(`Request failed`);
@@ -58284,6 +58328,17 @@ var ArtifactHttpClient = class {
       HttpCodes.TooManyRequests
     ];
     return retryableStatusCodes.includes(statusCode);
+  }
+  // Only positive integer seconds are supported, not HTTP-date values.
+  getRetryAfterSeconds(response) {
+    var _a;
+    const header = response.message.headers["retry-after"];
+    const value = (_a = Array.isArray(header) ? header[0] : header) === null || _a === void 0 ? void 0 : _a.trim();
+    if (value === void 0 || !/^\d+$/.test(value)) {
+      return void 0;
+    }
+    const parsed = parseInt(value, 10);
+    return !isNaN(parsed) && parsed > 0 ? parsed : void 0;
   }
   sleep(milliseconds) {
     return __awaiter6(this, void 0, void 0, function* () {
@@ -99120,8 +99175,7 @@ function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
 }
 function resultTitle(result, inputs) {
-  if (result.scanStatus === "incomplete") return result.reportStatus === "failed" ? "Scan coverage is partial, and required reporting failed." : "Scan coverage is partial. Available findings are provisional.";
-  if (result.scanStatus !== "completed") return "Scan could not complete. Available findings are provisional.";
+  if (result.scanStatus !== "completed") return "Scan could not complete.";
   if (result.reportStatus === "failed") return "Scan completed, but required reporting failed.";
   if (result.policyStatus === "failed") return "Scan completed. Findings meet the configured failure threshold.";
   if (inputs.failOnSeverity === "none") return "Scan completed. Findings are reported without failing the job.";
@@ -99136,13 +99190,12 @@ function resultSummary(result, inputs, target) {
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
     `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
-    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Valid partial scans warn without evaluating this policy. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
+    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus === "incomplete") parts.push("Partial coverage alone does not fail the job. The findings policy was not evaluated; review the deferred work before treating the security review as complete.");
-  if (result.scanStatus !== "completed") parts.push("**Findings below are provisional. This is not a completed scan.**");
+  if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
@@ -99157,7 +99210,7 @@ function resultSummary(result, inputs, target) {
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {
-    const message = plain(`${result.scanStatus === "completed" ? "" : "Provisional finding: "}${finding.summary}`, 4e3);
+    const message = plain(finding.summary, 4e3);
     const props = {
       title: plain(`${finding.severity.toUpperCase()}: ${finding.title}`, 200),
       file: finding.path,
@@ -99246,8 +99299,8 @@ async function runAction(actionRoot, overrides = {}) {
   setOutput("report-status", "failed");
   setOutput("sarif-upload-ready", "false");
   try {
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "";
     inputs = parseInputs((name) => getInput(name), process.env.GITHUB_WORKSPACE ?? "");
+    const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context5();
     target = await resolveTarget(inputs, event);
     setOutput("scanned-sha", target.scannedSha);
@@ -99261,7 +99314,9 @@ async function runAction(actionRoot, overrides = {}) {
       finalSummary = "The requested diff is empty. No scan ran and no model cost was incurred.";
       info(finalSummary);
     } else {
-      if (!inputs.dryRun && (!apiKey || /[\r\n\u0000]/.test(apiKey))) throw new Error("Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.");
+      if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
+        throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
+      }
       tempRoot = await (0, import_promises9.realpath)(process.env.RUNNER_TEMP ?? "");
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
@@ -99281,7 +99336,7 @@ async function runAction(actionRoot, overrides = {}) {
       };
       log2(`Target commit: ${target.scannedSha}.${target.diffBase ? ` Diff: ${target.diffBase}..${target.diffHead}.` : ""}`);
       if (inputs.paths.length) log2(`Paths: ${inputs.paths.join(", ")}.`);
-      log2(`Model: ${inputs.model}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      log2(`Model: ${inputs.model || "(not specified)"}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
       if (inputs.cyberAccessProgram) log2(`Requested Cyber access program: ${inputs.cyberAccessProgram}.`);
       const scanLabel = inputs.dryRun ? "CLI configuration validation" : "Security scan";
       const scanStarted = performance.now();
@@ -99291,7 +99346,7 @@ async function runAction(actionRoot, overrides = {}) {
       try {
         execution = await deps.runProcess(runtime.nodePath, [runtime.cliPath, ...args], {
           cwd: target.repository,
-          env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(apiKey),
+          env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(credentials),
           // Stream stderr with terminal controls escaped; structured stdout is consumed below.
           log: inputs.verbose ? info : void 0
         });
@@ -99326,12 +99381,12 @@ async function runAction(actionRoot, overrides = {}) {
           scannedSha: target.scannedSha,
           exitCode: execution.exitCode,
           executionFailed: interrupted || !!checkoutError,
-          publishable: target.publishable && !interrupted && !checkoutError
+          publishable: target.publishable
         });
         if (result.paths.jsonPath && !result.paths.sarifPath)
           warning("SARIF report is unavailable; scan results and other reports are still available.");
         if (checkoutError) result.errors.unshift(checkoutError);
-        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit. Available findings are provisional.");
+        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit.");
         let reportsValidated = false;
         try {
           const reports = await collectReports(result);
@@ -99348,15 +99403,13 @@ async function runAction(actionRoot, overrides = {}) {
         }
         outputs(result, target, execution.exitCode);
         info(`Scan: ${result.scanStatus}; findings policy: ${result.policyStatus}; report: ${result.reportStatus}; SARIF upload ready: ${result.sarifUploadReady}.`);
-        info(`${result.scanStatus === "completed" ? "Findings" : "Provisional findings"}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
+        info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
         finalSummary = resultSummary(result, inputs, target);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== "failed" && (result.scanStatus === "incomplete" || result.scanStatus === "completed" && result.policyStatus === "passed");
+        success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === "incomplete")
-          warning("Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.");
       }
     }
   } catch (error2) {

@@ -528,10 +528,8 @@ export class ScanDashboard {
   public finishComponents(result: ComponentScanResult): void {
     this.#componentResult = result;
     this.showComponents(
-      result.failed ||
-        result.incomplete ||
-        result.deduplication?.status === "incomplete"
-        ? "Finished with partial results"
+      result.failed || result.deduplication?.status === "failed"
+        ? "Finished with errors"
         : "Complete",
     );
   }
@@ -925,12 +923,12 @@ export class ScanDashboard {
     const findings =
       this.#componentResult === null
         ? `${rawFindings} findings before deduplication`
-        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "incomplete" ? " · matching incomplete" : ""}`;
+        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     return this.#formatFrame([
       `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,
       divider,
-      `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("incomplete")} incomplete · ${count("failed")} failed`,
+      `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("failed")} failed`,
       "",
       row(" ", "Component", "Status", "Files", "Findings", "Cost"),
       ...table,
@@ -1370,7 +1368,6 @@ function componentStatus(receipt: ComponentReceipt): string {
     pending: "Queued",
     started: "Running",
     completed: "Complete",
-    incomplete: "Incomplete",
     failed: "Failed",
   }[receipt.status];
 }

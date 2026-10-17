@@ -25,7 +25,9 @@ pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 node plugins/codex-security/mcp-app/scripts/build_native.mjs
 ```
 
-The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. The runtime extension runs after Promptfoo loads the native Codex provider, preserving its authentication precedence. A pinned Promptfoo patch runs saved `:beforeAll` startup hooks during viewer replay. Replay does not restore grading metadata, so grading hooks remain disabled.
+The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. Separate YAML files under `providers/` retain the native Codex provider IDs and each suite's settings. The suite's `$ref` entries expand these settings into saved evaluation snapshots, so later edits to the provider files do not change an existing run's retry, resume, or replay settings. The runner uses Node's `--import` to preload the runtime adapter into the Promptfoo child process, so it can bind the staged runtime during evaluation, retry, resume, and viewer replay without a Promptfoo patch. Native provider loading preserves authentication precedence.
+
+The adapter depends on bundled Codex classes and internal methods in the pinned Promptfoo provider. The provider tests cover those methods, executable selection, authentication, and per-case settings. Replay does not restore grading metadata, so grading hooks remain disabled.
 
 Saved runs whose provider ID is `file://.../triage-provider.mts` need to be rerun with the current configuration before retry, resume, or replay. Their saved results remain intact. Native Codex provider IDs are unchanged.
 
@@ -72,7 +74,7 @@ cases use freeform answers.
 
 ## Calibration Dataset
 
-`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, finding IDs, and checkout directories use stable opaque names. Variant labels, fix references, and checkout commit IDs remain in harness metadata rather than the model prompt. Hydration keeps Git metadata in opaque sibling directories outside the model-readable checkout. Re-run `calibration:hydrate` to update older checkout layouts.
+`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Promptfoo calls `scripts/generate-calibration-tests.mts:generateTests` to load each dataset variant as a test case, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, finding IDs, and checkout directories use stable opaque names. Variant labels, fix references, and checkout commit IDs remain in harness metadata rather than the model prompt. Hydration keeps Git metadata in opaque sibling directories outside the model-readable checkout. Re-run `calibration:hydrate` to update older checkout layouts.
 
 ELI5: the dataset says "this exact old commit should be affected" and "this exact fixed commit should not be affected." The generator turns those rows into Promptfoo test prompts. The hydrator downloads the exact repo commits so Codex can inspect real code instead of synthetic snippets.
 
@@ -88,11 +90,13 @@ Run all deterministic calibration checks:
 pnpm --dir evals/triage-finding run test:calibration
 ```
 
-Regenerate the Promptfoo calibration tests:
+Validation and evaluation load calibration tests directly from the dataset. To export a YAML copy for inspection:
 
 ```bash
-pnpm --dir evals/triage-finding run calibration:generate
+pnpm --dir evals/triage-finding run calibration:generate --output artifacts/calibration-oss.yaml
 ```
+
+The optional exporter retains `--dataset`, `--output`, `--repo-root`, `--case`, and `--variant`. Its default output remains `tests/calibration-oss.yaml`; generated YAML is not needed to run the suite.
 
 Hydrate the local OSS checkouts:
 
@@ -122,7 +126,7 @@ The calibration config is separate from the default synthetic eval:
 
 - `promptfooconfig.yaml` covers the small fixture app and GitHub intake routing.
 - `promptfooconfig.calibration.yaml` covers the OSS vulnerable/fixed commit pairs and adds `assertions/calibration-evidence.mts` to check that required paths or fix commits are cited in the response.
-- `promptfooconfig.calibration-smoke.yaml` covers a generated one-row smoke file under `artifacts/calibration-smoke.yaml`.
+- `promptfooconfig.calibration-smoke.yaml` passes case and variant filters to the native generator to load one smoke case.
 
 The calibration eval uses the Codex SDK provider, which shells out to `codex exec`. Run it from a normal shell or an unsandboxed command runner so the Codex CLI can write its normal `$CODEX_HOME` state.
 
