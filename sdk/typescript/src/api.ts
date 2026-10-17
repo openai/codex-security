@@ -48,6 +48,7 @@ import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  privateReplayOverrides,
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
@@ -69,7 +70,6 @@ import {
   shellEnvironmentReference,
 } from "./codex-prompt.js";
 import {
-  DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   inlineToml,
   isExternalModelProvider,
@@ -77,10 +77,14 @@ import {
   mergedCodexConfig,
   resolveCodexProfile,
   resolveCommandAuthConfig,
+  resolveAgentPaths,
+  resolveSkillPaths,
+  resolveOtelPaths,
   scanApprovalPolicy,
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvKey,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -300,7 +304,10 @@ interface PreparedSession {
   sessionConfig: JsonObject;
   modelProvider: unknown;
   externalProvider:
-    | (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS]
+    | (Omit<
+        (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS],
+        "env_key"
+      > & { env_key: string })
     | null;
   apiKey: string | null;
   scanEnvironment: ProcessEnvironment;
@@ -1140,7 +1147,10 @@ export class CodexSecurity {
       );
       await knowledgeBase.cleanup();
     }
-    const configuration = await mergedCodexConfig(this.config);
+    const configuration = await mergedCodexConfig(
+      this.config,
+      scanCodexHome(this.#dependencies.environment),
+    );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
     validateScanCostLimit(options.maxCostUsd, model.model);
@@ -1168,6 +1178,7 @@ export class CodexSecurity {
         modelProvider,
         hasCommandAuth(configuration),
         true,
+        scanProviderEnvKey(configuration),
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -1563,6 +1574,7 @@ export class CodexSecurity {
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let deepProgressTracker: DeepScanProgressTracker | null = null;
+    let savedProviderProfile: ProviderProfile | undefined;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
@@ -1719,6 +1731,7 @@ export class CodexSecurity {
           runtime.environment,
           options.auth,
           modelProvider,
+          session.externalProvider?.env_key,
         ),
       };
       for (const root of [
@@ -1780,6 +1793,7 @@ export class CodexSecurity {
             runtime.environment,
             options.auth,
             modelProvider,
+            session.externalProvider?.env_key,
           ),
         ),
         ...(session.apiKey === null
@@ -2029,6 +2043,62 @@ export class CodexSecurity {
         onError: reportTrackingError,
       });
       costTracker = tracker;
+      // Saved launches reload the native file; preflight uses resolved values.
+      const profileName = effectiveConfig["profile"];
+      const inlineProfiles = effectiveConfig["profiles"];
+      const recipeConfig: JsonObject = {
+        ...preflightConfig,
+        approval_policy: approvalPolicy,
+      };
+      // Reruns allocate a new output directory; retain the original file origins.
+      for (const key of [
+        "model_instructions_file",
+        "model_catalog_json",
+        "experimental_compact_prompt_file",
+      ]) {
+        const value = workerRuntimeConfig[key];
+        if (typeof value !== "string") continue;
+        recipeConfig[key] = value;
+        const profiles = recipeConfig["profiles"];
+        if (
+          typeof profileName === "string" &&
+          isRecord(profiles) &&
+          isRecord(profiles[profileName]) &&
+          typeof profiles[profileName][key] === "string"
+        ) {
+          recipeConfig["profiles"] = {
+            ...profiles,
+            [profileName]: { ...profiles[profileName], [key]: value },
+          };
+        }
+      }
+      if (
+        typeof profileName === "string" &&
+        !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
+      ) {
+        recipeConfig["profile"] = profileName;
+        delete recipeConfig["skills"];
+        // Reload inherited file settings, retaining explicit refinements omitted
+        // from the readable recipe in the existing private replay snapshot.
+        delete recipeConfig["model_providers"];
+        const replayOverrides = privateReplayOverrides(
+          this.config.codexOverrides ?? {},
+          recipeConfig,
+        );
+        resolveAgentPaths(replayOverrides, scanDir);
+        resolveSkillPaths(replayOverrides, scanDir);
+        resolveOtelPaths(replayOverrides, scanDir);
+        if (
+          options.resumeScanId === undefined &&
+          Object.keys(replayOverrides).length > 0
+        ) {
+          savedProviderProfile = await createProviderProfile(
+            codexSecurityCredentialHome(this.#dependencies.environment),
+            replayOverrides,
+            { replay: true },
+          );
+        }
+      }
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
       const recipe = scanRecipe({
@@ -2037,7 +2107,7 @@ export class CodexSecurity {
         mode,
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
-        config: { ...preflightConfig, approval_policy: approvalPolicy },
+        config: recipeConfig,
         failOnSeverity: options.failureSeverity,
         knowledgeBasePaths: knowledgeBase?.sources,
         maxCostUsd: options.maxCostUsd,
@@ -2045,6 +2115,12 @@ export class CodexSecurity {
         auth: options.auth,
         cyberAccessProgram: options.cyberAccessProgram,
       });
+      if (savedProviderProfile !== undefined) {
+        recipe["providerProfile"] = {
+          name: savedProviderProfile.name,
+          home: "managed",
+        };
+      }
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       recipe["scanInputs"] = scanInputIdentity(
         options.scanPrompt,
@@ -2088,7 +2164,51 @@ export class CodexSecurity {
                 userContext: options.scanPrompt,
                 workflowId: options.workflowId,
               }),
-            );
+            ).catch(async (error: unknown) => {
+              const profile = savedProviderProfile;
+              if (profile !== undefined) {
+                // Registration can commit before cancellation or an output error.
+                // Delete the snapshot only after confirming no saved recipe owns it.
+                savedProviderProfile = undefined;
+                try {
+                  const lookupOptions = {
+                    ...workbenchOptions,
+                    signal: undefined,
+                  };
+                  const { scans } = await workbench(lookupOptions, [
+                    "list-scans",
+                    "--scan-root",
+                    scanDir,
+                  ]);
+                  let referenced = false;
+                  for (const scan of scans as JsonObject[]) {
+                    if (scan["recipeAvailable"] === false) continue;
+                    const { recipe: savedRecipe } = await workbench(
+                      lookupOptions,
+                      [
+                        "get-scan-recipe",
+                        "--scan-id",
+                        scan["scanId"] as string,
+                      ],
+                    );
+                    if (
+                      isRecord(savedRecipe) &&
+                      isRecord(savedRecipe["providerProfile"]) &&
+                      savedRecipe["providerProfile"]["name"] === profile.name
+                    ) {
+                      referenced = true;
+                      break;
+                    }
+                  }
+                  if (!referenced) savedProviderProfile = profile;
+                } catch {
+                  // An unavailable receipt cannot establish that cleanup is safe.
+                }
+              }
+              throw error;
+            });
+      // The registered recipe now owns the private snapshot, including after completion.
+      savedProviderProfile = undefined;
       const scanId = registration["scanId"];
       const resumeThreadId =
         options.resumeScanId === undefined
@@ -2996,6 +3116,7 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
+          savedProviderProfile?.cleanup(),
         ])) {
           if (cleanup.status === "rejected") {
             warnCleanupFailed(options, cleanup.reason);
@@ -3322,6 +3443,7 @@ export class CodexSecurity {
                 : runtime.environment,
               auth,
               modelProvider,
+              externalProvider?.env_key,
             ),
           ),
         ),
@@ -3368,7 +3490,12 @@ export class CodexSecurity {
       configuredCodexPath === undefined
         ? undefined
         : this.#codexCommand().command;
-    let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
+    let sdkEnvironment = definedEnvironment({
+      ...withoutOpenAiApiKeys(environment),
+      ...(externalProvider === null
+        ? {}
+        : { [externalProvider.env_key]: apiKey! }),
+    });
     if (
       process.platform === "win32" &&
       (configuredCodexPath === undefined ||
@@ -3492,24 +3619,36 @@ export class CodexSecurity {
     };
     try {
       const requestedConfig = resolveCommandAuthConfig(
-        await mergedCodexConfig(this.config),
-        configuredCodexHome(this.#dependencies.environment),
+        await mergedCodexConfig(
+          this.config,
+          scanCodexHome(this.#dependencies.environment),
+        ),
+        scanCodexHome(this.#dependencies.environment),
       );
       const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
       const externalProvider =
         !commandAuth && isExternalModelProvider(modelProvider)
-          ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+          ? {
+              ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
+              env_key: scanProviderEnvKey(requestedConfig)!,
+            }
           : null;
       let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
         modelProvider,
         commandAuth,
+        false,
+        externalProvider?.env_key,
       );
       const apiKey =
         authentication.method === "api_key"
-          ? environmentApiKey(this.#dependencies.environment, modelProvider)
+          ? environmentApiKey(
+              this.#dependencies.environment,
+              modelProvider,
+              externalProvider?.env_key,
+            )
           : null;
       const scanEnvironment = selectedScanEnvironment(
         commandAuth
@@ -3517,6 +3656,7 @@ export class CodexSecurity {
           : this.#dependencies.environment,
         options.auth,
         modelProvider,
+        externalProvider?.env_key,
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -3645,6 +3785,7 @@ export class CodexSecurity {
           runtime.codexHome,
           options.auth,
           modelProvider,
+          externalProvider?.env_key,
         );
       if (
         options.safetyIdentifier !== undefined &&
@@ -3712,7 +3853,11 @@ export class CodexSecurity {
   async #providerPreflightCommand(config?: JsonObject): Promise<CodexCommand> {
     return await providerPreflightCommand(
       this.#codexCommand(),
-      config ?? (await mergedCodexConfig(this.config)),
+      config ??
+        (await mergedCodexConfig(
+          this.config,
+          scanCodexHome(this.#dependencies.environment),
+        )),
     );
   }
 
@@ -3765,7 +3910,12 @@ export class CodexSecurity {
   ): Promise<
     LocalScanInputs & { policyPaths: string[]; gitMetadataPaths: string[] }
   > {
-    policyCodexConfig(await mergedCodexConfig(this.config));
+    policyCodexConfig(
+      await mergedCodexConfig(
+        this.config,
+        scanCodexHome(this.#dependencies.environment),
+      ),
+    );
     const sources = await inspectSecurityPolicySources(target, signal);
     const protectedRoots = [
       ...new Set([
@@ -3866,10 +4016,12 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       const revision = await repositoryRevision(local.repository, signal);
-      const { model } = scanModelConfiguration({
-        ...DEFAULT_CODEX_CONFIG,
-        ...this.config.codexOverrides,
-      });
+      const { model } = scanModelConfiguration(
+        await mergedCodexConfig(
+          this.config,
+          scanCodexHome(this.#dependencies.environment),
+        ),
+      );
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot,
@@ -4168,6 +4320,7 @@ export class CodexSecurity {
         : this.#dependencies.environment,
       auth,
       modelProvider,
+      scanProviderEnvKey(requestedConfig),
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -4967,6 +5120,7 @@ export function scanAuthentication(
   modelProvider?: unknown,
   commandAuth = false,
   preflight = false,
+  providerEnvKey?: string,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -4993,14 +5147,22 @@ export function scanAuthentication(
   if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
     return { method: "stored_credentials", verified: false };
   }
-  const key = environmentApiKeyEntry(environment, modelProvider);
+  const key = environmentApiKeyEntry(
+    environment,
+    modelProvider,
+    providerEnvKey,
+  );
   if (key === null && isExternalModelProvider(modelProvider)) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
     if (preflight && auth === "auto") {
-      return { method: "api_key", source: provider.env_key, verified: false };
+      return {
+        method: "api_key",
+        source: providerEnvKey ?? provider.env_key,
+        verified: false,
+      };
     }
     throw new AuthenticationRequiredError(
-      `Set ${provider.env_key} to run a scan through ${provider.name}.`,
+      `Set ${providerEnvKey ?? provider.env_key} to run a scan through ${provider.name}.`,
     );
   }
   if (
@@ -5040,8 +5202,16 @@ export async function runtimeScanAuthentication(
   codexHome: string,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): Promise<ScanAuthentication> {
-  const authentication = scanAuthentication(environment, auth, modelProvider);
+  const authentication = scanAuthentication(
+    environment,
+    auth,
+    modelProvider,
+    false,
+    false,
+    providerEnvKey,
+  );
   if (authentication.method !== "stored_credentials") return authentication;
 
   try {
@@ -5069,21 +5239,34 @@ export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): ProcessEnvironment {
-  const selectedProviderKey = isExternalModelProvider(modelProvider)
+  const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
+  const selectedProviderKey =
+    standardProviderKey === null
+      ? null
+      : (providerEnvKey ?? standardProviderKey);
   const bedrockProvider = modelProvider === "amazon-bedrock";
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
   return Object.fromEntries(
-    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
+    Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
+      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") {
+        return (
+          selectedProviderKey !== null &&
+          key === selectedProviderKey.toUpperCase()
+        );
+      }
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
         return (
           !bedrockProvider &&
-          (selectedProviderKey === null || key === selectedProviderKey)
+          (selectedProviderKey === null ||
+            key === standardProviderKey ||
+            key === selectedProviderKey.toUpperCase())
         );
       }
       return true;
@@ -5110,23 +5293,21 @@ function notifyObserver<Name extends ScanObserverName>(
 function environmentApiKey(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): string | null {
-  return environmentApiKeyEntry(environment, modelProvider)?.value ?? null;
+  return (
+    environmentApiKeyEntry(environment, modelProvider, providerEnvKey)?.value ??
+    null
+  );
 }
 
 function environmentApiKeyEntry(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
-): {
-  source:
-    | "OPENAI_API_KEY"
-    | "CODEX_API_KEY"
-    | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
-  value: string;
-} | null {
+  providerEnvKey?: string,
+): { source: string; value: string } | null {
   const keys = isExternalModelProvider(modelProvider)
-    ? [EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
+    ? [providerEnvKey ?? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
     : (["OPENAI_API_KEY", "CODEX_API_KEY"] as const);
   for (const requested of keys) {
     const value = environmentValue(environment, requested)?.trim();
@@ -5253,6 +5434,7 @@ export function scanRuntimeCodexConfig(
       delete profile["default_permissions"];
       delete profile["permissions"];
       delete profile["sandbox_mode"];
+      delete profile["allow_login_shell"];
     }
   }
   return {
@@ -5378,6 +5560,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "enable_fanout",
       "api_key_cyber_access_programs",
       "api_key_model_discovery",
+      "shell_tool",
+      "unified_exec",
     ]) {
       if (typeof value[key] === "boolean") result[key] = value[key];
     }
@@ -5397,7 +5581,23 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
         result["multi_agent_v2"] = sanitized;
       }
     }
+    const codeMode = value["code_mode"];
+    if (typeof codeMode === "boolean" || isRecord(codeMode)) {
+      result["code_mode"] = structuredClone(codeMode) as JsonObject[string];
+    }
     return result;
+  };
+  const copyWorkerSettings = (result: JsonObject, source: JsonObject): void => {
+    for (const key of [
+      "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
+      "model_verbosity",
+      "web_search",
+    ]) {
+      const value = source[key];
+      if (typeof value === "string") result[key] = value;
+    }
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
@@ -5411,6 +5611,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       const value = source[key];
       if (safeString(value)) result[key] = value;
     }
+    copyWorkerSettings(result, source);
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
     const skills = source["skills"];
@@ -5447,14 +5648,18 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     safeProfileName(config["profile"]) ? config : resolved,
   );
   // Keep effective execution settings even when preflight filters the profile name.
+  copyWorkerSettings(result, resolved);
   for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
   }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
+    "code_mode",
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
+    "shell_tool",
+    "unified_exec",
   ]) {
     if (resolvedFeatures[key] !== undefined) {
       result["features"] = {
@@ -5463,19 +5668,24 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       };
     }
   }
-  const selectedProfile = safeProfileName(config["profile"])
-    ? config["profile"]
-    : undefined;
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const selectedProfile =
+    safeProfileName(profileName) &&
+    isRecord(profiles) &&
+    isRecord(profiles[profileName])
+      ? profileName
+      : undefined;
   if (selectedProfile !== undefined) {
     result["profile"] = selectedProfile;
   }
-  const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
     for (const [name, profile] of Object.entries(profiles)) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
       const projected = executionConfig(profile as JsonObject);
-      if (Object.keys(projected).length === 0) continue;
+      if (Object.keys(projected).length === 0 && name !== selectedProfile)
+        continue;
       sanitized[name] = projected;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
@@ -5555,6 +5765,9 @@ function selectedWorkerRuntimeConfig(
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
+  resolveAgentPaths(resolved, workingDirectory);
+  resolveSkillPaths(resolved, workingDirectory);
+  resolveOtelPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
   const providerEnvironmentNames = isRecord(providers)
     ? Object.values(providers)
@@ -5582,12 +5795,15 @@ function selectedWorkerRuntimeConfig(
       return value === undefined ? [] : [[name, value]];
     }),
   );
-  const instructionsFile = resolved["model_instructions_file"];
-  if (typeof instructionsFile === "string") {
-    resolved["model_instructions_file"] = resolve(
-      workingDirectory,
-      expandHome(instructionsFile, environment),
-    );
+  for (const key of [
+    "model_instructions_file",
+    "model_catalog_json",
+    "experimental_compact_prompt_file",
+  ]) {
+    const path = resolved[key];
+    if (typeof path === "string") {
+      resolved[key] = resolve(workingDirectory, expandHome(path, environment));
+    }
   }
   return {
     ...Object.fromEntries(
@@ -5597,13 +5813,17 @@ function selectedWorkerRuntimeConfig(
         "responses_api_metadata",
         "openai_base_url",
         "features",
+        "agents",
         "model_auto_compact_token_limit",
         "model_context_window",
         "model_instructions_file",
+        "model_catalog_json",
+        "experimental_compact_prompt_file",
         "model_verbosity",
         "shell_environment_policy",
         "skills",
         "web_search",
+        "otel",
         "windows",
       ]
         .filter((key) => resolved[key] !== undefined)

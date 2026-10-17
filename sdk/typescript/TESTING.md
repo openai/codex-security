@@ -120,7 +120,7 @@ consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
 The full Bun suite runs once per OS under Node 22: three file shards on Linux
-and macOS, and seven on Windows. The other Node versions run the installed
+and macOS, and eight on Windows. The other Node versions run the installed
 package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
@@ -130,7 +130,7 @@ inventory to Bun's native `--shard` option. Bun sorts the file paths and assigns
 them round-robin across the shards. New files are included automatically;
 there is no timing table to update when adding or splitting tests.
 To reproduce one Windows shard locally after building the plugin, run
-`node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
+`node --experimental-strip-types scripts/run-ci-tests.mts 3/8 --seed=12345`.
 
 Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
 reports include case durations, and the MCP runner can upload its JUnit report.
