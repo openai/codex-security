@@ -1151,6 +1151,8 @@ async function testOpenAiCredentialsReachWorker() {
     const previousEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
+      "OPENAI_FEDERATION_RULE_ID",
+      "OPENAI_IDENTITY_TOKEN_FILE",
       "CODEX_CLI_PATH",
       "CODEX_HOME",
       "CODEX_SECURITY_CONFIG_PATH",
@@ -1160,6 +1162,8 @@ async function testOpenAiCredentialsReachWorker() {
     try {
       restoreEnv("OPENAI_API_KEY", entry.openai);
       restoreEnv("CODEX_API_KEY", entry.codex);
+      restoreEnv("OPENAI_FEDERATION_RULE_ID", undefined);
+      restoreEnv("OPENAI_IDENTITY_TOKEN_FILE", undefined);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
       const configPath = path.join(fixture.root, "scan-settings.toml");
