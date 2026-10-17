@@ -955,6 +955,25 @@ snapshots:
       ),
     );
   }
+  const cargoRoot = await scan("cargo-first-party-root", {
+    "Cargo.toml": '[package]\nname="synthetic-local-root"\nversion="0.1.0"\n',
+    "Cargo.lock": `${ecosystemFixtures.cargo.content("1.2.0")}\n[[package]]\nname="synthetic-local-root"\nversion="0.1.0"\n`,
+  });
+  assert.equal(cargoRoot.coverage.status, "complete");
+  assert.equal(cargoRoot.coverage.unresolvedPackages, 0);
+  assert.equal(
+    cargoRoot.coverage.firstPartyPackages?.[0]?.name,
+    "synthetic-local-root",
+  );
+  assertEcosystemFacts(cargoRoot, ecosystemFixtures.cargo, "1.2.0");
+  const cargoRegistry = await scan("cargo-registry-optional-manifest", {
+    "Cargo.toml": "invalid manifest [",
+    "Cargo.lock": ecosystemFixtures.cargo.content("9.0.0"),
+  });
+  assert.equal(cargoRegistry.status, "completed");
+  assert.equal(cargoRegistry.coverage.status, "complete");
+  assert.equal(cargoRegistry.matches.length, 0);
+
   for (const version of ["1.2.0", "9.0.0"]) {
     const sourceOnlyComposer = await scan(`composer-source-only-${version}`, {
       "composer.lock": JSON.stringify({

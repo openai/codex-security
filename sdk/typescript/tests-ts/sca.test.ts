@@ -5,7 +5,9 @@ import {
   chmod,
   mkdir,
   readFile,
+  readdir,
   realpath,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -52,6 +54,7 @@ import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
@@ -165,8 +168,10 @@ function triage(): TriageFinding {
 async function fixture(
   options: {
     matched?: boolean;
+    severities?: string[];
     turns?: (
       | "completed"
+      | "missing_usage"
       | "truncated"
       | "malformed"
       | "cancelled"
@@ -270,6 +275,7 @@ process.exit(child.status ?? 1);
     else await writeFile(sourcePath, "synthetic changed source context");
   };
   const calls = { runtime: 0, model: 0, scanner: 0 };
+  let threadCount = 0;
   const captured: {
     codex?: CodexOptions;
     thread?: ThreadOptions;
@@ -375,6 +381,7 @@ process.exit(child.status ?? 1);
           result.matches = options.turns.map((_, index) => ({
             ...result.matches[0]!,
             id: `match-${index + 1}`,
+            severity: options.severities?.[index] ?? null,
           }));
         if (options.advisoryDetails !== undefined)
           result.matches[0]!.sourceAdvisories[0]!["details"] =
@@ -412,7 +419,8 @@ process.exit(child.status ?? 1);
         );
         expect(saved.matches).toHaveLength(options.turns?.length ?? 1);
         expect(saved.status).toBe("partial");
-        expect(saved.assessments[0].status).toBe("not_started");
+        if (calls.runtime === 1)
+          expect(saved.assessments[0].status).toBe("not_started");
         if (options.runtimeError)
           throw new Error("synthetic authentication unavailable");
         return { ...preparedRuntime(codexHome), environment };
@@ -430,9 +438,13 @@ process.exit(child.status ?? 1);
         return {
           startThread: (thread) => {
             captured.thread = thread;
+            const threadId =
+              ++threadCount === 1 ? "sca-thread" : `sca-thread-${threadCount}`;
+            let threadTurns = 0;
             return {
               id: null,
               async runStreamed(prompt) {
+                threadTurns++;
                 captured.prompt = String(prompt);
                 captured.evidence = JSON.parse(
                   await readFile(join(outputDir, "sca-result.json"), "utf8"),
@@ -446,17 +458,16 @@ process.exit(child.status ?? 1);
                 const behavior = options.turns?.[turnNumber - 1];
                 const finding = {
                   ...triage(),
-                  input_id: `match-${turnNumber}`,
+                  input_id: JSON.parse(
+                    String(prompt).match(/Assess only match ("[^"\n]+")/)![1]!,
+                  ),
                   triage_item_id: `triage-${behavior === "duplicate_id" ? 1 : turnNumber}`,
                 };
                 return {
                   events: (async function* (): AsyncGenerator<ThreadEvent> {
                     yield {
                       type: "thread.started",
-                      thread_id:
-                        turnNumber === 1
-                          ? "sca-thread"
-                          : `sca-thread-${turnNumber}`,
+                      thread_id: threadId,
                     };
                     if (options.commandActivity) {
                       for (const status of [
@@ -526,14 +537,18 @@ process.exit(child.status ?? 1);
                     };
                     yield {
                       type: "turn.completed",
-                      usage: {
-                        input_tokens: 1000,
-                        cached_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 1000,
-                        reasoning_output_tokens: 0,
-                      },
-                    };
+                      ...(behavior === "missing_usage"
+                        ? {}
+                        : {
+                            usage: {
+                              input_tokens: 1000 * threadTurns,
+                              cached_input_tokens: 0,
+                              cache_write_input_tokens: 0,
+                              output_tokens: 1000 * threadTurns,
+                              reasoning_output_tokens: 0,
+                            },
+                          }),
+                    } as ThreadEvent;
                   })(),
                 };
               },
@@ -1354,12 +1369,21 @@ test("final cost recovery persists an unchanged estimate without duplicate notif
       await readFile(join(outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.model.costUsd).toBe(expected);
+    expect(saved.model.cost?.estimatedUsd).toBe(expected);
+    expect(saved.model.costPending).toBe(false);
     for (let index = 1; index < costs.length; index++)
       expect(costs[index]).not.toEqual(costs[index - 1]);
   } finally {
     refresh.mockRestore();
     stop.mockRestore();
   }
+  const resumed = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+    maxCostUsd: 1,
+  });
+  expect(resumed.status).toBe("completed");
+  expect(resumed.model.costUsd).toBeGreaterThan(costs.at(-1)!.estimatedUsd);
 });
 
 test.each([
@@ -2327,7 +2351,7 @@ test("unrelated Git reference changes retain all dependency assessments", async 
     repositoryPath: repository,
     outputDir,
   });
-  expect(sourceCalls).toHaveLength(3);
+  expect(sourceCalls).toHaveLength(5);
   expect(result.status).toBe("completed");
   expect(result.assessments.map(({ status }) => status)).toEqual([
     "completed",
@@ -2390,8 +2414,8 @@ test.each([1, 2] as const)(
     expect(result.diagnostics.join("\n")).toContain(
       "synthetic source snapshot unavailable",
     );
-    expect(calls.runtime).toBe(snapshotErrorAt === 1 ? 0 : 1);
-    expect(calls.model).toBe(snapshotErrorAt === 1 ? 0 : 1);
+    expect(calls.runtime).toBe(0);
+    expect(calls.model).toBe(0);
     expect(
       JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
@@ -2432,7 +2456,7 @@ test("dependency source snapshots preserve per-scan process environment, protect
       signal: controller.signal,
     });
     expect(result.status).toBe("completed");
-    expect(sourceCalls).toHaveLength(2);
+    expect(sourceCalls).toHaveLength(4);
     expect(pythonResolutions[0]).toMatchObject({
       environment,
       protectedRoot: repository,
@@ -2537,7 +2561,11 @@ test.each(["completed", "malformed", "truncated"] as const)(
       outputDir: f.outputDir,
     });
     expect(result.assessments.map((assessment) => assessment.threadId)).toEqual(
-      ["sca-thread", "sca-thread-2", "sca-thread-3"],
+      [
+        "sca-thread",
+        "sca-thread",
+        middle === "truncated" ? "sca-thread-2" : "sca-thread",
+      ],
     );
     expect(result.assessments.map((assessment) => assessment.status)).toEqual([
       "completed",
@@ -2545,10 +2573,859 @@ test.each(["completed", "malformed", "truncated"] as const)(
       "completed",
     ]);
     expect(f.turns[1]!.evidence.assessments[0]!.threadId).toBe("sca-thread");
-    expect(f.turns[2]!.evidence.assessments[1]!.threadId).toBe("sca-thread-2");
+    expect(f.turns[2]!.evidence.assessments[1]!.threadId).toBe("sca-thread");
     const saved = JSON.parse(
       await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     );
     expect(saved.assessments).toEqual(result.assessments);
   },
 );
+
+test("prioritizes severity, reuses a package thread, and supplies focused evidence", async () => {
+  const f = await fixture({
+    turns: ["completed", "completed", "completed"],
+    severities: ["LOW", "CRITICAL", "HIGH"],
+  });
+  await using security = f.client;
+  const inventories: Readonly<ScaResult>[] = [];
+  let modelCallsAtInventory: number | undefined;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onInventory: (inventory) => {
+      inventories.push(inventory);
+      modelCallsAtInventory = f.calls.model;
+      // Observers receive detached data and cannot alter the scan.
+      inventory.matches[0]!.severity = "observer-only";
+      throw new Error("synthetic inventory observer failure");
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(inventories).toHaveLength(1);
+  expect(modelCallsAtInventory).toBe(0);
+  expect(result.matches[0]!.severity).toBe("LOW");
+  expect(
+    f.turns.map((turn) =>
+      JSON.parse(turn.prompt.match(/Assess only match ("[^"\n]+")/)![1]!),
+    ),
+  ).toEqual(["match-2", "match-3", "match-1"]);
+  expect(new Set(result.assessments.map((item) => item.threadId)).size).toBe(1);
+  expect(result.model.cost?.inputTokens).toBe(3000);
+  expect(result.model.cost?.outputTokens).toBe(3000);
+  const evidence = JSON.parse(
+    await readFile(join(f.outputDir, "sca-assessment-input.json"), "utf8"),
+  );
+  expect(evidence.match.id).toBe("match-1");
+  expect(
+    evidence.earlierAssessments.map(
+      (item: { matchId: string }) => item.matchId,
+    ),
+  ).toEqual(["match-2", "match-3"]);
+  expect(evidence).not.toHaveProperty("components");
+  expect(evidence).not.toHaveProperty("matches");
+});
+
+test("continues a budget-stopped run without repeating matching or completed assessments", async () => {
+  const f = await fixture({ turns: ["completed", "completed", "completed"] });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const perTurn = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 1000,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: 1000,
+    reasoning_output_tokens: 0,
+  })!.estimatedUsd;
+  await expect(
+    security.scanDependencies({ ...options, maxCostUsd: perTurn * 1.5 }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const checkpoint = await readFile(savedPath, "utf8");
+  const prior: ScaResult = JSON.parse(checkpoint);
+  await expect(
+    security.scanDependencies({ ...options, maxCostUsd: perTurn * 1.5 }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  expect(await readFile(savedPath, "utf8")).toBe(checkpoint);
+  const costs: number[] = [];
+  const result = await security.scanDependencies({
+    ...options,
+    maxCostUsd: perTurn * 3.5,
+    onCost: (cost) => {
+      costs.push(cost.estimatedUsd);
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(result.assessments.slice(0, 2)).toEqual(prior.assessments.slice(0, 2));
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(3);
+  expect(costs[0]).toBeCloseTo(perTurn * 2);
+  expect(result.model.costUsd).toBeCloseTo(perTurn * 3);
+  expect(result.model.cost?.inputTokens).toBe(3000);
+  expect(result.model.cost?.estimatedUsdRange?.max).toBeGreaterThan(
+    result.model.costUsd!,
+  );
+});
+
+test.each([
+  "source",
+  "configuration",
+  "provider",
+  "endpoint",
+  "environment endpoint",
+] as const)(
+  "refuses continuation after changed %s and preserves saved artifacts",
+  async (change) => {
+    const provider = {
+      name: "Synthetic provider",
+      base_url: "https://provider.example.invalid/v1",
+      wire_api: "responses",
+      requires_openai_auth: true,
+    };
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides:
+        change === "endpoint"
+          ? { openai_base_url: "https://provider.example.invalid/v1" }
+          : change === "environment endpoint"
+            ? {}
+            : {
+                model_provider: "synthetic.provider",
+                model_providers: { "synthetic.provider": provider },
+              },
+    });
+    await using security = f.client;
+    if (change === "environment endpoint")
+      Object.assign(f.environment, {
+        OPENAI_BASE_URL: "https://provider.example.invalid/v1",
+      });
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    await security.scanDependencies(options);
+    if (change === "environment endpoint")
+      Object.assign(f.environment, {
+        OPENAI_BASE_URL: "https://changed.example.invalid/v1",
+      });
+    else if (change === "source")
+      await writeFile(join(f.repository, "usage.txt"), "changed source");
+    else if (change === "configuration")
+      Object.assign(security.config.codexOverrides!, {
+        model_reasoning_effort: "low",
+      });
+    else if (change === "endpoint")
+      Object.assign(security.config.codexOverrides!, {
+        openai_base_url: "https://changed.example.invalid/v1",
+      });
+    else
+      Object.assign(security.config.codexOverrides!, {
+        model_providers: {
+          "synthetic.provider": {
+            ...provider,
+            base_url: "https://changed.example.invalid/v1",
+          },
+        },
+      });
+    const checkpoint = await readFile(
+      join(f.outputDir, "sca-result.json"),
+      "utf8",
+    );
+    await expect(security.scanDependencies(options)).rejects.toThrow(
+      change === "source"
+        ? "source changed"
+        : "model, effort, provider, instructions, or skill changed",
+    );
+    expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
+      checkpoint,
+    );
+    expect(f.turns).toHaveLength(2);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test("rejects concurrent assessment of the same output directory", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  await using competitor = new TestClient({}, { environment: f.environment });
+  let concurrent: Promise<unknown> | undefined;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const result = await security.scanDependencies({
+    ...options,
+    onInventory: () => {
+      concurrent = competitor
+        .scanDependencies(options)
+        .catch((error: unknown) => error);
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(await concurrent).toMatchObject({
+    message: "A dependency scan is already running.",
+  });
+  expect(f.calls.scanner).toBe(1);
+});
+
+test("finalizes an interrupted checkpoint with all assessments already saved", async () => {
+  const f = await fixture({ turns: ["completed", "completed"] });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const perTurn = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 1000,
+    cache_write_input_tokens: 0,
+    output_tokens: 1000,
+  })!.estimatedUsd;
+  await expect(
+    security.scanDependencies({ ...options, maxCostUsd: perTurn * 1.5 }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  const checkpoint: ScaResult = JSON.parse(
+    await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+  );
+  expect(checkpoint.status).toBe("partial");
+  expect(
+    checkpoint.assessments.every((item) => item.status === "completed"),
+  ).toBe(true);
+  const result = await security.scanDependencies({
+    ...options,
+    maxCostUsd: perTurn * 3,
+  });
+  expect(result.status).toBe("completed");
+  expect(result.assessments).toEqual(checkpoint.assessments);
+  expect(result.model.cost).toEqual(checkpoint.model.cost);
+  expect(f.turns).toHaveLength(2);
+  expect(f.calls.scanner).toBe(1);
+});
+
+test("source drift during inventory does not create a resumable checkpoint", async () => {
+  const f = await fixture({ changeSourceAt: "scanner" });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const result = await security.scanDependencies(options);
+  expect(result.status).toBe("partial");
+  expect(result.assessmentContext).toBeUndefined();
+  expect(result.matches).toHaveLength(1);
+  await writeFile(
+    join(f.repository, "usage.txt"),
+    "synthetic initial source context",
+  );
+  await expect(security.scanDependencies(options)).rejects.toThrow(
+    "no source checkpoint",
+  );
+  expect(f.turns).toHaveLength(0);
+  expect(f.calls.scanner).toBe(1);
+});
+
+test("continues saved matching after authentication becomes available", async () => {
+  const fixtureOptions = { runtimeError: true };
+  const f = await fixture(fixtureOptions);
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.status).toBe("partial");
+  expect(initial.assessmentContext?.sourceDigest).toBeString();
+  expect(initial.assessmentContext?.configurationDigest).toBeNull();
+  expect(f.turns).toHaveLength(0);
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const checkpoint = await readFile(savedPath, "utf8");
+  const blocked = await security.scanDependencies(options);
+  expect(blocked.status).toBe("partial");
+  expect(blocked.matches).toEqual(initial.matches);
+  expect(blocked.assessments).toEqual(initial.assessments);
+  expect(blocked.diagnostics.at(-1)).toContain(
+    "synthetic authentication unavailable",
+  );
+  expect(await readFile(savedPath, "utf8")).toBe(checkpoint);
+  fixtureOptions.runtimeError = false;
+  const result = await security.scanDependencies(options);
+  expect(result.status).toBe("completed");
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(1);
+});
+
+test("continuation setup failure returns completed assessments without changing the checkpoint", async () => {
+  const f = await fixture({ turns: ["completed", "malformed"] });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.status).toBe("partial");
+  expect(initial.assessments[0]!.status).toBe("completed");
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const checkpoint = await readFile(savedPath, "utf8");
+  await using blockedClient = new TestClient(security.config, {
+    environment: f.environment,
+    sourceSnapshot: async () => ({
+      repository: f.repository,
+      revision: initial.repository.revision,
+      content: await readFile(join(f.repository, "usage.txt"), "utf8"),
+    }),
+    prepareRuntime: async () => {
+      throw new Error("synthetic authentication unavailable");
+    },
+    runOsvScan: async () => {
+      throw new Error("Matching must not repeat during continuation");
+    },
+  });
+
+  const blocked = await blockedClient.scanDependencies(options);
+  expect(blocked.status).toBe("partial");
+  expect(blocked.assessments).toEqual(initial.assessments);
+  expect(blocked.matches).toEqual(initial.matches);
+  expect(blocked.scanner).toEqual(initial.scanner);
+  expect(blocked.model).toEqual(initial.model);
+  expect(blocked.diagnostics.at(-1)).toContain(
+    "synthetic authentication unavailable",
+  );
+  expect(await readFile(savedPath, "utf8")).toBe(checkpoint);
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(2);
+
+  const completed = await security.scanDependencies(options);
+  expect(completed.status).toBe("completed");
+  expect(completed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(3);
+});
+
+test("continuation rejects linked lock directories before recovery writes", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  const external = await temporaryDirectory("synthetic-lock-target-");
+  await mkdir(f.outputDir, { mode: 0o700 });
+  await writeFile(join(f.outputDir, "sca-result.json"), "{}");
+  await symlink(
+    external,
+    join(f.outputDir, ".lock"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await expect(
+    security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+    }),
+  ).rejects.toThrow("lock must be a real directory");
+  expect(await readdir(external)).toEqual([]);
+  expect(f.calls.scanner).toBe(0);
+});
+
+test("historical thread cost cannot verify a later interrupted turn", async () => {
+  const controller = new AbortController();
+  const f = await fixture({
+    controller,
+    turns: ["completed", "cancelled"],
+  });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const originalStop = ScanCostTracker.prototype.stop;
+  const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+    async function (this: ScanCostTracker, usage?: unknown) {
+      const snapshot = await originalStop.call(this, usage);
+      return {
+        ...snapshot,
+        cost: estimateScanCost("gpt-5.6-sol", {
+          input_tokens: 1000,
+          cache_write_input_tokens: 0,
+          output_tokens: 1000,
+        }),
+      };
+    },
+  );
+  try {
+    await expect(
+      security.scanDependencies({ ...options, signal: controller.signal }),
+    ).rejects.toBeInstanceOf(ScanInterruptedError);
+  } finally {
+    stop.mockRestore();
+  }
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const saved = await readFile(savedPath, "utf8");
+  const checkpoint: ScaResult = JSON.parse(saved);
+  expect(checkpoint.model.cost?.inputTokens).toBe(1000);
+  expect(checkpoint.model.costPending).toBe(true);
+  await expect(
+    security.scanDependencies({ ...options, maxCostUsd: 10 }),
+  ).rejects.toThrow("earlier assessment usage is unavailable");
+  expect(await readFile(savedPath, "utf8")).toBe(saved);
+  expect(f.turns).toHaveLength(2);
+});
+
+test("an unverified reused turn stops budget-limited work before another assessment", async () => {
+  const f = await fixture({ turns: ["completed", "truncated", "completed"] });
+  await using security = f.client;
+  const originalRefresh = ScanCostTracker.prototype.refresh;
+  const refresh = spyOn(
+    ScanCostTracker.prototype,
+    "refresh",
+  ).mockImplementation(async function (this: ScanCostTracker) {
+    const snapshot = await originalRefresh.call(this);
+    return {
+      ...snapshot,
+      cost:
+        snapshot.cost ??
+        estimateScanCost("gpt-5.6-sol", {
+          input_tokens: 1000,
+          cache_write_input_tokens: 0,
+          output_tokens: 1000,
+        }),
+    };
+  });
+  try {
+    const failure = await security
+      .scanDependencies({
+        repositoryPath: f.repository,
+        outputDir: f.outputDir,
+        maxCostUsd: 10,
+      })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ScanInterruptedError);
+    expect((failure as ScanInterruptedError).cause).toMatchObject({
+      message: "Could not verify the dependency assessment cost limit.",
+    });
+  } finally {
+    refresh.mockRestore();
+  }
+  const saved: ScaResult = JSON.parse(
+    await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+  );
+  expect(saved.model.costPending).toBe(true);
+  expect(saved.assessments.map((item) => item.status)).toEqual([
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+  expect(f.turns).toHaveLength(2);
+});
+
+test.each([false, true])(
+  "continuation preserves unknown prior spend (pending checkpoint: %p)",
+  async (pending) => {
+    const f = await fixture({ turns: ["completed", "truncated"] });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    await security.scanDependencies(options);
+    const path = join(f.outputDir, "sca-result.json");
+    if (pending) {
+      const checkpoint: ScaResult = JSON.parse(await readFile(path, "utf8"));
+      checkpoint.model.costPending = true;
+      const priorCost = estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1000,
+        output_tokens: 1000,
+      })!;
+      checkpoint.model.cost = { ...priorCost };
+      checkpoint.model.costUsd = priorCost.estimatedUsd;
+      await writeFile(path, JSON.stringify(checkpoint));
+    }
+    const original = await readFile(path, "utf8");
+    await expect(
+      security.scanDependencies({ ...options, maxCostUsd: 10 }),
+    ).rejects.toThrow("earlier assessment usage is unavailable");
+    expect(await readFile(path, "utf8")).toBe(original);
+    const costs: unknown[] = [];
+    const result = await security.scanDependencies({
+      ...options,
+      onCost: (cost) => {
+        costs.push(cost);
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(result.model.costUsd).toBeNull();
+    expect(result.model.cost).toBeUndefined();
+    expect(costs).toHaveLength(0);
+    expect(f.calls.scanner).toBe(1);
+    expect(f.turns).toHaveLength(3);
+  },
+);
+
+test.each(["built-in", "custom provider"] as const)(
+  "continuation ignores an environment endpoint overridden by %s configuration",
+  async (kind) => {
+    const endpoint = "https://configured.example.invalid/v1";
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides:
+        kind === "built-in"
+          ? { openai_base_url: endpoint }
+          : {
+              model_provider: "synthetic.provider",
+              model_providers: {
+                "synthetic.provider": {
+                  name: "Synthetic provider",
+                  base_url: endpoint,
+                  wire_api: "responses",
+                  requires_openai_auth: true,
+                },
+              },
+            },
+    });
+    await using security = f.client;
+    Object.assign(f.environment, {
+      OPENAI_BASE_URL: "https://ignored.example.invalid/v1",
+    });
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    Object.assign(f.environment, {
+      OPENAI_BASE_URL: "https://changed.example.invalid/v1",
+    });
+    const result = await security.scanDependencies(options);
+    expect(result.status, result.diagnostics.join("\n")).toBe("completed");
+    expect(result.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.turns).toHaveLength(3);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "unreadable optional installed metadata preserves inventory and continuation",
+  async () => {
+    const f = await fixture({ turns: ["malformed", "completed"] });
+    await using security = f.client;
+    await writeFile(
+      join(f.repository, "package.json"),
+      JSON.stringify({
+        name: "synthetic-project",
+        dependencies: { "synthetic-package": "1.0.0" },
+      }),
+    );
+    const installed = join(f.repository, "node_modules/synthetic-package");
+    await mkdir(installed, { recursive: true });
+    const manifest = join(installed, "package.json");
+    await writeFile(
+      manifest,
+      JSON.stringify({ name: "synthetic-package", version: "1.0.0" }),
+    );
+    await chmod(manifest, 0o000);
+    try {
+      let observed: ScaResult | undefined;
+      const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+      const initial = await security.scanDependencies({
+        ...options,
+        onInventory: (inventory) => {
+          observed = inventory;
+        },
+      });
+      expect(observed?.matches).toHaveLength(2);
+      expect(initial.assessmentContext?.sourceDigest).toBeString();
+      expect(initial.packageContexts?.[0]?.installedPath).toBeNull();
+      const result = await security.scanDependencies(options);
+      expect(result.status).toBe("completed");
+      expect(f.calls.scanner).toBe(1);
+    } finally {
+      await chmod(manifest, 0o600);
+    }
+  },
+);
+
+test.each([false, true])(
+  "missing usage on a completed reused turn remains unverified (budgeted: %p)",
+  async (budgeted) => {
+    const f = await fixture({
+      turns: ["completed", "missing_usage", "completed"],
+    });
+    await using security = f.client;
+    await writeSession(f.codexHome, "sca-thread", {
+      input_tokens: 1000,
+      output_tokens: 1000,
+    });
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    if (budgeted) {
+      const failure = await security
+        .scanDependencies({ ...options, maxCostUsd: 1 })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ScanInterruptedError);
+      expect((failure as ScanInterruptedError).cause).toMatchObject({
+        message: "Could not verify the dependency assessment cost limit.",
+      });
+    } else {
+      const result = await security.scanDependencies(options);
+      expect(result.status).toBe("completed");
+      expect(
+        result.assessments.every((item) => item.status === "completed"),
+      ).toBe(true);
+      expect(result.assessments[2]!.threadId).not.toBe(
+        result.assessments[1]!.threadId,
+      );
+    }
+    const checkpointPath = join(f.outputDir, "sca-result.json");
+    const serialized = await readFile(checkpointPath, "utf8");
+    const checkpoint: ScaResult = JSON.parse(serialized);
+    expect(checkpoint.model.costPending).toBe(true);
+    expect(f.turns).toHaveLength(budgeted ? 2 : 3);
+    if (budgeted) {
+      expect(checkpoint.model.cost?.inputTokens).toBe(1000);
+      expect(checkpoint.assessments.map((item) => item.status)).toEqual([
+        "completed",
+        "completed",
+        "cancelled",
+      ]);
+      await expect(
+        security.scanDependencies({ ...options, maxCostUsd: 10 }),
+      ).rejects.toThrow("earlier assessment usage is unavailable");
+      expect(await readFile(checkpointPath, "utf8")).toBe(serialized);
+      expect(f.turns).toHaveLength(2);
+    }
+  },
+);
+
+test("retains native rollout fallback for a first assessment without SDK usage", async () => {
+  const f = await fixture({ turns: ["missing_usage"] });
+  await using security = f.client;
+  await writeSession(f.codexHome, "sca-thread", {
+    input_tokens: 1000,
+    output_tokens: 1000,
+  });
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    maxCostUsd: 1,
+  });
+  expect(result.status).toBe("completed");
+  expect(result.model.costPending).toBe(false);
+  expect(result.model.cost?.inputTokens).toBe(1000);
+});
+
+test.each([false, true])(
+  "unrelated provider definitions do not invalidate continuation (initially present: %p)",
+  async (initiallyPresent) => {
+    const unrelated = {
+      "synthetic.unused": {
+        name: "Unused synthetic provider",
+        base_url: "https://unused.example.invalid/v1",
+        wire_api: "responses",
+        requires_openai_auth: true,
+      },
+    };
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides: initiallyPresent ? { model_providers: unrelated } : {},
+    });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    if (initiallyPresent)
+      delete security.config.codexOverrides!["model_providers"];
+    else security.config.codexOverrides!["model_providers"] = unrelated;
+    const result = await security.scanDependencies(options);
+    expect(result.status).toBe("completed");
+    expect(result.assessmentContext?.configurationDigest).toBe(
+      initial.assessmentContext?.configurationDigest,
+    );
+    expect(result.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.calls.scanner).toBe(1);
+    expect(f.turns).toHaveLength(3);
+  },
+);
+
+test("malformed optional package metadata preserves inventory and assessment", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  await writeFile(
+    join(f.repository, "package.json"),
+    JSON.stringify({
+      name: "synthetic-project",
+      dependencies: { ["synthetic\u0000name"]: "1.0.0" },
+    }),
+  );
+  let observed: ScaResult | undefined;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onInventory: (inventory) => {
+      observed = inventory;
+    },
+  });
+  expect(observed?.matches).toHaveLength(1);
+  expect(result.status).toBe("completed");
+  expect(result.assessments[0]!.status).toBe("completed");
+  expect(result.diagnostics.join("\n")).toContain(
+    "Installed dependency context unavailable:",
+  );
+  expect(result.assessmentContext?.sourceDigest).toBeString();
+});
+
+test.each(
+  ["developer_instructions", "instructions", "compact_prompt"].flatMap((key) =>
+    [false, true].map((profile) => [key, profile] as const),
+  ),
+)("changed %s reject continuation (profile: %p)", async (key, profile) => {
+  const overrides = (instructions: string): JsonObject =>
+    profile
+      ? {
+          profile: "synthetic-assessment",
+          profiles: {
+            "synthetic-assessment": { [key]: instructions },
+          },
+        }
+      : { [key]: instructions };
+  const f = await fixture({
+    turns: ["completed", "malformed"],
+    codexOverrides: overrides("Synthetic original assessment instructions."),
+  });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.assessments[0]!.status).toBe("completed");
+  expect(f.captured.codex?.config?.[key]).toBe(
+    "Synthetic original assessment instructions.",
+  );
+  const checkpoint = await readFile(
+    join(f.outputDir, "sca-result.json"),
+    "utf8",
+  );
+  Object.assign(
+    security.config.codexOverrides!,
+    overrides("Synthetic changed assessment instructions."),
+  );
+  await expect(security.scanDependencies(options)).rejects.toThrow(
+    "instructions, or skill changed",
+  );
+  expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
+    checkpoint,
+  );
+  expect(f.turns).toHaveLength(2);
+  expect(f.calls.model).toBe(1);
+  expect(f.calls.scanner).toBe(1);
+});
+
+test.each([
+  ["model_verbosity", "low", "high"],
+  ["model_context_window", 16000, 32000],
+  ["model_auto_compact_token_limit", 8000, 12000],
+  ["model_reasoning_summary", "detailed", "none"],
+] as const)(
+  "continuation binds effective %s",
+  async (key, original, changed) => {
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides: {
+        profile: "synthetic-assessment",
+        profiles: { "synthetic-assessment": { [key]: original } },
+      },
+    });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    expect(initial.assessments[0]).toMatchObject({
+      status: "completed",
+      error: null,
+    });
+    expect(f.captured.codex?.config?.[key]).toBe(original);
+    const checkpointPath = join(f.outputDir, "sca-result.json");
+    const checkpoint = await readFile(checkpointPath, "utf8");
+    const profile = (security.config.codexOverrides!["profiles"] as JsonObject)[
+      "synthetic-assessment"
+    ] as JsonObject;
+    profile[key] = changed;
+    await expect(security.scanDependencies(options)).rejects.toThrow(
+      "Use the original settings or start a new run",
+    );
+    expect(await readFile(checkpointPath, "utf8")).toBe(checkpoint);
+    expect(f.turns).toHaveLength(2);
+    profile[key] = original;
+    const resumed = await security.scanDependencies(options);
+    expect(resumed.status).toBe("completed");
+    expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test.each([
+  ["model_instructions_file", "path", "absolute"],
+  ["model_instructions_file", "contents", "relative"],
+  ["model_instructions_file", "missing", "home"],
+  ["experimental_compact_prompt_file", "path", "relative"],
+  ["experimental_compact_prompt_file", "contents", "home"],
+  ["experimental_compact_prompt_file", "missing", "absolute"],
+] as const)(
+  "%s binds %s changes with %s paths before continuing",
+  async (key, change, pathKind) => {
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      homeVariable: process.platform === "win32" ? "USERPROFILE" : "HOME",
+      codexOverrides: {
+        profile: "synthetic-assessment",
+        profiles: { "synthetic-assessment": {} },
+      },
+    });
+    await using security = f.client;
+    await mkdir(f.selectedUserHome, { recursive: true });
+    const original = join(f.selectedUserHome, "original instructions.md");
+    const changed = join(f.selectedUserHome, "changed instructions.md");
+    const contents = "Synthetic original assessment instructions.";
+    await writeFile(original, contents);
+    await writeFile(changed, contents);
+    const configuredPath = (path: string) =>
+      pathKind === "home"
+        ? `~/${basename(path)}`
+        : pathKind === "relative"
+          ? relative(f.outputDir, path)
+          : path;
+    const profile = (security.config.codexOverrides!["profiles"] as JsonObject)[
+      "synthetic-assessment"
+    ] as JsonObject;
+    profile[key] = configuredPath(original);
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    expect(initial.assessments[0]).toMatchObject({
+      status: "completed",
+      error: null,
+    });
+    expect(initial.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      "failed",
+    ]);
+    expect(f.captured.codex?.config?.[key]).toBe(original);
+    const checkpointPath = join(f.outputDir, "sca-result.json");
+    const checkpoint = await readFile(checkpointPath, "utf8");
+    if (change === "path") profile[key] = configuredPath(changed);
+    else if (change === "contents")
+      await writeFile(original, "Synthetic changed assessment instructions.");
+    else await rm(original);
+    await expect(security.scanDependencies(options)).rejects.toThrow(
+      change === "missing" ? "ENOENT" : "instructions, or skill changed",
+    );
+    expect(await readFile(checkpointPath, "utf8")).toBe(checkpoint);
+    expect(f.turns).toHaveLength(2);
+    expect(f.calls.model).toBe(1);
+    expect(f.calls.scanner).toBe(1);
+
+    profile[key] = configuredPath(original);
+    await writeFile(original, ` ${contents} `);
+    const resumed = await security.scanDependencies(options);
+    expect(resumed.status).toBe("completed");
+    expect(resumed.assessmentContext?.configurationDigest).toBe(
+      initial.assessmentContext?.configurationDigest,
+    );
+    expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.turns).toHaveLength(3);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test("overridden instruction defaults do not invalidate continuation", async () => {
+  const instructionsRoot = await temporaryDirectory("synthetic-instructions-");
+  const modelFile = join(instructionsRoot, "model.md");
+  const compactFile = join(instructionsRoot, "compact.md");
+  await writeFile(modelFile, "Synthetic selected model instructions.");
+  await writeFile(compactFile, "Synthetic unused compaction instructions.");
+  const f = await fixture({
+    turns: ["completed", "malformed"],
+    codexOverrides: {
+      model_instructions_file: modelFile,
+      instructions: "Synthetic unused model instructions.",
+      compact_prompt: "Synthetic selected compaction instructions.",
+      experimental_compact_prompt_file: compactFile,
+    },
+  });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.assessments[0]!.status).toBe("completed");
+  security.config.codexOverrides!["instructions"] =
+    "Synthetic changed unused model instructions.";
+  await writeFile(
+    compactFile,
+    "Synthetic changed unused compaction instructions.",
+  );
+  const resumed = await security.scanDependencies(options);
+  expect(resumed.status).toBe("completed");
+  expect(resumed.assessmentContext?.configurationDigest).toBe(
+    initial.assessmentContext?.configurationDigest,
+  );
+  expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(f.turns).toHaveLength(3);
+  expect(f.calls.scanner).toBe(1);
+});

@@ -393,7 +393,10 @@ function caseInsensitiveField(
 }
 
 function inputProvenance(
-  coverage: Pick<ScaCoverage, "inputs" | "configFiles" | "limitations">,
+  coverage: Pick<
+    ScaCoverage,
+    "inputs" | "configFiles" | "limitations" | "firstPartyPackages"
+  >,
 ): string {
   return JSON.stringify({
     inputs: coverage.inputs.map(({ path, sha256, format, status }) => ({
@@ -404,6 +407,7 @@ function inputProvenance(
     })),
     configFiles: coverage.configFiles,
     limitations: coverage.limitations,
+    firstPartyPackages: coverage.firstPartyPackages,
   });
 }
 
@@ -536,7 +540,7 @@ async function repositoryFiles(
 
 type ScaInputDiscovery = Pick<
   ScaCoverage,
-  "inputs" | "configFiles" | "limitations"
+  "inputs" | "configFiles" | "limitations" | "firstPartyPackages"
 > & {
   localReferences: DependencyLocalReference[];
   diagnostics: string[];
@@ -570,6 +574,7 @@ export async function discoverScaInputs(
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
   const localReferences: DependencyLocalReference[] = [];
+  const firstPartyPackages: NonNullable<ScaCoverage["firstPartyPackages"]> = [];
   const diagnostics = [
     ...submodules.map(
       (path) =>
@@ -658,6 +663,61 @@ export async function discoverScaInputs(
         );
         input.status = inspected.status;
         input.reason = inspected.reason;
+        if (
+          additional === "cargo" &&
+          inspected.references.some(
+            (reference) => reference.resolution === "workspace-or-path",
+          )
+        ) {
+          const manifestPath = join(dirname(path), "Cargo.toml");
+          const metadata = await lstat(manifestPath).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            },
+          );
+          if (
+            metadata?.isFile() &&
+            !relativePathIsOutside(
+              relative(repository, await realpath(manifestPath)),
+            )
+          ) {
+            let manifest: Record<string, unknown> | undefined;
+            try {
+              manifest = parseToml(await readFile(manifestPath, "utf8"));
+            } catch (error) {
+              diagnostics.push(
+                `Could not identify the local package from ${slash(relative(repository, manifestPath))}: ${errorMessage(error)}`,
+              );
+            }
+            const pkg = manifest?.["package"];
+            if (record(pkg))
+              for (
+                let index = inspected.references.length - 1;
+                index >= 0;
+                index--
+              ) {
+                const reference = inspected.references[index]!;
+                if (
+                  reference.resolution === "workspace-or-path" &&
+                  reference.name === pkg["name"] &&
+                  reference.version !== null &&
+                  reference.version === pkg["version"]
+                ) {
+                  firstPartyPackages.push({
+                    name: reference.name,
+                    version: reference.version,
+                    sourcePath: input.path,
+                    manifestPath: slash(relative(repository, manifestPath)),
+                  });
+                  inspected.references.splice(index, 1);
+                  limitations.push(
+                    `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${slash(relative(repository, manifestPath))}; registry advisory coverage does not apply to that local package.`,
+                  );
+                }
+              }
+          }
+        }
         localReferences.push(...inspected.references);
         diagnostics.push(...inspected.diagnostics);
         limitations.push(...inspected.limitations);
@@ -747,6 +807,7 @@ export async function discoverScaInputs(
       configFiles,
       limitations,
       localReferences,
+      firstPartyPackages,
       diagnostics,
     });
   }
@@ -756,6 +817,7 @@ export async function discoverScaInputs(
     configFiles,
     limitations,
     localReferences,
+    firstPartyPackages,
     diagnostics,
   };
 }

@@ -288,7 +288,7 @@ describe("SCA report", () => {
       const result = fixture();
       result.model.costUsd = cost;
       expect(renderScaReport(result)).toContain(
-        `Model cost (USD): **${cost === null ? "unavailable" : cost}**`,
+        cost === null ? "unavailable" : `$${cost.toFixed(2)}`,
       );
     },
   );
@@ -668,6 +668,51 @@ describe("SCA update handoff", () => {
     expect(handoff.validationInstructions).toContain(
       "No project checks were supplied",
     );
+  });
+
+  test("retains observed introduction chains and identifies only missing chains", () => {
+    const result = fixture();
+    addMatch(result, "missing-chain", "2.0.0");
+    result.packageContexts = [
+      {
+        componentId: "component-1",
+        manifestPath: "packages/app/package.json",
+        projectName: "synthetic-app",
+        private: true,
+        installedPath: "node_modules/synthetic-package",
+        dependencyChain: [
+          { name: "synthetic-app", version: "1.0.0", path: "packages/app" },
+          {
+            name: "synthetic-introducer",
+            version: "3.0.0",
+            path: "node_modules/synthetic-introducer",
+          },
+          {
+            name: "synthetic-package",
+            version: "1.0.0",
+            path: "node_modules/synthetic-package",
+          },
+        ],
+        dependencyGroups: ["dev"],
+        limitations: ["Synthetic installed-source limitation."],
+      },
+    ];
+    const handoff = createScaUpdateHandoff(result, [
+      "match-1",
+      "missing-chain",
+    ]);
+    expect(handoff.findingText).toContain("synthetic-introducer");
+    expect(handoff.findingText).toContain("packages/app/package.json");
+    expect(handoff.findingText).toContain("not a complete graph");
+    expect(handoff.findingText).toContain(
+      "Synthetic installed-source limitation.",
+    );
+    const missing = handoff.unresolvedDecisions.filter((decision) =>
+      decision.includes("dependency chain"),
+    );
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain("missing-chain");
+    expect(missing[0]).not.toContain("match-1");
   });
 
   test("rejects missing selections and unknown match IDs", () => {
