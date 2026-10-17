@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from bisect import bisect_right
-from itertools import chain
+from itertools import chain, islice
 from pathlib import Path
 from typing import Any
 
@@ -390,7 +390,7 @@ def bounded_json_value(
         if not consume_json_budget(budget, 2):
             return {}
         result = {}
-        for key, item in list(value.items())[:20]:
+        for key, item in islice(value.items(), 20):
             if budget[0] <= 0 or not isinstance(key, str):
                 break
             remaining = budget[0]

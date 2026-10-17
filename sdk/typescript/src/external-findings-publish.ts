@@ -1,6 +1,14 @@
 import { hash, randomUUID } from "node:crypto";
 import { chmodSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -529,11 +537,43 @@ async function preparePublicationInput(
       (left, right) => left.localeCompare(right),
     ),
   );
-  let recovered: SavedSubmission | undefined;
-  for (const legacyKey of new Set([
+  const legacyKeys = new Set([
     hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
     historicalKey,
-  ])) {
+  ]);
+  async function rejectUnidentifiedLegacyCheckpoint(): Promise<void> {
+    const entries = await readdir(state, { withFileTypes: true }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      },
+    );
+    if (entries.length) await validatePreparedOutputDir(state, undefined, true);
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
+        continue;
+      const candidateKey = entry.name.slice(0, -".pending.json".length);
+      if (candidateKey === key || legacyKeys.has(candidateKey)) continue;
+      const serialized = await readOptionalFile(join(state, entry.name));
+      if (serialized === undefined) continue;
+      try {
+        // Locale-dependent filenames predate input projections. Later formats
+        // must remain isolated by their deployment-bound checkpoint keys.
+        const content = JSON.parse(serialized) as SavedSubmission | null;
+        if (!content || content.inputProjection !== undefined) continue;
+        validateSaved(serialized, true);
+      } catch {
+        continue;
+      }
+      // These older bodies contain no deployment identity. Do not guess a
+      // destination or replace their immutable request with a fresh publication.
+      throw new CodexSecurityError(
+        "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
+      );
+    }
+  }
+  let recovered: SavedSubmission | undefined;
+  for (const legacyKey of legacyKeys) {
     if (legacyKey === key) continue;
     const legacyPath = join(state, `${legacyKey}.pending.json`);
     const captured = await readOptionalFile(legacyPath);
@@ -608,6 +648,7 @@ async function preparePublicationInput(
   const serialized = await readOptionalFile(pendingPath);
   const saved =
     serialized === undefined ? recovered : validateSaved(serialized);
+  if (!saved) await rejectUnidentifiedLegacyCheckpoint();
   if (saved) {
     const content = saved;
     for (const submission of content.requests) {
@@ -751,6 +792,8 @@ async function preparePublicationInput(
       return await withImportLock(state, key, dependencies.signal, async () => {
         // Re-read under the lock to keep checkpoints from another publisher.
         const pending = await readOptionalFile(pendingPath);
+        if (pending === undefined && !saved)
+          await rejectUnidentifiedLegacyCheckpoint();
         const current =
           pending === undefined
             ? submission

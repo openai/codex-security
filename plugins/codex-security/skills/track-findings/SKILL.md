@@ -52,12 +52,14 @@ Report source status as `verified`, `unverified` (a candidate cannot be tied to 
 
 Read the provider state needed to choose supported fields. Use exact ids for teams, projects, labels, milestones, and assignees when available. Do not invent metadata or infer it from names.
 
+Call `get_codex_security_finding_issues` with `scanDirectory`, the selected `findingIds`, and the confirmed `destination`: Linear `{type: "linear", teamId, projectId?}`, Jira `{type: "jira", cloudId, projectId}`, or GitHub `{type: "github-issue" | "github-advisory", hostname, repository: "owner/repo"}`. Use canonical provider ids. Saved associations include earlier scan occurrences and CLI publications; read them through the selected provider and confirm the match before reuse. They do not replace remote duplicate searches.
+
 Search the finding id and fingerprint before proposing a create. Search all statuses in the exact destination; GitHub issue searches exclude pull requests. Complete identifier searches and read plausible matches. Add narrow semantic searches when safe for the confirmed audience.
 
 Compare bindings when present and assess whether the source context, affected code, root cause, control, and sink match. Similar wording or missing bindings alone do not settle the comparison. Choose one outcome:
 
 - `create`: complete searches found no issue tracking the same finding.
-- `reuse`: one issue tracks the finding, established by a current read or this run's successful create receipt. Reuse is read-only and does not require adding bindings or rewriting the issue.
+- `reuse`: one issue tracks the finding, established by a current read or this run's successful create receipt. Reuse does not require adding bindings or rewriting the issue.
 - `update`: one verified matching issue should receive specific reviewed changes.
 - `blocked`: routing, access, disclosure, or duplicate ambiguity prevents a decision.
 
@@ -73,7 +75,7 @@ Every create or update body includes labeled canonical finding id and primary fi
 
 Do not include credentials, signed URLs, local file URLs, or unreviewed links. A public GitHub issue requires approval of its complete public title and body, including a prominent visibility warning. Exclude internal evidence, attack paths, exploit detail, and private source links from public issues.
 
-For batches, show every item in execution order and obtain approval for that list. A general request to track findings does not approve an unseen payload. Changes to source, identity, transport, destination, audience, duplicate decision, payload, or membership require a new preview and approval. Read-only reuse requires neither mutation approval nor write access.
+For batches, show every item in execution order and obtain approval for that list. A general request to track findings does not approve an unseen payload. Changes to source, identity, transport, destination, audience, duplicate decision, payload, or membership require a new preview and approval. Reuse requires neither provider mutation approval nor write access.
 
 ## 5. Apply and verify
 
@@ -81,9 +83,11 @@ After an approval pause or interruption, rerun source validation, reverify sourc
 
 Before creating, refresh duplicate results to catch an issue created while awaiting approval. After a pause, reread each selected reuse candidate and reconfirm the match; stop if it is unreadable or ambiguous, and return to preview if the duplicate decision changes. Before updating after a pause, reread the fields being changed and return to preview if they differ from the reviewed values. Without an intervening pause, a successful create receipt can supply the values for an already approved follow-up edit. Preserve unowned fields and existing rich content.
 
-Process findings serially in the approved order. Immediately before each create, update, or reuse, run the source validator with that exact finding id and stop if it fails. Use the exact approved payload and record each provider receipt outside the sealed bundle. Stop the batch on a failed or uncertain mutation or unresolved duplicate.
+Process findings serially in the approved order. Immediately before each create, update, or reuse, run the source validator with that exact finding id and stop if it fails. Use the exact approved payload. Stop the batch on a failed or uncertain mutation or unresolved duplicate.
 
-A successful provider response establishes an accepted write. Read the returned object through the same transport when possible to check identity and changed fields, allowing provider formatting that preserves meaning and links. Report a failed follow-up read separately, retaining the returned identity. An unreadable issue does not authorize another create.
+A successful provider response establishes an accepted write. Immediately call `record_codex_security_finding_issues` with the same source and destination and a receipt containing the canonical `findingId` and `occurrenceId`, returned `issueIdentifier`, optional returned `url`, and `operation: "create" | "update" | "reuse"`. Record verified reuse the same way, using the current scan occurrence. Preserve returned identities and stop the batch if local recording fails; a storage failure never authorizes another create.
+
+After recording an accepted write, read the returned object through the same transport when possible to check identity and changed fields, allowing provider formatting that preserves meaning and links. Record the same receipt again with `readback: {status: "verified"}` or `{status: "failed", error}`; omit readback when no read was attempted. A current read confirming reuse can be recorded as verified immediately. Keep accepted writes and read failures distinct. An unreadable issue does not authorize another create.
 
 For CLI issue writes, put the approved body in a mode-`0600` temporary file outside the repository and scan bundle, arrange cleanup on every exit, and pass it to one `gh issue create` or `gh issue edit`. Never print the file. Capture the issue identity and read it with `gh issue view --json`. Use the advisory reference for JSON file creation and required readback.
 

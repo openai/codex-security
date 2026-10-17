@@ -15,6 +15,11 @@ import {
   classifyScanDirectorySeverity,
   deduplicateScan,
   deduplicateRecords,
+  runHostedScan,
+  type HostedScanInput,
+  type HostedScanOptions,
+  type HostedScanResult,
+  type ScanExecutor,
   type DeduplicateRecordsInput,
   type DeduplicateRecordsResult,
   type DeduplicationReviewRequest,
@@ -354,3 +359,24 @@ export async function suggestFindingOwners(
     identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
   };
 }
+
+export async function hostedScan(
+  input: HostedScanInput,
+  executor: ScanExecutor,
+  signal: AbortSignal,
+): Promise<HostedScanResult> {
+  const options: HostedScanOptions = {
+    executor,
+    signal,
+    onEvent(event) {
+      event.type satisfies "progress" | "activity";
+    },
+  };
+  return await runHostedScan(input, options);
+}
+
+const localOptions: ScanOptions = {
+  // @ts-expect-error Hosted execution uses the standalone runHostedScan API.
+  hosted: {},
+};
+void localOptions;
