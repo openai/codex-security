@@ -56202,7 +56202,9 @@ async function analyzeResults(options) {
   }
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
+  result.usage = value.turn?.usage ?? void 0;
   result.estimatedCost = value.cost?.estimatedUsd;
+  result.estimatedCostRange = value.cost?.estimatedUsdRange;
   result.paths = {
     resultsDirectory: options.resultsDirectory,
     manifestPath: (0, import_node_path5.join)(options.resultsDirectory, "scan-manifest.json"),
@@ -99191,12 +99193,17 @@ function resultTitle(result, inputs) {
 function resultSummary(result, inputs, target) {
   const esc = (value, limit = 4e3) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(" \xB7 ") : "unavailable";
+  const usage = result.usage;
+  const tokens = usage ? `${usage.input_tokens.toLocaleString("en-US")} input (${usage.cached_input_tokens.toLocaleString("en-US")} cached) \xB7 ${usage.output_tokens.toLocaleString("en-US")} output` : "unavailable";
+  const range2 = result.estimatedCostRange;
+  const cost = range2 && range2.max !== range2.min ? range2.max === null ? `$${range2.min.toFixed(4)} (upper estimate unavailable)` : `$${range2.min.toFixed(4)}\u2013$${range2.max.toFixed(4)}` : result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} \xB7 **Findings policy:** ${result.policyStatus} \xB7 **Report:** ${result.reportStatus}`,
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
-    `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
+    `**Configured provider:** <code>${esc(inputs.provider)}</code> \xB7 **Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
+    `**Tokens:** ${tokens} \xB7 **Estimated cost:** ${cost}`,
     `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."

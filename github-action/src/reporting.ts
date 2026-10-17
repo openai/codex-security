@@ -22,12 +22,19 @@ export function resultTitle(result: ScanResults, inputs: Inputs): string {
 export function resultSummary(result: ScanResults, inputs: Inputs, target: Target): string {
   const esc = (value: string, limit = 4000) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(' · ') : 'unavailable';
+  const usage = result.usage;
+  const tokens = usage ? `${usage.input_tokens.toLocaleString('en-US')} input (${usage.cached_input_tokens.toLocaleString('en-US')} cached) · ${usage.output_tokens.toLocaleString('en-US')} output` : 'unavailable';
+  const range = result.estimatedCostRange;
+  const cost = range && range.max !== range.min
+    ? range.max === null ? `$${range.min.toFixed(4)} (upper estimate unavailable)` : `$${range.min.toFixed(4)}–$${range.max.toFixed(4)}`
+    : result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} · **Findings policy:** ${result.policyStatus} · **Report:** ${result.reportStatus}`,
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(', '))}</code>` : ''} · **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
-    `**Model:** <code>${esc(inputs.model)}</code> · **Reasoning effort:** ${inputs.effort}`,
+    `**Configured provider:** <code>${esc(inputs.provider)}</code> · **Model:** <code>${esc(inputs.model)}</code> · **Reasoning effort:** ${inputs.effort}`,
+    `**Tokens:** ${tokens} · **Estimated cost:** ${cost}`,
     `**Failure threshold:** ${inputs.failOnSeverity === 'none' ? 'report-only findings' : inputs.failOnSeverity + ' and above'}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...(inputs.maxCost !== undefined ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : []),
     'Applicable root and nested SECURITY.md policy is discovered by the scanner.',

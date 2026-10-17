@@ -97,6 +97,8 @@ test("runs a report-only full scan outside the target checkout", () => {
     "standard",
     "--effort",
     "high",
+    "--codex",
+    'responses_api_metadata.codex_security_integration="azure_pipelines"',
     "--output-dir",
     `${result.root}/scan`,
     "--json",

@@ -21,7 +21,8 @@ async function fixture(t: { after(fn: () => Promise<void>): void }): Promise<Res
       coverage: await document('coverage.json'),
       scanDir: root,
       sarifPath: join(root, 'exports/results.sarif'),
-      cost: { estimatedUsd: 0.125 },
+      turn: { usage: { input_tokens: 1200, cached_input_tokens: 200, output_tokens: 50 } },
+      cost: { estimatedUsd: 0.125, estimatedUsdRange: { min: 0.125, max: 0.25, context: 'unknown' } },
     }),
   };
 }
@@ -40,10 +41,25 @@ test('adapts a synthetic CLI JSON result into findings, counts and report output
   assert.equal(result.reportStatus, 'ready');
   assert.equal(result.sarifUploadReady, true);
   assert.deepEqual(result.counts, { critical: 0, high: 1, medium: 0, low: 0, informational: 0 });
+  assert.deepEqual(result.usage, { input_tokens: 1200, cached_input_tokens: 200, output_tokens: 50 });
   assert.equal(result.estimatedCost, 0.125);
+  assert.deepEqual(result.estimatedCostRange, { min: 0.125, max: 0.25, context: 'unknown' });
   assert.equal(result.findings[0]?.path, 'src/extract.py');
   assert.equal(result.findings[0]?.startLine, 41);
   assert.equal(result.paths.jsonPath, join(opts.resultsDirectory, 'findings.json'));
+});
+
+test('token usage remains available for unpriced models and distinguishes missing measurements from zero', async (t) => {
+  const opts = await fixture(t);
+  for (const usage of [{ input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 },
+    { input_tokens: 1200, cached_input_tokens: 200, output_tokens: 50 }, null, undefined]) {
+    change(opts, value => { value.turn = { usage }; value.cost = null; });
+    const result = await analyzeResults(opts);
+    assert.equal(result.scanStatus, 'completed');
+    assert.deepEqual(result.usage, usage ?? undefined);
+    assert.equal(result.estimatedCost, undefined);
+    assert.equal(result.estimatedCostRange, undefined);
+  }
 });
 
 test('uses the structured CLI findings instead of reparsing report documents', async (t) => {

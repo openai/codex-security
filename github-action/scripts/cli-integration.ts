@@ -1,9 +1,11 @@
-// Exercise the locked CLI or an installed release candidate without model calls.
+// Exercise the locked CLI or an installed release candidate with synthetic local requests only.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { parseInputs, scanArguments } from '../src/inputs.js';
 import { analyzeResults } from '../src/results.js';
 import { captureRunnerPath, checkPython, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
@@ -75,6 +77,8 @@ try {
     assert.deepEqual(result.findings.map(finding => finding.title),
       cliResult.findings.findings.map((finding: any) => finding.title));
     assert.equal(result.estimatedCost, cliResult.cost?.estimatedUsd);
+    assert.deepEqual(result.usage, cliResult.turn?.usage ?? undefined);
+    assert.deepEqual(result.estimatedCostRange, cliResult.cost?.estimatedUsdRange);
   }
 
   // Deep Scan cannot use --mock; validate the Action's actual arguments without model calls.
@@ -112,6 +116,67 @@ try {
     if (missing.error) throw missing.error;
     assert.equal(missing.status, 2);
     assert.match(missing.stderr + missing.stdout, /--model is required when using --provider/);
+  }
+
+  // Exercise Action arguments through the installed CLI and native request serializer.
+  // A terminal fixture error stops each scan before any model output or tool execution.
+  const requests: Array<{headers: IncomingHttpHeaders; body: any}> = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk);
+    if (request.method === 'POST' && request.url?.endsWith('/responses')) {
+      requests.push({headers:request.headers, body:JSON.parse(Buffer.concat(chunks).toString())});
+      response.writeHead(400, {'content-type':'application/json'});
+      response.end(JSON.stringify({error:{message:'Synthetic attribution fixture', type:'invalid_request_error'}}));
+    } else {
+      // Tell native WebSocket negotiation to fall back to HTTP.
+      response.writeHead(request.url?.endsWith('/responses') ? 426 : 200, {'content-type':'application/json'});
+      response.end('{"models":[]}');
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const endpoint = `http://127.0.0.1:${address.port}`;
+    for (const provider of ['openai', 'amazon-bedrock']) {
+      requests.length = 0;
+      const requestHome = join(root, `request-${provider}`);
+      const codexHome = join(requestHome, '.codex');
+      await mkdir(codexHome, {recursive:true, mode:0o700});
+      const values: Record<string, string> = {provider, model:'gpt-5.6-sol', verbose:'false'};
+      const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
+        {repository}, join(root, `request-${provider}-results`));
+      for (const override of [
+        provider === 'openai' ? `openai_base_url="${endpoint}/v1"`
+          : `model_providers.amazon-bedrock.base_url="${endpoint}/v1"`,
+        `chatgpt_base_url="${endpoint}"`, 'features.enable_request_compression=false',
+        'otel.exporter="none"', 'otel.metrics_exporter="none"', 'otel.trace_exporter="none"',
+      ]) args.push('--codex', override);
+      const failure = await promisify(execFile)(process.execPath, [cli, ...args], {
+        cwd:repository, timeout:120_000, maxBuffer:8 * 1024 * 1024,
+        env:{...env, HOME:requestHome, CODEX_HOME:codexHome,
+          CODEX_SECURITY_STATE_DIR:join(requestHome, 'state'),
+          HTTP_PROXY:endpoint, HTTPS_PROXY:endpoint, ALL_PROXY:endpoint, NO_PROXY:'127.0.0.1',
+          OPENAI_API_KEY:'synthetic-api-key',
+          AWS_BEARER_TOKEN_BEDROCK:'synthetic-bedrock-token', AWS_REGION:'us-east-1'},
+      }).then(() => assert.fail('The synthetic request must fail'), error => error);
+      assert.equal(failure.code, 2, failure.stderr);
+      assert.equal(requests.length, 1, failure.stderr);
+      const request = requests[0];
+      for (const metadata of [
+        JSON.parse(String(request.headers['x-codex-turn-metadata'])),
+        JSON.parse(request.body.client_metadata['x-codex-turn-metadata']),
+      ]) {
+        assert.equal(metadata.codex_security_integration, 'github_action');
+        assert.equal(metadata.codex_security_provider, provider);
+        assert.equal(metadata.analytics_enabled, false);
+        assert.equal(metadata.thread_source, 'security_scan');
+      }
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 
   // Normalization must not let a literal repository path become a framework option.
@@ -253,7 +318,7 @@ try {
   assert.equal(result.policyStatus, 'not-evaluated');
   assert.equal(result.sarifUploadReady, false);
   assert.ok(result.errors.some(error => error.includes(cliError.message)));
-  console.log(`${candidatePackage === undefined ? 'Pinned' : 'Candidate'} CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, sandbox readiness and filesystem enforcement, MCP runner tracking, and failures passed without model calls.`);
+  console.log(`${candidatePackage === undefined ? 'Pinned' : 'Candidate'} CLI ${installed.version}: real JSON results, severity exits, SARIF export, Deep Scan, literal-path and virtualenv preflights, sandbox readiness and filesystem enforcement, MCP runner tracking, request attribution and analytics opt-outs, and failures passed without external model calls.`);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
