@@ -50,7 +50,7 @@ jobs:
           firewall-version: "1.15.0"
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.13.0"
           package-manager-cache: false
@@ -153,7 +153,6 @@ jobs:
           sudo apt-get install --yes ripgrep
 
       - name: Audit production dependencies
-        continue-on-error: true
         run: sfw pnpm --dir sdk/typescript run audit:prod
 
       - name: Verify
@@ -232,10 +231,15 @@ jobs:
           (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
           "$consumer/node_modules/.bin/codex-security" --version
           "$consumer/node_modules/.bin/codex-security" --help
+          "$consumer/node_modules/.bin/cs" --version
+          "$consumer/node_modules/.bin/cs" --help
+
+      - name: Check Action against the release candidate
+        uses: ./.github/actions/check-action-candidate
 
       - name: Upload verified package
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-release-tarball
           path: dist/*.tgz
@@ -261,7 +265,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
@@ -309,7 +313,7 @@ jobs:
           ' "$(npm --version)"
 
       - name: Download verified package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           path: dist

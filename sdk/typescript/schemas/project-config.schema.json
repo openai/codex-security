@@ -21,6 +21,11 @@
           "type": "string",
           "enum": ["standard", "deep"]
         },
+        "cyber_access_program": {
+          "description": "Experimental Cyber access program for scan turns (OpenAI provider only). Omit to preserve Codex defaults.",
+          "type": "string",
+          "enum": ["standard", "daybreak_blue", "daybreak_red"]
+        },
         "scope": {
           "description": "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
           "anyOf": [

@@ -4,6 +4,9 @@ minimumReleaseAgeExclude:
   - "@openai/*"
 trustLockfile: true
 
+overrides:
+  "typed-rest-client@2.3.1>qs": 6.16.0
+
 # Stryker rewrites tsconfig files through the compiler API removed in TypeScript 7.
 packageExtensions:
   "@stryker-mutator/core@10.0.0":

@@ -1,41 +1,84 @@
-<!-- release-version: 0.1.27 -->
+<!-- release-version: 0.4.0 -->
 
 <!-- release-section: highlights:start -->
+
 ## Highlights
 
-- port source and test report checks to TypeScript ([#768](https://github.com/openai/codex-security/pull/768))
-- port custom validation to TypeScript ([#792](https://github.com/openai/codex-security/pull/792))
-- add Python-free Unix OS primitives ([#794](https://github.com/openai/codex-security/pull/794))
-- add Python-free Windows OS primitives ([#795](https://github.com/openai/codex-security/pull/795))
-- add Python-free musl native artifacts ([#796](https://github.com/openai/codex-security/pull/796))
-- bundle verified native runtime artifacts ([#797](https://github.com/openai/codex-security/pull/797))
-- preserve Windows filenames in native helpers ([#798](https://github.com/openai/codex-security/pull/798))
-- port security policy resolution to TypeScript ([#799](https://github.com/openai/codex-security/pull/799))
-- budget package installation and verification ([#834](https://github.com/openai/codex-security/pull/834))
-- open ready pull requests ([#833](https://github.com/openai/codex-security/pull/833))
-- draft SECURITY.md for owner review ([#536](https://github.com/openai/codex-security/pull/536))
-- resolve Windows Node to an absolute executable ([#788](https://github.com/openai/codex-security/pull/788))
-- shard automatic component planning for large repositories ([#845](https://github.com/openai/codex-security/pull/845))
-- import CSV and JSON findings as saved scans ([#850](https://github.com/openai/codex-security/pull/850))
-- add a feedback command ([#854](https://github.com/openai/codex-security/pull/854))
-- improve scan usage and cost reports ([#853](https://github.com/openai/codex-security/pull/853))
-- recover interrupted Deep Scans and bulk campaigns ([#835](https://github.com/openai/codex-security/pull/835))
-- reject owned plugin keys inside Codex profiles ([#861](https://github.com/openai/codex-security/pull/861))
-- include CommonJS and TypeScript module extensions in scan inventories ([#859](https://github.com/openai/codex-security/pull/859))
-- include workflow files in diff inventories ([#820](https://github.com/openai/codex-security/pull/820))
-- accept a UTF-8 byte order mark in imported findings JSON ([#856](https://github.com/openai/codex-security/pull/856))
-- authenticate deep workers with OpenAI API keys ([#870](https://github.com/openai/codex-security/pull/870))
-- drop canonical document size limits that do not exist ([#868](https://github.com/openai/codex-security/pull/868))
-- pin native Rust formatting edition ([#863](https://github.com/openai/codex-security/pull/863))
-- detect a Linear URL contradiction over plain HTTP ([#867](https://github.com/openai/codex-security/pull/867))
-- pipeline dedupe with configurable concurrency ([#852](https://github.com/openai/codex-security/pull/852))
-- disable reasoning summaries by default for Bedrock ([#869](https://github.com/openai/codex-security/pull/869))
-- reuse scan authentication for patch and validation ([#871](https://github.com/openai/codex-security/pull/871))
-- bump smol-toml from 1.6.1 to 1.7.1 in /sdk/typescript ([#873](https://github.com/openai/codex-security/pull/873))
+Codex Security 0.4.0 adds hosted Standard scan execution and improves token
+accounting, bulk-scan recovery, and report formatting. The minor version marks
+the removal of obsolete ranking helpers; direct helper users should follow the
+migration guidance below.
+
+- Hosts can run Standard repository or path scans through the TypeScript
+  `runHostedScan(input, { executor, signal, onEvent })` API or the
+  `codex-security scan --host` JSON-RPC adapter. Hosted execution is opt-in and
+  requires a host-provided executor, frozen checkout, and explicit model and
+  storage settings. Hosts own authorization, cancellation, and durable execution
+  state. See the [hosted scan guide](https://github.com/openai/codex-security/blob/npm-v0.4.0/sdk/typescript/docs/hosted-scans.md).
+  ([#1559](https://github.com/openai/codex-security/pull/1559))
+- Scan token totals include recorded usage from earlier Deep Scan worker
+  attempts and context compaction without counting resumed history twice.
+  The SDK and compatible hosts can finish accounting for the final response
+  after report generation. Missing records remain marked incomplete or
+  unavailable rather than being presented as an exact total.
+  ([#1657](https://github.com/openai/codex-security/pull/1657))
+- Bulk scans preserve successful results and original scan failures when
+  temporary-checkout cleanup fails. Cleanup errors are reported separately, and
+  reusing a completed scan can retry its recorded cleanup without another scan.
+  ([#1433](https://github.com/openai/codex-security/pull/1433))
+- Reports render malformed evidence ranges as a valid single line or just the
+  path. Finding text beginning with tilde fences or parenthesized list markers
+  no longer changes the formatting of surrounding report sections. These fixes
+  preserve the underlying findings.
+  ([#1656](https://github.com/openai/codex-security/pull/1656),
+  [#1604](https://github.com/openai/codex-security/pull/1604))
+- The package includes Codex CLI/SDK 0.163.0 and restores the **Codex Security**
+  display name in plugin listings, prompts, and tool labels. The npm package
+  remains `@openai/codex-security`, with the `cs` and `codex-security` commands.
+  ([#1670](https://github.com/openai/codex-security/pull/1670),
+  [#1681](https://github.com/openai/codex-security/pull/1681))
+
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
+
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+### Scripts and custom workflows that invoke ranking helpers
+
+The following plugin helper commands are removed:
+
+- `make-repo-rank-input` and `select-deep-review-input`
+- `make-rank-shards`, `validate-rank-shard`, and `merge-rank-outputs`
+- `make-rank-pool-plan`, `validate-rank-worker`, and `validate-rank-pool`
+
+Remove the ranking, shard/pool scheduling, and ranked-selection stages from
+custom workflows. Generate the scoped inventory and review every selected file:
+
+1. For explicit repository scopes, use
+   `scripts/generate_rank_input.py make-repo-scope-input --repo <repo_root> --scopes-file <scopes_json> --out <output_jsonl>`
+   with your Python interpreter and the script from the installed plugin.
+   The scopes file is a JSON array, such as `["src", "tests"]`; use `["."]`
+   for the whole repository instead of the old default `--scope .`.
+   Output rows contain only `path`, for example `{"path":"src/example.ts"}`.
+   Update your consumer to resolve each path against the repository root and
+   read that file directly. If it requires a `path`/`area` review worklist,
+   convert every row to `{"path":"src/example.ts","area":"repository"}`.
+   This inventory contains no `area` or `preview` fields and cannot be passed
+   directly to `copy-deep-review-input`.
+2. For Git diffs, retain `make-diff-rank-input` with its existing revision or
+   local-patch arguments. Copy all candidate rows into the review worklist with
+   `scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <input_jsonl> --out <review_jsonl>`.
+   On Windows, use the `.cmd` launcher.
+3. Review the entire resulting worklist instead of selecting a ranked subset.
+   `bind-repo-scopes` and the retained diff helpers keep their existing
+   arguments and worklist formats.
+
+See the [scoped review reference](https://github.com/openai/codex-security/blob/npm-v0.4.0/plugins/codex-security/skills/security-scan/references/scan-artifacts-and-ledger.md#scoped-deep-review)
+for commands, scope inputs, and Windows invocation details.
+([#1607](https://github.com/openai/codex-security/pull/1607))
+
+Normal CLI and SDK scans do not need this helper migration. Hosted execution is
+opt-in; existing local scans continue to use their current execution path.
+
 <!-- release-section: upgrades:end -->

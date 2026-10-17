@@ -1,8 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { readFileSync, realpathSync } from "node:fs";
 import { binaryPath } from "./binding.mjs";
 import { libc } from "./platform.mjs";
 
@@ -39,10 +37,27 @@ function versionAfter(value: string, floor: string): boolean {
   return false;
 }
 
-if (
-  process.argv[1] !== undefined &&
-  pathToFileURL(resolve(process.argv[1])).href === import.meta.url
-) {
+function isMain() {
+  if (
+    process.execArgv.some(
+      (argument) =>
+        /^(?:--(?:eval|print)(?:=|$)|-(?:e|p|pe)$)/u.test(argument) ||
+        (process.versions["bun"] !== undefined && /^-[ep]/u.test(argument)),
+    )
+  )
+    return false;
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      process.argv[1] !== "-" &&
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const bytes = readFileSync(binaryPath);
   checkPrivatePaths(bytes);
   let floor: string;

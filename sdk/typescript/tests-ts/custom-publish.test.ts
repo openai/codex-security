@@ -1,26 +1,21 @@
-import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, mock } from "bun:test";
 import { publishScanToCustomInternal as publishScanToCustom } from "../src/custom-publish.js";
 import type { FindingsDocument } from "../src/models.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { rejecting } from "./support/errors.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "custom-publish-",
+  false,
+);
+afterEach(cleanup);
 
 async function fixture() {
-  const scan = await mkdtemp(join(tmpdir(), "custom-publish-"));
-  directories.push(scan);
-  await cp(join(PLUGIN_ROOT, "examples/completed-scan"), scan, {
-    recursive: true,
-  });
+  const scan = await temporaryDirectory();
+  await copyCompletedScanFixture(scan);
   if (process.platform !== "win32") await chmod(scan, 0o700);
   const source = await readFile(join(scan, "findings.json"), "utf8");
   const document = JSON.parse(source) as FindingsDocument;
@@ -31,7 +26,19 @@ test("publishes complete sealed findings with their repository ID to a custom ba
   const { scan, source, document } = await fixture();
   const controller = new AbortController();
   const ids = document.findings.map((finding) => finding.findingId);
-  let calls = 0;
+  const fetchMock = mock(async (url: URL, options: RequestInit) => {
+    expect(String(url)).toBe("http://synthetic.test/service/v1/bulk/findings");
+    expect(options).toEqual({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        findings: document.findings,
+        repositoryId: "target_sha256_example",
+      }),
+      signal: controller.signal,
+    });
+    return Response.json(ids, { status: 201 });
+  });
   const result = await publishScanToCustom(
     scan,
     {
@@ -40,22 +47,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
       signal: controller.signal,
     },
     {
-      fetch: async (url, options) => {
-        calls++;
-        expect(String(url)).toBe(
-          "http://synthetic.test/service/v1/bulk/findings",
-        );
-        expect(options).toEqual({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            findings: document.findings,
-            repositoryId: "target_sha256_example",
-          }),
-          signal: controller.signal,
-        });
-        return Response.json(ids, { status: 201 });
-      },
+      fetch: fetchMock,
     },
   );
   expect(result).toEqual({
@@ -64,7 +56,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
     findingIds: ids,
     findingCount: ids.length,
   });
-  expect(calls).toBe(1);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(await readFile(join(scan, "findings.json"), "utf8")).toBe(source);
 });
 
@@ -74,9 +66,7 @@ test("dry-run previews the complete upload without HTTP or credentials", async (
     scan,
     { findingsUrl: "http://localhost:3000", dryRun: true },
     {
-      fetch: async () => {
-        throw new Error("dry-run must not send a request");
-      },
+      fetch: rejecting("dry-run must not send a request"),
     },
   );
   expect(result).toEqual({
@@ -97,29 +87,26 @@ test("does not retry failed uploads or report incomplete receipts as successful"
     [[], 201, "did not acknowledge all"],
     [["wrong-finding"], 201, "did not acknowledge all"],
   ] as const) {
-    let calls = 0;
+    const fetchMock = mock(async () => {
+      return Response.json(receipt, { status });
+    });
     await expect(
       publishScanToCustom(
         scan,
         { findingsUrl: "http://synthetic.test" },
         {
-          fetch: async () => {
-            calls++;
-            return Response.json(receipt, { status });
-          },
+          fetch: fetchMock,
         },
       ),
     ).rejects.toThrow(message);
-    expect(calls).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   }
 });
 
 test("rejects mismatched or changed sealed artifacts before publication, including dry-run", async () => {
   const { scan, source } = await fixture();
   const dependencies = {
-    fetch: async () => {
-      throw new Error("must not upload invalid artifacts");
-    },
+    fetch: rejecting("must not upload invalid artifacts"),
   };
   await expect(
     publishScanToCustom(

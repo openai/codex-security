@@ -9,15 +9,23 @@ import re
 import sqlite3
 import sys
 import uuid
-from pathlib import Path, PurePosixPath
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import finalize_scan_contract as finalizer
+from workbench_scan_usage import TOKEN_FIELDS
+from workbench_scan_usage import (
+    _reject_nonstandard_json_number as reject_nonstandard_json_number,
+)
+
+reject_non_finite_json = finalizer._reject_non_finite_json
 
 
-def reject_non_finite_json(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r} is not supported")
+def timestamp_key(value: str) -> datetime:
+    return finalizer.parse_timestamp(value)
 
 
 def require_uuid(value: str, label: str) -> str:
@@ -40,14 +48,7 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
     return "locked" in str(error).lower() or "busy" in str(error).lower()
 
 
-def path_within_scope(path: str, scope: str) -> bool:
-    candidate = PurePosixPath(path)
-    requested = PurePosixPath(scope)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    if requested == PurePosixPath("."):
-        return True
-    return candidate == requested or requested in candidate.parents
+path_within_scope = finalizer.path_within_scope
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:
@@ -57,27 +58,12 @@ def require_close_note(close_reason: str | None, note: str | None) -> None:
         raise SystemExit("Explain why this finding will not be fixed.")
 
 
-def user_text(value: str | None) -> str | None:
+def user_context_argument(args: argparse.Namespace) -> str | None:
+    value = sys.stdin.read() if getattr(args, "user_context_stdin", False) else args.user_context
     return optional_text(value)
 
 
-def user_context_argument(args: argparse.Namespace) -> str | None:
-    value = sys.stdin.read() if getattr(args, "user_context_stdin", False) else args.user_context
-    return user_text(value)
-
-
-def reject_nonstandard_json_number(value: str) -> None:
-    raise ValueError(f"invalid JSON number {value}")
-
-
-SCAN_USAGE_TOKEN_KEYS = (
-    "inputTokens",
-    "cachedInputTokens",
-    "cacheWriteInputTokens",
-    "outputTokens",
-    "reasoningOutputTokens",
-    "totalTokens",
-)
+SCAN_USAGE_TOKEN_KEYS = tuple(TOKEN_FIELDS.values())
 
 
 def _valid_legacy_scan_cost(cost: object) -> bool:
@@ -94,15 +80,6 @@ def _valid_legacy_scan_cost(cost: object) -> bool:
     )
 
 
-def _valid_scan_token_counts(usage: object) -> bool:
-    return (
-        isinstance(usage, dict)
-        and set(usage) == set(SCAN_USAGE_TOKEN_KEYS)
-        and all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
-        and usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] <= usage["inputTokens"]
-    )
-
-
 def _valid_measured_scan_usage(usage: object) -> bool:
     if not isinstance(usage, dict):
         return False
@@ -113,6 +90,19 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or usage.get("source") != "codex_rollout"
         or type(thread_count) is not int
         or thread_count < 0
+    ):
+        return False
+    completion = usage.get("completion")
+    if "completion" in usage and (
+        not isinstance(completion, dict)
+        or set(completion) != {"threadId", "turnId", "finalized"}
+        or not isinstance(completion["threadId"], str)
+        or not completion["threadId"]
+        or not isinstance(completion["turnId"], str)
+        or not completion["turnId"]
+        or type(completion["finalized"]) is not bool
+        or not completion["finalized"]
+        and coverage == "complete"
     ):
         return False
     warnings = usage.get("warnings", [])
@@ -128,7 +118,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         return False
     if coverage == "unavailable":
         return thread_count == 0 and set(usage).issubset(
-            {"coverage", "source", "threadCount", "warnings"}
+            {"coverage", "source", "threadCount", "warnings", "completion"}
         )
 
     allowed_keys = {
@@ -137,12 +127,15 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "completion",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
         return False
-    counts = {key: usage.get(key) for key in SCAN_USAGE_TOKEN_KEYS}
-    if not _valid_scan_token_counts(counts):
+    if (
+        not all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+        or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
+    ):
         return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
@@ -195,9 +188,5 @@ def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sq
     return row
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

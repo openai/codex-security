@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import assert from "node:assert/strict";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
@@ -13,25 +13,25 @@ import {
   type ProjectConfigInput,
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { ConfigurationError } from "../src/errors.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-async function temporaryDirectory() {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "project-config-")),
-  );
-  directories.push(directory);
-  return directory;
-}
+const { temporaryDirectory, cleanup } =
+  createApiTestFixtures("project-config-");
+afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  [
+    "Cyber selection",
+    { scan: { cyber_access_program: "daybreak_blue" } },
+    true,
+  ],
+  [
+    "unknown Cyber selection",
+    { scan: { cyber_access_program: "unknown" } },
+    false,
+  ],
   [
     "standard path scope",
     { scan: { mode: "standard", scope: { paths: ["src"] } } },
@@ -250,10 +250,8 @@ describe("project configuration input contract", () => {
   });
 
   test.each([
-    ["invalid.yaml", "scan: [\n"],
     ["duplicate.yaml", "scan: {}\nscan: {}\n"],
     ["stream.yaml", "scan: {}\n---\nscan: {}\n"],
-    ["invalid.json", '{"scan":'],
     ["invalid.ts", "export default {};"],
     ["unknown.yaml", "scan:\n  workres: 2\n"],
   ])("rejects an invalid selected file: %s", async (name, contents) => {
@@ -263,10 +261,35 @@ describe("project configuration input contract", () => {
     await expect(readProjectConfig(path)).rejects.toThrow();
   });
 
-  test("reports a missing selected file", async () => {
-    await expect(
-      readProjectConfig("missing.yaml", await temporaryDirectory()),
-    ).rejects.toThrow("Cannot read project configuration");
+  test.each([
+    ["scan.yaml", "scan: [\n"],
+    ["scan.json", '{"scan":'],
+  ])(
+    "includes the parser message when %s cannot be parsed",
+    async (name, contents) => {
+      const path = join(await temporaryDirectory(), name);
+      await writeFile(path, contents);
+      const error = await readProjectConfig(path).catch(
+        (cause: unknown) => cause,
+      );
+      assert(error instanceof ConfigurationError);
+      assert(error.cause instanceof Error);
+      expect(error.message).toBe(
+        `Cannot parse project configuration at ${path}: ${error.cause.message}`,
+      );
+    },
+  );
+
+  test.each([
+    ["missing.yaml", "ENOENT"],
+    ["directory.yaml", "EISDIR"],
+  ])("includes the system error for %s", async (name, code) => {
+    const path = join(await temporaryDirectory(), name);
+    if (code === "EISDIR") await mkdir(path);
+    await expect(readProjectConfig(path)).rejects.toMatchObject({
+      message: expect.stringContaining(`${path}: ${code}`),
+      cause: expect.objectContaining({ code }),
+    });
   });
 });
 

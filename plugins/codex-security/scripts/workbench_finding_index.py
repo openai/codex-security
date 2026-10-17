@@ -5,7 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from decimal import Decimal
 from typing import Any
+
+# Tag numbers so 10 and 10.0 compare equally without treating true as 1.
+_finding_json = json.JSONDecoder(
+    parse_int=lambda value: (Decimal(value),),
+    parse_float=lambda value: (Decimal(value),),
+)
 
 
 def upsert_finding(
@@ -14,6 +21,17 @@ def upsert_finding(
     timestamp: str,
     repository_id: str | None = None,
 ) -> None:
+    current = connection.execute(
+        "SELECT details_json FROM findings WHERE id = ?", (finding["findingId"],)
+    ).fetchone()
+    details = json.dumps(finding, allow_nan=False, sort_keys=True)
+    # Preserve unchanged text without conflating JSON booleans and numbers.
+    if (
+        current is not None
+        and current["details_json"] is not None
+        and _finding_json.decode(current["details_json"]) == _finding_json.decode(details)
+    ):
+        details = current["details_json"]
     connection.execute(
         """
         INSERT INTO findings (
@@ -34,7 +52,7 @@ def upsert_finding(
             finding["ruleId"],
             finding["identity"]["anchor"],
             finding["identity"].get("instance"),
-            json.dumps(finding, allow_nan=False, sort_keys=True),
+            details,
             timestamp,
             timestamp,
         ),
@@ -52,15 +70,10 @@ def index_findings(
     document: dict[str, Any],
     timestamp: str,
 ) -> None:
-    findings = document.get("findings")
-    if not isinstance(findings, list):
-        raise SystemExit("findings.json must contain a findings array.")
     repository_id = connection.execute(
         "SELECT target_id FROM scans WHERE id = ?", (scan_id,)
     ).fetchone()["target_id"]
-    for finding in findings:
-        if not isinstance(finding, dict):
-            raise SystemExit("findings.json entries must be objects.")
+    for finding in document["findings"]:
         severity = finding["severity"]
         confidence = finding["confidence"]
         upsert_finding(connection, finding, timestamp, repository_id)

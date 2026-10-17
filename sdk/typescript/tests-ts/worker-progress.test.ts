@@ -34,10 +34,6 @@ describe("worker progress events", () => {
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"reporting","filesCompleted":1,"filesTotal":1}';
     const dispatch =
       'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":1,"started":1}';
-    const preflight = JSON.stringify({
-      profile: "security_scan",
-      results: [{ capability: "delegated_workers", status: "pass" }],
-    });
     for (const event of [
       {},
       { type: "item.completed", item: null },
@@ -53,30 +49,6 @@ describe("worker progress events", () => {
         item: { type: "reasoning", aggregated_output: progress },
       },
       { type: "item.completed", item: { type: "agent_message", text: null } },
-      {
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          command: ["config_preflight.py"],
-          aggregated_output: preflight,
-        },
-      },
-      {
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          command: "config_preflight.py",
-          aggregated_output: [preflight],
-        },
-      },
-      {
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          command: null,
-          aggregated_output: 1,
-        },
-      },
       messageEvent(
         "CODEX_SECURITY_SCAN_PROGRESS not-json\nCODEX_SECURITY_WORKER_STATUS null",
       ),
@@ -84,98 +56,6 @@ describe("worker progress events", () => {
       expect(workerStatusFromEvent(event)).toBeNull();
       expect(scanProgressUpdatesFromEvent(event)).toEqual([]);
     }
-  });
-
-  test("rejects conflicting preflight capacity and ignores unrelated results", () => {
-    const delegated = { capability: "delegated_workers", status: "pass" };
-    const capacity = { capability: "usable_worker_slots_2", actual: 2 };
-    const preflight = (results: unknown[]) =>
-      workerStatusFromEvent(
-        commandEvent(
-          "config_preflight.py",
-          JSON.stringify({ profile: "security_scan", results }),
-        ),
-      );
-    expect(
-      preflight([null, {}, { capability: 42 }, delegated, capacity]),
-    ).toEqual({
-      kind: "preflight",
-      delegation: "available",
-      configuredSlots: 2,
-    });
-    expect(preflight([delegated, capacity, capacity])).toBeNull();
-    expect(preflight([{ ...delegated, status: "invalid" }])).toBeNull();
-    expect(preflight([])).toBeNull();
-  });
-
-  test("reads configured worker capacity from a completed preflight", () => {
-    const output = JSON.stringify({
-      profile: "security_scan",
-      status: "ready",
-      results: [
-        { capability: "delegated_workers", status: "pass", actual: true },
-        { capability: "usable_worker_slots_6", status: "pass", actual: 8 },
-      ],
-    });
-
-    expect(
-      workerStatusFromEvent(
-        commandEvent(
-          '"/managed/python" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/config_preflight.py" --profile security_scan',
-          output,
-        ),
-      ),
-    ).toEqual({
-      kind: "preflight",
-      delegation: "available",
-      configuredSlots: 8,
-    });
-  });
-
-  test("keeps unavailable and unknown delegation distinct from capacity", () => {
-    for (const [status, delegation] of [
-      ["fail", "unavailable"],
-      ["unknown", "unknown"],
-    ] as const) {
-      expect(
-        workerStatusFromEvent(
-          commandEvent(
-            "python3 /plugin/scripts/config_preflight.py --profile security_scan",
-            JSON.stringify({
-              profile: "security_scan",
-              status: "ready",
-              results: [
-                { capability: "delegated_workers", status },
-                {
-                  capability: "usable_worker_slots_6",
-                  status: "pass",
-                  actual: 8,
-                },
-              ],
-            }),
-          ),
-        ),
-      ).toEqual({ kind: "preflight", delegation, configuredSlots: 8 });
-    }
-  });
-
-  test("accepts diff preflight without a worker-slot requirement", () => {
-    expect(
-      workerStatusFromEvent(
-        commandEvent(
-          "python3 C:\\plugin\\scripts\\config_preflight.py --profile security_diff_scan",
-          JSON.stringify({
-            profile: "security_diff_scan",
-            status: "ready",
-            results: [{ capability: "delegated_workers", status: "pass" }],
-          }),
-        ),
-      ),
-    ).toEqual({
-      kind: "preflight",
-      delegation: "available",
-      configuredSlots: null,
-    });
   });
 
   test("reads a dispatch marker from the agent message", () => {
@@ -276,29 +156,6 @@ describe("worker progress events", () => {
   test("accepts verbose worker status and more than 1,024 workers", () => {
     expect(
       workerStatusFromEvent(
-        commandEvent(
-          "python3 /plugin/scripts/config_preflight.py",
-          JSON.stringify({
-            profile: "security_scan",
-            details: "x".repeat(65 * 1024),
-            results: [
-              { capability: "delegated_workers", status: "pass" },
-              {
-                capability: "usable_worker_slots_2048",
-                status: "pass",
-                actual: 2048,
-              },
-            ],
-          }),
-        ),
-      ),
-    ).toEqual({
-      kind: "preflight",
-      delegation: "available",
-      configuredSlots: 2048,
-    });
-    expect(
-      workerStatusFromEvent(
         messageEvent(
           `${"x".repeat(65 * 1024)}\nCODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2048,"started":1025,"timestamp":1}`,
         ),
@@ -341,6 +198,60 @@ describe("worker progress events", () => {
     ).toEqual([progress]);
   });
 
+  test("ignores progress and dispatch markers inside nested or tilde fences", () => {
+    const progress = {
+      phase: "discovery" as const,
+      filesCompleted: 3,
+      filesTotal: 8,
+    };
+    const progressMarker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(progress)}`;
+    const liveProgress = { ...progress, filesCompleted: 4 };
+    const liveMarker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(liveProgress)}`;
+    const dispatchMarker = `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify({
+      phase: "file_review",
+      planned: 6,
+      started: 3,
+    })}`;
+    // A four-backtick fence is not closed by an inner three-backtick line.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          [
+            "````markdown",
+            "```text",
+            progressMarker,
+            "```",
+            "````",
+            liveMarker,
+          ].join("\n"),
+        ),
+      ),
+    ).toEqual([liveProgress]);
+    // A tilde fence is not closed by a backtick fence.
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          [
+            "~~~text",
+            progressMarker,
+            "```",
+            progressMarker,
+            "~~~",
+            liveMarker,
+          ].join("\n"),
+        ),
+      ),
+    ).toEqual([liveProgress]);
+    // Dispatch markers inside a fenced block are not live worker status.
+    expect(
+      workerStatusFromEvent(
+        messageEvent(["Example:", "```text", dispatchMarker, "```"].join("\n")),
+      ),
+    ).toBeNull();
+  });
+
   test("rejects malformed or overstated file progress", () => {
     for (const text of [
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":9,"filesTotal":8}',
@@ -356,37 +267,7 @@ describe("worker progress events", () => {
   });
 
   test("ignores unrelated, malformed, or conflicting events", () => {
-    const preflight = JSON.stringify({
-      profile: "security_scan",
-      results: [{ capability: "delegated_workers", status: "pass" }],
-    });
     for (const event of [
-      commandEvent("rg config_preflight.py /repository", preflight),
-      commandEvent("python3 /plugin/scripts/config_preflight.py", "not json"),
-      commandEvent(
-        "python3 /plugin/scripts/config_preflight.py",
-        JSON.stringify({
-          profile: "deep_security_scan",
-          results: [{ capability: "delegated_workers", status: "pass" }],
-        }),
-      ),
-      commandEvent(
-        "python3 /plugin/scripts/config_preflight.py",
-        JSON.stringify({
-          profile: ["security_scan"],
-          results: [{ capability: "delegated_workers", status: "pass" }],
-        }),
-      ),
-      commandEvent(
-        "python3 /plugin/scripts/config_preflight.py",
-        JSON.stringify({
-          profile: "security_scan",
-          results: [
-            { capability: "delegated_workers", status: "pass" },
-            { capability: "delegated_workers", status: "fail" },
-          ],
-        }),
-      ),
       messageEvent(
         'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2,"started":3}',
       ),

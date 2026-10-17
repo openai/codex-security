@@ -1,52 +1,55 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { promisify } from "node:util";
+import { describe, expect, test } from "bun:test";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 type FixtureOptions = NonNullable<Parameters<typeof dependencies>[0]>;
-const directories: string[] = [];
-afterEach(async () => {
-  for (const directory of directories.splice(0))
-    await rm(directory, { recursive: true, force: true });
-});
+const execFileAsync = promisify(execFile);
 
 async function repositoryFixture({ initializeGit = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "patch-results-"));
-  directories.push(directory);
   const runRepositoryCommand: NonNullable<
     FixtureOptions["onRepositoryCommand"]
-  > = (command, args, cwd, options) => {
-    const result = execFileSync(command, [...args], {
+  > = async (command, args, cwd, options) => {
+    const { stdout } = await execFileAsync(command, [...args], {
       cwd,
       encoding: "utf8",
       env: { ...process.env, ...options?.environment },
-      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
-    return options?.trim === false ? result : result.trim();
+    return options?.trim === false ? stdout : stdout.trim();
   };
   const git = (...args: string[]) =>
     runRepositoryCommand("git", args, directory);
-  await writeFile(join(directory, "app.ts"), "original\n");
-  if (initializeGit) {
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
-    git("add", ".");
-    git("commit", "-m", "Synthetic fixture");
+  try {
+    await writeFile(join(directory, "app.ts"), "original\n");
+    if (initializeGit) {
+      await git("init", "--initial-branch=main");
+      await git("config", "user.name", "Synthetic User");
+      await git("config", "user.email", "synthetic@example.test");
+      await git("add", ".");
+      await git("commit", "-m", "Synthetic fixture");
+    }
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
   }
   return {
     directory,
     git,
+    async [Symbol.asyncDispose]() {
+      await rm(directory, { recursive: true, force: true });
+    },
     async patch(args: string[], options: FixtureOptions = {}) {
-      const stdout = capture();
-      const stderr = capture();
-      const status = await main(
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      const status = await runCli(
         ["patch", ...args, "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           currentDirectory: directory,
           environment: {
@@ -69,7 +72,7 @@ async function repositoryFixture({ initializeGit = true } = {}) {
 
 describe("patch outcomes", () => {
   test("uses the external sandbox only after explicit opt-in and prints a warning", async () => {
-    const fixture = await repositoryFixture();
+    await using fixture = await repositoryFixture();
     const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -96,15 +99,7 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
-        onCodex: (_args, output, environment) =>
-          runCodexSkillCommand(
-            ["-e", source],
-            output,
-            {
-              command: process.execPath,
-            },
-            environment,
-          ),
+        onCodex: nodeCodex(source),
       },
     );
     expect(outcome.status).toBe(0);
@@ -119,14 +114,14 @@ lines.on("line", (line) => {
   });
 
   test.each([false, true])(
-    "fails a no-op with full output %s and preserves local changes",
+    "fails a no-op with full output %j and preserves local changes",
     async (fullOutput) => {
-      const fixture = await repositoryFixture();
+      await using fixture = await repositoryFixture();
       await writeFile(join(fixture.directory, "app.ts"), "staged change\n");
-      fixture.git("add", "app.ts");
+      await fixture.git("add", "app.ts");
       await writeFile(join(fixture.directory, "app.ts"), "unstaged change\n");
       await writeFile(join(fixture.directory, "local.txt"), "untracked\n");
-      const index = fixture.git("write-tree");
+      const index = await fixture.git("write-tree");
       const outcome = await fixture.patch(
         ["Synthetic issue", ...(fullOutput ? ["--full-output"] : [])],
         {
@@ -141,7 +136,7 @@ lines.on("line", (line) => {
         ok: false,
         error: { code: "NO_PATCH_APPLIED" },
       });
-      expect(fixture.git("write-tree")).toBe(index);
+      expect(await fixture.git("write-tree")).toBe(index);
       expect(await readFile(join(fixture.directory, "app.ts"), "utf8")).toBe(
         "unstaged change\n",
       );
@@ -152,10 +147,10 @@ lines.on("line", (line) => {
   );
 
   test("reports actual changed files and preserves the index", async () => {
-    const fixture = await repositoryFixture();
+    await using fixture = await repositoryFixture();
     await writeFile(join(fixture.directory, "local.txt"), "unrelated\n");
-    fixture.git("add", "local.txt");
-    const index = fixture.git("write-tree");
+    await fixture.git("add", "local.txt");
+    const index = await fixture.git("write-tree");
     const outcome = await fixture.patch(["Synthetic issue", "--full-output"], {
       onCodex: async (_args, output) => {
         await writeFile(join(fixture.directory, "app.ts"), "fixed\n");
@@ -176,13 +171,13 @@ lines.on("line", (line) => {
         files: ["app.ts", "regression.test.ts"],
       },
     });
-    expect(fixture.git("write-tree")).toBe(index);
+    expect(await fixture.git("write-tree")).toBe(index);
   });
 
   test.each([false, true])(
-    "checks patch changes outside a Git repository: %s",
+    "checks patch changes outside a Git repository: %j",
     async (apply) => {
-      const fixture = await repositoryFixture({ initializeGit: false });
+      await using fixture = await repositoryFixture({ initializeGit: false });
       const outcome = await fixture.patch(["Synthetic issue"], {
         onCodex: async () => {
           if (apply)
@@ -203,7 +198,7 @@ lines.on("line", (line) => {
   );
 
   test("rejects a verified saved-finding result when no files change", async () => {
-    const fixture = await repositoryFixture();
+    await using fixture = await repositoryFixture();
     const outcome = await fixture.patch(["--scan", "scan-1"], {
       onWorkbench: () => ({
         scan: {
@@ -243,10 +238,22 @@ lines.on("line", (line) => {
     expect(outcome.stderr).toContain("No patch was applied; 0 files changed.");
   });
 
-  test.each(["exit", "rpc"])(
+  test.each(["exit", "rpc", "stdout", "empty"])(
     "fails before starting a model turn when sandbox preflight returns %s failure",
     async (failure) => {
-      const fixture = await repositoryFixture();
+      await using fixture = await repositoryFixture();
+      const diagnostic =
+        "sandbox: unshare: Permission denied /synthetic/repository sk-proj-SYNTHETIC_SECRET";
+      const response =
+        failure === "rpc"
+          ? { error: { code: -32603, message: diagnostic } }
+          : {
+              result: {
+                exitCode: 1,
+                stdout: failure === "stdout" ? diagnostic : "",
+                stderr: failure === "exit" ? diagnostic : "",
+              },
+            };
       const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -258,22 +265,14 @@ lines.on("line", (line) => {
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
     assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
-    send({ id: request.id, ${failure === "rpc" ? 'error: { code: -32603, message: "sandbox: unshare: Permission denied /private/repository sk-proj-SYNTHETIC_SECRET" }' : 'result: { exitCode: 1, stdout: "", stderr: "sandbox: unshare: Permission denied /private/repository sk-proj-SYNTHETIC_SECRET" }'} });
+    send({ id: request.id, ...${JSON.stringify(response)} });
   }
   if (request.method === "turn/start") throw new Error("Model turn must not start");
 });`;
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
-          onCodex: (_args, output, environment) =>
-            runCodexSkillCommand(
-              ["-e", source],
-              output,
-              {
-                command: process.execPath,
-              },
-              environment,
-            ),
+          onCodex: nodeCodex(source),
         },
       );
       expect(outcome.status).toBe(2);
@@ -281,11 +280,22 @@ lines.on("line", (line) => {
         ok: false,
         error: { code: "SANDBOX_UNAVAILABLE" },
       });
-      expect(outcome.stdout + outcome.stderr).not.toContain("SYNTHETIC_SECRET");
-      expect(outcome.stdout + outcome.stderr).not.toContain(
-        "/private/repository",
+      if (failure !== "empty")
+        expect(outcome.stdout + outcome.stderr).toContain(diagnostic);
+      expect(outcome.stderr).toContain(
+        "No patch was applied; 0 files changed.",
       );
-      expect(fixture.git("status", "--porcelain")).toBe("");
+      expect(await fixture.git("status", "--porcelain")).toBe("");
     },
   );
 });
+
+function nodeCodex(source: string): NonNullable<FixtureOptions["onCodex"]> {
+  return (_args, output, environment) =>
+    runCodexSkillCommand(
+      ["-e", source],
+      output,
+      { command: process.execPath },
+      environment,
+    );
+}

@@ -1,3 +1,4 @@
+import { parseJsonLines } from "./support/json.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,11 +28,8 @@ test("keeps model-visible attack-path tool names within the Codex limit", async 
     );
     expect(status, stderr).toBe(0);
 
-    const tools = stdout
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line))
-      .find((response) => response.id === 2).result.tools as {
+    const tools = parseJsonLines(stdout).find((response) => response.id === 2)
+      .result.tools as {
       name: string;
       _meta?: { ui?: { visibility?: string[] } };
     }[];

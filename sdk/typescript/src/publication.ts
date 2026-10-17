@@ -1,3 +1,4 @@
+import { findingEntry } from "./value.js";
 import {
   loadContractWithScanDirectory,
   type LoadedContract,
@@ -37,7 +38,7 @@ export interface PrepareScanPublicationOptions {
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
-  /** Publish only these finding IDs (for example dedupe's uniqueFindingIds). */
+  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
   findingIds?: readonly string[];
   /** Use this assessment; otherwise use the scan's saved classification when present. */
   classification?: SeverityClassification | ScanSeverityClassification;
@@ -53,15 +54,9 @@ export interface PreparedPublicationIssue {
 
 export interface PreparedScanPublication {
   scanId: string;
-  uploadId: string;
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
-  /** Complete sealed membership, retained when only some findings become issues. */
-  sourceFindings?: Pick<
-    PreparedPublicationIssue,
-    "findingId" | "occurrenceId"
-  >[];
 }
 
 export function linearPublicationArguments(
@@ -124,12 +119,7 @@ export async function prepareScanPublication(
       options.environment,
     );
   }
-  const assessments = new Map(
-    classification?.assessments.map((assessment) => [
-      assessment.findingId,
-      assessment,
-    ]),
-  );
+  const assessments = new Map(classification?.assessments.map(findingEntry));
   const selected = selectClassificationFindings(
     contract.findings.findings,
     options.findingIds ??
@@ -146,15 +136,7 @@ export async function prepareScanPublication(
 
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: canonicalScanDirectory,
-    ...(classification === undefined && options.findingIds === undefined
-      ? {}
-      : {
-          sourceFindings: contract.findings.findings.map(
-            ({ findingId, occurrenceId }) => ({ findingId, occurrenceId }),
-          ),
-        }),
     destination: {
       type: options.destination,
       teamId: options.teamId,
@@ -162,27 +144,24 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    issues: selected
-      .filter(
-        ({ findingId }) => assessments.get(findingId)?.decision !== "excluded",
-      )
-      .map((finding) => {
-        const assessment = assessments.get(finding.findingId);
-        const level = assessment?.level ?? finding.severity.level;
-        const priority = LINEAR_PRIORITIES[level];
-        return {
-          findingId: finding.findingId,
-          occurrenceId: finding.occurrenceId,
-          title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
-          description: renderFindingDescription(
-            contract,
-            finding,
-            uploadedAt,
-            assessment,
-          ),
-          ...(priority === undefined ? {} : { priority }),
-        };
-      }),
+    issues: selected.flatMap((finding) => {
+      const assessment = assessments.get(finding.findingId);
+      if (assessment?.decision === "excluded") return [];
+      const level = assessment?.level ?? finding.severity.level;
+      const priority = LINEAR_PRIORITIES[level];
+      return {
+        findingId: finding.findingId,
+        occurrenceId: finding.occurrenceId,
+        title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
+        description: renderFindingDescription(
+          contract,
+          finding,
+          uploadedAt,
+          assessment,
+        ),
+        ...(priority === undefined ? {} : { priority }),
+      };
+    }),
   };
 }
 
@@ -277,7 +256,6 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Coverage:** ${coverage.completeness}`,
     `**Coverage mode:** ${coverage.mode}`,
     `**Scan mode:** ${scanMode(coverage.mode)}`,
     `**Started:** ${scan.startedAt}`,
@@ -336,16 +314,10 @@ function renderCodeEvidence(
   target: ScanTargetRecord,
   evidence: FindingCodeEvidence,
 ): string[] {
-  const location: FindingLocation = {
-    path: evidence.path,
-    startLine: evidence.startLine,
-    ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-    ...(evidence.role === undefined ? {} : { role: evidence.role }),
-  };
   return [
     `### ${evidence.label}`,
     "",
-    renderLocation(target, location),
+    renderLocation(target, evidence),
     "",
     fencedCode(evidence.code, evidence.language),
     "",

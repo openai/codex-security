@@ -12,7 +12,7 @@ import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
 import {
   bundledPluginRoot,
-  codexSecurityStateDirectory,
+  workbenchEnvironment,
   resolvePluginPython,
   runWorkbench,
 } from "./runtime.js";
@@ -58,10 +58,7 @@ export async function classifyScanSeverityInternal(
     runWorkbench:
       dependencies.runWorkbench ??
       (async (args) => {
-        const stateEnvironment = {
-          ...environment,
-          CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
-        };
+        const stateEnvironment = workbenchEnvironment(environment);
         return runWorkbench(
           {
             environment: stateEnvironment,

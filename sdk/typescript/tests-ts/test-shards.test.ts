@@ -2,71 +2,134 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
-  readdir,
   readFile,
-  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
-import { shardTestFiles } from "../scripts/test-shards.mjs";
+import { readSubprocess } from "./support/shell.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
-test("balances measured work and includes new files without mutating the inventory", () => {
-  const files = [
-    "new.test.ts",
-    "small.test.ts",
-    "medium.test.ts",
-    "slow.test.ts",
-  ];
-  const shards = shardTestFiles(files, 2, {
-    "slow.test.ts": 100,
-    "medium.test.ts": 70,
-    "small.test.ts": 30,
-  });
-  expect(shards.map(({ seconds }) => seconds)).toEqual([101, 100]);
-  expect(shards.flatMap(({ files }) => files).sort()).toEqual(
-    [...files].sort(),
-  );
-  expect(files[0]).toBe("new.test.ts");
-  expect(
-    shardTestFiles([...files].reverse(), 2, {
-      "slow.test.ts": 100,
-      "medium.test.ts": 70,
-      "small.test.ts": 30,
-    }),
-  ).toEqual(shards);
-});
-
-test.each([0, -1, 1.5, Number.NaN])(
-  "rejects an invalid shard count %p",
-  (count) => {
-    expect(() => shardTestFiles(["a.test.ts"], count)).toThrow(
-      "positive integer",
-    );
+test.each([3, 7])(
+  "runs each eligible file once across %i native shards, including new files",
+  async (count) => {
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const root = await temporaryDirectory("codex-security-native-shards-");
+    try {
+      await mkdir(join(root, "scripts"));
+      await mkdir(join(root, "tests-ts"));
+      await copyFile(
+        new URL("../scripts/run-ci-tests.mts", import.meta.url),
+        join(root, "scripts", "run-ci-tests.mts"),
+      );
+      const files = [
+        ...Array.from({ length: 20 }, (_, index) => `probe-${index}.test.ts`),
+        "newly-added.test.ts",
+      ];
+      const executionLog = join(root, "executed.txt");
+      for (const file of files) {
+        await writeFile(
+          join(root, "tests-ts", file),
+          `import { appendFileSync } from "node:fs";
+import { test } from "bun:test";
+test(${JSON.stringify(file)}, () => {
+  appendFileSync(${JSON.stringify(executionLog)}, ${JSON.stringify(`${file}\n`)});
+});\n`,
+        );
+      }
+      await writeFile(
+        join(root, "tests-ts", "windows-machine-policy.test.ts"),
+        'throw new Error("Machine policy test must run separately");\n',
+      );
+      const executed: string[] = [];
+      for (let shard = 1; shard <= count; shard++) {
+        await writeFile(executionLog, "");
+        const child = Bun.spawn({
+          cmd: [
+            node!,
+            "--experimental-strip-types",
+            join(root, "scripts", "run-ci-tests.mts"),
+            `${shard}/${count}`,
+          ],
+          env: {
+            ...process.env,
+            PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+          },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 30_000,
+          windowsHide: true,
+        });
+        const { status, stdout, stderr } = await readSubprocess(child);
+        expect(status, stderr).toBe(0);
+        const shardFiles = (await readFile(executionLog, "utf8"))
+          .trim()
+          .split("\n");
+        expect(stdout).toContain(
+          `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
+        );
+        executed.push(...shardFiles);
+      }
+      expect(executed.sort()).toEqual(files.sort());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   },
 );
 
-test.each([
-  ["unix", 3],
-  ["windows", 7],
-] as const)("covers every shared test once on %s", async (platform, count) => {
-  const tests = (await readdir(new URL("./", import.meta.url)))
-    .filter(
-      (file) =>
-        file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
-    )
-    .sort();
-  const timings = JSON.parse(
-    await readFile(
-      new URL("../scripts/ci-test-durations.json", import.meta.url),
-      "utf8",
-    ),
-  );
-  const shards = shardTestFiles(tests, count, timings[platform]);
-  expect(shards.every(({ files }) => files.length > 0)).toBe(true);
-  expect(shards.flatMap(({ files }) => files).sort()).toEqual(tests);
+test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-empty-shard-");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyFile(
+      new URL("../scripts/run-ci-tests.mts", import.meta.url),
+      join(root, "scripts", "run-ci-tests.mts"),
+    );
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      'import { test } from "bun:test"; test("synthetic shard probe", () => {});\n',
+    );
+    await writeFile(
+      join(root, "tests-ts", "windows-machine-policy.test.ts"),
+      'throw new Error("Machine policy test must run separately");\n',
+    );
+    for (const shard of [1, 2]) {
+      const child = Bun.spawn({
+        cmd: [
+          node!,
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
+          `${shard}/2`,
+        ],
+        env: {
+          ...process.env,
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const { status, stdout, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(shard === 1 ? 0 : 1);
+      if (shard === 1) {
+        expect(stdout).toContain("Test shard 1/2: probe.test.ts");
+        expect(stderr).toContain("synthetic shard probe");
+      } else {
+        expect(stderr).toContain("Test shard 2/2 is empty.");
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const defaultTimeoutMs = process.platform === "win32" ? "120000" : "30000";
@@ -104,16 +167,10 @@ test.each([
     try {
       await mkdir(join(root, "scripts"));
       await mkdir(join(root, "tests-ts"));
-      for (const file of [
-        "run-ci-tests.mjs",
-        "test-shards.mjs",
-        "ci-test-durations.json",
-      ]) {
-        await copyFile(
-          new URL(`../scripts/${file}`, import.meta.url),
-          join(root, "scripts", file),
-        );
-      }
+      await copyFile(
+        new URL("../scripts/run-ci-tests.mts", import.meta.url),
+        join(root, "scripts", "run-ci-tests.mts"),
+      );
       await writeFile(
         join(root, "tests-ts", "probe.test.ts"),
         `import { expect, test } from "bun:test";
@@ -128,7 +185,8 @@ test("synthetic report probe --timeout=5000", () => {
       const child = Bun.spawn({
         cmd: [
           node!,
-          join(root, "scripts", "run-ci-tests.mjs"),
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
           "1/1",
           ...options,
         ],
@@ -142,13 +200,9 @@ test("synthetic report probe --timeout=5000", () => {
         stderr: "pipe",
         timeout: 30_000,
       });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
+      const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(fail ? 1 : 0);
-      expect(stdout).toContain("probe.test.ts");
+      expect(stdout).toContain("Test shard 1/1: probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
       if (report === "available") {
         const xml = await readFile(
@@ -170,9 +224,7 @@ test("synthetic report probe --timeout=5000", () => {
 );
 
 test("preserves the configured timeout in isolated test subprocesses", async () => {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-test-timeout-")),
-  );
+  const directory = await temporaryDirectory("codex-security-test-timeout-");
   const fixture = join(directory, "isolated.test.ts");
   const helper = new URL("./support/test-subprocess.ts", import.meta.url).href;
   await writeFile(
@@ -196,10 +248,7 @@ test("isolated timeout", async () => {
       timeout: 30_000,
       windowsHide: true,
     });
-    const [status, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stderr).text(),
-    ]);
+    const { status, stderr } = await readSubprocess(child);
     expect(status, stderr).toBe(1);
     expect(stderr).toContain("this test timed out after 100ms");
   } finally {

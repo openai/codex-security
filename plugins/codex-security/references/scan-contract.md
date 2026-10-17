@@ -26,6 +26,8 @@ Retention is an explicit consumer decision. Producing a sealed bundle must not s
 
 A sealed manifest records the terminal timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
 
+Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format. All schema-valid fractional widths remain readable on supported Python versions; parsing uses native microsecond precision. History and finding queries use native date precision and stable ID tie-breakers; ordering beyond millisecond precision is not guaranteed. Stored timestamp text remains unchanged.
+
 `scan.status` records why the bundle was sealed:
 
 | Status        | Meaning                                                                                                         |
@@ -65,7 +67,7 @@ A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDig
 
 `targetId` identifies the stable repository or workspace. Prefer a digest of a sanitized canonical absolute remote URL when one exists. Otherwise use a digest of a stable local workspace identity. Never persist remote URL credentials, query parameters, fragments, or tokens.
 
-For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive it from the exact authoritative diff kind and immutable base/head revisions. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
+For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, derive `snapshotDigest` from the authoritative diff kind and immutable base/head revisions. The workbench supplies it during finalization, so workbench-backed unsealed drafts may omit it. Previously sealed manifests retain their recorded digest. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode the result as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.
 
 ## Finding Identity
 
@@ -106,7 +108,7 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items; receipt references point to the original evidence. Findings reduction does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
 
 Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
 
@@ -118,7 +120,6 @@ For Standard and diff scans, record:
 - detailed receipt references
 - explicit exclusions
 - deferred work
-- completeness
 
 `mode` records the requested scan workflow:
 
@@ -134,17 +135,19 @@ For Standard and diff scans, record:
 
 `inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
 
+The discovery helper's `in_scope_files.txt` input contains one UTF-8 path per line. LF and CRLF separators are accepted; filenames containing CR or LF are unsupported. Other path whitespace and spelling are preserved.
+
 For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
 
 | Inventory strategy | Meaning                                                   |
 | ------------------ | --------------------------------------------------------- |
-| `repository`       | Repository-wide tracked source-like file inventory        |
+| `repository`       | Repository-wide file inventory                            |
 | `scoped_path`      | Repository inventory constrained to requested paths       |
 | `diff`             | Files selected from the reviewed Git change set           |
 | `directory`        | Deterministic non-Git directory inventory                 |
 | `custom`           | Producer-defined inventory described by detailed receipts |
 
-For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
+Coverage lists reviewed surfaces, exclusions, and follow-up work. The manifest records execution status. Existing sealed bundles retain legacy metadata unchanged.
 
 Map detailed ledger closure into completed surface summaries in this order:
 
@@ -169,7 +172,7 @@ The three canonical JSON files are also the only semantic inputs to final report
 Record report-specific semantics without duplicating data already represented elsewhere:
 
 - `scan.scope`: optional narrative `summary`, reviewed artifact names, runtime/test status, validation mode, scan context, and limitations. Include/exclude paths remain the authoritative scope boundaries.
-- `scan.threatModel`: concise summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions.
+- `scan.threatModel`: structured summary plus assets, trust boundaries, attacker capabilities, security objectives, and assumptions, or `{ "format": "markdown", "content": "<exact model text>" }` for a retained document. Optional model `scope` and `origin` identify the modeled paths and source separately from the scan's scope. The host derives `<scan_dir>/threatmodel.md` from this content; it is an exportable projection, not an independently authored input.
 - finding `validation`: validation method, direct evidence, counterevidence, and the conclusion used by the report.
 - finding `codeEvidence`: stable, exact source snippets with labels, locations, language, and explanations; `rootCause`, `validation`, and `attackPath` select the snippets they need through `evidenceRefs`.
 - finding `rootCause`: the violated invariant and the code that breaks it. Do not substitute a path/line restatement for the explanation.
@@ -183,6 +186,8 @@ Record report-specific semantics without duplicating data already represented el
 These fields are optional for compatibility with existing v1 canonical artifacts. When omitted, finalization emits explicit, deterministic fallback text derived only from the remaining canonical JSON. It never reads an existing report to recover missing semantics.
 
 ## Schemas
+
+New completed findings must match `schemas/tools/scan-draft.schema.json`. Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
 
 - `schemas/scan-manifest.schema.json`
 - `schemas/findings.schema.json`
