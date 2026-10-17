@@ -1758,9 +1758,9 @@ def finish_deep_scan_locked(
             """,
             (scan_id,),
         ).fetchone()
+        discovery_deadline = args.terminal_reason == "capped" and deep_scan_deadline_reached(run)
         zero_discovery_deadline = (
-            args.terminal_reason == "capped"
-            and deep_scan_deadline_reached(run)
+            discovery_deadline
             and run["completion_sequence"] == 0
             and (
                 standard_scan_manifest
@@ -1793,8 +1793,10 @@ def finish_deep_scan_locked(
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
         with (
-            saved_results.preserve_deep_deadline_draft(dependencies(), connection, scan)
-            if zero_discovery_deadline and standard_scan_manifest
+            saved_results.preserve_deep_deadline_draft(
+                dependencies(), connection, scan, preserve_reduction=not zero_discovery_deadline
+            )
+            if discovery_deadline and standard_scan_manifest
             else nullcontext()
         ):
             timestamp = dependencies().now()
