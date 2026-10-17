@@ -45,6 +45,7 @@ export async function runHostProtocol(
   operation: {
     label: string;
     requestMethod: string;
+    progressMethod?: string;
     /** Scan cancellation must retain the host's eventual receipt and usage. */
     awaitCancellationReceipt?: boolean;
     errorData?: (error: unknown) => object | undefined;
@@ -235,7 +236,7 @@ export async function runHostProtocol(
             if (terminalCode === undefined)
               void send({
                 jsonrpc: "2.0",
-                method: "scan.progress",
+                method: operation.progressMethod ?? "scan.progress",
                 params: { id: runId, event },
               }).catch(outputError);
           },
