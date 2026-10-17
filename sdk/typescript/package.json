@@ -45,6 +45,7 @@
     "docs/cli.md",
     "docs/findings-service.md",
     "docs/dedupe-records.md",
+    "docs/classify-severity-records.md",
     "docs/hosted-scans.md",
     "docs/validate-records.md"
   ],
