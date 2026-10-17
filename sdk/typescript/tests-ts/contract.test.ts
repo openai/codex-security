@@ -789,6 +789,8 @@ describe("canonical scan contract", () => {
       "artifacts/report.json.",
       "artifacts/report.json ",
       "artifacts/CON.txt",
+      " ",
+      "\u00a0",
     ]) {
       const scanDir = await copyExample();
       const path = join(scanDir, "scan-manifest.json");
@@ -857,6 +859,31 @@ describe("canonical scan contract", () => {
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).resolves.toBeDefined();
   });
+
+  test.each([" ", "  ", "\u00a0"])(
+    "preserves literal whitespace repository path %j in the contract",
+    async (path) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const manifest = await readJson(manifestPath);
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      manifest["scan"]["scope"]["includePaths"] = [path];
+      coverage["includePaths"] = [path];
+      findings["findings"][0]["locations"][0]["path"] = path;
+      await writeJson(manifestPath, manifest);
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.scope.includePaths).toEqual([path]);
+      expect(contract.coverage.includePaths).toEqual([path]);
+      expect(contract.findings.findings[0]!.locations[0]!.path).toBe(path);
+    },
+  );
 
   test.each([-1, 0])(
     "agrees with Python on a finding end-line offset of %i",

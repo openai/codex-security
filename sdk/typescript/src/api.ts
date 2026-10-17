@@ -3,6 +3,13 @@ import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  ScanExecutionError,
+  ScanExecutionResultSchema,
+  type ScanExecutor,
+  type ScanExecutionEvent,
+  type ScanExecutionRequest,
+} from "./scan-executor.js";
+import {
   chmod,
   lstat,
   mkdir,
@@ -345,7 +352,7 @@ export interface ScanOptions extends ScanSettings {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
   onDeepProgress?: (progress: DeepScanProgress) => void;
-  /** Preflight status and best-effort, model-reported phase dispatch counts. */
+  /** Best-effort, model-reported phase dispatch counts. */
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   /**
    * Reports each persisted worker session once when discovered during this run.
@@ -501,6 +508,7 @@ function patchOutcomeFromResponse(
   }
 }
 export type ScanAuthentication =
+  | { method: "host"; verified: false }
   | { method: "command"; verified: false }
   | {
       method: "api_key";
@@ -599,6 +607,15 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
+  /** Explicit hosted execution; never falls back to createCodex. */
+  hostedScan?: {
+    executor: ScanExecutor;
+    context: Pick<
+      ScanExecutionRequest,
+      "repository" | "revision" | "scope" | "identity"
+    >;
+    onEvent(event: ScanExecutionEvent): void;
+  };
   createCodex(
     options: CodexOptions & { nativeProfile?: string },
   ): CodexClientLike | Promise<CodexClientLike>;
@@ -620,7 +637,8 @@ interface ClientDependencies {
   canRunDirectDeepScan?: () => boolean;
 }
 
-const DEFAULT_DEPENDENCIES: ClientDependencies = {
+/** @internal */
+export const DEFAULT_DEPENDENCIES: ClientDependencies = {
   createCodex: ({ nativeProfile, ...options }) =>
     nativeProfile === undefined
       ? new Codex(options)
@@ -675,6 +693,11 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
+    // Reject the removed experimental option rather than starting local inference.
+    if ("hosted" in options)
+      throw new CodexSecurityError(
+        "Use runHostedScan with an executor for hosted execution.",
+      );
     return await this.#trackOperation(() =>
       options.workflowId === undefined
         ? this.#run(repository, { ...options })
@@ -1144,6 +1167,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         hasCommandAuth(configuration),
+        true,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -1542,6 +1566,7 @@ export class CodexSecurity {
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
+    let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
@@ -1561,6 +1586,48 @@ export class CodexSecurity {
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    const terminalScanTurnStatus = () =>
+      scanTurnStatus === "completed" || scanTurnStatus === "failed"
+        ? scanTurnStatus
+        : signal.aborted
+          ? ("interrupted" as const)
+          : null;
+    const finalizeScanUsage = async (
+      scanId: string,
+      workbenchOptions: WorkbenchCommandOptions,
+      completedScan: unknown,
+      turnStatus: "completed" | "failed" | "interrupted",
+    ): Promise<void> => {
+      const measuredUsage = isRecord(completedScan)
+        ? completedScan["usage"]
+        : undefined;
+      const usageCompletion = isRecord(measuredUsage)
+        ? measuredUsage["completion"]
+        : undefined;
+      if (
+        isRecord(usageCompletion) &&
+        usageCompletion["finalized"] === false &&
+        typeof usageCompletion["threadId"] === "string" &&
+        typeof usageCompletion["turnId"] === "string"
+      ) {
+        try {
+          await workbench(
+            { ...workbenchOptions, signal: undefined },
+            workbenchArgs("finalize-scan-usage", {
+              scanId,
+              threadId: usageCompletion["threadId"],
+              turnId: usageCompletion["turnId"],
+              turnStatus,
+            }),
+          );
+        } catch (error) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not finalize scan token usage: ${errorMessage(error)}`);
+        }
+      }
+    };
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
@@ -1659,6 +1726,16 @@ export class CodexSecurity {
         ...(knowledgeBase?.protectedRoots ?? []),
       ]) {
         git = await inspectTrustedExecutable("git", git.environment, root);
+        if (this.#dependencies.hostedScan !== undefined) {
+          // Match the hosted MCP launchers' PATH-based tool lookups.
+          for (const command of process.platform === "win32"
+            ? ["node"]
+            : ["dirname", "node"]) {
+            git.environment = (
+              await inspectTrustedExecutable(command, git.environment, root)
+            ).environment;
+          }
+        }
       }
       checkOpen();
       const scanOutputRoot =
@@ -2184,7 +2261,6 @@ export class CodexSecurity {
         mode,
         skillName,
         scanId,
-        runtime.configPath !== undefined,
         knowledgeBase !== null,
         options.resumeScanId !== undefined &&
           typeof registration["userContext"] === "string"
@@ -2358,6 +2434,7 @@ export class CodexSecurity {
             signal,
           })
         : (await thread.runStreamed(prompt, turnOptions)).events;
+      scanTurnStatus = "in_progress";
       checkOpen();
 
       let result = await runScanEvents({
@@ -2374,6 +2451,9 @@ export class CodexSecurity {
         modelProvider,
         workbenchValidated: true,
         model,
+        onTurnStatus: (status) => {
+          scanTurnStatus = status;
+        },
         onThreadStarted: async (threadId) => {
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
             throw new CodexSecurityError(
@@ -2545,6 +2625,13 @@ export class CodexSecurity {
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
       activeScan = null;
+      const completedScan = completion["scan"];
+      await finalizeScanUsage(
+        scanId,
+        workbenchOptions,
+        completedScan,
+        "completed",
+      );
       if (directDeepScan) {
         result = new ScanResult({
           ...result,
@@ -2556,7 +2643,6 @@ export class CodexSecurity {
           },
         });
       }
-      const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         const targetWarnings = new Set([
           ...preparedTargetWarnings,
@@ -2669,6 +2755,7 @@ export class CodexSecurity {
           )(`Could not run post-scan instructions: ${errorMessage(error)}`);
         }
       }
+      if (this.#dependencies.hostedScan !== undefined) return result;
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
           workbench(workbenchOptions, args, input);
@@ -2730,6 +2817,7 @@ export class CodexSecurity {
     } catch (error) {
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
+      const terminalTurnStatus = terminalScanTurnStatus();
       let failure =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
@@ -2765,6 +2853,13 @@ export class CodexSecurity {
               `--message=${failure.message.slice(0, 2400)}`,
             ],
           );
+          if (terminalTurnStatus !== null)
+            await finalizeScanUsage(
+              activeScan.id,
+              activeScan.options,
+              completion["scan"],
+              terminalTurnStatus,
+            );
           activeScan = null;
           runPostScan = null;
           const result = await collectResult(
@@ -2812,6 +2907,37 @@ export class CodexSecurity {
           return result;
         } catch {}
       }
+      if (activeScan !== null && scanTurnStatus !== null) {
+        try {
+          const cleanupOptions = { ...activeScan.options, signal: undefined };
+          const saved = await workbench(
+            cleanupOptions,
+            workbenchArgs("get-scan", { scanId: activeScan.id }),
+          );
+          const completedScan = saved["scan"];
+          const progress = isRecord(completedScan)
+            ? completedScan["progress"]
+            : undefined;
+          if (isRecord(progress) && progress["status"] === "complete") {
+            const scanId = activeScan.id;
+            activeScan = null;
+            if (terminalTurnStatus !== null)
+              await finalizeScanUsage(
+                scanId,
+                cleanupOptions,
+                completedScan,
+                terminalTurnStatus,
+              );
+          }
+        } catch (cleanupError) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(
+            `Could not finalize scan token usage: ${errorMessage(cleanupError)}`,
+          );
+        }
+      }
       // A failed attachment must not turn a resumable coordinator into a terminal failure.
       // Deep Scan orchestration persists its own terminal failures and cancellations.
       if (activeScan !== null && options.resumeScanId === undefined) {
@@ -2854,7 +2980,11 @@ export class CodexSecurity {
         }
       }
       if (this.#closed) this.#requireOpen();
-      if (signal.aborted && !(failure instanceof ScanInterruptedError)) {
+      if (
+        signal.aborted &&
+        !(failure instanceof ScanInterruptedError) &&
+        !(failure instanceof ScanExecutionError)
+      ) {
         throwIfAborted(signal, scanDir);
       }
       throw failure;
@@ -3087,6 +3217,90 @@ export class CodexSecurity {
     environment: ProcessEnvironment;
     codexOptions: CodexOptions & { nativeProfile?: string };
   }> {
+    const hosted = this.#dependencies.hostedScan;
+    if (hosted !== undefined) {
+      const environment = {
+        ...definedEnvironment(
+          environmentWithGit(session.runtime.environment, git),
+        ),
+        ...runtimePaths,
+      };
+      const model = scanModelConfiguration(session.effectiveConfig);
+      return {
+        environment,
+        // Hosted Standard scans do not launch a local Codex process.
+        codexOptions: {},
+        codex: {
+          startThread: () => {
+            let id: string | null = null;
+            return {
+              get id() {
+                return id;
+              },
+              async runStreamed(prompt, { signal }) {
+                const request = {
+                  version: 2 as const,
+                  requestId: randomUUID(),
+                  ...hosted.context,
+                  scanId: runtimePaths["CODEX_SECURITY_SCAN_ID"]!,
+                  prompt,
+                  ...model,
+                  runtime: {
+                    pluginRoot: session.runtime.plugin.pluginRoot,
+                    pluginVersion: session.runtime.plugin.version,
+                    stateDirectory: runtimePaths["CODEX_SECURITY_STATE_DIR"]!,
+                    outputDirectory: runtimePaths["CODEX_SECURITY_SCAN_DIR"]!,
+                    environment,
+                  },
+                };
+                // A transport failure is terminal; only the host can reconcile
+                // whether remote execution was accepted.
+                let result;
+                try {
+                  result = ScanExecutionResultSchema.parse(
+                    await hosted.executor.run(request, {
+                      signal: signal ?? new AbortController().signal,
+                      onEvent: hosted.onEvent,
+                    }),
+                  );
+                } catch (error) {
+                  // Transport failure does not prove non-acceptance. Never resubmit.
+                  throw new ScanExecutionError({
+                    requestId: request.requestId,
+                    status: "acceptance_unknown",
+                    message: errorMessage(error),
+                  });
+                }
+                if (result.requestId !== request.requestId)
+                  throw new ScanExecutionError({
+                    ...result,
+                    requestId: request.requestId,
+                    status: "acceptance_unknown",
+                    message:
+                      "Execution response does not match the active request.",
+                  });
+                if (result.status !== "completed")
+                  throw new ScanExecutionError(result);
+                id = result.sessionId!;
+                return {
+                  events: (async function* () {
+                    yield { type: "thread.started", thread_id: id };
+                    yield {
+                      type: "item.completed",
+                      item: {
+                        type: "agent_message",
+                        text: result.finalResponse ?? "",
+                      },
+                    };
+                    yield { type: "turn.completed", usage: result.usage };
+                  })(),
+                };
+              },
+            };
+          },
+        },
+      };
+    }
     const {
       runtime,
       runtimeHome,
@@ -3218,6 +3432,59 @@ export class CodexSecurity {
     temporaryRoot?: string,
     deepScan = false,
   ): Promise<PreparedSession> {
+    if (this.#dependencies.hostedScan !== undefined) {
+      // Hosted scans use only the explicitly selected bundle and configuration.
+      // No local auth, Codex subprocess, provider profile, or ambient config.
+      const environment = this.#dependencies.environment;
+      const pluginRoot = await bundledPluginRoot();
+      const metadata = await pluginMetadata(pluginRoot);
+      const effectiveConfig = {
+        // The executor supplies its actual tools and capacity. Local Codex
+        // defaults must not masquerade as hosted runtime capabilities.
+        approval_policy: "never",
+        ...this.config.codexOverrides,
+      };
+      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+      const runtimeHome = await createIsolatedHome(temporaryRoot, (path) =>
+        requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+      );
+      const configPath = join(runtimeHome, "config-preflight.toml");
+      const runtime: PreparedRuntime = {
+        codexHome: runtimeHome,
+        bootstrapWorkspace: runtimeHome,
+        configPath,
+        credentialsAvailable: false,
+        environment: definedEnvironment(environment),
+        plugin: {
+          ...metadata,
+          pluginRoot,
+          installedRoot: pluginRoot,
+          marketplaceRoot: pluginRoot,
+          marketplaceName: "codex-security-sdk",
+        },
+      };
+      this.#runtime = runtime;
+      await writeCodexConfig(configPath, preflightConfig);
+      const python = await resolvePluginPython({
+        environment,
+        protectedRoot,
+        signal,
+      });
+      return {
+        runtime,
+        runtimeHome,
+        effectiveConfig,
+        preflightConfig,
+        sessionConfig: preflightConfig,
+        modelProvider: "host",
+        externalProvider: null,
+        apiKey: null,
+        scanEnvironment: environment,
+        authentication: { method: "host", verified: false },
+        approvalPolicy: "never",
+        python,
+      };
+    }
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     const checkOpen = (): void => {
       this.#requireOpen();
@@ -4100,6 +4367,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
+  onTurnStatus?: (status: "completed" | "failed") => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -4122,6 +4390,9 @@ export async function runScanEvents(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
+        if (event.type === "turn.completed")
+          options.onTurnStatus?.("completed");
+        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
@@ -4395,7 +4666,6 @@ function scanPrompt(
   mode: ScanMode,
   skillName: string,
   scanId: string,
-  hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
   enforceCostLimit = false,
@@ -4454,11 +4724,6 @@ function scanPrompt(
           'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
           'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
         ]),
-    ...(hasConfigPath
-      ? [
-          `For normal config-preflight helper calls, append --config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
-        ]
-      : []),
     ...(hasKnowledgeBase
       ? [
           `The ${shellEnvironmentReference("CODEX_SECURITY_KNOWLEDGE_BASE")} environment variable contains primary documents about the project and its organization, including their architecture, threat model, and policies. These documents are a source of truth and override conflicting SECURITY.md guidance, generated threat models, and other sources, except explicit user instructions.`,
@@ -4701,6 +4966,7 @@ export function scanAuthentication(
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
   modelProvider?: unknown,
   commandAuth = false,
+  preflight = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -4730,6 +4996,9 @@ export function scanAuthentication(
   const key = environmentApiKeyEntry(environment, modelProvider);
   if (key === null && isExternalModelProvider(modelProvider)) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    if (preflight && auth === "auto") {
+      return { method: "api_key", source: provider.env_key, verified: false };
+    }
     throw new AuthenticationRequiredError(
       `Set ${provider.env_key} to run a scan through ${provider.name}.`,
     );

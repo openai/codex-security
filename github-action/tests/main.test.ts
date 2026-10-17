@@ -9,7 +9,7 @@ import { DefaultArtifactClient } from '@actions/artifact';
 import { runAction } from '../src/main.js';
 import { INPUT_NAMES } from '../src/inputs.js';
 import { gitEnvironment } from '../src/targets.js';
-import type { Runtime } from '../src/runtime.js';
+import { runtimeEnvironment, type Runtime } from '../src/runtime.js';
 import type { ProcessResult } from '../src/process.js';
 import { copyCompletedScan } from './fixtures.js';
 
@@ -79,7 +79,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     root: join(root, 'runtime'), home: join(root, 'runtime/home'), codexHome: join(root, 'runtime/codex'),
     stateDirectory: join(root, 'runtime/state'), resultsDirectory: join(root, 'results'),
     nodePath: '/never-executed/node', cliPath: '/never-executed/cli.js',
-    env: (key) => ({ OPENAI_API_KEY: key }),
+    env: (credentials) => runtimeEnvironment(runtime, credentials),
   };
   let setups = 0;
   let processes = 0;
@@ -242,9 +242,94 @@ test('same-repository Dependabot PR scans with a supplied key', async (t) => {
   assert.equal(result.outputs['sarif-upload-ready'], 'true');
 });
 
+for (const mode of ['standard', 'deep']) {
+  test(`Bedrock ${mode} scans use captured AWS credentials without an OpenAI key`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('mode', mode);
+    delete process.env.OPENAI_API_KEY;
+    Object.assign(process.env, {AWS_ACCESS_KEY_ID:'synthetic-access-key', AWS_SECRET_ACCESS_KEY:'synthetic-secret-key',
+      AWS_SESSION_TOKEN:'synthetic-session-token', AWS_REGION:'us-east-2', GITHUB_TOKEN:'must-not-reach-scan'});
+    app.configure({prepare: () => { process.env.AWS_SESSION_TOKEN = 'changed-during-setup'; }});
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
+    assert.equal(result.outputs['sarif-upload-ready'], 'true');
+    assert.equal(result.args[result.args.indexOf('--provider') + 1], 'amazon-bedrock');
+    assert.equal(result.args[result.args.indexOf('--auth') + 1], 'auto');
+    assert.equal(result.environment.AWS_ACCESS_KEY_ID, 'synthetic-access-key');
+    assert.equal(result.environment.AWS_SECRET_ACCESS_KEY, 'synthetic-secret-key');
+    assert.equal(result.environment.AWS_SESSION_TOKEN, 'synthetic-session-token');
+    assert.equal(result.environment.AWS_REGION, 'us-east-2');
+    assert.equal(result.environment.OPENAI_API_KEY, undefined); assert.equal(result.environment.GITHUB_TOKEN, undefined);
+  });
+}
+
+for (const [provider, key] of [['openrouter', 'OPENROUTER_API_KEY'], ['fireworks', 'FIREWORKS_API_KEY']]) {
+  for (const mode of ['standard', 'deep']) test(`${provider} ${mode} scans use only the captured provider key`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', provider); app.setInput('model', 'synthetic/model'); app.setInput('mode', mode);
+    Object.assign(process.env, {OPENROUTER_API_KEY:'synthetic-openrouter', FIREWORKS_API_KEY:'synthetic-fireworks',
+      AWS_SESSION_TOKEN:'unrelated-aws', GITHUB_TOKEN:'unrelated-github'});
+    const expectedKey = process.env[key];
+    app.configure({prepare: () => { process.env[key] = 'changed-during-setup'; }});
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
+    assert.equal(result.args[result.args.indexOf('--provider') + 1], provider);
+    assert.equal(result.args[result.args.indexOf('--auth') + 1], 'api-key');
+    assert.equal(result.environment[key], expectedKey);
+    for (const other of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN'])
+      if (other !== key) assert.equal(result.environment[other], undefined);
+  });
+  test(`${provider} requires its own key and keeps dry-run credential-free`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', provider); app.setInput('model', 'synthetic/model');
+    delete process.env[key];
+    const missing = await app.run();
+    assert.equal(missing.exitCode, 1); assert.equal(missing.setups, 0);
+    assert.ok(missing.summary.includes(key));
+    process.env[key] = 'synthetic-provider-key';
+    app.setInput('dry-run', 'true');
+    const dry = await app.run();
+    assert.equal(dry.exitCode, 0); assert.equal(dry.outputs['skip-reason'], 'dry-run');
+    assert.equal(dry.environment[key], undefined); assert.equal(dry.environment.OPENAI_API_KEY, undefined);
+  });
+}
+
+test('Bedrock PR scans retain diff scope and severity failure outputs', async t => {
+  const app = await harness(t, 'pr');
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('fail-on-severity', 'high');
+  process.env.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-bedrock-bearer';
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.ok(result.args.includes('--diff')); assert.ok(result.args.includes('--head'));
+  assert.equal(result.environment.AWS_BEARER_TOKEN_BEDROCK, 'synthetic-bedrock-bearer');
+  assert.equal(result.environment.OPENAI_API_KEY, undefined);
+});
+
+test('Bedrock dry-run forwards no credentials and remains a skipped scan', async t => {
+  const app = await harness(t);
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('dry-run', 'true');
+  process.env.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-bedrock-bearer';
+  const result = await app.run();
+  assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'skipped');
+  assert.equal(result.outputs['skip-reason'], 'dry-run');
+  assert.equal(result.environment.AWS_BEARER_TOKEN_BEDROCK, undefined); assert.equal(result.environment.OPENAI_API_KEY, undefined);
+});
+
+test('Bedrock authentication errors remain scan failures', async t => {
+  const app = await harness(t);
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model');
+  delete process.env.OPENAI_API_KEY;
+  app.configure({exitCode:2, cliFailure:true});
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.processes, 1);
+  assert.equal(result.outputs['scan-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
+});
+
 for (const scenario of ['schedule', 'pr'] as const) {
   test(`missing API key fails a ${scenario === 'pr' ? 'Dependabot PR' : 'scheduled scan'} with setup guidance`, async (t) => {
     const app = await harness(t, scenario); delete process.env.OPENAI_API_KEY;
+    process.env.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-bedrock-bearer';
     if (scenario === 'pr') process.env.GITHUB_ACTOR = 'dependabot[bot]';
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
