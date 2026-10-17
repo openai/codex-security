@@ -15,7 +15,6 @@ from workbench_test_support import (
     saved_binding,
     saved_discovery_worker,
     scan_command,
-    worker_coverage_id,
     write_checkpoint,
 )
 
@@ -74,10 +73,13 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
         "standard-worker-thread",
     )
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert (
-        any(row["id"] == worker_coverage_id(worker_id, "review") for row in coverage["deferred"])
-        is latest_pending
+    assert not any(row["id"] == "review" for row in coverage["deferred"])
+    assert all(
+        row.get("workerId") == worker_id
+        for row in coverage["deferred"]
+        if row["id"] != "scan-stopped"
     )
+    assert any(row["id"] == f"{worker_id}/review" for row in coverage["deferred"]) is latest_pending
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
         == frozen
@@ -126,7 +128,14 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     )
     assert len(published) == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    expected_id = worker_coverage_id(worker_id, "review") if layout == "worker" else "review"
+    expected_id = f"{worker_id}/review" if layout == "worker" else "review"
+    if layout == "worker":
+        assert not any(row["id"] == "review" for row in coverage["deferred"])
+        assert all(
+            row.get("workerId") == worker_id
+            for row in coverage["deferred"]
+            if row["id"] != "scan-stopped"
+        )
     assert any(row["id"] == expected_id for row in coverage["deferred"])
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert published[0].relative_to(scan_dir).as_posix() in sources

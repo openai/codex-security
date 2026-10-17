@@ -89,6 +89,53 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
     assert all(p.read_bytes() == contents for p, contents in originals.items())
 
 
+def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_replay(tmp_path):
+    surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    pending = saved_draft(
+        "coverage-scan",
+        surfaces=[surface],
+        deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+    )
+    closed = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[{**surface, "disposition": "no_issue_found"}],
+        closures=[{"id": "review", "reason": "Review completed."}],
+    )
+    source = worker(tmp_path, "first", closed)
+    output = Path(source["artifact_dir"])
+    for modified, draft in [(100, pending), (200, closed)]:
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(200, 200))
+    os.utime(output / "result.json", ns=(200, 200))
+    parent = saved_draft("coverage-scan")
+    parent["coverage"] = {
+        "mode": "deep_repository",
+        "inventoryStrategy": "repository",
+        "includePaths": ["."],
+        "excludePaths": [],
+    }
+    write_saved_parent(tmp_path, parent, 300)
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    first = recover(tmp_path, [source], project=True)
+    replay = recover(tmp_path, [source], project=True, frozen=first[0]["scan"]["preservedSources"])
+    assert replay[2] == first[2]
+    for coverage in (first[2], replay[2]):
+        assert coverage["surfaces"] == [
+            {
+                **surface,
+                "id": "first/api",
+                "workerId": "first",
+                "disposition": "no_issue_found",
+            }
+        ]
+        assert [row["id"] for row in coverage["deferred"]] == ["scan-stopped"]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pending_work(tmp_path):
     surface = {"id": "api", "label": "API", "disposition": "needs_follow_up"}
     task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
