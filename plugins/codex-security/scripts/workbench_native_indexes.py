@@ -1,6 +1,7 @@
 """Read-only native findings and repository indexes for the Security workbench."""
 
 import argparse
+import os
 import sqlite3
 import sys
 from collections import Counter
@@ -217,17 +218,22 @@ def list_repositories(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+    # Keep scanned targets in latest-started order, then include targets without scans.
+    target_ids = [
+        *latest_scan_by_target,
+        *(target_id for target_id in targets if target_id not in latest_scan_by_target),
+    ]
     repositories = [
         {
-            "checkoutAvailable": Path(target["current_path"]).is_dir(),
+            "checkoutAvailable": os.path.isdir(target["current_path"]),
             "displayName": target["display_name"],
-            "latestScan": latest_scan,
+            "latestScan": latest_scan_by_target.get(target_id),
             "openFindingsCount": open_findings_by_target.get(target_id, 0),
-            "scanCount": scan_count_by_target[target_id],
+            "scanCount": scan_count_by_target.get(target_id, 0),
             "targetId": target_id,
             "targetPath": target["current_path"],
         }
-        for target_id, latest_scan in latest_scan_by_target.items()
+        for target_id in target_ids
         if (target := targets.get(target_id)) is not None
     ]
     if args is None:
@@ -238,7 +244,8 @@ def list_repositories(
         repository
         for repository in repositories
         if (args.target_id is None or repository["targetId"] == args.target_id)
-        and args.status != "not_scanned"
+        and (args.status != "scanned" or repository["scanCount"] > 0)
+        and (args.status != "not_scanned" or repository["scanCount"] == 0)
         and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
         and (
             not query
