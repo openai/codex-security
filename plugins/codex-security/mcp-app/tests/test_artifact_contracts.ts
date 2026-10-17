@@ -116,7 +116,7 @@ const pythonTextResults = JSON.parse(
     process.env.PYTHON || "python3",
     [
       "-c",
-      "import json, re, sys; values, pattern = json.load(sys.stdin); print(json.dumps([[bool(value.strip()), bool(re.search(pattern, value))] for value in values]))",
+      "import json, re, sys; values, pattern = json.load(sys.stdin.buffer); print(json.dumps([[bool(value.strip()), bool(re.search(pattern, value))] for value in values]))",
     ],
     {
       input: JSON.stringify([
