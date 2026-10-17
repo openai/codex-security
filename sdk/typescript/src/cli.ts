@@ -8792,31 +8792,19 @@ async function executeScan(
         progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
-        const update =
-          status.kind === "preflight"
-            ? `preflight:${status.delegation}:${status.configuredSlots}`
-            : `dispatch:${status.phase}:${status.planned}:${status.started}`;
+        const update = `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
-        if (status.kind === "preflight") {
-          diagnostic("worker.preflight", {
-            delegation: status.delegation,
-            configured_slots: status.configuredSlots,
-          });
-        } else {
-          diagnostic("worker.phase", {
-            phase: status.phase,
-            planned: status.planned,
-            started: status.started,
-          });
-          workerCapacity = { planned: status.planned, started: status.started };
-          phase = scanPhase(status.phase);
-        }
+        diagnostic("worker.phase", {
+          phase: status.phase,
+          planned: status.planned,
+          started: status.started,
+        });
+        workerCapacity = { planned: status.planned, started: status.started };
+        phase = scanPhase(status.phase);
         const message = workerStatusMessage(status);
         if (dashboard !== null) {
-          if (status.kind === "dispatch") {
-            dashboard.setStage(scanPhase(status.phase));
-          }
+          dashboard.setStage(scanPhase(status.phase));
           dashboard.note(message);
           return;
         }
@@ -9897,17 +9885,6 @@ export function parseCodexOverrides(
 }
 
 function workerStatusMessage(status: ScanWorkerStatus): string {
-  if (status.kind === "preflight") {
-    if (status.delegation === "unavailable") {
-      return "Preflight: worker delegation unavailable; continuing without delegated workers.";
-    }
-    if (status.delegation === "unknown") {
-      return "Preflight: worker delegation could not be confirmed; continuing scan.";
-    }
-    return status.configuredSlots === null
-      ? "Preflight: worker delegation supported."
-      : `Preflight: worker delegation supported (up to ${status.configuredSlots} worker slots).`;
-  }
   if (status.started === status.planned) {
     return `Scan phase: ${scanPhase(status.phase)} (${status.started} ${status.started === 1 ? "worker" : "workers"}).`;
   }

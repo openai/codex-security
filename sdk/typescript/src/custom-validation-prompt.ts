@@ -11,9 +11,9 @@ const SOURCES = {
   "references/core-scan.md":
     "caa48f845e7edf4768140a7244d92637175df6f8e26a7660109a20f0dbe21546",
   "skills/security-scan/SKILL.md":
-    "93a23fd5e8fd505282fca51432dd981ffee85dd99e438d31fcba6ba8c1860f15",
+    "ee0fa89f3670693091e401466fae743d082a3e42b5672eef48047ab538c870a3",
   "skills/security-diff-scan/SKILL.md":
-    "e0ddfea9e46ec5389a6634630aa518273b0b4bc68efac09441adf549bab8d253",
+    "c15bc248bd43d28d7c137c557be3526575db812a9b7225ee8d921b29c0f772f0",
 } as const;
 
 const DISABLED_TOOLS = [

@@ -1,10 +1,9 @@
 import { isRecord } from "./record.js";
-import { isSafeNonNegativeInteger, parseJson } from "./value.js";
+import { parseJson } from "./value.js";
 import { z } from "zod";
 
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
-const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
 const workerPhaseSchema = z.enum([
   "ranking",
   "file_review",
@@ -47,14 +46,10 @@ export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
   }[value];
 }
 
-/** Preflight is tool-derived; dispatch counts depend on model-emitted markers. */
-export type ScanWorkerStatus =
-  | {
-      kind: "preflight";
-      delegation: "available" | "unavailable" | "unknown";
-      configuredSlots: number | null;
-    }
-  | ({ kind: "dispatch" } & z.infer<typeof dispatchSchema>);
+/** Dispatch counts depend on model-emitted markers. */
+export type ScanWorkerStatus = {
+  kind: "dispatch";
+} & z.infer<typeof dispatchSchema>;
 
 export function workerStatusFromEvent(
   event: Readonly<Record<string, unknown>>,
@@ -63,7 +58,6 @@ export function workerStatusFromEvent(
     return null;
   }
   const item = event["item"];
-  if (item["type"] === "command_execution") return preflightStatus(item);
   if (item["type"] === "agent_message") return dispatchStatus(item);
   return null;
 }
@@ -123,57 +117,6 @@ function scanProgressFromMarker(marker: string): ScanProgress | null {
     parseJson(() => marker.slice(SCAN_PROGRESS_PREFIX.length)),
   );
   return parsed.success ? parsed.data : null;
-}
-
-function preflightStatus(
-  item: Readonly<Record<string, unknown>>,
-): ScanWorkerStatus | null {
-  if (
-    typeof item["command"] !== "string" ||
-    !PREFLIGHT_COMMAND.test(item["command"]) ||
-    typeof item["aggregated_output"] !== "string"
-  ) {
-    return null;
-  }
-  const payload = parseJson(() => item["aggregated_output"] as string);
-  if (
-    !isRecord(payload) ||
-    (payload["profile"] !== "security_scan" &&
-      payload["profile"] !== "security_diff_scan") ||
-    !Array.isArray(payload["results"])
-  ) {
-    return null;
-  }
-  const results = payload["results"];
-  const delegated = results.filter(
-    (result): result is Record<string, unknown> =>
-      isRecord(result) && result["capability"] === "delegated_workers",
-  );
-  const delegatedResult = delegated[0];
-  if (delegated.length !== 1 || delegatedResult === undefined) return null;
-  const delegation =
-    delegatedResult["status"] === "pass"
-      ? "available"
-      : delegatedResult["status"] === "fail"
-        ? "unavailable"
-        : delegatedResult["status"] === "unknown"
-          ? "unknown"
-          : null;
-  if (delegation === null) return null;
-  const capacity = results.filter(
-    (result): result is Record<string, unknown> =>
-      isRecord(result) &&
-      typeof result["capability"] === "string" &&
-      result["capability"].startsWith("usable_worker_slots_"),
-  );
-  if (capacity.length > 1) return null;
-  const capacityResult = capacity[0];
-  const configuredSlots =
-    capacityResult !== undefined &&
-    isSafeNonNegativeInteger(capacityResult["actual"])
-      ? capacityResult["actual"]
-      : null;
-  return { kind: "preflight", delegation, configuredSlots };
 }
 
 function dispatchStatus(
