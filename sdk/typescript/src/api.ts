@@ -1796,6 +1796,11 @@ export class CodexSecurity {
           scanDir,
           workerProviderEnvironment,
         );
+      const sqliteHome = workerRuntimeConfig["sqlite_home"];
+      const sqliteEnvironment: Record<string, string> =
+        mode === "deep" && typeof sqliteHome === "string"
+          ? { CODEX_SQLITE_HOME: sqliteHome }
+          : {};
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
         responses_api_metadata: {
@@ -2061,6 +2066,7 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
           ...environmentWithGit(git.environment, git),
+          ...sqliteEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -2336,6 +2342,7 @@ export class CodexSecurity {
             )
           : null;
       const runtimePaths = {
+        ...sqliteEnvironment,
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT:
           options.resumeScanId !== undefined &&
@@ -5582,33 +5589,20 @@ function selectedWorkerRuntimeConfig(
       return value === undefined ? [] : [[name, value]];
     }),
   );
-  const instructionsFile = resolved["model_instructions_file"];
-  if (typeof instructionsFile === "string") {
-    resolved["model_instructions_file"] = resolve(
-      workingDirectory,
-      expandHome(instructionsFile, environment),
-    );
+  // Workers use separate directories; preserve the parent scan's native paths.
+  for (const key of [
+    "model_instructions_file",
+    "experimental_compact_prompt_file",
+    "model_catalog_json",
+    "sqlite_home",
+  ]) {
+    const file = resolved[key];
+    if (typeof file === "string") {
+      resolved[key] = resolve(workingDirectory, expandHome(file, environment));
+    }
   }
   return {
-    ...Object.fromEntries(
-      [
-        ...CODEX_AUTH_CONFIG_KEYS,
-        "analytics",
-        "responses_api_metadata",
-        "openai_base_url",
-        "features",
-        "model_auto_compact_token_limit",
-        "model_context_window",
-        "model_instructions_file",
-        "model_verbosity",
-        "shell_environment_policy",
-        "skills",
-        "web_search",
-        "windows",
-      ]
-        .filter((key) => resolved[key] !== undefined)
-        .map((key) => [key, resolved[key]!]),
-    ),
+    ...structuredCodexConfig(resolved),
     ...(provider === undefined ? {} : { model_provider: provider }),
     ...(Object.keys(providerEnvironment).length === 0
       ? {}
