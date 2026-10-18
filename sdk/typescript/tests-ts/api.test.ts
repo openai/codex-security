@@ -6447,7 +6447,7 @@ describe("CodexSecurity orchestration", () => {
         const repository = join(root, `repository-${index}`);
         const codexHome = join(root, `home-${index}`);
         const scanDir = join(root, `scan-${index}`);
-        const sqliteHome = join(root, `sqlite-${index}`);
+        const sqliteHome = join(codexHome, "sqlite");
         const configPath = join(root, `worker-config-${index}.toml`);
         const installedRoot = join(codexHome, "plugins", "cache", "selected");
         const customSkill = {
@@ -6470,7 +6470,7 @@ describe("CodexSecurity orchestration", () => {
               synthetic_native: { selected: `scan-${index}` },
               experimental_compact_prompt_file: `../native-${index}.json`,
               model_catalog_json: `../native-${index}.json`,
-              sqlite_home: `../sqlite-${index}`,
+              sqlite_home: index === 0 ? "sqlite" : sqliteHome,
             },
           },
         };
@@ -6510,6 +6510,7 @@ describe("CodexSecurity orchestration", () => {
                     options.config as JsonObject,
                   );
                   expect(saved["skills"]).toEqual(effective["skills"]);
+                  expect(effective["sqlite_home"]).toBe(sqliteHome);
                   const snapshot = parseToml(
                     await readFile(
                       options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
