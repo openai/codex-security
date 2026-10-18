@@ -71,6 +71,10 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
+`reasoningEffort` accepts `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"`
+and is forwarded unchanged to the executor. Choose an effort supported by the
+selected model and provider.
+
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
 uses the existing `ScanProgress` type; activity uses `ScanActivity`. Observer

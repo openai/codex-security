@@ -316,6 +316,18 @@ test.each(sealedScopes)(
   },
 );
 
+test("hosted scans forward max reasoning effort to the executor", async () => {
+  const input = { ...(await fixture()), reasoningEffort: "max" as const };
+  const executor = draftExecutor();
+  const result = await runHostedScan(input, { executor });
+  expect(result.status, JSON.stringify(result)).toBe("completed");
+  expect(executor.run).toHaveBeenCalledTimes(1);
+  expect(executor.run.mock.calls[0]![0]).toMatchObject({
+    model: input.model,
+    reasoningEffort: "max",
+  });
+});
+
 test("hosted execution preserves inspected runtime tool paths", async () => {
   const input = await fixture(["tools/placeholder.ts"]);
   const repositoryTools = await realpath(join(input.repository, "tools"));
@@ -521,10 +533,15 @@ test.each([
   expect(stderr.text()).toContain("--host must be used alone");
 });
 
-test.each([false, true])(
-  "CLI pipes retain progress and execution receipts, including cancellation (%p)",
-  async (cancel) => {
+test.each([
+  { cancel: false, reasoningEffort: "high" },
+  { cancel: true, reasoningEffort: "high" },
+  { cancel: false, reasoningEffort: "max" },
+] as const)(
+  "CLI pipes retain $reasoningEffort reasoning, progress and execution receipts (cancel: $cancel)",
+  async ({ cancel, reasoningEffort }) => {
     const input = await fixture();
+    input.reasoningEffort = reasoningEffort;
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -554,6 +571,7 @@ test.each([false, true])(
         const message = JSON.parse(line);
         messages.push(message);
         if (message.method === "execution.run") {
+          expect(message.params.reasoningEffort).toBe(reasoningEffort);
           requestId = message.params.requestId;
           for (const event of [progressEvent, { invalid: true }])
             send(child.stdin, {

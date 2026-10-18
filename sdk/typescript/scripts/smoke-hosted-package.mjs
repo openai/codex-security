@@ -20,6 +20,11 @@ const fixture = JSON.parse(
 );
 const input = publicSdk.HostedScanInputSchema.parse(fixture.run.params);
 assert.equal(input.version, 2);
+assert.equal(
+  publicSdk.HostedScanInputSchema.parse({ ...input, reasoningEffort: "max" })
+    .reasoningEffort,
+  "max",
+);
 await assert.rejects(
   publicSdk.runHostedScan(
     { ...input, scope: { paths: [] } },
