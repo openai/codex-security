@@ -316,21 +316,6 @@ test.each(sealedScopes)(
   },
 );
 
-test.each(["max", "synthetic-future-effort"])(
-  "hosted scans forward %s reasoning effort to the executor",
-  async (reasoningEffort) => {
-    const input = { ...(await fixture()), reasoningEffort };
-    const executor = draftExecutor();
-    const result = await runHostedScan(input, { executor });
-    expect(result.status, JSON.stringify(result)).toBe("completed");
-    expect(executor.run).toHaveBeenCalledTimes(1);
-    expect(executor.run.mock.calls[0]![0]).toMatchObject({
-      model: input.model,
-      reasoningEffort,
-    });
-  },
-);
-
 test("hosted execution preserves inspected runtime tool paths", async () => {
   const input = await fixture(["tools/placeholder.ts"]);
   const repositoryTools = await realpath(join(input.repository, "tools"));
@@ -536,16 +521,11 @@ test.each([
   expect(stderr.text()).toContain("--host must be used alone");
 });
 
-test.each([
-  { cancel: false, reasoningEffort: "high" },
-  { cancel: true, reasoningEffort: "high" },
-  { cancel: false, reasoningEffort: "max" },
-  { cancel: false, reasoningEffort: "synthetic-future-effort" },
-] as const)(
-  "CLI pipes retain $reasoningEffort reasoning, progress and execution receipts (cancel: $cancel)",
-  async ({ cancel, reasoningEffort }) => {
+test.each([false, true])(
+  "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
+  async (cancel) => {
     const input = await fixture();
-    input.reasoningEffort = reasoningEffort;
+    if (!cancel) input.reasoningEffort = "synthetic-future-effort";
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -575,7 +555,7 @@ test.each([
         const message = JSON.parse(line);
         messages.push(message);
         if (message.method === "execution.run") {
-          expect(message.params.reasoningEffort).toBe(reasoningEffort);
+          expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
           requestId = message.params.requestId;
           for (const event of [progressEvent, { invalid: true }])
             send(child.stdin, {

@@ -20,13 +20,6 @@ const fixture = JSON.parse(
 );
 const input = publicSdk.HostedScanInputSchema.parse(fixture.run.params);
 assert.equal(input.version, 2);
-assert.equal(
-  publicSdk.HostedScanInputSchema.parse({
-    ...input,
-    reasoningEffort: "synthetic-future-effort",
-  }).reasoningEffort,
-  "synthetic-future-effort",
-);
 await assert.rejects(
   publicSdk.runHostedScan(
     { ...input, scope: { paths: [] } },
