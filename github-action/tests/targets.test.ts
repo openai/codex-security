@@ -49,7 +49,12 @@ test('PR target resolves merge base and preserves exact upload head identity', a
 test('GitHub Cloud checkout origins match the event host for HTTPS and SSH', async t => {
   const f = await fixture(t); const head = await f.change();
   for (const [host, sshUser] of [['github.com', 'git'], ['example-enterprise.ghe.com', 'example-enterprise']]) {
-    for (const origin of [`https://${host}/example/repo.git`, `${sshUser}@${host}:example/repo.git`, `ssh://${sshUser}@${host}/example/repo`]) {
+    for (const origin of [
+      `https://${host}/example/repo.git`, `https://${host}:443/example/repo`,
+      `https://${host.toUpperCase()}/Example/Repo.git/`,
+      `${sshUser}@${host}:example/repo.git`, `${sshUser}@${host.toUpperCase()}:Example/Repo/`,
+      `ssh://${sshUser}@${host}/example/repo`, `ssh://${sshUser}@${host.toUpperCase()}:22/Example/Repo.git/`,
+    ]) {
       f.run('remote', 'set-url', 'origin', origin);
       for (const eventName of ['schedule', 'pull_request']) {
         const event = {...f.event(head, eventName), serverUrl:`https://${host}`};
@@ -59,6 +64,29 @@ test('GitHub Cloud checkout origins match the event host for HTTPS and SSH', asy
         assert.equal(target.diffBase, eventName === 'schedule' ? undefined : f.base);
       }
     }
+  }
+});
+test('GitHub.com checkout origins support its SSH-over-443 endpoint', async t => {
+  const f = await fixture(t);
+  f.run('remote', 'set-url', 'origin', 'ssh://git@ssh.github.com:443/example/repo.git');
+  const target = await resolveTarget(f.inputs({scope:'repository'}), f.event(f.base, 'schedule'));
+  assert.equal(target.scannedSha, f.base);
+  assert.equal(target.publishable, true);
+
+  const enterpriseEvent = {...f.event(f.base), serverUrl:'https://example-enterprise.ghe.com'};
+  await assert.rejects(resolveTarget(f.inputs(), enterpriseEvent), /origin does not match/);
+  for (const origin of ['https://ssh.github.com/example/repo.git', 'ssh://git@ssh.github.com:22/example/repo.git',
+    'ssh://git@ssh.github.com:443/other/repo.git', 'ssh://other@ssh.github.com:443/example/repo.git']) {
+    f.run('remote', 'set-url', 'origin', origin);
+    await assert.rejects(resolveTarget(f.inputs(), f.event(f.base)), /origin does not match/);
+  }
+});
+test('SCP checkout paths remain literal when compared with the triggering repository', async t => {
+  const f = await fixture(t);
+  for (const origin of ['git@github.com:example/repo.git#suffix', 'git@github.com:example/repo.git?suffix',
+    'git@github.com:other/../example/repo.git']) {
+    f.run('remote', 'set-url', 'origin', origin);
+    await assert.rejects(resolveTarget(f.inputs(), f.event(f.base)), /origin does not match/);
   }
 });
 test('unsupported server URLs still fail eligibility', async t => {

@@ -79,12 +79,17 @@ function originMatches(url: string, repository: string, serverUrl: string): bool
   try {
     const host = new URL(serverUrl).hostname;
     const sshUser = host === 'github.com' ? 'git' : host.slice(0, -'.ghe.com'.length);
-    const sshPrefix = `${sshUser}@${host}:`;
-    if (url.startsWith(sshPrefix)) return url.slice(sshPrefix.length).replace(/\.git$/, '') === repository;
-    const parsed = new URL(url);
-    return ['https:', 'ssh:'].includes(parsed.protocol) && parsed.hostname === host && !parsed.password &&
-      (parsed.protocol === 'ssh:' ? parsed.username === sshUser : !parsed.username) &&
-      parsed.pathname.replace(/^\//, '').replace(/\.git$/, '') === repository;
+    // Keep SCP paths literal: URL parsing would interpret their ? and # characters.
+    const scp = /^([^/@:]+@[a-z0-9.-]+):(.+)$/i.exec(url);
+    const parsed = new URL(scp ? `ssh://${scp[1]}` : url);
+    const ssh = parsed.protocol === 'ssh:';
+    const originHost = parsed.hostname.toLowerCase();
+    const matchesHost = originHost === host ||
+      (host === 'github.com' && ssh && originHost === 'ssh.github.com' && parsed.port === '443');
+    const repositoryPath = scp ? scp[2] : parsed.pathname.slice(1);
+    return matchesHost && !parsed.password &&
+      (ssh ? parsed.username === sshUser : parsed.protocol === 'https:' && !parsed.username) &&
+      repositoryPath.replace(/\/$/, '').replace(/\.git$/, '').toLowerCase() === repository.toLowerCase();
   } catch { return false; }
 }
 

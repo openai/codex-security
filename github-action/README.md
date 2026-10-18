@@ -78,7 +78,18 @@ This setup is specific to the Linux runner. Local macOS scans use the built-in
 Seatbelt sandbox and do not need Bubblewrap. See the
 [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
 
-## GitHub Enterprise Cloud
+## Supported GitHub hosts and checkout URLs
+
+The Action supports GitHub.com and GitHub Enterprise Cloud on `*.ghe.com`.
+Checkout origins can use HTTPS, SCP-style SSH (`USER@HOST:OWNER/REPO.git`),
+or an `ssh://` URL, including an explicit port 22. Repository names and hostnames
+are compared without regard to case; a `.git` suffix and trailing slash are optional.
+
+On GitHub.com, `ssh://git@ssh.github.com:443/OWNER/REPO.git` is also supported.
+GitHub does not offer this SSH-over-443 endpoint for enterprises on `ghe.com`;
+see [GitHub's SSH-over-HTTPS guidance](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
+
+### GitHub Enterprise Cloud
 
 The workflows in this guide also support GitHub Enterprise Cloud with data
 residency at `https://SUBDOMAIN.ghe.com`. The Action reads `GITHUB_SERVER_URL`
