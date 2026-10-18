@@ -25,8 +25,8 @@ export function validateEvent(event: EventContext): void {
   if (!['pull_request','schedule','workflow_dispatch','push'].includes(event.eventName))
     throw new Error(`Unsupported event: ${event.eventName}. Use pull_request, schedule, workflow_dispatch, or push. Privileged PR source-scanning triggers are not supported.`);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(event.repository)) throw new Error('GITHUB_REPOSITORY is invalid.');
-  // The artifact service implementation is GitHub.com-specific for this release.
-  if (event.serverUrl !== 'https://github.com') throw new Error('This release supports GitHub.com only; GitHub Enterprise Server has not been validated.');
+  if (!/^https:\/\/(?:github\.com|[a-z0-9-]+\.ghe\.com)$/.test(event.serverUrl))
+    throw new Error('This release supports GitHub.com and GitHub Enterprise Cloud on *.ghe.com; GitHub Enterprise Server has not been validated.');
   if (event.eventName === 'pull_request') {
     const pr = event.payload.pull_request;
     if (!pr || pr.head?.repo?.full_name !== event.repository || pr.base?.repo?.full_name !== event.repository)
@@ -74,13 +74,16 @@ export async function containedPath(repository: string, input: string): Promise<
   return path;
 }
 
-function originMatches(url: string, repository: string): boolean {
+function originMatches(url: string, repository: string, serverUrl: string): boolean {
   // Parse without printing potentially embedded tokens.
   try {
-    if (url.startsWith('git@github.com:')) return url.slice(15).replace(/\.git$/, '') === repository;
+    const host = new URL(serverUrl).hostname;
+    const sshUser = host === 'github.com' ? 'git' : host.slice(0, -'.ghe.com'.length);
+    const sshPrefix = `${sshUser}@${host}:`;
+    if (url.startsWith(sshPrefix)) return url.slice(sshPrefix.length).replace(/\.git$/, '') === repository;
     const parsed = new URL(url);
-    return ['https:', 'ssh:'].includes(parsed.protocol) && parsed.hostname === 'github.com' && !parsed.password &&
-      (parsed.protocol === 'ssh:' ? parsed.username === 'git' : !parsed.username) &&
+    return ['https:', 'ssh:'].includes(parsed.protocol) && parsed.hostname === host && !parsed.password &&
+      (parsed.protocol === 'ssh:' ? parsed.username === sshUser : !parsed.username) &&
       parsed.pathname.replace(/^\//, '').replace(/\.git$/, '') === repository;
   } catch { return false; }
 }
@@ -95,7 +98,7 @@ export async function resolveTarget(inputs: Inputs, event: EventContext): Promis
   if (configKeys.some(key => /^credential\.|^http\..*extraheader$|^include\.path$|^includeif\..*\.path$|^core\.sshcommand$|^url\..*\.insteadof$/.test(key)))
     throw new Error('The checkout retains Git authentication or external configuration. Use actions/checkout with persist-credentials: false and a dedicated clean job. Credential values have not been printed.');
   const origin = (await git(repository, ['config', '--no-includes', '--get', 'remote.origin.url'])).trim();
-  if (!originMatches(origin, event.repository)) throw new Error('The checkout origin does not match GITHUB_REPOSITORY. Cross-repository checkouts are not supported.');
+  if (!originMatches(origin, event.repository, event.serverUrl)) throw new Error('The checkout origin does not match GITHUB_SERVER_URL and GITHUB_REPOSITORY. Cross-repository checkouts are not supported.');
   const scannedSha = await commit(repository, 'HEAD');
   const pr = event.eventName === 'pull_request' ? event.payload.pull_request : undefined;
   if (pr && scannedSha !== pr.head.sha) throw new Error('PR scans must check out github.event.pull_request.head.sha, not the merge commit.');

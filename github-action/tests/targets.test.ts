@@ -46,6 +46,40 @@ test('PR target resolves merge base and preserves exact upload head identity', a
   assert.equal(target.diffBase,f.base); assert.equal(target.diffHead,head);
   assert.equal(target.analysisRef,'refs/pull/7/head'); assert.equal(target.publishable,true);
 });
+test('GitHub Cloud checkout origins match the event host for HTTPS and SSH', async t => {
+  const f = await fixture(t); const head = await f.change();
+  for (const [host, sshUser] of [['github.com', 'git'], ['example-enterprise.ghe.com', 'example-enterprise']]) {
+    for (const origin of [`https://${host}/example/repo.git`, `${sshUser}@${host}:example/repo.git`, `ssh://${sshUser}@${host}/example/repo`]) {
+      f.run('remote', 'set-url', 'origin', origin);
+      for (const eventName of ['schedule', 'pull_request']) {
+        const event = {...f.event(head, eventName), serverUrl:`https://${host}`};
+        const target = await resolveTarget(f.inputs({scope:eventName === 'schedule' ? 'repository' : 'diff'}), event);
+        assert.equal(target.scannedSha, head); assert.equal(target.publishable, true);
+        assert.equal(target.analysisRef, eventName === 'schedule' ? 'refs/heads/main' : 'refs/pull/7/head');
+        assert.equal(target.diffBase, eventName === 'schedule' ? undefined : f.base);
+      }
+    }
+  }
+});
+test('unsupported server URLs still fail eligibility', async t => {
+  const f = await fixture(t);
+  for (const serverUrl of ['', 'https://github.example.invalid', 'http://example-enterprise.ghe.com',
+    'https://ghe.com', 'https://example-enterprise.ghe.com.example.invalid', 'https://example-enterprise-ghe.com']) {
+    assert.throws(() => validateEvent({...f.event(f.base), serverUrl}), /supports GitHub.com and GitHub Enterprise Cloud/);
+  }
+});
+test('enterprise checkout origins cannot select another host or repository', async t => {
+  const f = await fixture(t);
+  const event = {...f.event(f.base), serverUrl:'https://example-enterprise.ghe.com'};
+  for (const origin of ['https://github.com/example/repo.git', 'https://other-enterprise.ghe.com/example/repo.git',
+    'other-enterprise@other-enterprise.ghe.com:example/repo.git', 'https://example-enterprise.ghe.com/other/repo.git',
+    'example-enterprise@example-enterprise.ghe.com:other/repo.git']) {
+    f.run('remote', 'set-url', 'origin', origin);
+    await assert.rejects(resolveTarget(f.inputs(), event), /origin does not match/);
+  }
+  f.run('remote', 'set-url', 'origin', 'https://example-enterprise.ghe.com/example/repo.git');
+  await assert.rejects(resolveTarget(f.inputs(), f.event(f.base)), /origin does not match/);
+});
 test('manual diff scans resolve an explicit base against the checked-out head', async t => {
   const f=await fixture(t);
   f.run('tag','scan-base');
@@ -119,6 +153,21 @@ test('persisted Git credentials and origin userinfo are refused without revealin
   f.run('config','--unset','http.https://github.com/.extraheader');
   f.run('remote','set-url','origin','https://CANARY@github.com/example/repo.git');
   await assert.rejects(resolveTarget(f.inputs(),f.event(f.base)),error=>/origin/.test(String(error))&&!String(error).includes('CANARY'));
+});
+test('enterprise checkouts retain the Git credential protections', async t => {
+  const f = await fixture(t);
+  const event = {...f.event(f.base), serverUrl:'https://example-enterprise.ghe.com'};
+  f.run('remote', 'set-url', 'origin', `${event.serverUrl}/example/repo.git`);
+  const key = `http.${event.serverUrl}/.extraheader`;
+  f.run('config', key, 'AUTHORIZATION: bearer synthetic-token');
+  await assert.rejects(resolveTarget(f.inputs(), event), /persist-credentials/);
+  f.run('config', '--unset', key);
+  for (const origin of ['https://synthetic-token@example-enterprise.ghe.com/example/repo.git',
+    'https://example-enterprise:synthetic-token@example-enterprise.ghe.com/example/repo.git',
+    'ssh://example-enterprise:synthetic-token@example-enterprise.ghe.com/example/repo.git']) {
+    f.run('remote', 'set-url', 'origin', origin);
+    await assert.rejects(resolveTarget(f.inputs(), event), /origin does not match/);
+  }
 });
 
 test('worktree configuration is optional and clean linked checkouts are accepted', async t => {
