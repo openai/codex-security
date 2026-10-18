@@ -14,6 +14,7 @@
 - normalize hostnames before credential lookup and API routing ([#1069](https://github.com/openai/codex-security/pull/1069))
 - clean up imports and expected test exceptions ([#1665](https://github.com/openai/codex-security/pull/1665))
 - honor selected profile approval policy ([#530](https://github.com/openai/codex-security/pull/530))
+- remove reasoning effort allowlist ([#1712](https://github.com/openai/codex-security/pull/1712))
 
 <!-- release-section: highlights:end -->
 

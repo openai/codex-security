@@ -522,9 +522,10 @@ test.each([
 });
 
 test.each([false, true])(
-  "CLI pipes retain progress and execution receipts, including cancellation (%p)",
+  "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
+    if (!cancel) input.reasoningEffort = "synthetic-future-effort";
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -554,6 +555,7 @@ test.each([false, true])(
         const message = JSON.parse(line);
         messages.push(message);
         if (message.method === "execution.run") {
+          expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
           requestId = message.params.requestId;
           for (const event of [progressEvent, { invalid: true }])
             send(child.stdin, {
