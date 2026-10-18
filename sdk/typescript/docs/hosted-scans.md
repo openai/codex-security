@@ -72,8 +72,6 @@ repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
 The hosted protocol accepts `reasoningEffort` as a string without an allowlist.
-The shared runtime requires a nonblank value, which is forwarded unchanged to
-the executor. The selected model and provider determine which efforts are supported.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
