@@ -313,7 +313,8 @@ function renderLocation(
       : `-${location.endLine}`
   }`;
   const sourceUrl = immutableSourceUrl(target, location);
-  return `- **${role}:** ${sourceUrl === undefined ? `\`${label}\`` : `[\`${label}\`](${sourceUrl})`}`;
+  const formattedLabel = inlineCode(label);
+  return `- **${role}:** ${sourceUrl === undefined ? formattedLabel : `[${formattedLabel}](${sourceUrl})`}`;
 }
 
 function renderCodeEvidence(
@@ -322,10 +323,15 @@ function renderCodeEvidence(
   index: number,
 ): string[] {
   const lines = [`### ${evidence.label ?? `Code evidence ${index + 1}`}`, ""];
-  if (evidence.path !== undefined) {
+  if (typeof evidence["location"] === "string") {
+    lines.push(
+      `- **${evidence.role === undefined ? "Location" : humanizeRole(evidence.role)}:** ${inlineCode(evidence["location"])}`,
+      "",
+    );
+  } else if (evidence.path !== undefined) {
     lines.push(
       evidence.startLine === undefined
-        ? `- **${evidence.role === undefined ? "Location" : humanizeRole(evidence.role)}:** \`${evidence.path}\``
+        ? `- **${evidence.role === undefined ? "Location" : humanizeRole(evidence.role)}:** ${inlineCode(evidence.path)}`
         : renderLocation(target, {
             ...evidence,
             path: evidence.path,
@@ -362,20 +368,37 @@ type PublicationCodeEvidence = Partial<FindingCodeEvidence> &
   Pick<FindingCodeEvidence, "code">;
 
 function publicationCodeEvidence(finding: Finding): PublicationCodeEvidence[] {
-  const evidence: PublicationCodeEvidence[] = [...(finding.codeEvidence ?? [])];
-  const ids = new Set(evidence.map((item) => item.id));
+  const evidence: PublicationCodeEvidence[] = (finding.codeEvidence ?? []).map(
+    (item) =>
+      typeof item["location"] === "string" || isRecord(item["location"])
+        ? publicationEvidenceEntry(item, item.code)
+        : item,
+  );
+  const ids = new Set(
+    evidence.filter((item) => item.code.trim()).map((item) => item.id),
+  );
   for (const item of finding.code_evidence ?? []) {
     if (ids.has(item.id)) continue;
-    ids.add(item.id);
+    if (item.code.trim()) ids.add(item.id);
     evidence.push(publicationEvidenceEntry(item, item.code));
   }
   const snippets = new Set(
     evidence.map((item) => JSON.stringify([item.id ?? "", item.code])),
   );
-  for (const rootCause of [finding.rootCause, finding.root_cause]) {
-    if (!isRecord(rootCause)) continue;
+  const attackPath = finding.attackPath;
+  for (const section of [
+    finding.rootCause,
+    finding.root_cause,
+    finding.validation,
+    attackPath,
+    attackPath?.dataFlow,
+    attackPath?.["dataflow"],
+    attackPath?.data_flow,
+    attackPath?.reachability,
+  ]) {
+    if (!isRecord(section)) continue;
     for (const key of ["codeEvidence", "code_evidence"]) {
-      const embedded = rootCause[key];
+      const embedded = section[key];
       if (!Array.isArray(embedded)) continue;
       for (const item of embedded) {
         if (!isRecord(item)) continue;
@@ -406,6 +429,11 @@ function publicationEvidenceEntry(
     const value = item[key];
     if (typeof value === "string" && value.length > 0) entry[key] = value;
   }
+  if (typeof item["location"] === "string") {
+    const label = item["location"].trim().replace(/\s+/g, " ");
+    if (label) entry["location"] = label;
+    return entry;
+  }
   const location = isRecord(item["location"]) ? item["location"] : item;
   const path = location["path"];
   if (typeof path === "string" && path.length > 0) entry.path = path;
@@ -422,6 +450,16 @@ function publicationEvidenceEntry(
 function humanizeRole(role: string): string {
   const words = role.replaceAll("_", " ");
   return `${words.slice(0, 1).toUpperCase()}${words.slice(1)}`;
+}
+
+function inlineCode(label: string): string {
+  let fenceLength = 1;
+  for (const match of label.matchAll(/`+/g)) {
+    fenceLength = Math.max(fenceLength, match[0].length + 1);
+  }
+  const fence = "`".repeat(fenceLength);
+  const padding = label.startsWith("`") || label.endsWith("`") ? " " : "";
+  return `${fence}${padding}${label}${padding}${fence}`;
 }
 
 function fencedCode(code: string, language?: string): string {

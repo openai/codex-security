@@ -474,6 +474,7 @@ describe("scan publication preparation", () => {
     finding.codeEvidence = [
       canonical,
       { ...canonical, code: "second_canonical_source()" },
+      { ...canonical, id: "canonical-whitespace", code: " \t " },
     ];
     finding.code_evidence = [
       { id: "shared", code: "shadow_source()" },
@@ -493,6 +494,8 @@ describe("scan publication preparation", () => {
         explanation: true,
       },
       { id: "whitespace", code: " \t " },
+      { id: "whitespace", code: "legacy_whitespace_evidence()" },
+      { id: "canonical-whitespace", code: "canonical_whitespace_evidence()" },
       {
         id: "path-only",
         code: "legacy_path_only()",
@@ -534,6 +537,8 @@ describe("scan publication preparation", () => {
       "legacy_invalid_metadata()",
       "legacy_path_only()",
       "legacy_range()",
+      "legacy_whitespace_evidence()",
+      "canonical_whitespace_evidence()",
     ])
       expect(description).toContain(snippet);
     expect(description.indexOf("canonical_source()")).toBeLessThan(
@@ -554,7 +559,7 @@ describe("scan publication preparation", () => {
     ])
       expect(description).not.toContain(omitted);
     expect(description).toContain("`````\n````\nlegacy_minimal()\n`````");
-    expect(description).toContain("```\n \t \n```");
+    expect(description.split("```\n \t \n```")).toHaveLength(3);
     expect(description).toContain("`src/path-only.py`");
     expect(description).not.toContain("[`src/path-only.py");
     expect(description).toContain("src/range.py#L12)");
@@ -638,7 +643,31 @@ describe("scan publication preparation", () => {
     const scanDirectory = await copyExample();
     const findingsPath = join(scanDirectory, "findings.json");
     const findings = await readJson<FindingsDocument>(findingsPath);
-    findings.findings[0]!.code_evidence = [
+    const finding = findings.findings[0]!;
+    finding.codeEvidence = [
+      {
+        id: "canonical-nested",
+        label: "Canonical nested location",
+        path: "src/shadow-canonical.py",
+        startLine: 1,
+        code: "canonical_nested_location()",
+        explanation: "Canonical explanation.",
+        location: {
+          path: "src/canonical-nested.py",
+          startLine: 20,
+          endLine: 24,
+        },
+      },
+      {
+        id: "canonical-backticks",
+        label: "Canonical backtick path",
+        path: "app/api/`id`/route.ts",
+        startLine: 7,
+        code: "canonical_backtick_path()",
+        explanation: "Canonical backtick explanation.",
+      },
+    ];
+    finding.code_evidence = [
       {
         id: "nested-range",
         code: "nested_range()",
@@ -656,6 +685,11 @@ describe("scan publication preparation", () => {
         id: "path-only",
         code: "nested_path_only()",
         location: { path: "src/path-only.py", startLine: true, endLine: 42 },
+      },
+      {
+        id: "backtick-path-only",
+        code: "backtick_path_only()",
+        location: { path: "`route`.ts" },
       },
       {
         id: "unsafe-path",
@@ -680,6 +714,11 @@ describe("scan publication preparation", () => {
       )
     ).issues[0]!;
 
+    expect(description).toContain("src/canonical-nested.py#L20-L24)");
+    expect(description).toContain("[``app/api/`id`/route.ts:7``]");
+    expect(description).toContain("app/api/%60id%60/route.ts#L7)");
+    expect(description).toContain("`` `route`.ts ``");
+    expect(description).not.toContain("src/shadow-canonical.py");
     expect(description).toContain("src/nested.py:12-15");
     expect(description).toContain("src/nested.py#L12-L15)");
     expect(description).not.toContain("src/shadow.py");
@@ -689,6 +728,109 @@ describe("scan publication preparation", () => {
     expect(description).not.toContain("[`src/path-only.py");
     expect(description).toContain("`../outside.py:10`");
     expect(description).not.toContain("/../outside.py#");
+    expect(await readFile(findingsPath, "utf8")).toBe(saved);
+  });
+
+  test("preserves embedded validation and attack-path evidence catalogs", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const finding = findings.findings[0]!;
+    const embedded = (name: string) => ({
+      codeEvidence: [{ code: `${name}_canonical()` }],
+      code_evidence: [{ code: `${name}_legacy()` }],
+    });
+    finding.validation = embedded("validation");
+    finding.attackPath = {
+      ...embedded("attack"),
+      dataFlow: embedded("data_flow_camel"),
+      dataflow: embedded("data_flow_lower"),
+      data_flow: embedded("data_flow_snake"),
+      reachability: embedded("reachability"),
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDirectory);
+    const saved = await readFile(findingsPath, "utf8");
+
+    const { description } = (
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
+    ).issues[0]!;
+
+    let previous = -1;
+    for (const section of [
+      "validation",
+      "attack",
+      "data_flow_camel",
+      "data_flow_lower",
+      "data_flow_snake",
+      "reachability",
+    ]) {
+      for (const alias of ["canonical", "legacy"]) {
+        const snippet = `${section}_${alias}()`;
+        expect(description).toContain(snippet);
+        expect(description.indexOf(snippet)).toBeGreaterThan(previous);
+        previous = description.indexOf(snippet);
+      }
+    }
+    expect(await readFile(findingsPath, "utf8")).toBe(saved);
+  });
+
+  test("preserves string evidence locations as literal labels in both catalogs", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const finding = findings.findings[0]!;
+    finding.codeEvidence = [
+      {
+        id: "canonical-string",
+        label: "Canonical string location",
+        path: "src/shadow-canonical.py",
+        startLine: 1,
+        code: "canonical_string_location()",
+        explanation: "Canonical explanation.",
+        location: "  src/string.py:12 \n  additional context  ",
+      },
+    ];
+    finding.code_evidence = [
+      {
+        id: "legacy-string",
+        code: "legacy_string_location()",
+        path: "src/shadow-legacy.py",
+        startLine: 2,
+        location: "  `src/quoted.py:12` \n ",
+      },
+      {
+        id: "legacy-backticks",
+        code: "legacy_backtick_location()",
+        location: "src/with``ticks.py:12",
+      },
+    ];
+    await writeJson(findingsPath, findings);
+    const manifestPath = join(scanDirectory, "scan-manifest.json");
+    const manifest = await readJson<ScanManifest>(manifestPath);
+    manifest.scan.target.kind = "git_revision";
+    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
+    delete manifest.scan.target.snapshotDigest;
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDirectory);
+    const saved = await readFile(findingsPath, "utf8");
+
+    const { description } = (
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
+    ).issues[0]!;
+
+    expect(description).toContain("`src/string.py:12 additional context`");
+    expect(description).toContain("`` `src/quoted.py:12` ``");
+    expect(description).toContain("```src/with``ticks.py:12```");
+    expect(description).not.toContain("src/shadow-");
+    for (const path of ["src/string.py", "src/quoted.py", "src/with``ticks.py"])
+      expect(description).not.toContain(`${path}#L`);
     expect(await readFile(findingsPath, "utf8")).toBe(saved);
   });
 
