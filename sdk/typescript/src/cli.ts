@@ -3665,6 +3665,7 @@ export async function main(
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
           ),
+          ownerSuggestions: ScanSettingsSchema.shape.ownerSuggestions,
           showCost: SHOW_COST_OPTION,
           headless: z
             .boolean()

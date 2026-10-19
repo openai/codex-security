@@ -18,6 +18,7 @@ import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
+import * as ownerSuggestions from "../src/suggest-owners.js";
 import {
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
@@ -41,6 +42,74 @@ import { writeSource } from "./support/shell.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
+
+test("hosted owner artifact is opt-in and included in the completed receipt", async () => {
+  for (const enabled of [false, true]) {
+    const input = await fixture();
+    const executor = draftExecutor();
+    const result = await runHostedScan(
+      { ...input, ownerSuggestions: enabled },
+      { executor },
+    );
+    expect(result.status).toBe("completed");
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    if (result.status !== "completed") throw new Error(result.status);
+    expect(
+      result.artifacts.some(({ path }) => path === "owner-suggestions.json"),
+    ).toBe(enabled);
+    const manifest = await readJson(
+      join(input.outputDirectory, "scan-manifest.json"),
+    );
+    expect(JSON.stringify(manifest)).not.toContain("owner-suggestions.json");
+    if (enabled)
+      expect(
+        await readJson(join(input.outputDirectory, "owner-suggestions.json")),
+      ).toMatchObject({
+        schemaVersion: 2,
+        revision: input.revision,
+        results: [],
+      });
+  }
+});
+
+test.each([false, true])(
+  "owner failure preserves the completed hosted scan (cancel=%s)",
+  async (cancel) => {
+    const controller = new AbortController();
+    const suggestion = spyOn(
+      ownerSuggestions,
+      "suggestOwnersInternal",
+    ).mockImplementation(async () => {
+      if (cancel) controller.abort();
+      throw new Error("Synthetic owner-stage failure");
+    });
+    try {
+      const input = await fixture();
+      const executor = draftExecutor();
+      const result = await runHostedScan(
+        { ...input, ownerSuggestions: true },
+        {
+          executor,
+          signal: controller.signal,
+        },
+      );
+      expect(result.status).toBe("completed");
+      expect(result).toHaveProperty(
+        "ownerSuggestionsError",
+        "Synthetic owner-stage failure",
+      );
+      expect(executor.run).toHaveBeenCalledTimes(1);
+      expect(
+        result.artifacts.some(({ path }) => path === "owner-suggestions.json"),
+      ).toBe(false);
+      expect(
+        await readJson(join(input.outputDirectory, "scan-manifest.json")),
+      ).toHaveProperty("scan.status", "completed");
+    } finally {
+      suggestion.mockRestore();
+    }
+  },
+);
 
 async function fixture(
   additionalFiles: readonly string[] = [],

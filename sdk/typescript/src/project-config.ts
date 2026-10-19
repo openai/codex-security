@@ -58,6 +58,7 @@ const PROJECT_SETTING_KEYS = {
   auth: "auth",
   mode: "scan.mode",
   cyberAccessProgram: "scan.cyber_access_program",
+  ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
@@ -339,6 +340,11 @@ export function resolveScanSettings(
     ),
     mode,
     target,
+    ownerSuggestions: choose(
+      "scan.owner_suggestions",
+      file?.scan?.owner_suggestions,
+      overrides.ownerSuggestions,
+    ),
     knowledgeBasePaths,
     scanPromptFile: choose(
       "scan.instructions_file",

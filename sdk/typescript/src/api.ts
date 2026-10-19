@@ -43,6 +43,7 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
+import type { SuggestOwnersOptions } from "./suggest-owners.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
 import {
@@ -610,6 +611,7 @@ interface ClientDependencies {
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
+    ownerCodex?: SuggestOwnersOptions["codex"];
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity"
@@ -2753,6 +2755,59 @@ export class CodexSecurity {
             options,
             "onWarning",
           )(`Could not run post-scan instructions: ${errorMessage(error)}`);
+        }
+      }
+      if (options.ownerSuggestions) {
+        try {
+          if (options.maxCostUsd !== undefined)
+            throw new Error(
+              "Owner suggestions are unavailable when maxCostUsd is set.",
+            );
+          const { writeScanOwnerSuggestions } =
+            await import("./scan-owner-suggestions.js");
+          const writer = await prepareScanArtifactRestorer(
+            workbenchOptions,
+            scanDir,
+          );
+          const hosted = this.#dependencies.hostedScan;
+          result.ownerSuggestionsPath = await writeScanOwnerSuggestions(
+            repo,
+            result,
+            writer,
+            {
+              environment,
+              auth: options.auth,
+              config: {
+                codexOverrides: scanPreflightCodexConfig(
+                  resolveCodexProfile(session.sessionConfig),
+                ),
+              },
+              nativeProfile: runtime.providerProfile,
+              model,
+              reasoningEffort: scanModelConfiguration(session.sessionConfig)
+                .reasoningEffort,
+              signal,
+              cyberAccessProgram: options.cyberAccessProgram,
+              ...(hosted === undefined
+                ? {}
+                : {
+                    codex: hosted.ownerCodex ?? {
+                      startThread() {
+                        throw new Error(
+                          "Hosted owner inference is unavailable.",
+                        );
+                      },
+                    },
+                  }),
+            },
+            this.#surface,
+          );
+        } catch (error) {
+          result.ownerSuggestionsError = errorMessage(error);
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not generate owner suggestions: ${errorMessage(error)}`);
         }
       }
       if (this.#dependencies.hostedScan !== undefined) return result;
