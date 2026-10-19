@@ -9,11 +9,11 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md":
-    "9c0eca53147383a89cd345eac7791ea75b954f7f083448ef25019d8f9ba30afe",
+    "caa48f845e7edf4768140a7244d92637175df6f8e26a7660109a20f0dbe21546",
   "skills/security-scan/SKILL.md":
-    "104e2f93fc965c34e91970f517a89e330d5b29dbb243dcea5d95d83f14d135cf",
+    "ee0fa89f3670693091e401466fae743d082a3e42b5672eef48047ab538c870a3",
   "skills/security-diff-scan/SKILL.md":
-    "653df6b1127141fb35bd0d6eea4ce5e2e764f5f5cede91b6fc7f3b3eb3a65874",
+    "c15bc248bd43d28d7c137c557be3526575db812a9b7225ee8d921b29c0f772f0",
 } as const;
 
 const DISABLED_TOOLS = [
@@ -26,7 +26,7 @@ const DISABLED_TOOLS = [
 ];
 
 const HANDOFF =
-  "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json, findings.json, and coverage.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Set scan.scope.validationMode to custom_pending and put each finding's matching coverage surface IDs in extensions.customValidationSurfaceIds. Every reported coverage surface must have a candidate. Do not claim that custom validation has occurred. Verify the three files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
+  "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json, findings.json, and coverage.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Set scan.scope.validationMode to custom_pending and put each finding's matching coverage surface IDs in extensions.customValidationSurfaceIds. Every reported coverage surface must have a candidate. When source discovery finishes and a bound semantic draft tool is available, submit an accepted final source-discovery draft with complete: true, preserving the provisional findings, coverage, threat model, and custom_pending validation mode. This marks source discovery finished; it does not claim custom validation has occurred or seal the scan. Keep complete: false when requested source review remains unfinished. Verify the three files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
 
 async function source(pluginRoot: string, name: keyof typeof SOURCES) {
   const text = (await readFile(join(pluginRoot, name), "utf8")).replaceAll(
@@ -63,6 +63,10 @@ export async function customDiscoveryPrompt(
       .replace(
         /^Keep discovery, validation, and attack-path reasoning.+$/m,
         "Keep source-evidence and counterevidence checks within discovery. Do not run an independent final validation pass or invoke separate phase skills.",
+      )
+      .replace(
+        "reconcile their evidence and submit the result;",
+        "reconcile their evidence and preserve provisional candidates through the SDK-owned discovery handoff;",
       );
     workflow = [
       skill.slice(

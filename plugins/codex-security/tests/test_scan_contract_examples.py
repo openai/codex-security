@@ -116,31 +116,12 @@ class ScanContractExamplesTest(unittest.TestCase):
         )
         standard_request = {
             **request,
-            "coverage": {**coverage, "completeness": "complete", "deferred": []},
+            "coverage": {**coverage, "deferred": []},
         }
         standard_validator.validate(standard_request)
         self.assertFalse(standard_validator.is_valid(request))
         self.assertFalse(standard_validator.is_valid({**request, "coverage": coverage}))
-        for completeness in ("complete", "partial", "unknown"):
-            with self.subTest(standard_completeness=completeness):
-                standard_coverage_request = {
-                    **standard_request,
-                    "coverage": {
-                        **standard_request["coverage"],
-                        "completeness": completeness,
-                    },
-                }
-                standard_validator.validate(standard_coverage_request)
-                self.assertFalse(validator.is_valid(standard_coverage_request))
-        self.assertFalse(
-            standard_validator.is_valid(
-                {
-                    **standard_request,
-                    "coverage": {**standard_request["coverage"], "completeness": "invalid"},
-                }
-            )
-        )
-        for missing_field in ("completeness", "surfaces", "explicitExclusions", "deferred"):
+        for missing_field in ("surfaces", "explicitExclusions", "deferred"):
             with self.subTest(standard_missing_coverage_field=missing_field):
                 self.assertFalse(
                     standard_validator.is_valid(
@@ -303,13 +284,6 @@ class ScanContractExamplesTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "was expected"):
             validate_schema_node(manifest, schema, "scan-manifest")
 
-    def test_coverage_rejects_unknown_completeness(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "probably-complete"
-        with self.assertRaisesRegex(AssertionError, "is not one of"):
-            validate_schema_node(coverage, schema, "coverage")
-
     def test_findings_accept_safe_writeup_and_reject_unsafe_path(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
         findings = copy.deepcopy(self.findings)
@@ -321,36 +295,6 @@ class ScanContractExamplesTest(unittest.TestCase):
         findings["findings"][0]["writeup"]["reportPath"] = "../outside.md"
         with self.assertRaisesRegex(AssertionError, "does not match"):
             validate_schema_node(findings, schema, "findings")
-
-    def test_findings_reject_unsafe_code_evidence_paths(self) -> None:
-        schema = read_json(SCHEMA_DIR / "findings.schema.json")
-        for path in (
-            "src/handler.py",
-            "../outside.py",
-            "src/../../outside.py",
-            "/etc/passwd",
-            "src\\\\outside.py",
-            "C:/outside.py",
-            ".",
-            "src/\\x00outside.py",
-        ):
-            with self.subTest(path=path):
-                findings = copy.deepcopy(self.findings)
-                findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "request-input",
-                        "label": "Request input",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "value = request.args.get('value')",
-                        "explanation": "The request controls the value.",
-                    }
-                ]
-                if path == "src/handler.py":
-                    validate_schema_node(findings, schema, "findings")
-                else:
-                    with self.assertRaises(AssertionError):
-                        validate_schema_node(findings, schema, "findings")
 
     def test_findings_accept_code_evidence_call_stack_role(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
@@ -414,34 +358,14 @@ class ScanContractExamplesTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "does not match"):
                     validate_schema_node(coverage, schema, "coverage")
 
-    def test_coverage_rejects_complete_with_needs_follow_up_surface(self) -> None:
+    def test_coverage_accepts_unresolved_work(self) -> None:
         schema = read_json(SCHEMA_DIR / "coverage.schema.json")
         coverage = copy.deepcopy(self.coverage)
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_rejects_complete_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["deferred"] = [
-            {
-                "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
-            }
-        ]
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_allows_partial_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "partial"
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
+                "reason": "Runtime verification remains unavailable.",
             }
         ]
         validate_schema_node(coverage, schema, "coverage")

@@ -12,7 +12,7 @@ describe("npm package smoke timeouts", () => {
   test("extends the Windows install budget without slowing other command failures", () => {
     const { installTimeoutMs, commandTimeoutMs } =
       packageSmokeTimeouts("win32");
-    expect(installTimeoutMs).toBe(300_000);
+    expect(installTimeoutMs).toBe(600_000);
     expect(commandTimeoutMs).toBe(180_000);
   });
 

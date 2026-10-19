@@ -1,3 +1,4 @@
+import { notify } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -28,10 +29,17 @@ import {
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
-import type { CoverageDocument } from "./models.js";
+import {
+  readKnowledgeBaseSnapshot,
+  type KnowledgeBaseSnapshot,
+} from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
-import { DiffTarget, type ScanMode } from "./targets.js";
+import {
+  DiffTarget,
+  UNSUPPORTED_GIT_ENVIRONMENT,
+  type ScanMode,
+} from "./targets.js";
 import {
   meetsSeverity,
   type ScanPromptSettings,
@@ -53,27 +61,33 @@ const LOCK_HEARTBEAT_MS = 5_000;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
-interface MultiscanTask {
-  id: string;
-  repository: string;
-  revision: string;
-  mode: ScanMode;
-  scope?: string;
-  prompt?: string;
-}
+type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
 interface MultiscanReceipt extends MultiscanTask {
-  status: "completed" | "completed_with_incomplete_coverage" | "failed";
+  status: "completed" | "failed";
   attempt: number;
   outputDir: string;
   threatModelPath?: string;
-  coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
-  warning?: string;
   warnings?: string[];
   policyFailed?: boolean;
+  knowledgeBaseFailure?: true;
+  cleanupPending?: "checkout" | "recovery-checkout";
 }
+
+interface MultiscanHistory {
+  maxAttempt: number;
+  scan?: MultiscanReceipt;
+}
+
+type MultiscanKnowledge = Partial<
+  Record<
+    ScanMode,
+    | { snapshot: KnowledgeBaseSnapshot; failure?: never }
+    | { snapshot?: never; failure: { error: unknown } }
+  >
+>;
 
 export interface MultiscanOptions extends ScanPromptSettings {
   inputPath: string;
@@ -85,8 +99,10 @@ export interface MultiscanOptions extends ScanPromptSettings {
   maxAttempts: number;
   recoverScan?(
     scanDir: string,
-    prompts: ScanPromptSettings,
-  ): Promise<Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined>;
+    prompts: ScanPromptSettings & {
+      knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+    },
+  ): Promise<Pick<ScanResult, "manifest" | "cost" | "findings"> | undefined>;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
@@ -99,8 +115,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
   signal?: AbortSignal;
   onProgress?(event: {
     repository: string;
-    status:
-      "started" | "completed" | "completed_with_incomplete_coverage" | "failed";
+    status: "started" | "completed" | "failed";
     attempt: number;
     error?: string;
     warning?: string;
@@ -110,7 +125,6 @@ export interface MultiscanOptions extends ScanPromptSettings {
 export interface MultiscanResult {
   total: number;
   completed: number;
-  incomplete: number;
   failed: number;
   skipped: number;
   resultsPath: string;
@@ -214,14 +228,35 @@ async function runCampaign(
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
-  await ensureManifest(join(output, "manifest.json"), tasks, options);
+  const knowledgeByMode: MultiscanKnowledge = {};
+  const sharedKnowledge = options.knowledgeBasePaths?.length
+    ? readKnowledgeBaseSnapshot(options.knowledgeBasePaths, options.signal)
+    : undefined;
+  for (const mode of new Set(tasks.map((task) => task.mode))) {
+    try {
+      const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
+      const snapshot = await (sharedKnowledge ??
+        (paths?.length
+          ? readKnowledgeBaseSnapshot(paths, options.signal)
+          : undefined));
+      if (snapshot !== undefined) knowledgeByMode[mode] = { snapshot };
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      knowledgeByMode[mode] = { failure: { error } };
+    }
+  }
+  await ensureManifest(
+    join(output, "manifest.json"),
+    tasks,
+    options,
+    knowledgeByMode,
+  );
   const receipts = await readReceipts(
     ledger,
     options.recoverScan !== undefined,
   );
   const pending: MultiscanTask[] = [];
   let completed = 0;
-  let incomplete = 0;
   let policyFailed = false;
   const warnings: NonNullable<MultiscanResult["warnings"]> = [];
   const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
@@ -229,9 +264,13 @@ async function runCampaign(
   );
   let untouched = 0;
   for (const task of tasks) {
-    const receipt = receipts.get(task.id.toLowerCase());
-    if (receipt === undefined) {
-      if (options.recoverScan !== undefined) {
+    const history = receipts.get(task.id.toLowerCase());
+    const receipt = history?.scan;
+    if (
+      receipt === undefined ||
+      knowledgeByMode[task.mode]?.failure !== undefined
+    ) {
+      if (history === undefined && options.recoverScan !== undefined) {
         const attempts = await readdir(
           join(output, "artifacts", task.id),
         ).catch((error: NodeJS.ErrnoException) => {
@@ -261,61 +300,70 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
+      if (
+        receipt.status === "completed" &&
+        Number.isSafeInteger(receipt.attempt) &&
+        receipt.attempt > 0
+      ) {
+        try {
+          if (receipt.cleanupPending === "checkout") {
+            await rm(join(output, "checkouts", task.id), {
+              recursive: true,
+              force: true,
+            });
+          } else if (receipt.cleanupPending === "recovery-checkout") {
+            const recoveryRoot = join(output, "recovery-checkouts");
+            await lstat(recoveryRoot);
+            await ensureOutputDirectory(recoveryRoot);
+            const taskRoot = join(recoveryRoot, task.id);
+            await lstat(taskRoot);
+            await ensureOutputDirectory(taskRoot);
+            await rm(join(taskRoot, `attempt-${receipt.attempt}`), {
+              recursive: true,
+              force: true,
+            });
+          }
+        } catch {}
+      }
       if (receipt.status !== "failed" && receipt.warnings?.length) {
         warnings.push({ repository: task.id, warnings: receipt.warnings });
         for (const warning of receipt.warnings) {
           notifyProgress(options, {
             repository: task.id,
-            status: receipt.status,
+            status: "completed",
             attempt: receipt.attempt,
             warning,
           });
         }
       }
-      if (receipt.status === "completed") {
+      if (
+        receipt.status === "completed" ||
+        (await legacyCompletedReceipt({
+          ...receipt,
+          outputDir: artifactOutput,
+        }))
+      ) {
         policyFailed ||= receipt.policyFailed === true;
         completed += 1;
-        continue;
-      }
-      const coverage =
-        receipt.status === "completed_with_incomplete_coverage"
-          ? (receipt.coverage ?? "unknown")
-          : await legacyIncompleteCoverage({
-              ...receipt,
-              outputDir: artifactOutput,
-            });
-      if (coverage !== undefined) {
-        policyFailed ||= receipt.policyFailed === true;
-        incomplete += 1;
-        notifyProgress(options, {
-          repository: task.id,
-          status: "completed_with_incomplete_coverage",
-          attempt: receipt.attempt,
-          warning:
-            receipt.warning ??
-            `Scan coverage is ${coverage}; results may be incomplete.`,
-        });
         continue;
       }
     }
     pending.push(task);
   }
-  const skipped = completed + incomplete + untouched;
-  if (pending.length === 0) {
-    return {
-      total: tasks.length,
-      completed,
-      incomplete,
-      failed: 0,
-      skipped,
-      resultsPath: ledger,
-      ...(warnings.length === 0 ? {} : { warnings }),
-      ...(hasPolicy ? { policyFailed } : {}),
-    };
-  }
+  const skipped = completed + untouched;
+  let failed = 0;
+  const summarize = (): MultiscanResult => ({
+    total: tasks.length,
+    completed,
+    failed,
+    skipped,
+    resultsPath: ledger,
+    ...(warnings.length === 0 ? {} : { warnings }),
+    ...(hasPolicy ? { policyFailed } : {}),
+  });
+  if (pending.length === 0) return summarize();
 
   let next = 0;
-  let failed = 0;
   const worker = async (
     security: Pick<CodexSecurity, "run" | "close">,
   ): Promise<void> => {
@@ -323,35 +371,43 @@ async function runCampaign(
       options.signal?.throwIfAborted();
       const task = pending[next++];
       if (task === undefined) return;
-      let attempt = receipts.get(task.id.toLowerCase())?.attempt ?? 0;
+      const knowledge = knowledgeByMode[task.mode];
+      const history = receipts.get(task.id.toLowerCase());
+      let maxAttempt = history?.maxAttempt ?? 0;
+      let recoveryAttempt = history?.scan?.attempt ?? 0;
       const artifactRoot = join(output, "artifacts", task.id);
       if (options.recoverScan !== undefined) {
         await ensureOutputDirectory(artifactRoot);
         for (const name of await readdir(artifactRoot)) {
-          const prior = Number(/^attempt-([1-9][0-9]*)$/u.exec(name)?.[1]);
-          if (Number.isSafeInteger(prior)) attempt = Math.max(attempt, prior);
+          const match = /^attempt-([1-9][0-9]*)$/u.exec(name);
+          if (match && Number.isSafeInteger(Number(match[1]))) {
+            maxAttempt = Math.max(maxAttempt, Number(match[1]));
+            recoveryAttempt = Math.max(recoveryAttempt, Number(match[1]));
+          }
         }
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
-        if (options.recoverScan === undefined) attempt += 1;
+        let attempt = maxAttempt;
+        if (options.recoverScan === undefined) attempt = ++maxAttempt;
+        else if (retry === 0) attempt = recoveryAttempt;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
         let protectedRoot = join(output, "checkouts", task.id);
         let attemptedResume = false;
         let failure: string | undefined;
-        let warning: string | undefined;
+        let cleanupFailure: string | undefined;
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
-        let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
         let requiresRecovery = false;
+        let knowledgeBaseFailure = false;
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            | (Pick<ScanResult, "coverage" | "cost" | "findings"> &
+            | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
                 Partial<Pick<ScanResult, "threatModelPath">>)
             | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
@@ -377,19 +433,32 @@ async function runCampaign(
                 attempt,
                 status: "started",
               });
-              result = await options.recoverScan(scanDir, options);
+              if (knowledge?.failure !== undefined) {
+                knowledgeBaseFailure = true;
+                throw knowledge.failure.error;
+              }
+              result = await options.recoverScan(scanDir, {
+                ...options,
+                knowledgeBaseSnapshot: knowledge?.snapshot,
+              });
               attemptedResume = result !== undefined;
             }
           }
           const scanSettings = options.scanOptionsByMode?.[task.mode];
           if (result === undefined) {
-            if (options.recoverScan !== undefined) attempt += 1;
+            if (options.recoverScan !== undefined) attempt = ++maxAttempt;
             scanDir = join(artifactRoot, `attempt-${attempt}`);
             notifyProgress(options, {
               repository: task.id,
               attempt,
               status: "started",
             });
+            if (options.recoverScan === undefined)
+              await validateOutputDir(scanDir);
+            if (knowledge?.failure !== undefined) {
+              knowledgeBaseFailure = true;
+              throw knowledge.failure.error;
+            }
             if (options.recoverScan !== undefined) {
               const checkoutRoot = await ensureOutputDirectory(
                 join(output, "recovery-checkouts"),
@@ -402,7 +471,6 @@ async function runCampaign(
               await mkdir(scanDir, { mode: 0o700 });
               await mkdir(checkout, { mode: 0o700 });
             } else {
-              await validateOutputDir(scanDir);
               checkout = join(output, "checkouts", task.id);
               await rm(checkout, { recursive: true, force: true });
               await mkdir(checkout, { mode: 0o700 });
@@ -430,6 +498,7 @@ async function runCampaign(
               .join("\n\n");
             result = await security.run(checkout, {
               ...scanSettings,
+              knowledgeBaseSnapshot: knowledge?.snapshot,
               ...(task.scope === undefined ? {} : { target: [task.scope] }),
               ...(options.knowledgeBasePaths?.length
                 ? { knowledgeBasePaths: options.knowledgeBasePaths }
@@ -468,15 +537,8 @@ async function runCampaign(
               meetsSeverity(finding, failureSeverity),
             );
           }
-          coverage = result.coverage.completeness;
-          if (coverage !== "complete") {
-            if (!(await hasArtifacts(scanDir))) {
-              throw new Error(
-                "Multiscan scan output is missing required artifacts.",
-              );
-            }
-            warning = `Scan coverage is ${coverage}; results may be incomplete.`;
-          }
+          if (result.manifest.scan.status !== "completed")
+            throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
           if (error instanceof ScanCostLimitExceededError) {
@@ -489,60 +551,58 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            await rm(checkout, { recursive: true, force: true });
+            cleanupFailure = await removeCheckout(checkout);
           }
         }
-        const status =
-          failure !== undefined
-            ? "failed"
-            : warning === undefined
-              ? "completed"
-              : "completed_with_incomplete_coverage";
+        const reportedErrors = [failure, cleanupFailure].filter(
+          (message): message is string => message !== undefined,
+        );
+        let reportedError =
+          reportedErrors.length === 0 ? undefined : reportedErrors.join("; ");
+        const status = failure !== undefined ? "failed" : "completed";
         if (threatModelPath === undefined)
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
             protectedRoot,
             signal: options.signal,
           });
-        await appendReceipt(
-          ledger,
-          `${JSON.stringify({
-            ...task,
-            status,
-            attempt,
-            outputDir: scanDir,
-            ...(threatModelPath === null ? {} : { threatModelPath }),
-            ...(coverage === undefined ? {} : { coverage }),
-            ...(cost === null ? {} : { cost }),
-            ...(failure === undefined ? {} : { error: failure }),
-            ...(warning === undefined ? {} : { warning }),
-            ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
-            ...(attemptPolicyFailed === undefined
-              ? {}
-              : { policyFailed: attemptPolicyFailed }),
-          })}\n`,
-        );
-        if (
-          options.recoverScan !== undefined &&
-          failure === undefined &&
-          checkout !== undefined
-        ) {
-          await rm(checkout, { recursive: true, force: true });
+        const recoveryCheckout =
+          options.recoverScan !== undefined && failure === undefined
+            ? checkout
+            : undefined;
+        const receipt: MultiscanReceipt = {
+          ...task,
+          status,
+          attempt,
+          outputDir: scanDir,
+          ...(threatModelPath === null ? {} : { threatModelPath }),
+          ...(cost === null ? {} : { cost }),
+          ...(reportedError === undefined ? {} : { error: reportedError }),
+          ...(recoveryCheckout !== undefined
+            ? { cleanupPending: "recovery-checkout" }
+            : failure === undefined && cleanupFailure !== undefined
+              ? { cleanupPending: "checkout" }
+              : {}),
+          ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
+          ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
+          policyFailed: attemptPolicyFailed,
+        };
+        await appendReceipt(ledger, `${JSON.stringify(receipt)}\n`);
+        if (recoveryCheckout !== undefined) {
+          reportedError = await removeCheckout(recoveryCheckout);
         }
         notifyProgress(options, {
           repository: task.id,
           attempt,
           status,
-          ...(failure === undefined ? {} : { error: failure }),
-          ...(warning === undefined ? {} : { warning }),
+          ...(reportedError === undefined ? {} : { error: reportedError }),
         });
         if (failure === undefined) {
           policyFailed ||= attemptPolicyFailed === true;
           if (runWarnings.length > 0) {
             warnings.push({ repository: task.id, warnings: runWarnings });
           }
-          if (warning === undefined) completed += 1;
-          else incomplete += 1;
+          completed += 1;
           break;
         }
         if (exhaustedBudget || attemptedResume || requiresRecovery) {
@@ -568,25 +628,22 @@ async function runCampaign(
   );
   const rejection = results.find((result) => result.status === "rejected");
   if (rejection?.status === "rejected") throw rejection.reason;
-  return {
-    total: tasks.length,
-    completed,
-    incomplete,
-    failed,
-    skipped,
-    resultsPath: ledger,
-    ...(warnings.length === 0 ? {} : { warnings }),
-    ...(hasPolicy ? { policyFailed } : {}),
-  };
+  return summarize();
 }
 
 function notifyProgress(
   options: MultiscanOptions,
   event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
 ): void {
-  try {
-    void Promise.resolve(options.onProgress?.(event)).catch(() => {});
-  } catch {}
+  notify(() => options.onProgress?.(event));
+}
+
+async function removeCheckout(path: string): Promise<string | undefined> {
+  return rm(path, { recursive: true, force: true }).then(
+    () => undefined,
+    (error: unknown) =>
+      `Multiscan checkout cleanup failed: ${errorMessage(error)}`,
+  );
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {
@@ -846,35 +903,89 @@ async function ensureManifest(
     | "scanOptionsByMode"
     | "config"
   >,
+  knowledgeByMode: MultiscanKnowledge,
 ): Promise<void> {
-  const expected = `${JSON.stringify(
-    {
-      version: 1,
-      tasks,
-      scanPrompt: options.scanPrompt,
-      validationPrompt: options.validationPrompt,
-      postScanPrompt: options.postScanPrompt,
-      maxCostUsd: options.maxCostUsd,
-      ...(options.scanOptionsByMode === undefined
-        ? {}
-        : {
-            configurationDigest: workflowDigest({
-              scanOptions: options.scanOptionsByMode,
-              codex: options.config.codexOverrides,
-            }),
+  const knowledgeDigests: Partial<Record<ScanMode, string | null>> =
+    Object.fromEntries(
+      Object.entries(knowledgeByMode).map(([mode, knowledge]) => [
+        mode,
+        knowledge.snapshot === undefined
+          ? null
+          : workflowDigest(knowledge.snapshot.documents),
+      ]),
+    );
+  const manifest = {
+    version: 2,
+    tasks,
+    scanPrompt: options.scanPrompt,
+    validationPrompt: options.validationPrompt,
+    postScanPrompt: options.postScanPrompt,
+    maxCostUsd: options.maxCostUsd,
+    // Failed modes cannot start scans; bind their inputs only after repair.
+    ...(Object.keys(knowledgeDigests).length > 0
+      ? { knowledgeBaseDigests: knowledgeDigests }
+      : {}),
+    ...(options.scanOptionsByMode === undefined &&
+    Object.keys(options.config.codexOverrides ?? {}).length === 0 &&
+    options.config.pluginPath === undefined &&
+    options.config.pythonPath === undefined
+      ? {}
+      : {
+          configurationDigest: workflowDigest({
+            scanOptions: options.scanOptionsByMode,
+            codex: options.config.codexOverrides,
+            pluginPath: options.config.pluginPath,
+            pythonPath: options.config.pythonPath,
           }),
-    },
-    null,
-    2,
-  )}\n`;
+        }),
+  };
+  const expected = `${JSON.stringify(manifest, null, 2)}\n`;
   try {
     await writeFile(path, expected, { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if ((await readFile(path, "utf8")) !== expected) {
+    const existing = await readFile(path, "utf8");
+    if (existing === expected) return;
+    const { knowledgeBaseDigests: savedDigests = {}, ...savedInputs } =
+      JSON.parse(existing) as Record<string, unknown> & {
+        knowledgeBaseDigests?: Partial<Record<ScanMode, string | null>>;
+      };
+    const { knowledgeBaseDigests: _, ...expectedInputs } = manifest;
+    const mismatch = (): never => {
       throw new Error(
         "Multiscan manifest does not match existing output directory.",
       );
+    };
+    if (JSON.stringify(savedInputs) !== JSON.stringify(expectedInputs))
+      mismatch();
+    const boundDigests = { ...savedDigests };
+    for (const mode of Object.keys({
+      ...savedDigests,
+      ...knowledgeDigests,
+    }) as ScanMode[]) {
+      const saved = savedDigests[mode];
+      const current = knowledgeDigests[mode];
+      if (
+        saved === undefined ||
+        current === undefined ||
+        (saved !== null && current !== null && saved !== current)
+      ) {
+        mismatch();
+      }
+      boundDigests[mode] = saved ?? current;
+    }
+    // Preserve bound modes when their inputs are temporarily unavailable.
+    if (Object.keys(boundDigests).length > 0)
+      manifest.knowledgeBaseDigests = boundDigests;
+    const bound = `${JSON.stringify(manifest, null, 2)}\n`;
+    if (bound !== existing) {
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, bound, { flag: "wx", mode: 0o600 });
+        await rename(temporary, path);
+      } finally {
+        await rm(temporary, { force: true });
+      }
     }
   }
 }
@@ -882,7 +993,7 @@ async function ensureManifest(
 async function readReceipts(
   path: string,
   preserveInterrupted = false,
-): Promise<Map<string, MultiscanReceipt>> {
+): Promise<Map<string, MultiscanHistory>> {
   let contents: string;
   try {
     contents = await readFile(path, "utf8");
@@ -904,12 +1015,21 @@ async function readReceipts(
       Buffer.byteLength(contents) - Buffer.byteLength(partial),
     );
   }
-  return new Map(
-    lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {
-      const receipt = JSON.parse(line) as MultiscanReceipt;
-      return [receipt.id.toLowerCase(), receipt];
-    }),
-  );
+  const receipts = new Map<string, MultiscanHistory>();
+  for (const line of lines.filter(Boolean)) {
+    const saved = JSON.parse(line);
+    if (saved.status === "completed_with_incomplete_coverage")
+      saved.status = "completed";
+    const receipt = saved as MultiscanReceipt;
+    const id = receipt.id.toLowerCase();
+    const previous = receipts.get(id);
+    receipts.set(id, {
+      maxAttempt: Math.max(previous?.maxAttempt ?? 0, receipt.attempt),
+      // Extraction failures never start or modify a scan; keep its last receipt.
+      scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
+    });
+  }
+  return receipts;
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {
@@ -924,25 +1044,22 @@ async function hasArtifacts(path: string): Promise<boolean> {
   }
 }
 
-async function legacyIncompleteCoverage(
+async function legacyCompletedReceipt(
   receipt: MultiscanReceipt,
-): Promise<Exclude<CoverageDocument["completeness"], "complete"> | undefined> {
+): Promise<boolean> {
   if (
     receipt.status !== "failed" ||
     receipt.error !== "Multiscan repository coverage is incomplete."
   ) {
-    return undefined;
+    return false;
   }
   try {
-    const coverage = JSON.parse(
-      await readFile(join(receipt.outputDir, "coverage.json"), "utf8"),
-    ) as { completeness?: unknown };
-    return coverage.completeness === "partial" ||
-      coverage.completeness === "unknown"
-      ? coverage.completeness
-      : undefined;
+    const manifest = JSON.parse(
+      await readFile(join(receipt.outputDir, "scan-manifest.json"), "utf8"),
+    );
+    return manifest.scan?.status === "completed";
   } catch {
-    return undefined;
+    return false;
   }
 }
 
@@ -950,7 +1067,7 @@ function parseInventory(
   source: string,
   directory: string,
   defaultMode: ScanMode,
-): MultiscanTask[] {
+) {
   const { data: rows, errors } = Papa.parse<string[]>(source, {
     delimiter: ",",
     skipEmptyLines: "greedy",
@@ -1012,7 +1129,7 @@ function parseInventory(
       id,
       repository: normalizeRepository(get("repository"), directory),
       revision,
-      mode,
+      mode: mode as ScanMode,
       ...(scope ? { scope } : {}),
       ...(prompt ? { prompt } : {}),
     };
@@ -1064,18 +1181,14 @@ async function checkoutRevision(
   githubHost?: string,
 ): Promise<void> {
   const environment = { ...process.env };
-  const repositoryVariables = new Set([
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ]);
   for (const name of Object.keys(environment)) {
-    if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
+    if (UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()))
+      delete environment[name];
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_DEFAULT_HASH"] =
+    task.revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
     environment,

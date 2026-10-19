@@ -238,10 +238,22 @@ lines.on("line", (line) => {
     expect(outcome.stderr).toContain("No patch was applied; 0 files changed.");
   });
 
-  test.each(["exit", "rpc"])(
+  test.each(["exit", "rpc", "stdout", "empty"])(
     "fails before starting a model turn when sandbox preflight returns %s failure",
     async (failure) => {
       await using fixture = await repositoryFixture();
+      const diagnostic =
+        "sandbox: unshare: Permission denied /synthetic/repository sk-proj-SYNTHETIC_SECRET";
+      const response =
+        failure === "rpc"
+          ? { error: { code: -32603, message: diagnostic } }
+          : {
+              result: {
+                exitCode: 1,
+                stdout: failure === "stdout" ? diagnostic : "",
+                stderr: failure === "exit" ? diagnostic : "",
+              },
+            };
       const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -253,7 +265,7 @@ lines.on("line", (line) => {
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
     assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
-    send({ id: request.id, ${failure === "rpc" ? 'error: { code: -32603, message: "sandbox: unshare: Permission denied /private/repository sk-proj-SYNTHETIC_SECRET" }' : 'result: { exitCode: 1, stdout: "", stderr: "sandbox: unshare: Permission denied /private/repository sk-proj-SYNTHETIC_SECRET" }'} });
+    send({ id: request.id, ...${JSON.stringify(response)} });
   }
   if (request.method === "turn/start") throw new Error("Model turn must not start");
 });`;
@@ -268,9 +280,10 @@ lines.on("line", (line) => {
         ok: false,
         error: { code: "SANDBOX_UNAVAILABLE" },
       });
-      expect(outcome.stdout + outcome.stderr).not.toContain("SYNTHETIC_SECRET");
-      expect(outcome.stdout + outcome.stderr).not.toContain(
-        "/private/repository",
+      if (failure !== "empty")
+        expect(outcome.stdout + outcome.stderr).toContain(diagnostic);
+      expect(outcome.stderr).toContain(
+        "No patch was applied; 0 files changed.",
       );
       expect(await fixture.git("status", "--porcelain")).toBe("");
     },

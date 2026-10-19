@@ -12,12 +12,13 @@ from source_cases import SOURCE_CASES
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PLUGIN_ROOT / "scripts" / "generate_rank_input.py"
-GOLDEN_DIR = Path(__file__).resolve().parent / "goldens"
 
 
-def run_cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_repo_cli(
+    command: str, repo: str | Path, output: Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
+        [sys.executable, str(SCRIPT), command, "--repo", str(repo), *args, "--out", str(output)],
         check=check,
         capture_output=True,
         text=True,
@@ -56,35 +57,7 @@ def initialize_repo(repo: Path) -> None:
     git(repo, "config", "user.name", "Codex Security Tests")
 
 
-def test_make_repo_rank_input_matches_golden_and_filters_noise(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    (repo / "tests").mkdir()
-    (repo / "src" / "zeta.py").write_text("zeta = 2", encoding="utf-8")
-    (repo / "src" / "alpha.py").write_text("alpha = 1", encoding="utf-8")
-    (repo / "src" / "binary.py").write_bytes(b"value\x00binary")
-    (repo / "src" / "binary.unlisted").write_bytes(b"x" * (64 * 1024 + 1) + b"\0binary")
-    (repo / "tests" / "ignored.py").write_text("ignored = True", encoding="utf-8")
-    (repo / "README.md").write_text("ignored", encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scope",
-        "src",
-        "--out",
-        str(output),
-    )
-
-    assert output.read_text(encoding="utf-8") == (GOLDEN_DIR / "rank_input.jsonl").read_text(
-        encoding="utf-8"
-    )
-
-
-@pytest.mark.parametrize("mode", ["repo", "revisions"])
-def test_rank_input_keeps_large_generated_python(tmp_path: Path, mode: str) -> None:
+def test_rank_input_keeps_large_generated_python(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     initialize_repo(repo)
@@ -95,13 +68,11 @@ def test_rank_input_keeps_large_generated_python(tmp_path: Path, mode: str) -> N
     (repo / "src" / "normal.py").write_text("value = 1\n", encoding="utf-8")
     output = tmp_path / "rank_input.jsonl"
 
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "src"]
-    else:
-        git(repo, "add", ".")
-        git(repo, "commit", "-qm", "change")
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--head", "HEAD"]
-    run_cli(*arguments, "--preview-bytes", "128", "--out", str(output))
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "change")
+    command = "make-diff-rank-input"
+    arguments = ["--base", base, "--head", "HEAD"]
+    run_repo_cli(command, repo, output, *arguments, "--preview-bytes", "128")
 
     rows = read_jsonl(output)
     assert [row["path"] for row in rows] == ["src/generated.py", "src/normal.py"]
@@ -126,17 +97,7 @@ def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
     git(repo, "commit", "-qm", "change")
     output = tmp_path / "rank.jsonl"
 
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(repo),
-        "--base",
-        base,
-        "--head",
-        "HEAD",
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", base, "--head", "HEAD")
 
     preview = read_jsonl(output)[0]["preview"]
     assert preview.startswith("def visible():\n    pass\n# comment")
@@ -155,24 +116,13 @@ def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path
     git(repo, "commit", "-qm", "change")
     output = tmp_path / "rank.jsonl"
 
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(repo),
-        "--base",
-        base,
-        "--head",
-        "HEAD",
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", base, "--head", "HEAD")
 
     assert read_jsonl(output) == []
 
 
-@pytest.mark.parametrize("scope", [".", "src", "src/large.py", "explicit", "overlap", "diff"])
 def test_rank_input_streams_classification_and_bounds_previews(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
@@ -183,20 +133,19 @@ def test_rank_input_streams_classification_and_bounds_previews(
         + b"def outside():\n    pass\n"
     )
     output = tmp_path / "rank_input.jsonl"
-    arguments = ["make-repo-rank-input", "--repo", str(repo), "--out", str(output)]
-    if scope in {"explicit", "overlap"}:
-        scopes = tmp_path / "scopes.json"
-        scopes.write_text(
-            json.dumps(["src/large.py"] if scope == "explicit" else ["src", "src/large.py"])
-        )
-        arguments.extend(["--scopes-file", str(scopes)])
-    elif scope == "diff":
-        initialize_repo(repo)
-        git(repo, "commit", "--allow-empty", "-qm", "initial")
-        arguments[0] = "make-diff-rank-input"
-        arguments.extend(["--mode", "local-patch", "--base", "HEAD"])
-    else:
-        arguments.extend(["--scope", scope])
+    initialize_repo(repo)
+    git(repo, "commit", "--allow-empty", "-qm", "initial")
+    arguments = [
+        "make-diff-rank-input",
+        "--repo",
+        str(repo),
+        "--out",
+        str(output),
+        "--mode",
+        "local-patch",
+        "--base",
+        "HEAD",
+    ]
 
     original_open = Path.open
     reads: list[int] = []
@@ -231,7 +180,7 @@ def test_rank_input_streams_classification_and_bounds_previews(
     assert "outside" not in preview
 
 
-@pytest.mark.parametrize("mode", ["repo", "revisions", "staged", "unstaged"])
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
 def test_rank_input_includes_source_cases(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -249,58 +198,27 @@ def test_rank_input_includes_source_cases(tmp_path: Path, mode: str) -> None:
 
     if mode in {"revisions", "staged"}:
         git(repo, "add", ".")
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo), "--scope", "."]
-    else:
-        diff_mode = "revisions" if mode == "revisions" else "local-patch"
-        arguments = [
-            "make-diff-rank-input",
-            "--repo",
-            str(repo),
-            "--base",
-            base,
-            "--mode",
-            diff_mode,
-        ]
-        if mode == "revisions":
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
+    diff_mode = "revisions" if mode == "revisions" else "local-patch"
+    command = "make-diff-rank-input"
+    arguments = ["--base", base, "--mode", diff_mode]
+    if mode == "revisions":
+        git(repo, "commit", "-qm", "change")
+        arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+        git(repo, "checkout", "-q", base)
 
-    run_cli(*arguments, "--out", str(output))
+    run_repo_cli(command, repo, output, *arguments)
 
     assert read_jsonl(output) == [
         {
             "path": case.path,
-            "area": "." if mode == "repo" else "diff",
+            "area": "diff",
             "preview": case.after,
         }
         for case in sorted(SOURCE_CASES, key=lambda case: case.path)
     ]
 
 
-def test_make_repo_rank_input_rejects_scope_outside_repo(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-
-    result = run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scope",
-        str(outside),
-        "--out",
-        str(tmp_path / "rank.jsonl"),
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "Scope must be inside repo" in result.stderr
-
-
-def test_make_repo_rank_input_does_not_follow_file_symlinks(tmp_path: Path) -> None:
+def test_make_repo_scope_input_does_not_follow_file_symlinks(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     source = repo / "src"
     source.mkdir(parents=True)
@@ -311,47 +229,15 @@ def test_make_repo_rank_input_does_not_follow_file_symlinks(tmp_path: Path) -> N
     (source / "inside-link.py").symlink_to(source / "runtime.py")
     output = tmp_path / "rank_input.jsonl"
 
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scope",
-        "src",
-        "--out",
-        str(output),
-    )
+    scopes = tmp_path / "scopes.json"
+    scopes.write_text(json.dumps(["src"]))
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
-    assert read_jsonl(output) == [
-        {"path": "src/runtime.py", "area": "src", "preview": "runtime = True"}
-    ]
+    assert read_jsonl(output) == [{"path": "src/runtime.py"}]
     assert "outside_secret" not in output.read_text(encoding="utf-8")
 
 
-def test_make_repo_rank_input_preserves_legacy_tilde_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = tmp_path / "home"
-    repo = home / "repo"
-    (repo / "src").mkdir(parents=True)
-    (repo / "src" / "runtime.py").write_text("runtime = True", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
-    output = tmp_path / "rank_input.jsonl"
-
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        "~/repo",
-        "--scope",
-        "~/repo/src",
-        "--out",
-        str(output),
-    )
-
-    assert [row["path"] for row in read_jsonl(output)] == ["src/runtime.py"]
-
-
-def test_make_repo_rank_input_combines_explicit_files_and_directories(tmp_path: Path) -> None:
+def test_make_repo_scope_input_combines_explicit_files_and_directories(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "tests").mkdir()
@@ -383,15 +269,7 @@ def test_make_repo_rank_input_combines_explicit_files_and_directories(tmp_path: 
     )
     output = tmp_path / "rank_input.jsonl"
 
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
     assert [row["path"] for row in read_jsonl(output)] == sorted(
         [
@@ -408,7 +286,7 @@ def test_make_repo_rank_input_combines_explicit_files_and_directories(tmp_path: 
     )
 
 
-def test_make_repo_scope_input_preserves_every_requested_directory_file(tmp_path: Path) -> None:
+def test_repo_input_preserves_every_requested_directory_file(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src" / "tests").mkdir(parents=True)
     (repo / "src" / "examples").mkdir()
@@ -421,25 +299,17 @@ def test_make_repo_scope_input_preserves_every_requested_directory_file(tmp_path
     (repo / "src" / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
     (repo / "src" / ".git" / "config").write_text("private", encoding="utf-8")
     scopes = tmp_path / "target-paths.json"
-    scopes.write_text(json.dumps(["src", "src/runtime.py"]), encoding="utf-8")
+    scopes.write_text(json.dumps(["src", "src/runtime.py", "src/.git/config"]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
-    assert read_jsonl(output) == [
-        {"path": "src/Dockerfile"},
-        {"path": "src/examples/demo.py"},
-        {"path": "src/fixtures/payload.txt"},
-        {"path": "src/runtime.py"},
-        {"path": "src/tests/handler.py"},
+    assert [row["path"] for row in read_jsonl(output)] == [
+        "src/Dockerfile",
+        "src/examples/demo.py",
+        "src/fixtures/payload.txt",
+        "src/runtime.py",
+        "src/tests/handler.py",
     ]
 
 
@@ -451,14 +321,12 @@ def test_make_repo_scope_input_rejects_paths_outside_repository(tmp_path: Path) 
     scopes.write_text(json.dumps(["../outside.py"]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    result = run_cli(
+    result = run_repo_cli(
         "make-repo-scope-input",
-        "--repo",
-        str(repo),
+        repo,
+        output,
         "--scopes-file",
         str(scopes),
-        "--out",
-        str(output),
         check=False,
     )
 
@@ -480,14 +348,12 @@ def test_make_repo_scope_input_rejects_explicit_symlink_scopes(tmp_path: Path, s
     scopes.write_text(json.dumps([scope]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    result = run_cli(
+    result = run_repo_cli(
         "make-repo-scope-input",
-        "--repo",
-        str(repo),
+        repo,
+        output,
         "--scopes-file",
         str(scopes),
-        "--out",
-        str(output),
         check=False,
     )
 
@@ -496,7 +362,46 @@ def test_make_repo_scope_input_rejects_explicit_symlink_scopes(tmp_path: Path, s
     assert not output.exists()
 
 
-def test_make_repo_scope_input_preserves_tracked_ignored_and_binary_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scope", ["src", "."])
+@pytest.mark.parametrize("replacement", ["link", "loop", "file"])
+def test_repo_input_handles_replaced_tracked_directories(
+    tmp_path: Path, scope: str, replacement: str
+) -> None:
+    repo = tmp_path / "repo"
+    nested = repo / "src" / "nested"
+    nested.mkdir(parents=True)
+    initialize_repo(repo)
+    (repo / ".gitignore").write_text("private/\n", encoding="utf-8")
+    (repo / "src" / "handler.py").write_text("handler = True\n", encoding="utf-8")
+    (nested / "service.py").write_text("service = True\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    private = repo / "private"
+    private.mkdir()
+    (private / "service.py").write_text("outside_requested_scope = True\n", encoding="utf-8")
+    (nested / "service.py").unlink()
+    nested.rmdir()
+    if replacement == "link":
+        nested.symlink_to(private, target_is_directory=True)
+    elif replacement == "loop":
+        nested.symlink_to(nested.name, target_is_directory=True)
+    else:
+        nested.write_text("replacement = True\n", encoding="utf-8")
+    scopes = tmp_path / "target-paths.json"
+    scopes.write_text(json.dumps([scope]), encoding="utf-8")
+    output = tmp_path / "input.jsonl"
+
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
+
+    expected = ["src/handler.py"]
+    if replacement == "file":
+        expected.append("src/nested")
+    if scope == ".":
+        expected.insert(0, ".gitignore")
+    assert [row["path"] for row in read_jsonl(output)] == expected
+
+
+def test_repo_input_preserves_tracked_ignored_and_binary_files(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     source = repo / "src"
     vendor = source / "vendor"
@@ -510,23 +415,13 @@ def test_make_repo_scope_input_preserves_tracked_ignored_and_binary_files(tmp_pa
     scopes.write_text(json.dumps(["src"]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
-    assert read_jsonl(output) == [
-        {"path": "src/logo.png"},
-        {"path": "src/vendor/dependency.py"},
-    ]
+    expected = ["src/logo.png", "src/vendor/dependency.py"]
+    assert [row["path"] for row in read_jsonl(output)] == expected
 
 
-def test_make_repo_scope_input_respects_ignored_directory_descendants(tmp_path: Path) -> None:
+def test_repo_input_respects_ignored_directory_descendants(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src" / "node_modules").mkdir(parents=True)
     (repo / "src" / "nested").mkdir()
@@ -541,15 +436,7 @@ def test_make_repo_scope_input_respects_ignored_directory_descendants(tmp_path: 
     scopes.write_text(json.dumps(["src"]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
     assert {row["path"] for row in read_jsonl(output)} == {
         "src/handler.py",
@@ -558,7 +445,7 @@ def test_make_repo_scope_input_respects_ignored_directory_descendants(tmp_path: 
     }
 
 
-def test_make_repo_scope_input_keeps_explicitly_requested_ignored_file(tmp_path: Path) -> None:
+def test_repo_input_keeps_explicitly_requested_ignored_file(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / ".gitignore").write_text(".env\n", encoding="utf-8")
@@ -567,20 +454,12 @@ def test_make_repo_scope_input_keeps_explicitly_requested_ignored_file(tmp_path:
     scopes.write_text(json.dumps(["src/.env"]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
-    assert read_jsonl(output) == [{"path": "src/.env"}]
+    assert [row["path"] for row in read_jsonl(output)] == ["src/.env"]
 
 
-def test_make_repo_scope_input_uses_git_ignore_rules(tmp_path: Path) -> None:
+def test_repo_input_uses_git_ignore_rules(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     initialize_repo(repo)
@@ -591,20 +470,12 @@ def test_make_repo_scope_input_uses_git_ignore_rules(tmp_path: Path) -> None:
     scopes.write_text(json.dumps(["src"]), encoding="utf-8")
     output = tmp_path / "scoped-source-input.jsonl"
 
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
-    assert read_jsonl(output) == [{"path": "src/handler.py"}]
+    assert [row["path"] for row in read_jsonl(output)] == ["src/handler.py"]
 
 
-def test_make_repo_scope_input_falls_back_without_git_or_ripgrep(
+def test_repo_input_falls_back_without_git_or_ripgrep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -615,20 +486,12 @@ def test_make_repo_scope_input_falls_back_without_git_or_ripgrep(
     output = tmp_path / "scoped-source-input.jsonl"
     monkeypatch.setenv("PATH", str(tmp_path / "missing-tools"))
 
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
 
-    assert read_jsonl(output) == [{"path": "src/handler.py"}]
+    assert [row["path"] for row in read_jsonl(output)] == ["src/handler.py"]
 
 
-def test_make_repo_scope_input_fails_closed_when_ignore_rules_cannot_be_applied(
+def test_repo_input_fails_closed_when_ignore_rules_cannot_be_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -640,15 +503,8 @@ def test_make_repo_scope_input_fails_closed_when_ignore_rules_cannot_be_applied(
     output = tmp_path / "scoped-source-input.jsonl"
     monkeypatch.setenv("PATH", str(tmp_path / "missing-tools"))
 
-    result = run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-        check=False,
+    result = run_repo_cli(
+        "make-repo-scope-input", repo, output, "--scopes-file", str(scopes), check=False
     )
 
     assert result.returncode != 0
@@ -656,7 +512,7 @@ def test_make_repo_scope_input_fails_closed_when_ignore_rules_cannot_be_applied(
     assert not output.exists()
 
 
-def test_make_repo_scope_input_fails_closed_for_git_private_excludes_without_tools(
+def test_repo_input_fails_closed_for_git_private_excludes_without_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -669,68 +525,13 @@ def test_make_repo_scope_input_fails_closed_for_git_private_excludes_without_too
     output = tmp_path / "scoped-source-input.jsonl"
     monkeypatch.setenv("PATH", str(tmp_path / "missing-tools"))
 
-    result = run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-        check=False,
+    result = run_repo_cli(
+        "make-repo-scope-input", repo, output, "--scopes-file", str(scopes), check=False
     )
 
     assert result.returncode != 0
     assert "without Git or ripgrep" in result.stderr
     assert not output.exists()
-
-
-def test_make_repo_rank_input_keeps_explicit_binary_file_without_preview(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    with (repo / "payload.bin").open("wb") as payload:
-        payload.write(b"header-without-a-nul" * 4096)
-        payload.truncate(256 * 1024 * 1024)
-    scopes = tmp_path / "target-paths.json"
-    scopes.write_text(json.dumps(["payload.bin"]), encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
-
-    assert read_jsonl(output) == [{"path": "payload.bin", "area": "payload.bin", "preview": ""}]
-
-
-def test_make_repo_rank_input_bounds_explicit_source_like_binary(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    source = repo / "src"
-    source.mkdir(parents=True)
-    with (source / "payload.py").open("wb") as payload:
-        payload.write(b"header-without-a-nul" * 4096)
-        payload.write(b"\0binary")
-        payload.truncate(256 * 1024 * 1024)
-    scopes = tmp_path / "target-paths.json"
-    scopes.write_text(json.dumps(["src", "src/payload.py"]), encoding="utf-8")
-    output = tmp_path / "rank_input.jsonl"
-
-    run_cli(
-        "make-repo-rank-input",
-        "--repo",
-        str(repo),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
-
-    assert read_jsonl(output) == [{"path": "src/payload.py", "area": "src", "preview": ""}]
 
 
 @pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
@@ -764,33 +565,27 @@ def test_make_diff_rank_input_keeps_changed_and_deleted_text(tmp_path: Path, mod
     deleted_guard.unlink()
     deleted_entrypoint.unlink()
     deleted_binary.unlink()
-    (repo / "README.md").write_text("ignored", encoding="utf-8")
+    (repo / "README.md").write_text("Deployment instructions", encoding="utf-8")
     arguments = ["--mode", "local-patch"]
     if mode in {"revisions", "staged"}:
         git(repo, "add", ".")
     git(repo, "update-index", "--force-remove", "removed-module")
     git(repo, "update-index", "--add", "--cacheinfo", f"160000,{gitlink},added-module")
     if mode == "revisions":
+        link_blob = git(repo, "hash-object", "-w", "--stdin", input="../outside")
+        git(repo, "update-index", "--add", "--cacheinfo", f"120000,{link_blob},tests/link.py")
         git(repo, "commit", "-qm", "change")
         arguments = ["--head", git(repo, "rev-parse", "HEAD")]
         git(repo, "checkout", "-q", base)
     output = tmp_path / "diff.jsonl"
 
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(repo),
-        "--base",
-        base,
-        *arguments,
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", base, *arguments)
 
     rows = read_jsonl(output)
     assert [row["path"] for row in rows] == [
         ".github/workflows/ci.yml",
         ".gitmodules",
+        "README.md",
         "src/alpha.py",
         "src/beta.py",
         "src/deleted_guard.py",
@@ -810,17 +605,7 @@ def test_make_diff_rank_input_uses_empty_tree_for_root_commit(tmp_path: Path) ->
     empty_tree = git(repo, "hash-object", "-t", "tree", "--stdin", input="")
     output = tmp_path / "root.jsonl"
 
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(repo),
-        "--base",
-        empty_tree,
-        "--head",
-        head,
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", empty_tree, "--head", head)
 
     assert [row["path"] for row in read_jsonl(output)] == ["src/root.py"]
 
@@ -870,17 +655,7 @@ def test_make_diff_rank_input_supports_shallow_tips_without_merge_base(
     assert merge_base.returncode == 1
     output = tmp_path / "shallow.jsonl"
 
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(shallow),
-        "--base",
-        "origin/main",
-        "--head",
-        "HEAD",
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-diff-rank-input", shallow, output, "--base", "origin/main", "--head", "HEAD")
 
     assert [row["path"] for row in read_jsonl(output)] == [
         "src/feature.py",
@@ -904,7 +679,7 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
     index_only = repo / "src" / "index-only.py"
     index_only.write_text("index_only = True", encoding="utf-8")
     git(repo, "add", "src/index-only.py")
-    index_only.unlink()
+    index_only.unlink()  # The selected working tree no longer contains this staged addition.
     nested = repo / "nested"
     nested.mkdir()
     initialize_repo(nested)
@@ -913,28 +688,32 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
     git(nested, "commit", "-qm", "nested repository")
     output = tmp_path / "patch.jsonl"
 
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(repo),
-        "--base",
-        "HEAD",
-        "--mode",
-        "local-patch",
-        "--out",
-        str(output),
-    )
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", "HEAD", "--mode", "local-patch")
 
     assert [row["path"] for row in read_jsonl(output)] == [
         ".github/workflows/ci.yaml",
         "src/alpha.py",
         "src/beta.py",
-        "src/index-only.py",
     ]
-    assert read_jsonl(output)[-1]["preview"] == ""
 
 
-@pytest.mark.parametrize("mode", ["repo", "explicit-file", "revisions", "local-patch"])
+def test_make_diff_rank_input_accepts_base_that_matches_a_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "release").mkdir(parents=True)
+    initialize_repo(repo)
+    (repo / "release" / "build.py").write_text("build = 1", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "branch", "release")
+    (repo / "release" / "build.py").write_text("build = 2", encoding="utf-8")
+    output = tmp_path / "patch.jsonl"
+
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", "release", "--mode", "local-patch")
+
+    assert [row["path"] for row in read_jsonl(output)] == ["release/build.py"]
+
+
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
 def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"
     source_dir = repo / "src"
@@ -955,23 +734,43 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
         "src/utf8.ps1": source.strip(),
     }
 
-    if mode in {"repo", "explicit-file"}:
-        arguments = ["make-repo-rank-input", "--repo", str(repo)]
-        if mode == "explicit-file":
-            expected.update({"src/binary.ps1": "", "src/decoded-nul.ps1": ""})
-            scopes = tmp_path / "target-paths.json"
-            scopes.write_text(json.dumps(list(expected)), encoding="utf-8")
-            arguments.extend(["--scopes-file", str(scopes)])
-        else:
-            arguments.extend(["--scope", "src"])
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--base", base, "--mode", mode]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "add encoded source")
-            arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
-            git(repo, "checkout", "-q", base)
+    command = "make-diff-rank-input"
+    arguments = ["--base", base, "--mode", mode]
+    if mode == "revisions":
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "add encoded source")
+        arguments.extend(["--head", git(repo, "rev-parse", "HEAD")])
+        git(repo, "checkout", "-q", base)
 
-    run_cli(*arguments, "--out", str(output))
+    run_repo_cli(command, repo, output, *arguments)
 
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
+
+
+def test_revision_preview_uses_the_same_read_window_as_local_files(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    source = repo / "example.py"
+    source.write_text("def first():\n    pass\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    source.write_text(
+        "def first():\n    pass\n#" + "x" * 80_000 + "\ndef outside_window():\n    pass\n"
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "long source")
+    output = tmp_path / "preview.jsonl"
+    run_repo_cli(
+        "make-diff-rank-input",
+        repo,
+        output,
+        "--base",
+        base,
+        "--head",
+        "HEAD",
+    )
+    rows = read_jsonl(output)
+    assert "first" in rows[0]["preview"]
+    assert "outside_window" not in rows[0]["preview"]

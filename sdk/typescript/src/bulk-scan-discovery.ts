@@ -17,6 +17,7 @@ const GITHUB_REPOSITORIES_QUERY = `
         after: $cursor
         isArchived: false
         isFork: false
+        ownerAffiliations: [OWNER]
         orderBy: { field: PUSHED_AT, direction: DESC }
       ) {
         nodes {
