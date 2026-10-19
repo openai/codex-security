@@ -30,6 +30,28 @@ const findingSchema = {
 };
 const validateFinding = ajv.compile(findingSchema);
 const finding = canonical.findings.example.findings[0];
+for (const reviewedFiles of [[], ["src/a.ts"]])
+  assert.equal(
+    canonical.coverage.validate({
+      ...canonical.coverage.example,
+      reviewedFiles,
+    }),
+    true,
+  );
+for (const reviewedFiles of [
+  null,
+  "src/a.ts",
+  [42],
+  ["../outside.ts"],
+  ["src/a.ts", "src/a.ts"],
+])
+  assert.equal(
+    canonical.coverage.validate({
+      ...canonical.coverage.example,
+      reviewedFiles,
+    }),
+    false,
+  );
 for (const fields of [
   { title: " " },
   {

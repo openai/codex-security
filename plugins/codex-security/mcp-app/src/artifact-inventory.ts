@@ -1,6 +1,6 @@
 import { execFile as nodeExecFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
 import {
@@ -39,6 +39,10 @@ export async function prepareCodexSecurityReviewItems(
       `${label}: only a parent scan can prepare its shared inventory.`,
     );
   }
+  return prepareReviewItems(context);
+}
+
+async function prepareReviewItems(context: ArtifactContext) {
   if (!context.pluginRoot) {
     throw new Error(`${label}: the scan has no bound plugin context.`);
   }
@@ -113,6 +117,46 @@ export async function prepareCodexSecurityReviewItems(
   }
 
   return { reviewItemsTotal: (await readReviewItems(context)).length };
+}
+
+/** Validate model-reported review claims; inventory membership is not proof of review. */
+export async function validateReviewedFiles(
+  context: ArtifactContext,
+  paths: string[],
+): Promise<string[]> {
+  const reviewed = [
+    ...new Set(paths.map((path) => posix.normalize(path))),
+  ].sort();
+  if (reviewed.length === 0) return reviewed;
+
+  // Use the same host-generated inventory as discovery, including deleted diff
+  // files. Never infer reviewed files from findings or tool command text.
+  await prepareReviewItems(context);
+  const inventory = new Set(
+    (await readReviewItems(context)).map(({ path }) => posix.normalize(path)),
+  );
+  const scope = context.targetContract?.scope as
+    | { requiredIncludePaths?: string[]; requiredExcludePaths?: string[] }
+    | undefined;
+  const includes = scope?.requiredIncludePaths ??
+    context.includePaths ?? [context.scope ?? "."];
+  const excludes = scope?.requiredExcludePaths ?? [];
+  const contains = (scope: string, path: string) => {
+    const parent = posix.normalize(scope).replace(/\/$/u, "");
+    return parent === "." || path === parent || path.startsWith(`${parent}/`);
+  };
+  for (const path of reviewed) {
+    if (
+      !inventory.has(path) ||
+      !includes.some((scope) => contains(scope, path)) ||
+      excludes.some((scope) => contains(scope, path))
+    ) {
+      throw new Error(
+        `scan draft: reviewedFiles path ${JSON.stringify(path)} is not in the source inventory and requested scope.`,
+      );
+    }
+  }
+  return reviewed;
 }
 
 /** Return bounded source paths from the fixed scan or worker inventory. */

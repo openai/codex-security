@@ -43,6 +43,19 @@ export function aggregateDiscoveryCoverage(
     explicitExclusions: [],
     deferred: [],
   };
+  // An unknown worker list must not look like a complete aggregate (or zero).
+  if (
+    discoveries.length > 0 &&
+    discoveries.every(
+      ({ result }) => result.coverage.reviewedFiles !== undefined,
+    )
+  ) {
+    coverage.reviewedFiles = [
+      ...new Set(
+        discoveries.flatMap(({ result }) => result.coverage.reviewedFiles!),
+      ),
+    ].sort();
+  }
   for (const worker of discoveries) {
     const source = structuredClone(worker.result.coverage);
     const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))

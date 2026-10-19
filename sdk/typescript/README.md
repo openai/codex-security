@@ -194,6 +194,13 @@ Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
+`result.coverage.reviewedFiles`, when present, lists unique repository-relative
+files the model reports investigating beyond searches or excerpts. Its length
+is the reported file count, not a coverage percentage or proof of thorough review.
+An omitted list means file accounting is unavailable; an empty list means no
+files were reported reviewed. Deep scans combine accepted workers' lists only
+when each worker provides one.
+
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
 

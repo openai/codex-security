@@ -1,4 +1,7 @@
-import { surfaceDispositionSchema } from "../src/artifact-contracts.ts";
+import {
+  reviewedFilesSchema,
+  surfaceDispositionSchema,
+} from "../src/artifact-contracts.ts";
 import { threatModelSchemas } from "../src/threat-model-schema.ts";
 import * as z from "zod/v4";
 import {
@@ -263,6 +266,7 @@ const coverageDocument = z.looseObject({
   ]),
   includePaths: strings,
   excludePaths: strings,
+  reviewedFiles: reviewedFilesSchema.meta({ uniqueItems: true }).optional(),
   surfaces: z.array(
     z.looseObject({
       id: text,
