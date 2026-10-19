@@ -326,13 +326,25 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
 
 
 @pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("destination_kind", ["regular", "symlink", "symlink-chain"])
 @pytest.mark.parametrize("umask", [0o022, 0o777])
 @pytest.mark.parametrize("malformed_source", [False, True])
 def test_sqlite_snapshot_new_destination_is_private_during_backup(
-    tmp_path: Path, umask: int, malformed_source: bool
+    tmp_path: Path, destination_kind: str, umask: int, malformed_source: bool
 ) -> None:
     source = tmp_path / "source.sqlite3"
     snapshot = tmp_path / "snapshot.sqlite3"
+    links = []
+    if destination_kind != "regular":
+        target = tmp_path / "target.sqlite3"
+        if destination_kind == "symlink-chain":
+            intermediate = tmp_path / "intermediate.sqlite3"
+            intermediate.symlink_to(target.name)
+            links.append(intermediate)
+            target = intermediate
+        snapshot.symlink_to(target.name)
+        links.append(snapshot)
+    link_inodes = {link: link.lstat().st_ino for link in links}
     if malformed_source:
         source.write_text("not a SQLite database")
     else:
@@ -363,6 +375,9 @@ def test_sqlite_snapshot_new_destination_is_private_during_backup(
         os.umask(previous_umask)
     assert modes == [0o600]
     assert snapshot.stat().st_mode & 0o777 == 0o600
+    for link, inode in link_inodes.items():
+        assert link.is_symlink()
+        assert link.lstat().st_ino == inode
     if not malformed_source:
         with sqlite3.connect(snapshot) as connection:
             assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
