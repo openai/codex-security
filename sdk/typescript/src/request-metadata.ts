@@ -51,6 +51,7 @@ function providerFamily(provider: unknown): string {
   switch (provider) {
     case "openai":
     case "amazon-bedrock":
+    case "cheaperinference":
     case "openrouter":
     case "fireworks":
     case "ollama":
