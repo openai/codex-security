@@ -3,7 +3,11 @@ import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
-import { assertFlagPair } from "./assertions.ts";
+import {
+  assertConfigOverrides,
+  assertFlagPair,
+  nativeConfigOverrides,
+} from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -39,16 +43,19 @@ import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_al
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
-const { bundledCodexSdkEnvironment } = await importModule({
-  entryPoints: [
-    fileURLToPath(
-      new URL(
-        "../../../../sdk/typescript/src/codex-sdk-environment.ts",
-        import.meta.url,
-      ),
-    ),
-  ],
-});
+const { bundledCodexSdkEnvironment } =
+  process.platform === "win32"
+    ? {}
+    : await importModule({
+        entryPoints: [
+          fileURLToPath(
+            new URL(
+              "../../../../sdk/typescript/src/codex-sdk-environment.ts",
+              import.meta.url,
+            ),
+          ),
+        ],
+      });
 
 const {
   CodexSdkWorkerExecutor,
@@ -3867,37 +3874,6 @@ function assertWorkerSubagentPolicy(
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
-}
-
-function nativeConfigOverrides(args: readonly string[]) {
-  return args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
-  );
-}
-
-function assertConfigOverrides(
-  args: readonly string[],
-  values: Record<string, string | number | boolean | undefined>,
-) {
-  const overrides = nativeConfigOverrides(args).map((value) =>
-    parseToml(value),
-  );
-  for (const [key, value] of Object.entries(values)) {
-    const supplied = overrides.map((config) =>
-      key
-        .split(".")
-        .reduce<unknown>(
-          (current, part) =>
-            (current as Record<string, unknown> | undefined)?.[part],
-          config,
-        ),
-    );
-    assert.deepEqual(
-      supplied.findLast((item) => item !== undefined),
-      value,
-      key,
-    );
-  }
 }
 
 async function withWorkerFixture<Result>(
