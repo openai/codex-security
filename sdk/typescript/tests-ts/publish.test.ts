@@ -3427,8 +3427,14 @@ describe("connected Linear publication", () => {
   });
 
   test("returns persisted successes and partial failures when an optional receipt cannot be saved", async () => {
-    for (const partialFailure of [false, true]) {
+    for (const [partialFailure, lateAbort] of [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ] as const) {
       const publication = preparedPublication(2);
+      const controller = new AbortController();
       const progress: PublishScanProgress[] = [];
       let invocations = 0;
       let persisted: string[] = [];
@@ -3438,6 +3444,7 @@ describe("connected Linear publication", () => {
         publication.scanDirectory,
         {
           ...OPTIONS,
+          ...(lateAbort ? { signal: controller.signal } : {}),
           onProgress: (event) => progress.push(event),
         },
         dependencies(publication, {
@@ -3466,15 +3473,19 @@ describe("connected Linear publication", () => {
             persisted = issues.map((issue) => issue.issueIdentifier);
             return [...issues];
           },
-          writeReceipt: rejecting(
-            "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
-          ),
+          writeReceipt: async () => {
+            if (lateAbort) controller.abort("SIGINT");
+            throw new Error(
+              "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
+            );
+          },
         }),
       );
 
       const expectedCreated = partialFailure
         ? ["SEC-PERSISTED"]
         : ["SEC-PERSISTED", "SEC-ALSO-PERSISTED"];
+      expect(controller.signal.aborted).toBe(lateAbort);
       expect(invocations).toBe(1);
       expect(persisted).toEqual(expectedCreated);
       expect(result.created.map((issue) => issue.issueIdentifier)).toEqual(

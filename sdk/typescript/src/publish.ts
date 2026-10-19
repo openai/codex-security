@@ -523,7 +523,7 @@ export async function publishScanInternal(
   try {
     await saveReceipt(result, environment);
   } catch (error) {
-    if (result.created.length === 0 || options.signal?.aborted) throw error;
+    if (result.created.length === 0) throw error;
     result.warnings = [
       ...(result.warnings ?? []),
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
