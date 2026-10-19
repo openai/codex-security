@@ -137,7 +137,6 @@ async function completed(
   original.manifest.scan.id = scanId;
   original.findings.scanId = scanId;
   original.findings.findings = findings;
-  original.coverage.scanId = scanId;
   const result = new ScanResult({
     ...original,
     scanDir: options.outputDir!,
@@ -149,7 +148,6 @@ async function completed(
   for (const [name, value] of Object.entries({
     "scan-manifest.json": result.manifest,
     "findings.json": result.findings,
-    "coverage.json": result.coverage,
     "report.md": "Original report",
   })) {
     await writeFile(

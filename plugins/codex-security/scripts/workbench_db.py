@@ -55,6 +55,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from review_state import checkpoint_review_state, review_state, uses_legacy_review
 from workbench import handoff
 from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
@@ -1340,17 +1341,21 @@ def budget_exhausted_draft(
     warning: str,
 ) -> None:
     documents: dict[str, dict[str, Any]] = {}
-    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+    for name in ("scan-manifest.json", "findings.json"):
         path = artifact_path(scan_dir, name, required=False)
         if path is not None:
             documents[name] = read_json_object(path)
-    if documents and len(documents) != 3:
+    if documents and len(documents) != 2:
         raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
 
     if documents:
         manifest = documents["scan-manifest.json"]
         findings = documents["findings.json"]
-        coverage = documents["coverage.json"]
+        coverage = (
+            read_json_object(artifact_path(scan_dir, "coverage.json", required=True))
+            if uses_legacy_review(manifest["scan"])
+            else review_state(manifest["scan"])
+        )
         if not isinstance(manifest.get("scan"), dict) or not isinstance(
             findings.get("findings"), list
         ):
@@ -1466,9 +1471,11 @@ def budget_exhausted_draft(
             }
         )
     coverage.pop("completeness", None)
+    manifest["scan"].pop("coverageRef", None)
+    manifest["scan"]["mode"] = expected_coverage_mode(scan)
+    manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
     for name, payload in (
         ("findings.json", findings),
-        ("coverage.json", coverage),
         ("scan-manifest.json", manifest),
     ):
         try:
@@ -1534,7 +1541,6 @@ def complete_scan_locked(
         for file_name in (
             ARTIFACTS["manifest"],
             ARTIFACTS["findings"],
-            ARTIFACTS["coverage"],
         ):
             try:
                 (scan_dir / file_name).lstat()

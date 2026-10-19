@@ -950,3 +950,12 @@ test("named read-only profile excludes gold and credentials without a legacy san
     undefined,
   );
 });
+
+test("grades current worker review state", () => {
+  const { fixture, result } = retainedFixture();
+  const { coverage, ...draft } = result;
+  assert.equal(
+    gradeResult({ ...draft, reviewState: coverage }, fixture).passed,
+    true,
+  );
+});

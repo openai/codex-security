@@ -221,5 +221,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
     )
     if existing_head:
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
+            "reviewState"
+        ]
         assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])

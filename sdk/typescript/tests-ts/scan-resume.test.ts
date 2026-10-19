@@ -759,7 +759,6 @@ test.each([
         failed: 0,
       });
     } else {
-      expect(result.coverage).not.toHaveProperty("completeness");
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
       expect(result.cost.inputTokens).toBe(10000);
@@ -1363,7 +1362,7 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 manifest: { scan: { status: "completed" } },
                 coverage: {},
                 cost: null,
-              } as import("../src/result.js").ScanResult;
+              } as unknown as import("../src/result.js").ScanResult;
             },
           }),
         },

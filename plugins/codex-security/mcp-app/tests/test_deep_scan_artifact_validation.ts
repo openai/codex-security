@@ -70,8 +70,8 @@ async function testDiscoveryValidation(root: string) {
 
   await writeResult(worker.resultPath, {
     ...result,
-    coverage: {
-      ...result.coverage,
+    reviewState: {
+      ...result.reviewState,
       deferred: [{ reason: "Needs follow-up." }],
     },
   });
@@ -81,14 +81,14 @@ async function testDiscoveryValidation(root: string) {
     scanId,
   );
 
-  assert.deepEqual(withDeferred.coverage.deferred, [
+  assert.deepEqual(withDeferred.reviewState.deferred, [
     { reason: "Needs follow-up." },
   ]);
 
   await writeResult(worker.resultPath, {
     ...result,
-    coverage: {
-      ...result.coverage,
+    reviewState: {
+      ...result.reviewState,
       surfaces: [
         { label: "Unfinished Standard review", disposition: "needs_follow_up" },
       ],
@@ -100,7 +100,7 @@ async function testDiscoveryValidation(root: string) {
     scanId,
   );
 
-  assert.deepEqual(withFollowUp.coverage.surfaces, [
+  assert.deepEqual(withFollowUp.reviewState.surfaces, [
     { label: "Unfinished Standard review", disposition: "needs_follow_up" },
   ]);
 
@@ -178,7 +178,7 @@ async function testReducerValidation(root: string) {
     admitted,
     "validation returns the same reconciled result that was accepted on disk",
   );
-  assert.equal(Object.hasOwn(admitted, "coverage"), false);
+  assert.equal(Object.hasOwn(admitted, "reviewState"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
     "worker-001:1",
   ]);
@@ -432,7 +432,7 @@ async function testReducerValidation(root: string) {
 
   await writeResult(resultPath, draft([firstFinding]));
   const invalidArtifact = await readFile(resultPath, "utf8");
-  await assert.rejects(validate(), /coverage/);
+  await assert.rejects(validate(), /reviewState/);
   assert.equal(await readFile(resultPath, "utf8"), invalidArtifact);
   await writeResult(resultPath, reduction([firstFinding], { complete: false }));
   await assert.rejects(validate(), /only a checkpoint|not complete/);
@@ -586,7 +586,7 @@ async function testEmptyDiscoveryAndReduction(root: string) {
   assert.deepEqual(
     result.result,
     { scanId, findings: [] },
-    "reducers submit and return results without coverage",
+    "reducers submit and return results without reviewState",
   );
 }
 

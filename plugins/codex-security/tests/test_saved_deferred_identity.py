@@ -14,6 +14,7 @@ from test_workbench_standard_deep_results import (
 )
 from workbench_test_support import (
     preserve_scan_results,
+    read_review_state,
     saved_discovery_worker,
     saved_draft,
     write_checkpoint,
@@ -147,7 +148,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     preserve_scan_results(
         state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    return prepared_coverage[0], json.loads((scan_dir / "coverage.json").read_text())
+    return prepared_coverage[0], read_review_state(state, scan_dir)
 
 
 @pytest.mark.parametrize("named_history", [False, True])

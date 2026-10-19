@@ -334,7 +334,7 @@ describe("publish scan to custom", () => {
 describe("publish check", () => {
   test("escapes contract property controls at the CLI boundary without changing the SDK error", async () => {
     const scanDir = join(await publicationDirectory(), "scan");
-    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+    await cp(join(PLUGIN_ROOT, "examples", "legacy-completed-scan"), scanDir, {
       recursive: true,
     });
     if (process.platform !== "win32") await chmod(scanDir, 0o700);
@@ -1701,7 +1701,9 @@ describe("publish scan", () => {
 
     const text = stripVTControlCharacters(stderr.text());
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
-    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  completed-scan");
+    expect(text).toContain(
+      "CODEX SECURITY  ·  PUBLISH  ·  legacy-completed-scan",
+    );
     expect(text).toContain("Checking the connected Linear project.");
     expect(text).toContain("linear_get_team");
     expect(text).toContain("Created SEC-123");
@@ -2125,8 +2127,8 @@ describe("publish scan", () => {
 
   test("omits deleted, replaced, and linked scan directories without changing valid scan order", async () => {
     const directory = await publicationDirectory();
-    const firstDirectory = join(directory, "first-completed-scan");
-    const selectedDirectory = join(directory, "selected-completed-scan");
+    const firstDirectory = join(directory, "first-legacy-completed-scan");
+    const selectedDirectory = join(directory, "selected-legacy-completed-scan");
     const deletedDirectory = join(directory, "deleted-scan");
     const replacedDirectory = join(directory, "replaced-scan");
     const linkedDirectory = join(directory, "linked-scan");
@@ -2150,7 +2152,7 @@ describe("publish scan", () => {
       { id: "deleted-scan", directory: deletedDirectory },
       { id: "replaced-scan", directory: replacedDirectory },
       { id: "linked-scan", directory: linkedDirectory },
-      { id: "selected-scan", directory: "selected-completed-scan" },
+      { id: "selected-scan", directory: "selected-legacy-completed-scan" },
     ];
     const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 

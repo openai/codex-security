@@ -2582,7 +2582,7 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings and coverage between scans.",
+      description: "Match and compare findings between scans.",
       destructive: true,
       mcp: false,
       args: z.object({

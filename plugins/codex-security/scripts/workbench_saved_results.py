@@ -41,6 +41,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
+from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -279,10 +280,15 @@ def _read_saved_result(
         raise ContractError("checkpoint belongs to a different scan")
     if not _is_source_order_snapshot(relative) and (
         not isinstance(draft.get("findings"), list)
-        or not isinstance(draft.get("coverage", {} if kind == "dedup" else None), dict)
+        or not isinstance(
+            draft.get("reviewState", draft.get("coverage", {} if kind == "dedup" else None)), dict
+        )
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft), metadata.st_mtime_ns
+    digest = _digest(draft)
+    if "coverage" in draft and "reviewState" not in draft:
+        draft["reviewState"] = draft.pop("coverage")
+    return draft, digest, metadata.st_mtime_ns
 
 
 def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) -> dict[str, int]:
@@ -340,7 +346,7 @@ def _parent_scan_draft(
     parent = {
         "scanId": scan_id,
         "findings": findings.get("findings"),
-        "coverage": coverage,
+        "reviewState": coverage,
         **{
             key: parent_scan[key]
             for key in ("scope", "threatModel", "complete")
@@ -357,10 +363,14 @@ def _read_saved_parent_result(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
     findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
-    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
     parent_scan = manifest.get("scan")
     if not isinstance(parent_scan, dict):
         raise ContractError("Saved parent manifest has no scan object")
+    coverage = (
+        _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+        if uses_legacy_review(parent_scan)
+        else review_state(parent_scan)
+    )
     if (parent_scan.get("sealedAt") or parent_scan.get("artifacts")) and (
         parent_scan.get("id", scan_id) != scan_id
         or findings.get("scanId", scan_id) != scan_id
@@ -664,7 +674,7 @@ def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
 def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
     if draft.get("complete") is False:
         return []
-    coverage = draft["coverage"]
+    coverage = draft["reviewState"]
     rows = coverage.get("resolvedDeferred", [])
     try:
         # Invalid closure metadata cannot discard the evidence it names.
@@ -682,9 +692,9 @@ def _merge_tied_parent_observations(
     for finding in previous["findings"]:
         if finding not in merged["findings"]:
             merged["findings"].append(copy.deepcopy(finding))
-    coverage = merged["coverage"]
+    coverage = merged["reviewState"]
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = previous["coverage"].get(field, [])
+        rows = previous["reviewState"].get(field, [])
         output = coverage.setdefault(field, [])
         if isinstance(rows, list) and isinstance(output, list):
             for row in rows:
@@ -755,7 +765,7 @@ def _generic_surface_updates(
 
     saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
     for relative, draft, owner in sources:
-        rows = draft["coverage"].get("surfaces", [])
+        rows = draft["reviewState"].get("surfaces", [])
         for row in rows if isinstance(rows, list) else []:
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
@@ -774,7 +784,7 @@ def _generic_surface_updates(
         }
         if not closed_ids and not reopened_ids:
             continue
-        current = draft["coverage"].get("surfaces", [])
+        current = draft["reviewState"].get("surfaces", [])
         for surface in current if isinstance(current, list) else []:
             if not isinstance(surface, dict):
                 continue
@@ -922,8 +932,13 @@ def merge_saved_results(
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
-            # Without an accepted head, file-authored coverage is a full replacement.
-            parent_modified = (scan_dir / "coverage.json").lstat().st_mtime_ns
+            # Without an accepted head, a file-authored draft is a full replacement.
+            parent_file = (
+                "coverage.json"
+                if uses_legacy_review(parent_manifest["scan"])
+                else "scan-manifest.json"
+            )
+            parent_modified = (scan_dir / parent_file).lstat().st_mtime_ns
             parent_is_canonical = True
         except (ContractError, OSError, ValueError) as exc:
             if not stopped:
@@ -944,7 +959,11 @@ def merge_saved_results(
                 # A partial tool publication must not outrank its accepted head.
                 parent_modified = min(
                     (scan_dir / name).lstat().st_mtime_ns
-                    for name in ("findings.json", "coverage.json", "scan-manifest.json")
+                    for name in (
+                        "findings.json",
+                        "scan-manifest.json",
+                        *(["coverage.json"] if uses_legacy_review(parent_scan) else []),
+                    )
                 )
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
                 head_path = scan_dir / "checkpoint-head.json"
@@ -1097,7 +1116,7 @@ def merge_saved_results(
                 continue
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
-            sources.append((relative, {"coverage": {}, **draft}, worker_id))
+            sources.append((relative, {"reviewState": {}, **draft}, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
                 warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
@@ -1178,14 +1197,14 @@ def merge_saved_results(
     for field in ("deferred", "surfaces"):
         named_rows: dict[str | None, list[dict[str, Any]]] = {}
         for _, draft, owner in all_sources:
-            rows = draft["coverage"].get(field, [])
+            rows = draft["reviewState"].get(field, [])
             named_rows.setdefault(owner, []).extend(
                 row
                 for row in (rows if isinstance(rows, list) else [])
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
             )
         for _, draft, owner in all_sources:
-            rows = draft["coverage"].get(field, [])
+            rows = draft["reviewState"].get(field, [])
             if not isinstance(rows, list):
                 continue
             reserved = {
@@ -1279,8 +1298,8 @@ def merge_saved_results(
         if selected_model_source is not None:
             selected_model_source[:] = [frozen_model_source]
     coverage = (
-        copy.deepcopy(parent["coverage"])
-        if parent and parent["coverage"]
+        copy.deepcopy(parent["reviewState"])
+        if parent and parent["reviewState"]
         else {
             "mode": binding["coverageMode"],
             "inventoryStrategy": "diff"
@@ -1336,7 +1355,7 @@ def merge_saved_results(
 
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
-        relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
+        relative: _deferred_rows(draft["reviewState"]) for relative, draft, _ in all_sources
     }
     # A legacy source can contain independent tasks with the same explicit ID.
     # Later rewrites cannot make an ID-only closure identify one of those tasks.
@@ -1473,7 +1492,7 @@ def merge_saved_results(
             ):
                 outcomes.append((relative, owner, candidate_id, "reported"))
         for field in ("surfaces", "explicitExclusions"):
-            items = draft["coverage"].get(field, [])
+            items = draft["reviewState"].get(field, [])
             for item in items if isinstance(items, list) else []:
                 if (
                     isinstance(item, dict)
@@ -1571,7 +1590,7 @@ def merge_saved_results(
     }
     for field, replaced in replaced_rows.items():
         if parent and isinstance(coverage.get(field), list):
-            previous = parent["coverage"].get(field, [])
+            previous = parent["reviewState"].get(field, [])
             if isinstance(previous, list):
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
@@ -1607,7 +1626,7 @@ def merge_saved_results(
         if isinstance(identity, str)
     }
     for _, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
+        surfaces = draft["reviewState"].get("surfaces", [])
         by_id: dict[str, dict[str, Any]] = {}
         for surface in surfaces if isinstance(surfaces, list) else []:
             if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
@@ -1616,7 +1635,7 @@ def merge_saved_results(
                 ambiguous_surface_ids.add((owner, identity))
             by_id[identity] = surface
     for _, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
+        surfaces = draft["reviewState"].get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:
             if (
                 isinstance(surface, dict)
@@ -1873,7 +1892,7 @@ def merge_saved_results(
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
             if superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
                 continue
-            items = draft["coverage"].get(field, [])
+            items = draft["reviewState"].get(field, [])
             if field == "deferred":
                 items = deferred_rows[relative]
             if not isinstance(items, list):
@@ -2102,6 +2121,7 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
             manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
             manifest["scan"].pop("sealedAt", None)
             manifest["scan"].pop("artifacts", None)
+            manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
             checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
             contents = _encoded(checkpoint)
             name = f"{hashlib.sha256(contents).hexdigest()}.json"
@@ -2109,7 +2129,7 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
             write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
             for filename, document in (
                 ("findings.json", findings),
-                ("coverage.json", coverage),
+                *([("coverage.json", coverage)] if "coverageRef" in manifest["scan"] else []),
                 ("scan-manifest.json", manifest),
             ):
                 write_scan_local_bytes(scan_dir, filename, _encoded(document))
@@ -2517,12 +2537,20 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
-        manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
+        manifest, findings, coverage = (
+            draft["manifest"],
+            draft["findings"],
+            draft.get("reviewState", draft.get("coverage")),
+        )
+        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+        manifest["scan"].pop("coverageRef", None)
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        manifest["scan"]["mode"] = coverage["mode"]
+        manifest["scan"]["review"] = review_summary(coverage)
         checkpoint = manifest["scan"]
         checkpoint_contents = None
         if args.checkpoint_path is not None:
@@ -2576,7 +2604,6 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         for filename, document in (
             ("findings.json", findings),
-            ("coverage.json", coverage),
             ("scan-manifest.json", manifest),
         ):
             write_scan_local_bytes(
@@ -2584,6 +2611,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
         if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
             # Select the accepted final publication before releasing the write lock.
             with connection:

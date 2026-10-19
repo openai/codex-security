@@ -18,7 +18,7 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export type DeepReductionInput = Omit<ScanDraftInput, "reviewState">;
 export const deepReductionInputSchema = projectArtifactToolSchema(
   artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
 );
@@ -37,14 +37,14 @@ export interface ReducerArtifactValidation {
 export function aggregateDiscoveryCoverage(
   artifacts: DeepScanArtifacts,
   discoveries: { id: string; resultPath: string; result: ScanDraftInput }[],
-): ScanDraftInput["coverage"] {
-  const coverage: ScanDraftInput["coverage"] = {
+): ScanDraftInput["reviewState"] {
+  const reviewState: ScanDraftInput["reviewState"] = {
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
   };
   for (const worker of discoveries) {
-    const source = structuredClone(worker.result.coverage);
+    const source = structuredClone(worker.result.reviewState);
     const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
       .split(sep)
       .join("/");
@@ -69,17 +69,17 @@ export function aggregateDiscoveryCoverage(
             (ref) => `${prefix}/${ref}`,
           );
         }
-        (coverage[field] as JsonObject[]).push(retained);
+        (reviewState[field] as JsonObject[]).push(retained);
       }
     }
     for (const question of source.openQuestions ?? []) {
-      (coverage.openQuestions ??= []).push({
+      (reviewState.openQuestions ??= []).push({
         ...(typeof question === "string" ? { question } : question),
         workerId: worker.id,
       });
     }
   }
-  return coverage;
+  return reviewState;
 }
 
 export function parseDeepReduction(input: unknown): DeepReductionInput {

@@ -32,6 +32,26 @@ def call_workbench(monkeypatch, state, codex_home, *args):
         workbench_db.main()
 
 
+def recovered_review_state(state, scan_dir, scan_id):
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+        ).fetchall()
+    return saved.merge_saved_results(
+        scan_dir,
+        scan_id,
+        workbench_db.workbench_completion_binding(scan, workbench_db.now()),
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=manifest["scan"]["preservedSources"],
+    )[2]
+
+
 @pytest.mark.parametrize("latest_pending", [True, False])
 def test_failed_publication_keeps_order_after_identical_result_rewrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, latest_pending: bool
@@ -72,7 +92,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
         "--thread-id",
         "standard-worker-thread",
     )
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = recovered_review_state(state, scan_dir, scan_id)
     assert any(row["id"] == "review" for row in coverage["deferred"]) is latest_pending
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
@@ -121,7 +141,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         scan_id,
     )
     assert len(published) == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = recovered_review_state(state, scan_dir, scan_id)
     assert any(row["id"] == "review" for row in coverage["deferred"])
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert published[0].relative_to(scan_dir).as_posix() in sources
@@ -136,7 +156,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         "--thread-id",
         "standard-worker-thread",
     )
-    assert json.loads((scan_dir / "coverage.json").read_text()) == coverage
+    assert recovered_review_state(state, scan_dir, scan_id) == coverage
 
 
 @pytest.mark.parametrize("rewritten", ["result", "checkpoint"])

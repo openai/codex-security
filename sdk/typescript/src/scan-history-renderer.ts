@@ -338,7 +338,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("REVIEW")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }

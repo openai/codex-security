@@ -87,7 +87,7 @@ test("worker checkpoints retain typed surface IDs", async (t) => {
   const head = await readJson(f.root, "checkpoint-head.json");
   const checkpointPath = path.join(f.root, "checkpoints", head.checkpoint);
   const checkpoint = await readJson(checkpointPath);
-  checkpoint.coverage.surfaces[0].id = "HTTP API";
+  checkpoint.reviewState.surfaces[0].id = "HTTP API";
   await writeJson(checkpointPath, checkpoint);
   await assert.rejects(
     f.write(f.draft({ deferred: [generic] })),
@@ -109,7 +109,7 @@ for (const observation of ["checkpoint head", "worker result"]) {
     for (const name of await readdir(checkpoints)) {
       const checkpointPath = path.join(checkpoints, name);
       const checkpoint = await readJson(checkpointPath);
-      const time = checkpoint.coverage.deferred.length ? 50 : 100;
+      const time = checkpoint.reviewState.deferred.length ? 50 : 100;
       await utimes(checkpointPath, time, time);
     }
 
@@ -172,15 +172,15 @@ for (const observation of ["checkpoint head", "worker result"]) {
     }
     const result = await f.write(f.draft({}, true));
     assert.equal(replaced, true);
-    for (const coverage of [result.coverage, await f.read()]) {
-      assert.deepEqual(coverage.deferred, [task]);
-      assert.deepEqual(coverage.resolvedDeferred ?? [], []);
+    for (const reviewState of [result.reviewState, await f.read()]) {
+      assert.deepEqual(reviewState.deferred, [task]);
+      assert.deepEqual(reviewState.resolvedDeferred ?? [], []);
     }
   });
 }
 
 for (const headTime of [1, 2, 3]) {
-  test(`worker: stopped recovery retains accepted coverage with head time ${headTime}`, async (t) => {
+  test(`worker: stopped recovery retains accepted reviewState with head time ${headTime}`, async (t) => {
     const f = await fixture(t, "worker");
     const surface = (id: string) => ({
       id,
@@ -211,7 +211,7 @@ for (const headTime of [1, 2, 3]) {
     const head = await readJson(headPath);
     const selectedPath = path.join(f.root, "checkpoints", head.checkpoint);
     const selected = await readJson(selectedPath);
-    assert.deepEqual(selected.coverage.surfaces, [
+    assert.deepEqual(selected.reviewState.surfaces, [
       surface("existing"),
       ...added.surfaces,
     ]);
@@ -248,11 +248,11 @@ print(json.dumps([first[2],replay[2]]))`,
         f.context.scanId!,
       ],
     );
-    const [coverage, replay] = JSON.parse(stdout);
-    assert.deepEqual(replay, coverage);
+    const [reviewState, replay] = JSON.parse(stdout);
+    assert.deepEqual(replay, reviewState);
     for (const [field, rows] of Object.entries(added)) {
       assert.equal(
-        (coverage[field] ?? []).some((row: Record<string, unknown>) =>
+        (reviewState[field] ?? []).some((row: Record<string, unknown>) =>
           Object.entries(rows[0]).every(([key, value]) =>
             isDeepStrictEqual(row[key], value),
           ),
@@ -261,7 +261,7 @@ print(json.dumps([first[2],replay[2]]))`,
       );
     }
     assert.ok(
-      coverage.surfaces.some(
+      reviewState.surfaces.some(
         (row: Record<string, unknown>) => row.id === "existing",
       ),
     );
@@ -324,12 +324,12 @@ for (const updateSavedSurface of [false, true]) {
       const result = await f.write(input);
       assert.equal(result.findingCount, 1);
 
-      assert.deepEqual(result.coverage.deferred, [reopened, independent]);
-      assert.deepEqual(result.coverage.resolvedDeferred, [
+      assert.deepEqual(result.reviewState.deferred, [reopened, independent]);
+      assert.deepEqual(result.reviewState.resolvedDeferred, [
         close(stillClosed.id),
       ]);
       assert.deepEqual(
-        result.coverage.surfaces,
+        result.reviewState.surfaces,
         surfaces.map((surface) => ({
           ...surface,
           receiptRefs: surface.receiptRefs ?? [],
@@ -370,21 +370,25 @@ for (const updateSavedSurface of [false, true]) {
       assert.equal(result.findingCount, 2);
 
       assert.deepEqual(
-        new Set(result.coverage.deferred.map(({ id }: { id: string }) => id)),
+        new Set(
+          result.reviewState.deferred.map(({ id }: { id: string }) => id),
+        ),
         new Set([reopened.id, independent.id, nextTask.id]),
       );
       assert.deepEqual(
-        result.coverage.deferred.find(
+        result.reviewState.deferred.find(
           ({ id }: { id: string }) => id === updated.id,
         ),
         updated,
       );
-      assert.deepEqual((await f.read()).deferred, result.coverage.deferred);
-      assert.deepEqual(result.coverage.resolvedDeferred, [
+      assert.deepEqual((await f.read()).deferred, result.reviewState.deferred);
+      assert.deepEqual(result.reviewState.resolvedDeferred, [
         close(stillClosed.id),
       ]);
       assert.deepEqual(
-        new Set(result.coverage.surfaces.map(({ id }: { id: string }) => id)),
+        new Set(
+          result.reviewState.surfaces.map(({ id }: { id: string }) => id),
+        ),
         new Set([...surfaces, nextSurface].map(({ id }: { id: string }) => id)),
       );
     }
@@ -437,15 +441,15 @@ for (const outcome of ["rejected", "reported"]) {
       for (const input of [progress, f.draft()]) {
         const result = await f.write(input);
         assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
-        assert.deepEqual(result.coverage.deferred, [genericTask]);
+        assert.deepEqual(result.reviewState.deferred, [genericTask]);
         assert.deepEqual(
-          result.coverage.surfaces.map(surfaceDisposition),
+          result.reviewState.surfaces.map(surfaceDisposition),
           surfaceLink === "none"
             ? []
             : [{ id: surface.id, disposition: outcome }],
         );
         if (outcome === "rejected") {
-          assert.deepEqual(result.coverage.surfaces[0].candidate, candidate);
+          assert.deepEqual(result.reviewState.surfaces[0].candidate, candidate);
         } else {
           const saved = await readJson(f.root, "result.json");
           assert.deepEqual(saved.findings[0].provenance.originalCandidates, [
@@ -486,15 +490,15 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       f.draft({}, true),
     ]) {
       const result = await f.write(input);
-      assert.deepEqual(result.coverage.deferred, [moved]);
+      assert.deepEqual(result.reviewState.deferred, [moved]);
       assert.equal(
-        result.coverage.surfaces.find(
+        result.reviewState.surfaces.find(
           ({ id }: { id: string }) => id === first.id,
         ).disposition,
         "no_issue_found",
       );
       assert.equal(
-        result.coverage.surfaces.find(
+        result.reviewState.surfaces.find(
           ({ id }: { id: string }) => id === second.id,
         ).disposition,
         "needs_follow_up",
@@ -512,14 +516,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     let id;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const result = await f.write(f.draft({}, true));
-      assert.equal(result.coverage.deferred.length, 1);
-      id ??= result.coverage.deferred[0].id;
-      assert.equal(result.coverage.deferred[0].id, id);
+      assert.equal(result.reviewState.deferred.length, 1);
+      id ??= result.reviewState.deferred[0].id;
+      assert.equal(result.reviewState.deferred[0].id, id);
     }
     await f.write(f.draft({ resolvedDeferred: [close(id)] }, true));
     const retried = await f.write(f.draft({}, true));
-    assert.deepEqual(retried.coverage.deferred, []);
-    assert.deepEqual(retried.coverage.resolvedDeferred, [close(id)]);
+    assert.deepEqual(retried.reviewState.deferred, []);
+    assert.deepEqual(retried.reviewState.resolvedDeferred, [close(id)]);
   });
 
   for (const hasPublishedId of [false, true]) {
@@ -537,21 +541,24 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         false,
       );
       const restored = await f.write(f.draft({}, true));
-      assert.equal(restored.coverage.surfaces.length, 1);
-      const restoredSurface = restored.coverage.surfaces[0];
+      assert.equal(restored.reviewState.surfaces.length, 1);
+      const restoredSurface = restored.reviewState.surfaces[0];
       if (hasPublishedId) assert.equal(restoredSurface.id, "surface_uploads");
       const resolved = f.draft(
         {
           surfaces: [{ ...restoredSurface, disposition: "no_issue_found" }],
-          resolvedDeferred: [close(restored.coverage.deferred[0].id)],
+          resolvedDeferred: [close(restored.reviewState.deferred[0].id)],
         },
         true,
       );
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const result = await f.write(resolved);
 
-        assert.deepEqual(result.coverage.surfaces, resolved.coverage.surfaces);
-        assert.deepEqual(result.coverage.deferred, []);
+        assert.deepEqual(
+          result.reviewState.surfaces,
+          resolved.reviewState.surfaces,
+        );
+        assert.deepEqual(result.reviewState.deferred, []);
       }
     });
   }
@@ -578,7 +585,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     const result = await f.write(f.draft({}, true));
     assert.equal(result.findingCount, 1);
 
-    assert.deepEqual(result.coverage.surfaces.map(surfaceDisposition), [
+    assert.deepEqual(result.reviewState.surfaces.map(surfaceDisposition), [
       { id: surface.id, disposition: surface.disposition },
     ]);
   });
@@ -606,7 +613,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       if (outcome === "reported")
         terminal.findings = [findingFor(pending.candidateId)];
       else
-        terminal.coverage.surfaces = [
+        terminal.reviewState.surfaces = [
           {
             id: "candidate-surface",
             candidateId: pending.candidateId,
@@ -617,8 +624,8 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       for (const input of [terminal, f.draft({}, true)]) {
         const result = await f.write(input);
         assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
-        assert.deepEqual(result.coverage.deferred, [independent]);
-        assert.deepEqual(result.coverage.resolvedDeferred ?? [], []);
+        assert.deepEqual(result.reviewState.deferred, [independent]);
+        assert.deepEqual(result.reviewState.resolvedDeferred ?? [], []);
       }
     });
   }
@@ -629,7 +636,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     const second = { ...first, paths: ["src/other.py"] };
     await assert.rejects(
       f.write(f.draft({ deferred: [first, second] })),
-      /coverage.deferred repeats review/,
+      /reviewState.deferred repeats review/,
     );
     assert.deepEqual(await readdir(f.root), []);
     second.id = "other-review";
@@ -660,7 +667,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           layout === "worker" ? "result.json" : "coverage.json",
         );
         const saved = await readJson(filename);
-        (layout === "worker" ? saved.coverage : saved).deferred = tasks;
+        (layout === "worker" ? saved.reviewState : saved).deferred = tasks;
         await writeJson(filename, saved);
       }
       const snapshot = async (
@@ -685,8 +692,8 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const recovered = await f.write(f.draft({}, true));
 
-        assert.deepEqual(recovered.coverage.deferred, tasks);
-        assert.deepEqual(recovered.coverage.resolvedDeferred ?? [], []);
+        assert.deepEqual(recovered.reviewState.deferred, tasks);
+        assert.deepEqual(recovered.reviewState.resolvedDeferred ?? [], []);
         const beforeClosure = await snapshot();
         await assert.rejects(
           f.write(f.draft({ resolvedDeferred: [close("review")] }, true)),
@@ -700,12 +707,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: returned deferred IDs support closure, retries and explicit reopening`, async (t) => {
     const f = await fixture(t, layout);
     const initial = await f.write(f.draft({ deferred: [generic] }));
-    const original = initial.coverage.deferred[0];
+    const original = initial.reviewState.deferred[0];
     assert.equal(typeof original.id, "string");
-    assert.deepEqual(initial.coverage, await f.read());
+    assert.deepEqual(initial.reviewState, await f.read());
     const enriched = { ...original, notes: "Both callers were inspected." };
     const updatedDraft = await f.write(f.draft({ deferred: [enriched] }));
-    assert.deepEqual(updatedDraft.coverage.deferred, [enriched]);
+    assert.deepEqual(updatedDraft.reviewState.deferred, [enriched]);
     const checkpointRoot = path.join(f.root, "checkpoints");
     const originals = await Promise.all(
       (await readdir(checkpointRoot)).map(async (name) => [
@@ -984,7 +991,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       for (const name of await readdir(checkpoints)) {
         const file = path.join(checkpoints, name);
         const row = await readJson(file);
-        const time = row.coverage.resolvedDeferred?.length ? 2 : 1;
+        const time = row.reviewState.resolvedDeferred?.length ? 2 : 1;
         await utimes(file, time, time);
       }
       for (const name of layout === "worker"
@@ -1074,7 +1081,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       for (const name of await readdir(checkpointRoot)) {
         const file = path.join(checkpointRoot, name);
         const saved = await readJson(file);
-        if (saved.coverage.resolvedDeferred?.length)
+        if (saved.reviewState.resolvedDeferred?.length)
           originalClosures.push([
             file,
             (await stat(file)).mtimeMs,
@@ -1124,14 +1131,14 @@ test("worker: inherited closures cannot erase ambiguous legacy tasks", async (t)
   for (const name of await readdir(checkpoints)) {
     const filename = path.join(checkpoints, name);
     const saved = await readJson(filename);
-    const timestamp = saved.coverage.deferred.length ? 100 : 200;
+    const timestamp = saved.reviewState.deferred.length ? 100 : 200;
     await utimes(filename, timestamp, timestamp);
   }
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const recovered = await f.write(f.draft({}, true));
 
-    assert.deepEqual(recovered.coverage.deferred, tasks);
-    assert.deepEqual(recovered.coverage.resolvedDeferred ?? [], []);
+    assert.deepEqual(recovered.reviewState.deferred, tasks);
+    assert.deepEqual(recovered.reviewState.resolvedDeferred ?? [], []);
   }
 });
 
@@ -1144,14 +1151,14 @@ for (const layout of ["standard", "diff"] as const) {
         "sha256",
         JSON.stringify([generic.reason, generic.paths, []]),
       ).slice(0, 16)}`;
-      const coverage = await f.read();
+      const reviewState = await f.read();
       const named = Array.from({ length: taskCount }, (_, index) => ({
         id: index === 0 ? legacyId : `${legacyId}-${index + 1}`,
         paths: generic.paths,
         reason: generic.reason,
       }));
-      coverage.deferred = named;
-      await writeJson(path.join(f.root, "coverage.json"), coverage);
+      reviewState.deferred = named;
+      await writeJson(path.join(f.root, "coverage.json"), reviewState);
       await rm(path.join(f.root, "checkpoint-head.json"), { force: true });
       await rm(path.join(f.root, "checkpoints"), {
         recursive: true,
@@ -1163,11 +1170,11 @@ for (const layout of ["standard", "diff"] as const) {
         false,
       );
       const resumed = await f.write(f.draft({}, true));
-      assert.deepEqual(resumed.coverage.deferred, named);
+      assert.deepEqual(resumed.reviewState.deferred, named);
       const partlyClosed = await f.write(
         f.draft({ resolvedDeferred: [close(legacyId)] }, true),
       );
-      assert.deepEqual(partlyClosed.coverage.deferred, named.slice(1));
+      assert.deepEqual(partlyClosed.reviewState.deferred, named.slice(1));
       if (taskCount > 1)
         await f.write(
           f.draft(
@@ -1180,10 +1187,12 @@ for (const layout of ["standard", "diff"] as const) {
           ),
         );
       const retried = await f.write(f.draft({}, true));
-      assert.deepEqual(retried.coverage.deferred, []);
+      assert.deepEqual(retried.reviewState.deferred, []);
       assert.deepEqual(
         new Set(
-          retried.coverage.resolvedDeferred.map(({ id }: { id: string }) => id),
+          retried.reviewState.resolvedDeferred.map(
+            ({ id }: { id: string }) => id,
+          ),
         ),
         new Set(named.map(({ id }: { id: string }) => id)),
       );
@@ -1234,8 +1243,8 @@ for (const layout of ["standard", "diff"] as const) {
       ),
       /interrupted draft write/,
     );
-    for (const coverage of [{}, { resolvedDeferred }, {}]) {
-      await f.write(f.draft(coverage, true));
+    for (const reviewState of [{}, { resolvedDeferred }, {}]) {
+      await f.write(f.draft(reviewState, true));
       const saved = await f.read();
 
       assert.deepEqual(saved.deferred, []);
@@ -1266,17 +1275,17 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         );
       }
       const initial = await f.write(input);
-      const [surface] = initial.coverage.surfaces;
-      const [task] = initial.coverage.deferred;
+      const [surface] = initial.reviewState.surfaces;
+      const [task] = initial.reviewState.deferred;
       assert.equal(typeof surface.id, "string");
       assert.equal(typeof task.id, "string");
-      assert.deepEqual(initial.coverage, await f.read());
+      assert.deepEqual(initial.reviewState, await f.read());
       assert.deepEqual(input, original);
       for (const name of await readdir(path.join(f.root, "checkpoints"))) {
         const checkpoint = await readJson(f.root, "checkpoints", name);
-        assert.equal(checkpoint.coverage.surfaces[0].id, surface.id);
-        assert.deepEqual(checkpoint.coverage.surfaces[0].receiptRefs, []);
-        assert.equal(checkpoint.coverage.deferred[0].id, task.id);
+        assert.equal(checkpoint.reviewState.surfaces[0].id, surface.id);
+        assert.deepEqual(checkpoint.reviewState.surfaces[0].receiptRefs, []);
+        assert.equal(checkpoint.reviewState.deferred[0].id, task.id);
       }
       const linked = await f.write(
         f.draft({
@@ -1290,8 +1299,8 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           ],
         }),
       );
-      assert.equal(linked.coverage.deferred.length, 1);
-      assert.equal(linked.coverage.deferred[0].id, task.id);
+      assert.equal(linked.reviewState.deferred.length, 1);
+      assert.equal(linked.reviewState.deferred[0].id, task.id);
       const terminal = await f.write(
         f.draft(
           {
@@ -1302,12 +1311,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         ),
       );
 
-      assert.deepEqual(terminal.coverage.deferred, []);
-      assert.deepEqual(terminal.coverage.surfaces, [
+      assert.deepEqual(terminal.reviewState.deferred, []);
+      assert.deepEqual(terminal.reviewState.surfaces, [
         { ...surface, disposition: "no_issue_found", receiptRefs: [] },
       ]);
       await f.write(f.draft({}, true));
-      assert.deepEqual(await f.read(), terminal.coverage);
+      assert.deepEqual(await f.read(), terminal.reviewState);
     });
   }
 }
@@ -1321,26 +1330,26 @@ test("worker: duplicate authored surface IDs preserve each observation", async (
   ];
   const initial = await f.write(f.draft({ surfaces: rows }));
   assert.deepEqual(
-    initial.coverage.surfaces.map(({ id }: { id: string }) => id),
+    initial.reviewState.surfaces.map(({ id }: { id: string }) => id),
     ["api", "api-3", "api-2"],
   );
   assert.deepEqual(
-    (await f.write(f.draft({ surfaces: rows }))).coverage.surfaces,
-    initial.coverage.surfaces,
+    (await f.write(f.draft({ surfaces: rows }))).reviewState.surfaces,
+    initial.reviewState.surfaces,
   );
-  const updated = initial.coverage.surfaces.map(
+  const updated = initial.reviewState.surfaces.map(
     (row: Record<string, unknown>) =>
       row.id === "api-3" ? { ...row, disposition: "no_issue_found" } : row,
   );
   const saved = await f.write(f.draft({ surfaces: updated }));
-  assert.equal(saved.coverage.surfaces.length, 3);
+  assert.equal(saved.reviewState.surfaces.length, 3);
   assert.equal(
-    saved.coverage.surfaces.find(({ id }: { id: string }) => id === "api")
+    saved.reviewState.surfaces.find(({ id }: { id: string }) => id === "api")
       .disposition,
     "needs_follow_up",
   );
   assert.equal(
-    saved.coverage.surfaces.find(({ id }: { id: string }) => id === "api-3")
+    saved.reviewState.surfaces.find(({ id }: { id: string }) => id === "api-3")
       .disposition,
     "no_issue_found",
   );
@@ -1354,14 +1363,14 @@ test("worker: surface IDs remain valid independently of candidate names", async 
     disposition: "needs_follow_up",
   };
   const initial = await f.write(f.draft({ surfaces: [candidate] }));
-  const [surface] = initial.coverage.surfaces;
+  const [surface] = initial.reviewState.surfaces;
   assert.match(surface.id, /^[a-z0-9][a-z0-9._/-]*$/u);
   assert.equal(surface.candidateId, candidate.candidateId);
   await f.write(
     f.draft({ surfaces: [{ ...surface, disposition: "rejected" }] }, true),
   );
   const retried = await f.write(f.draft({}, true));
-  assert.deepEqual(retried.coverage.surfaces, [
+  assert.deepEqual(retried.reviewState.surfaces, [
     { ...surface, disposition: "rejected" },
   ]);
 });
@@ -1376,18 +1385,18 @@ test("worker: generated surface IDs preserve distinct observations and reserved 
   const second = { ...first, notes: "Second caller." };
   const input = f.draft({ surfaces: [first, second] });
   const initial = await f.write(input);
-  const ids = initial.coverage.surfaces.map(({ id }: { id: string }) => id);
+  const ids = initial.reviewState.surfaces.map(({ id }: { id: string }) => id);
   assert.ok(ids.every((id: string) => typeof id === "string"));
   assert.equal(new Set(ids).size, 2);
   assert.deepEqual(
-    (await f.write(input)).coverage.surfaces,
-    initial.coverage.surfaces,
+    (await f.write(input)).reviewState.surfaces,
+    initial.reviewState.surfaces,
   );
   const changed = { ...first, notes: "A newly found caller." };
   const updated = await f.write(f.draft({ surfaces: [changed] }));
-  assert.equal(updated.coverage.surfaces.length, 3);
+  assert.equal(updated.reviewState.surfaces.length, 3);
   assert.ok(
-    updated.coverage.surfaces.some(
+    updated.reviewState.surfaces.some(
       (row: Record<string, unknown>) =>
         row.id === ids[0] && row.notes === first.notes,
     ),
@@ -1400,14 +1409,14 @@ test("worker: generated surface IDs preserve distinct observations and reserved 
     { label: "Candidate", disposition: "needs_follow_up", candidateId: ids[1] },
   ];
   const saved = (await other.write(other.draft({ surfaces: reserved })))
-    .coverage.surfaces;
+    .reviewState.surfaces;
   assert.equal(new Set(saved.map(({ id }: { id: string }) => id)).size, 4);
   assert.equal(saved[2].id, ids[0]);
   assert.equal(saved[3].candidateId, ids[1]);
   assert.notEqual(saved[0].id, ids[0]);
   assert.notEqual(saved[3].id, ids[1]);
   for (const input of [other.draft({ surfaces: [saved[3]] }), other.draft()]) {
-    const retained = (await other.write(input)).coverage.surfaces;
+    const retained = (await other.write(input)).reviewState.surfaces;
     assert.equal(retained.length, saved.length);
     assert.deepEqual(
       retained.find(
@@ -1452,9 +1461,9 @@ for (const layout of ["standard", "diff"] as const) {
       for (const name of await readdir(path.join(f.root, "checkpoints"))) {
         const file = path.join(f.root, "checkpoints", name);
         const value = await readJson(file);
-        const time = value.coverage.resolvedDeferred?.length ? 100 : 200;
+        const time = value.reviewState.resolvedDeferred?.length ? 100 : 200;
         await utimes(file, time, time);
-        if (value.complete && value.coverage.resolvedDeferred?.length)
+        if (value.complete && value.reviewState.resolvedDeferred?.length)
           selected = name;
       }
       assert.ok(selected);
@@ -1473,7 +1482,7 @@ for (const layout of ["standard", "diff"] as const) {
         assert.deepEqual(saved.deferred, []);
         assert.deepEqual(
           saved.resolvedDeferred,
-          closed.coverage.resolvedDeferred,
+          closed.reviewState.resolvedDeferred,
         );
       } else {
         assert.deepEqual(saved.deferred, [pending]);
@@ -1546,7 +1555,7 @@ for (const complete of [false, true]) {
     );
     await rm(destination);
     await f.write(f.draft({}, true));
-    assert.deepEqual((await f.read()).deferred, submitted.coverage.deferred);
+    assert.deepEqual((await f.read()).deferred, submitted.reviewState.deferred);
   });
 }
 
@@ -1599,7 +1608,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
             head.checkpoint,
           );
           assert.equal(checkpoint.complete, false);
-          assert.deepEqual(checkpoint.coverage.deferred, [task]);
+          assert.deepEqual(checkpoint.reviewState.deferred, [task]);
         }
       }
       await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
@@ -1639,7 +1648,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       if (reverse) deferred.reverse();
       await assert.rejects(
         f.write(f.draft({ deferred })),
-        /coverage\.deferred repeats candidate-a/,
+        /reviewState\.deferred repeats candidate-a/,
       );
       assert.deepEqual(await readdir(f.root), []);
       await f.write(
@@ -1704,15 +1713,15 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         );
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const restored = await f.write(f.draft());
-          assert.equal(restored.coverage.deferred.length, 3);
+          assert.equal(restored.reviewState.deferred.length, 3);
           assert.ok(
-            restored.coverage.deferred.some(
+            restored.reviewState.deferred.some(
               (row: Record<string, unknown>) =>
                 row.candidateId === "candidate-a",
             ),
           );
           assert.ok(
-            restored.coverage.deferred.some((row: Record<string, unknown>) =>
+            restored.reviewState.deferred.some((row: Record<string, unknown>) =>
               isDeepStrictEqual(row, task),
             ),
           );
@@ -1737,18 +1746,18 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         };
         for (const input of [terminal, f.draft({}, true), f.draft()]) {
           const result = await f.write(input);
-          assert.deepEqual(result.coverage.deferred, [task]);
+          assert.deepEqual(result.reviewState.deferred, [task]);
 
           assert.equal(result.findingCount, outcome === "reported" ? 1 : 0);
           assert.deepEqual(
-            result.coverage.surfaces.filter(
+            result.reviewState.surfaces.filter(
               ({ id }: { id: string }) => id === followUp.id,
             ),
             [followUp],
           );
           if (outcome === "rejected")
             assert.equal(
-              result.coverage.surfaces.find(
+              result.reviewState.surfaces.find(
                 ({ id }: { id: string }) => id === "outcome",
               ).disposition,
               outcome,

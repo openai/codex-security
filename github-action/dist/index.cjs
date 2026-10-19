@@ -56160,7 +56160,7 @@ async function analyzeResults(options) {
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push("CLI did not return a usable JSON scan result. See the CLI diagnostics.");
@@ -56201,7 +56201,7 @@ async function analyzeResults(options) {
     resultsDirectory: options.resultsDirectory,
     manifestPath: (0, import_node_path5.join)(options.resultsDirectory, "scan-manifest.json"),
     jsonPath: (0, import_node_path5.join)(options.resultsDirectory, "findings.json"),
-    coveragePath: (0, import_node_path5.join)(options.resultsDirectory, "coverage.json"),
+    coveragePath: value.coverage ? (0, import_node_path5.join)(options.resultsDirectory, "coverage.json") : "",
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
@@ -99213,7 +99213,7 @@ function resultSummary(result, inputs, target) {
 <pre>${esc(finding.summary, 1200)}</pre>`);
   }
   if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
-  parts.push("Use the action outputs for full JSON, coverage, and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
+  parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
   return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
 }
 function emitAnnotations(result) {
@@ -99234,6 +99234,7 @@ function emitAnnotations(result) {
 var OUTPUT_NAMES = [
   "sarif-path",
   "json-path",
+  "manifest-path",
   "coverage-path",
   "results-directory",
   "scan-status",
@@ -99270,6 +99271,7 @@ function outputs(result, target, exitCode) {
     "sarif-path": result.paths.sarifPath,
     "json-path": result.paths.jsonPath,
     "coverage-path": result.paths.coveragePath,
+    "manifest-path": result.paths.manifestPath,
     "results-directory": result.paths.resultsDirectory,
     "scan-status": result.scanStatus,
     "policy-status": result.policyStatus,

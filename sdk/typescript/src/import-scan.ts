@@ -278,6 +278,22 @@ export async function importScan(
             runtimeStatus: "imported",
             limitations: [IMPORT_DESCRIPTION],
           },
+          mode: "repository",
+          reviewState: {
+            surfaces: findings.length
+              ? [
+                  {
+                    id: "import",
+                    label: basename(inputPath),
+                    disposition: "reported",
+                    receiptRefs: [sourceRef],
+                    notes: IMPORT_DESCRIPTION,
+                  },
+                ]
+              : [],
+            explicitExclusions: [],
+            deferred: [],
+          },
           extensions: {
             import: {
               format: options.format,
@@ -288,22 +304,6 @@ export async function importScan(
         },
       },
       "findings.json": { findings: bound },
-      "coverage.json": {
-        inventoryStrategy: "custom",
-        surfaces: findings.length
-          ? [
-              {
-                id: "import",
-                label: basename(inputPath),
-                disposition: "reported",
-                receiptRefs: [sourceRef],
-                notes: IMPORT_DESCRIPTION,
-              },
-            ]
-          : [],
-        explicitExclusions: [],
-        deferred: [],
-      },
     };
     for (const [name, document] of Object.entries(documents)) {
       await writeFile(

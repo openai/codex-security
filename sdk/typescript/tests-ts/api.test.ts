@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import {
@@ -99,7 +100,7 @@ import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
@@ -3285,7 +3286,7 @@ describe("CodexSecurity orchestration", () => {
     ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
-    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).toContain("Do not finalize or seal the files");
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
@@ -4485,7 +4486,7 @@ describe("CodexSecurity orchestration", () => {
         "prompt captured",
       );
       expect(prompt).toContain(
-        `Use exactly "${scanId}" as the scan ID in the manifest, findings, and coverage.`,
+        `Use exactly "${scanId}" as the scan ID in the manifest and findings.`,
       );
       expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
       if (mode === "deep") {
@@ -5208,7 +5209,9 @@ describe("CodexSecurity orchestration", () => {
       } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
-        expect((await result).coverage.deferred).toEqual([
+        expect(
+          (await readReviewState((await result).scanDir)).deferred,
+        ).toEqual([
           {
             id: "runtime-note",
             reason: "Optional runtime reproduction was unavailable.",
@@ -5830,7 +5833,7 @@ describe("CodexSecurity orchestration", () => {
           }
         } else {
           const recovered = await result;
-          expect(recovered.coverage).not.toHaveProperty("completeness");
+          expect(recovered.review).not.toHaveProperty("status");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
@@ -7043,8 +7046,8 @@ describe("CodexSecurity orchestration", () => {
     const makeScopeCommand = `${pythonCommand} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     const bindScopeCommand =
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
+        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
     expect(prompt).toContain(makeScopeCommand);
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -7122,19 +7125,14 @@ describe("CodexSecurity orchestration", () => {
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
-    const coverage = join(scanDir, "coverage.json");
     await writeFile(
       manifest,
       JSON.stringify({ scan: { scope: { includePaths: ["wrong"] } } }),
     );
-    await writeFile(coverage, JSON.stringify({ includePaths: ["wrong"] }));
     runScopedHelper(bindScopeCommand);
     expect(
       JSON.parse(await readFile(manifest, "utf8")).scan.scope.includePaths,
     ).toEqual(paths);
-    expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
-      paths,
-    );
     await client.close();
   });
 
@@ -7322,7 +7320,7 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt()).toContain("record_codex_security_scan_draft");
     expect(prompt()).toContain("complete_codex_security_scan");
-    expect(prompt()).not.toContain("do not finalize or seal them");
+    expect(prompt()).not.toContain("Do not finalize or seal the files");
     expect(prompt()).toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
@@ -7341,7 +7339,7 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt()).not.toContain("$codex-security:");
     expect(prompt()).not.toContain("record_codex_security_scan_draft");
     expect(prompt()).toContain("complete_codex_security_scan");
-    expect(prompt()).not.toContain("do not finalize or seal them");
+    expect(prompt()).not.toContain("Do not finalize or seal the files");
     expect(prompt()).toContain(
       'start_codex_security_deep_scan with {"scanId":"scan_example_001"}',
     );
@@ -7352,7 +7350,7 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, { mode: "deep", maxCostUsd: 1 }),
     ).rejects.toThrow("prompt captured");
-    expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toContain("Do not finalize or seal the files");
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(
@@ -7361,7 +7359,7 @@ describe("CodexSecurity orchestration", () => {
         maxCostUsd: 1,
       }),
     ).rejects.toThrow("prompt captured");
-    expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toContain("Do not finalize or seal the files");
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(

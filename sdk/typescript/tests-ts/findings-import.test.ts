@@ -21,7 +21,7 @@ const CSV_SOURCE =
 async function sourceDocument(): Promise<FindingsDocument> {
   return JSON.parse(
     await readFile(
-      join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+      join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
       "utf8",
     ),
   );

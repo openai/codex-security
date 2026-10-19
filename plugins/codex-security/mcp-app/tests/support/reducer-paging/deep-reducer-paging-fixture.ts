@@ -89,7 +89,7 @@ export async function createReducerPagingFixture(root: string) {
   const previousPath = path.join(previousRoot, "result.json");
   await writeJson(workerPath, {
     ...result,
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   });
   await writeJson(previousPath, previous);
 

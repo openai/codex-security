@@ -66,7 +66,7 @@ async function writeCompletedScan(env) {
     displayName: env.CODEX_SECURITY_TARGET_DISPLAY_NAME,
     snapshotDigest: env.CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST,
   };
-  for (const name of ["findings.json", "coverage.json"]) {
+  for (const name of ["findings.json"]) {
     const path = join(directory, name);
     const document = JSON.parse(await readFile(path, "utf8"));
     document.scanId = manifest.scan.id;

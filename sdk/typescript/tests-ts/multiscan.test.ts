@@ -8,6 +8,7 @@ import {
   access,
   appendFile,
   chmod,
+  cp,
   lstat,
   mkdir,
   readFile,
@@ -119,7 +120,7 @@ async function completedScan(
     await reseal(outputDir);
   }
   const result = fakeResult([], completeness);
-  return { manifest: result.manifest, coverage: result.coverage } as ScanResult;
+  return { manifest: result.manifest, review: result.review } as ScanResult;
 }
 
 async function reseal(scanDir: string): Promise<void> {
@@ -750,14 +751,13 @@ describe("multiscan", () => {
         mode: "standard",
       };
       const outputDir = join(paths.output, "artifacts", task.id, "attempt-1");
-      await mkdir(outputDir, { recursive: true, mode: 0o700 });
+      await completedScan(outputDir);
       const artifacts = [
         "scan-manifest.json",
         "findings.json",
         "coverage.json",
         "report.md",
       ].map((name) => join(outputDir, name));
-      await Promise.all(artifacts.map((path) => writeFile(path, "{}\n")));
       const before = await Promise.all(artifacts.map((path) => readFile(path)));
       await writeFile(
         paths.input,
@@ -1225,7 +1225,7 @@ describe("multiscan", () => {
           const recovered = fakeResult([severity]);
           return {
             manifest: recovered.manifest,
-            coverage: recovered.coverage,
+            review: recovered.review,
             cost: recovered.cost,
             findings: recovered.findings,
           };
@@ -2820,6 +2820,38 @@ describe("multiscan", () => {
       },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
+  });
+
+  test("resumes completed scans without coverage.json", async () => {
+    const { paths } = await repositoryFixture("manifest-review");
+    const run = mock<SecurityClient["run"]>(
+      async (_repository, scanOptions = {}) => {
+        await cp(
+          join(PLUGIN_ROOT, "examples", "completed-scan"),
+          scanOptions.outputDir!,
+          {
+            recursive: true,
+          },
+        );
+        await chmod(scanOptions.outputDir!, 0o700);
+        expect(await readdir(scanOptions.outputDir!)).not.toContain(
+          "coverage.json",
+        );
+        return fakeResult();
+      },
+    );
+    const configured = options(paths, client(run));
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 0,
+    });
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {

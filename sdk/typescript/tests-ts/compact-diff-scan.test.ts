@@ -740,8 +740,7 @@ describe("compact diff scan", () => {
       );
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.threatModel).toEqual(threatModel);
-      expect(contract.coverage.openQuestions).toEqual(openQuestions);
-      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      expect(contract.review).toEqual({ excludedPaths: [] });
       const report = readFileSync(join(scanDir, "report.md"), "utf8");
       const modelFacts =
         format === "Markdown"

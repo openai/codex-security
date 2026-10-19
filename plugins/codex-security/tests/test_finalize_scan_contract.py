@@ -19,7 +19,7 @@ import pytest
 from workbench_test_support import ScanFixtureTestCase, load_script, windows_file_backend
 
 FINALIZER = load_script("finalize_scan_contract")
-EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
+EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 

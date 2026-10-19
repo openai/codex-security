@@ -4393,7 +4393,10 @@ describe("CLI", () => {
             data: paginated
               ? expect.any(String)
               : {
-                  coverage: { completeness },
+                  review: {
+                    status:
+                      completeness === "partial" ? "incomplete" : completeness,
+                  },
                   warnings: [warning],
                 },
           });
@@ -5065,10 +5068,7 @@ describe("CLI", () => {
     "evaluates findings independently of legacy coverage %s",
     async (completeness) => {
       const result = fakeResult(["high"], completeness);
-      result.coverage.deferred.push({
-        id: "review-note",
-        reason: "Optional runtime reproduction was unavailable.",
-      });
+      result.review.excludedPaths.push("vendor");
       for (const [threshold, expected] of [
         [undefined, 0],
         ["critical", 0],
@@ -5090,8 +5090,8 @@ describe("CLI", () => {
         ).toBe(expected);
         const envelope = JSON.parse(stdout.text());
         expect(envelope.ok).toBe(true);
-        expect(envelope.data.coverage.deferred).toEqual(
-          result.coverage.deferred,
+        expect(envelope.data.review.excludedPaths).toEqual(
+          result.review.excludedPaths,
         );
         expect(envelope).not.toHaveProperty("error");
         expect(stderr.text()).not.toContain(
@@ -5125,10 +5125,7 @@ describe("CLI", () => {
     "%s retains findings and scope notes in a successful full-output result",
     async (command) => {
       const result = fakeResult(["high"]);
-      result.coverage.deferred.push({
-        id: "runtime-note",
-        reason: "Optional runtime reproduction was unavailable.",
-      });
+      result.review.excludedPaths.push("vendor");
       const { stdout, runCli } = createCliTest(main);
       const recipe = {
         repository: "/original/repository",
@@ -5156,7 +5153,7 @@ describe("CLI", () => {
       ).toBe(0);
       expect(JSON.parse(stdout.text())).toMatchObject({
         ok: true,
-        data: { findings: result.findings, coverage: result.coverage },
+        data: { findings: result.findings, review: result.review },
       });
     },
   );

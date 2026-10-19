@@ -28,6 +28,7 @@ import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
+import { readReviewState } from "./support/review-state.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
@@ -717,9 +718,7 @@ describe("custom validation", () => {
           expect(await json(join(scanDir, resultName))).toMatchObject({
             status: "complete",
           });
-          expect(
-            await json<CoverageDocument>(join(scanDir, "coverage.json")),
-          ).toMatchObject({
+          expect(await readReviewState(scanDir)).toMatchObject({
             deferred: expect.arrayContaining([
               expect.objectContaining({ id: "unfinished-source" }),
             ]),
@@ -798,7 +797,7 @@ describe("custom validation", () => {
           output_tokens: count === 0 ? 3 : 6,
         });
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
-          count === 0 ? "No findings" : "Fixture 0",
+          count === 0 || scenario === "dismissed" ? "No findings" : "Fixture 0",
         );
       } finally {
         await client.close();

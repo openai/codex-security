@@ -1341,7 +1341,7 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
     if (request.kind !== "discovery") return outcome;
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = await readJson(resultPath);
-    draft.coverage = {
+    draft.reviewState = {
       surfaces: [workerReviewed, followUp],
       explicitExclusions: [
         { pattern: "vendor/**", reason: "Third-party code." },
@@ -1371,7 +1371,7 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   });
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
-  const coverage = completed[0].coverage as unknown as {
+  const coverage = completed[0].reviewState as unknown as {
     surfaces: { id: string; workerId: string; receiptRefs?: string[] }[];
     explicitExclusions: { workerId: string; pattern: string }[];
     deferred: { id: string; surfaceIds: string[]; workerId: string }[];
@@ -1398,7 +1398,7 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   for (const worker of store.workers.values()) {
     if (worker.kind !== "discovery") continue;
     const draft = await readJson(worker.resultManifestPath!);
-    assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
-    assert.equal(draft.coverage.deferred.length, 1);
+    assert.deepEqual(draft.reviewState.surfaces, [workerReviewed, followUp]);
+    assert.equal(draft.reviewState.deferred.length, 1);
   }
 }

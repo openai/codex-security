@@ -19,7 +19,6 @@ FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
 REMEDIATION_UPDATE_STATES = ("generated", "applied", "verifying", "verified", "failed")
 EXPORT_FORMATS = ("csv", "json", "sarif")
 ARTIFACTS = {
-    "coverage": "coverage.json",
     "findings": "findings.json",
     "manifest": "scan-manifest.json",
     "markdownReport": "report.md",

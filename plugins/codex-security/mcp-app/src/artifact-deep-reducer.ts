@@ -52,7 +52,7 @@ export async function getCodexSecurityDeepReducerInputs(
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage: _coverage, ...reduction } = result;
+        const { reviewState: _coverage, ...reduction } = result;
         return { workerId: worker.id, result: reduction };
       }),
     );

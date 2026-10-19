@@ -33,7 +33,7 @@ const rendered = renderDiscoveryPrompt({ ...discoveryInput });
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
-assert.match(rendered, /coverage\.deferred/);
+assert.match(rendered, /reviewState\.deferred/);
 const discoveryContext = firstJsonBlock(rendered);
 const { scope, ...expectedContext } = discoveryInput;
 assert.deepEqual(discoveryContext, {

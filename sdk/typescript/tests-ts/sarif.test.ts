@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const example = join(PLUGIN_ROOT, "examples", "completed-scan");
+const example = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const manifest = JSON.parse(
   await readFile(join(example, "scan-manifest.json"), "utf8"),
 );

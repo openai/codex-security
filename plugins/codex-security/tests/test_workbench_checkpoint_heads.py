@@ -18,6 +18,7 @@ from workbench_test_support import (
     fail_deep_scan,
     get_scan,
     preserve_scan_results,
+    read_review_state,
     replay_saved_results,
     run_workbench,
     saved_binding,
@@ -77,10 +78,7 @@ def test_late_head_changes_require_explicit_recovery(
     frozen = json.loads(first_manifest)["scan"]["preservedSources"]
     assert any("/checkpoint-heads/" in path for path in frozen)
     assert not any(path.endswith("checkpoint-head.json") for path in frozen)
-    assert not any(
-        row["id"] == "review"
-        for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
-    )
+    assert not any(row["id"] == "review" for row in read_review_state(state, scan_dir)["deferred"])
     assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
 
     select(result.parent, reopened if selection == "reopened" else completed, 300)
@@ -91,7 +89,7 @@ def test_late_head_changes_require_explicit_recovery(
     assert manifest_path.read_bytes() == first_manifest
     recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert any(row["id"] == "review" for row in coverage["deferred"]) is (selection == "reopened")
     published = manifest_path.read_bytes()
     scan_command(state, "recover-scan-results", scan_id, environment=environment)
@@ -545,7 +543,7 @@ def test_completion_checks_selected_parent_checkpoint(
     manifest["scan"]["scope"]["limitations"] = ["The dependency boundary is still unreviewed."]
     manifest["scan"]["threatModel"] = {"summary": "The earlier threat model."}
     manifest_path.write_text(json.dumps(manifest))
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     if complete is False:
         coverage.update(deferred=[{"id": "review", "reason": "Review reopened."}])
     draft = {
@@ -796,7 +794,6 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
         ("findings.json", 200),
         ("findings.json", 50),
         ("findings.json", 100),
-        ("coverage.json", 200),
         ("scan-manifest.json", 200),
     ],
 )
@@ -866,7 +863,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     original_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
     original_checkpoint = scan_dir / "checkpoints" / original_head["checkpoint"]
     os.utime(original_checkpoint, ns=(100, 100))
-    for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
+    for filename in ("findings.json", "scan-manifest.json"):
         os.utime(scan_dir / filename, ns=(100, 100))
     select(scan_dir, original_checkpoint, 100)
 
@@ -902,10 +899,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     assert terminal_checkpoint != original_checkpoint
     os.utime(terminal_checkpoint, ns=(head_time, head_time))
     select(scan_dir, terminal_checkpoint, head_time)
-    assert (
-        json.loads((scan_dir / "coverage.json").read_text())
-        == (terminal if destination == "scan-manifest.json" else initial)["coverage"]
-    )
+    assert read_review_state(state, scan_dir) == initial["coverage"]
 
     first = []
 
@@ -922,7 +916,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     )
     replay = (
         json.loads((scan_dir / "findings.json").read_text()),
-        json.loads((scan_dir / "coverage.json").read_text()),
+        read_review_state(state, scan_dir),
     )
     for findings, coverage in (first[0], replay):
         assert child_work in coverage["deferred"]

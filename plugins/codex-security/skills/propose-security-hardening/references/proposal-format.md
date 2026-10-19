@@ -263,7 +263,7 @@ When an option maps to disclosure documents rather than canonical scan findings,
 - `opportunities_identified` requires at least one complete opportunity.
   `local_remediation_preferred` requires an empty opportunity list and a portfolio that explains why tactical fixes are proportionate.
 - `claimType` is `observed` or `inferred`. Proposed behavior belongs in option text, not in the evidence array.
-- `sourceKind` is `finding`, `disclosure`, `document`, `source`, `coverage`,
+- `sourceKind` is `finding`, `disclosure`, `document`, `source`, `reviewState`,
   `threat_model`, `poc`, or `experiment`. Use `evidenceId` for disclosure,
   document, PoC, or experiment evidence and `findingId` for a canonical finding.
 - `kind` is `baseline`, `incremental`, `structural`, `isolation`, or `foundational`.

@@ -54,7 +54,7 @@ raise AssertionError("publication never reached the requested crash boundary")
 
 @pytest.mark.parametrize(
     "boundary",
-    ["findings.json", "coverage.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
+    ["findings.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
 )
 def test_publication_crash_replays_selected_input_without_stale_overwrite(
     workbench_api, workbench_db, publication_scan, tmp_path, boundary

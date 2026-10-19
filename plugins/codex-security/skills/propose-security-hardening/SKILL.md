@@ -36,7 +36,7 @@ Start from one or more of:
 
 - a directory or explicit list of vulnerability disclosures, rough reports,
   supplied findings, incident reviews, assessment documents, PoCs, traces, or other relevant artifacts;
-- a Codex Security scan ID or scan directory, including its canonical `scan-manifest.json`, `findings.json`, `coverage.json`, and detailed finding writeups when available;
+- a Codex Security scan ID or scan directory, including its canonical `scan-manifest.json`, `findings.json`, and detailed finding writeups when available;
 - the target source tree and relevant revision or snapshot, when available;
 - any constraints the user supplied for performance, memory, compatibility,
   reliability, operational complexity, delivery horizon, or change budget.

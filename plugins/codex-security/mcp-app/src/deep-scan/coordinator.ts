@@ -363,7 +363,7 @@ export class DeepScanCoordinator {
       const draft = schedulerResult.result
         ? {
             ...structuredClone(schedulerResult.result),
-            coverage: aggregateDiscoveryCoverage(
+            reviewState: aggregateDiscoveryCoverage(
               this.artifacts,
               schedulerResult.discoveries,
             ),
@@ -371,7 +371,7 @@ export class DeepScanCoordinator {
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
-            coverage: {
+            reviewState: {
               surfaces: [],
               explicitExclusions: [],
               deferred: [

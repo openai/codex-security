@@ -254,7 +254,7 @@ describe("scan publication and artifact recovery", () => {
               reportPath: join(fixture.scanDir, "report.md"),
             });
             expect(envelope.data.findings.findings).toHaveLength(1);
-            expect(envelope.data.coverage.deferred.length).toBeGreaterThan(0);
+            expect(envelope.data.review).toEqual({ excludedPaths: [] });
             expect(envelope.data).not.toHaveProperty("turn");
           }
         }

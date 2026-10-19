@@ -382,7 +382,7 @@ function checkpoint(scanId: string, candidateId: string, reason: string) {
     scanId,
     complete: false,
     findings: [],
-    coverage: {
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [{ candidateId, reason, paths: ["fixture.py"] }],
@@ -413,13 +413,14 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
       },
       runWorkbench,
     );
-    const coverage = await readJson(run.scanDir, "coverage.json");
-    coverage.surfaces = [
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    const reviewState = manifest.scan.reviewState;
+    reviewState.surfaces = [
       { id: "http-api", label: "HTTP API", disposition: "reported" },
     ];
     const findings = await readJson(run.scanDir, "findings.json");
     findings.findings[0].locations[0].path = "./fixture.py";
-    await writeJsonLine(path.join(run.scanDir, "coverage.json"), coverage);
+    await writeJsonLine(path.join(run.scanDir, "scan-manifest.json"), manifest);
     await writeJsonLine(path.join(run.scanDir, "findings.json"), findings);
 
     for (const update of ["first-update", "reloaded-update"]) {
@@ -434,12 +435,13 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
         runWorkbench,
       );
       assert.equal(
-        (await readJson(run.scanDir, "coverage.json")).surfaces[0].id,
+        (await readJson(run.scanDir, "scan-manifest.json")).scan.reviewState
+          .surfaces[0].id,
         "http-api",
       );
       const head = await readJson(run.scanDir, "checkpoint-head.json");
       const saved = await readJson(run.scanDir, "checkpoints", head.checkpoint);
-      assert.equal(saved.coverage.surfaces[0].id, "http-api");
+      assert.equal(saved.reviewState.surfaces[0].id, "http-api");
       assert.equal(saved.findings[0].locations[0].path, "./fixture.py");
     }
 
@@ -450,7 +452,7 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
       path.join(run.scanDir, "checkpoints", head.checkpoint),
       saved,
     );
-    const names = ["scan-manifest.json", "findings.json", "coverage.json"];
+    const names = ["scan-manifest.json", "findings.json"];
     const before = await Promise.all(
       names.map((name) => readFile(path.join(run.scanDir, name))),
     );
@@ -524,10 +526,11 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
       "the stale writer retries after the host rejects its digest",
     );
 
-    const coverage = await readJson(run.scanDir, "coverage.json");
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    const reviewState = manifest.scan.reviewState;
     assert.deepEqual(
       new Set(
-        coverage.deferred.map(
+        reviewState.deferred.map(
           (item: { candidateId: string }) => item.candidateId,
         ),
       ),
@@ -593,9 +596,16 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
     );
     const stopped = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
     assert.equal(stopped.scan.progress.status, "canceled");
-    const coverage = await readJson(run.scanDir, "coverage.json");
-    const pending = coverage.deferred.map(
-      (item: { candidateId: string }) => item.candidateId,
+    const frozen = Object.keys(JSON.parse(sealed).scan.preservedSources).filter(
+      (name) => name.startsWith("checkpoints/"),
+    );
+    const retained = await Promise.all(
+      frozen.map((name) => readJson(run.scanDir, name)),
+    );
+    const pending = retained.flatMap((checkpoint) =>
+      checkpoint.reviewState.deferred.map(
+        (item: { candidateId: string }) => item.candidateId,
+      ),
     );
     assert.ok(pending.includes("early-result"));
     assert.ok(
@@ -998,7 +1008,7 @@ async function testWorkerCoverageSurvivesParentCompletion() {
       if (request.kind === "discovery") {
         const root = request.artifactContext!.root;
         const draft = await readJson(root, "result.json");
-        draft.coverage = {
+        draft.reviewState = {
           surfaces: [
             {
               id: "entry",
@@ -1057,7 +1067,12 @@ async function testWorkerCoverageSurvivesParentCompletion() {
     const terminal = await coordinator.wait(undefined, 30_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
-    const coverage = await readJson(run.scanDir, "coverage.json");
+    const head = await readJson(run.scanDir, "checkpoint-head.json");
+    const { reviewState: coverage } = await readJson(
+      run.scanDir,
+      "checkpoints",
+      head.checkpoint,
+    );
 
     assert.equal(coverage.surfaces.length, 2);
     assert.equal(
@@ -1135,7 +1150,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       {
         scanId: run.scanId,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [
@@ -1156,7 +1171,6 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const draftNames = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "checkpoint-head.json",
     ];
     const beforeFailure = await Promise.all(
@@ -1219,7 +1233,8 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       ["Unsafe request output saved"],
     );
     assert.equal(recovered.findings[0].provenance.workerId, worker.id);
-    const coverage = await readJson(run.scanDir, "coverage.json");
+    const coverage = (await readJson(run.scanDir, "scan-manifest.json")).scan
+      .reviewState;
 
     assert.equal(
       coverage.deferred.some((item: { reason: string }) =>

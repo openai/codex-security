@@ -1297,7 +1297,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
   assert.match(continuation, /completed source analysis/);
   assert.match(
     continuation,
-    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, coverage \}\)/,
+    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, reviewState \}\)/,
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
@@ -3280,7 +3280,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
         "result.json",
       );
       const result = await readJson(resultPath);
-      result.coverage.deferred = [
+      result.reviewState.deferred = [
         { id: "remaining-review", reason: "Source review remains pending." },
       ];
       await writeJson(resultPath, result);
@@ -3316,7 +3316,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
   assert.equal(resumed?.status, "succeeded", resumed?.error);
 
   assert.equal(
-    (completedDrafts[0].coverage.deferred as unknown[]).length,
+    (completedDrafts[0].reviewState.deferred as unknown[]).length,
     5,
     "resumed reduction must retain pending review from every merged worker",
   );
@@ -3646,7 +3646,7 @@ async function testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence
   const manifest = await readJson(terminal.manifestPath);
   assert.deepEqual(manifest.findings, []);
 
-  assert.deepEqual(completedDrafts[0].coverage.deferred, [
+  assert.deepEqual(completedDrafts[0].reviewState.deferred, [
     {
       reason:
         "The configured discovery time limit elapsed before any source review completed.",
@@ -3854,7 +3854,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   const acceptedReducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup" && worker.status === "succeeded",
   );
-  const { coverage, ...publishedReduction } = completed[0];
+  const { reviewState, ...publishedReduction } = completed[0];
   assert.deepEqual(
     publishedReduction,
     await readJson(acceptedReducer!.resultManifestPath!),
@@ -3873,7 +3873,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
     for (const worker of store.workers.values()) {
       if (worker.kind !== "discovery" || !worker.resultManifestPath) continue;
       const changed = await readJson(worker.resultManifestPath);
-      changed.coverage = {
+      changed.reviewState = {
         surfaces: [],
         explicitExclusions: [],
         deferred: [{ reason: "Late write after acceptance." }],
@@ -3914,11 +3914,11 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
   );
 
   assert.deepEqual(
-    completed[0].coverage.deferred,
+    completed[0].reviewState.deferred,
     [],
-    "late writes cannot change accepted coverage",
+    "late writes cannot change accepted reviewState",
   );
-  assert.equal(completed[0].coverage.surfaces.length, 1);
+  assert.equal(completed[0].reviewState.surfaces.length, 1);
   const reducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup",
   );

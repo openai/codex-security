@@ -172,7 +172,6 @@ function renderFindingDescription(
   uploadedAt: string,
   assessment?: SeverityAssessment,
 ): string {
-  const { coverage } = contract;
   const { scan } = contract.manifest;
   const lines = ["## Summary", "", finding.summary];
   if (assessment?.source === "rubric") {
@@ -262,8 +261,7 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Coverage mode:** ${coverage.mode}`,
-    `**Scan mode:** ${scanMode(coverage.mode)}`,
+    `**Scan mode:** ${scanMode(contract.mode)}`,
     `**Started:** ${scan.startedAt}`,
     `**Completed:** ${scan.completedAt}`,
     `**Uploaded:** ${uploadedAt}`,
@@ -295,7 +293,7 @@ function renderTargetIdentity(target: ScanTargetRecord): string[] {
   return lines;
 }
 
-function scanMode(mode: LoadedContract["coverage"]["mode"]): string {
+function scanMode(mode: LoadedContract["mode"]): string {
   if (mode === "deep_repository") return "deep";
   if (mode === "repository") return "standard";
   return mode;

@@ -41,6 +41,52 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     return module
 
 
+def read_review_state(state_dir: Path, scan_dir: Path) -> dict[str, Any]:
+    """Reconstruct internal review state from the retained publication inputs."""
+    review = load_script("review_state")
+
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    summary = manifest["scan"]
+    if review.uses_legacy_review(summary):
+        return json.loads((scan_dir / "coverage.json").read_text())
+    if "reviewState" in summary:
+        return review.review_state(summary)
+    if "preservedSources" not in summary:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    db = load_script("workbench_db")
+    saved = load_script("workbench_saved_results")
+    finalizer = load_script("finalize_scan_contract")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+            (summary["id"],),
+        ).fetchall()
+    binding = db.workbench_completion_binding(scan, summary["completedAt"], manifest)
+    binding["status"] = summary["status"]
+    documents = saved.merge_saved_results(
+        scan_dir,
+        summary["id"],
+        binding,
+        workers,
+        [],
+        stopped=summary["status"] != "completed",
+        reason=(
+            f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
+        ).strip(),
+        frozen_source_digests=summary["preservedSources"],
+    )
+    return finalizer._prepare_scan_finalization(
+        scan_dir,
+        expected_coverage_mode=db.expected_coverage_mode(scan),
+        completion_binding=binding,
+        draft_documents=documents,
+    ).coverage
+
+
 def source_plugin_version() -> str:
     manifest = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
     version = manifest.get("version")
