@@ -15,6 +15,7 @@
 - clean up imports and expected test exceptions ([#1665](https://github.com/openai/codex-security/pull/1665))
 - honor selected profile approval policy ([#530](https://github.com/openai/codex-security/pull/530))
 - remove reasoning effort allowlist ([#1712](https://github.com/openai/codex-security/pull/1712))
+- use the SHA-256 empty tree for root commit diffs ([#1716](https://github.com/openai/codex-security/pull/1716))
 
 <!-- release-section: highlights:end -->
 

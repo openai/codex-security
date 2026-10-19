@@ -64,6 +64,7 @@ from workbench_constants import (
     DELIVERED_ACTION_LEASE_SECONDS,
     DIFF_TARGET_KINDS,
     EMPTY_GIT_TREE,
+    EMPTY_GIT_TREES,
     FINDING_ABSOLUTE_PATH_BYTES,
     FINDING_LEVEL_BYTES,
     FINDING_LOCATION_PATH_BYTES,
@@ -337,7 +338,7 @@ def require_diff_target(
             None,
         )
         if parent_line is None:
-            parent = EMPTY_GIT_TREE
+            parent = EMPTY_GIT_TREES[git_output(target, "rev-parse", "--show-object-format")]
         else:
             parent = resolve_git_commit(
                 target,
