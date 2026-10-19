@@ -847,6 +847,37 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
 
 
+@pytest.mark.parametrize(
+    ("timestamps", "expected_order"),
+    [
+        (("2026-08-01T00:00:00Z", "2026-08-01T01:00:00+02:00"), (1, 0)),
+        (("2026-08-01T00:00:00.000200Z", "2026-08-01T01:00:00.000100+01:00"), (1, 0)),
+        (("2026-08-01T01:00:00+01:00", "2026-08-01T00:00:00Z"), (0, 1)),
+    ],
+    ids=["mixed-offsets", "microseconds", "equal-instants"],
+)
+def test_finding_occurrence_history_uses_start_instants(
+    tmp_path: Path, timestamps: tuple[str, str], expected_order: tuple[int, int]
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scans = sorted(
+        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
+        key=lambda scan: scan["scanId"],
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(timestamp, scan["scanId"]) for scan, timestamp in zip(scans, timestamps)],
+        )
+
+    for scan in scans:
+        finding = get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
+        assert finding["knownSince"] == timestamps[expected_order[0]]
+        assert finding["knownScanIds"] == [scans[index]["scanId"] for index in expected_order]
+
+
 def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

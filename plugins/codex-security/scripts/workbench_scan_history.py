@@ -990,7 +990,8 @@ def finding_matches(
         )
     )
     known_scans = sorted(
-        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
+        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows},
+        key=lambda scan: (timestamp_key(scan[0]), scan[1]),
     )
     included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
     rows.extend(
