@@ -220,16 +220,20 @@ export function scanCyberAccessConfig(
   program: CyberAccessProgram | undefined,
 ): JsonObject {
   if (program === undefined) return config;
-  const resolved = resolveCodexProfile(config);
-  const features = isObject(resolved["features"]) ? resolved["features"] : {};
+  const features = isObject(config["features"]) ? config["features"] : {};
+  const profileFeatures = selectedScanProfile(config)?.["features"];
   return {
     ...config,
     features: {
-      ...(isObject(config["features"]) ? config["features"] : {}),
+      ...features,
       // Explicit selections opt in to upstream API-key support. Keep a user's
       // explicit disable so Codex can report it instead of silently dropping it.
       api_key_cyber_access_programs:
-        features["api_key_cyber_access_programs"] ?? true,
+        (isObject(profileFeatures)
+          ? profileFeatures["api_key_cyber_access_programs"]
+          : undefined) ??
+        features["api_key_cyber_access_programs"] ??
+        true,
     },
   };
 }
