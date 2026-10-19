@@ -138,9 +138,21 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(identity.status, identity.stderr).toBe(0);
       const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
       expect(sid).toBeDefined();
+      const administrator = inspectWindowsTestAcl(
+        [
+          "$ErrorActionPreference = 'Stop'",
+          "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+        ],
+        process.env,
+      );
+      expect(administrator.status, administrator.stderr).toBe(0);
+      const localAdministrator = administrator.stdout.trim();
+      expect(localAdministrator).toMatch(/^S-1-(?:\d+-)*500$/u);
+      const resolvedAliases = { LA: localAdministrator };
       expect(
-        inspectWindowsCredentialAcl(original[ancestors.length]!.sddl, sid!)
-          .untrustedPrincipals,
+        inspectWindowsCredentialAcl(original[ancestors.length]!.sddl, sid!, {
+          resolvedAliases,
+        }).untrustedPrincipals,
       ).toContain("S-1-1-0");
 
       try {
@@ -181,7 +193,7 @@ describe("runtime directories and plugin Python boundary", () => {
           inspectWindowsCredentialAcl(
             repaired[ancestors.length + offset]!.sddl,
             sid!,
-            { scope },
+            { scope, resolvedAliases },
           ),
         ).toMatchObject({
           grantsCurrentUserAccess: true,
