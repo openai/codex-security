@@ -180,23 +180,15 @@ export async function readScanLogs(options: ScanLogOptions) {
       if (event["type"] === "session_meta" && isRecord(payload)) {
         replaying = payload["id"] !== session.threadId;
       }
-      if (replaying) {
-        if (
-          event["type"] !== "event_msg" ||
-          !isRecord(payload) ||
-          payload["type"] !== "task_started" ||
-          !sessionOwnsTurn(session, payload)
-        ) {
-          continue;
-        }
-        replaying = false;
-      }
-      if (
-        completionBoundary !== null &&
+      const taskStarted =
         event["type"] === "event_msg" &&
         isRecord(payload) &&
-        payload["type"] === "task_started"
-      ) {
+        payload["type"] === "task_started";
+      if (replaying) {
+        if (!taskStarted || !sessionOwnsTurn(session, payload)) continue;
+        replaying = false;
+      }
+      if (taskStarted && completionBoundary !== null) {
         const timestamp = sessionStartedAt(event["timestamp"]);
         if (timestamp !== null && timestamp >= completionBoundary) break;
       }

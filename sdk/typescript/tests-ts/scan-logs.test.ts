@@ -258,9 +258,15 @@ describe("saved scan logs", () => {
     },
   );
 
-  test.each(["2026-08-11T12:03:00.000Z", null, undefined])(
-    "uses the saved log boundary while preserving recorded resumed workers: %p",
-    async (logCompletedAt) => {
+  test.each([
+    ["complete", "2026-08-11T12:03:00.000Z"],
+    ["failed", "2026-08-11T12:03:00.000Z"],
+    ["canceled", "2026-08-11T12:03:00.000Z"],
+    ["complete", null],
+    ["complete", undefined],
+  ] as const)(
+    "preserves resumed workers with status %s and log boundary %p",
+    async (status, logCompletedAt) => {
       const home = await temporaryHome();
       const scanDirectory = join(home, "scans", "resumed");
       const resumed = [
@@ -320,7 +326,7 @@ describe("saved scan logs", () => {
           continuationThreadId: "parent",
           executionThreadIds: ["parent", "recorded-worker"],
           progress: {
-            status: "complete",
+            status,
             updatedAt: "2026-08-11T12:01:00.000Z",
           },
           updatedAt: "2026-08-11T12:05:00.000Z",
