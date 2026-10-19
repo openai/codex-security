@@ -4683,10 +4683,15 @@ describe("CodexSecurity orchestration", () => {
       undefined,
     ],
     ["managed provider selection retains matching", "managed", undefined],
+    ["native provider credentials retain matching", "native", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
       const limited = failure === "budget" || failure === "budget-context";
+      const nativeProvider = failure === "native";
+      const providerName = nativeProvider ? "openrouter" : "synthetic.provider";
+      const closedHistory =
+        failure === "dismissed" || failure === "managed" || nativeProvider;
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const current = {
         findingId: "csf_852f90d6e1177502ff113d4a",
@@ -4719,16 +4724,21 @@ describe("CodexSecurity orchestration", () => {
       const providerConfig = {
         features: { shell_tool: false, unified_exec: false, view_image: false },
         windows: { sandbox: "unelevated" },
-        model_provider: "synthetic.provider",
+        model_provider: providerName,
         model_providers: {
-          "synthetic.provider": {
+          [providerName]: {
             name: "Synthetic provider",
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
             env_http_headers: {
               "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
+              ...(nativeProvider
+                ? { "X-Native-Context": "OPENAI_API_KEY" }
+                : {}),
             },
-            auth: { command: "synthetic-auth" },
+            ...(nativeProvider
+              ? { env_key: "CODEX_API_KEY" }
+              : { auth: { command: "synthetic-auth" } }),
           },
           ...(failure === "managed"
             ? { "synthetic.managed": managedProvider }
@@ -4826,6 +4836,14 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
+          ...(nativeProvider
+            ? {
+                environment: {
+                  CODEX_API_KEY: " synthetic-native-key ",
+                  OPENAI_API_KEY: " synthetic-native-header ",
+                },
+              }
+            : {}),
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: {
               SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
@@ -4866,7 +4884,7 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
-              if (failure === "dismissed" || failure === "managed") {
+              if (closedHistory) {
                 return {
                   findings: args.includes("--status")
                     ? matched
@@ -4889,6 +4907,14 @@ describe("CodexSecurity orchestration", () => {
             return mockWorkbench(args, input);
           },
           async matchFindings(input, options, runtimeOptions) {
+            if (nativeProvider) {
+              expect(options?.environment?.["CODEX_API_KEY"]).toBe(
+                " synthetic-native-key ",
+              );
+              expect(options?.environment?.["OPENAI_API_KEY"]).toBe(
+                " synthetic-native-header ",
+              );
+            }
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
             if (failure !== "managed")
               expect(options?.config?.codexOverrides).toMatchObject({
@@ -5005,6 +5031,7 @@ describe("CodexSecurity orchestration", () => {
 
       try {
         const result = await client.run(repository, {
+          ...(nativeProvider ? { auth: "api-key" as const } : {}),
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
           onWarning: (message) => warnings.push(message),
@@ -5018,7 +5045,7 @@ describe("CodexSecurity orchestration", () => {
         ).toEqual(
           failure === "budget"
             ? ["another-open-finding"]
-            : failure === "dismissed" || failure === "managed"
+            : closedHistory
               ? []
               : undefined,
         );
@@ -5040,7 +5067,7 @@ describe("CodexSecurity orchestration", () => {
         expect(
           commands.some(([command]) => command === "list-global-findings"),
         ).toBe(true);
-        if (failure === "dismissed" || failure === "managed") {
+        if (closedHistory) {
           expect(JSON.parse(savedComparisonInput!)).toMatchObject({
             matches: [
               {

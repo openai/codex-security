@@ -3321,6 +3321,20 @@ export class CodexSecurity {
       sessionConfig,
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
+    const providerEnvironment = {
+      ...selectedProviderEnvironment(
+        session.effectiveConfig,
+        selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : this.#dependencies.environment,
+          auth,
+        ),
+      ),
+      ...(providerEnvKey === undefined || apiKey === null
+        ? {}
+        : { [providerEnvKey]: apiKey }),
+    };
     const environment: ProcessEnvironment = {
       ...environmentWithGit(
         pluginExecutionEnvironment(
@@ -3337,9 +3351,7 @@ export class CodexSecurity {
         ),
         git,
       ),
-      ...(providerEnvKey === undefined || apiKey === null
-        ? {}
-        : { [providerEnvKey]: apiKey }),
+      ...providerEnvironment,
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
@@ -3380,18 +3392,7 @@ export class CodexSecurity {
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment({
       ...withoutOpenAiApiKeys(environment),
-      ...selectedProviderEnvironment(
-        session.effectiveConfig,
-        selectedScanEnvironment(
-          commandAuth
-            ? withoutOpenAiApiKeys(this.#dependencies.environment)
-            : this.#dependencies.environment,
-          auth,
-        ),
-      ),
-      ...(providerEnvKey === undefined || apiKey === null
-        ? {}
-        : { [providerEnvKey]: apiKey }),
+      ...providerEnvironment,
     });
     if (
       process.platform === "win32" &&
