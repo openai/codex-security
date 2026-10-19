@@ -102,6 +102,7 @@ function validatePackagePaths(entries) {
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/classify-severity-records.md",
     "package/docs/hosted-scans.md",
     "package/docs/validate-records.md",
     "package/schemas/hosted-scan-v2.fixture.json",

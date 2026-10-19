@@ -1565,6 +1565,7 @@ describe("CLI workbench", () => {
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
+    let maxTimeMinutes: unknown;
 
     expect(
       await runCapturedCli(
@@ -1573,6 +1574,7 @@ describe("CLI workbench", () => {
         dependencies({
           onTurn: (_repository, options) => {
             parentScanId = options.parentScanId;
+            maxTimeMinutes = options.maxTimeMinutes;
           },
           onWorkbench: (args): JsonObject =>
             args[0] === "list-scans"
@@ -1583,6 +1585,7 @@ describe("CLI workbench", () => {
                     repository: "/current/repository",
                     target: { kind: "repository", paths: [] },
                     mode: "standard",
+                    maxTimeMinutes: 15,
                     config: {},
                   },
                 },
@@ -1590,6 +1593,7 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(parentScanId).toBe("latest-scan");
+    expect(maxTimeMinutes).toBe(15);
   });
 
   test("reruns a scan prefix with its resolved parent UUID", async () => {

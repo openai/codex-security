@@ -3656,7 +3656,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable for every change", async () => {
+  test("preserves source checks while isolating body-only edits", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3667,6 +3667,7 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
+          needs?: string | string[];
           "timeout-minutes"?: number;
           strategy?: { matrix: Record<string, string[]> };
           steps: Array<{
@@ -3678,9 +3679,8 @@ describe("GitHub release workflow safeguards", () => {
       >;
     };
 
-    expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
-    );
+    const sourceGroup =
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}";
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' }}",
     );
@@ -3705,9 +3705,16 @@ describe("GitHub release workflow safeguards", () => {
     ]) {
       expect(workflow.jobs[job]?.if).toBeUndefined();
     }
-    const requiredJobCondition = "always()";
-    expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
-    expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (["validate-title", "required-test", "windows"].includes(name)) {
+        continue;
+      }
+      expect([job.needs].flat(), name).toContain("validate-title");
+      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+    }
+    for (const job of ["required-test", "windows"]) {
+      expect(workflow.jobs[job]?.if).toStartWith("always() && (");
+    }
     const coverageGate = (job: string) =>
       workflow.jobs[job]?.steps.find(
         ({ name }) =>
@@ -3803,23 +3810,89 @@ describe("GitHub release workflow safeguards", () => {
     };
     const unixJob = workflow.jobs["required-test"];
     const windowsJob = workflow.jobs["windows"];
-    const fullNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }),
-      ),
-    ];
     const requiredContexts = new Set([
       "ubuntu-latest / node-22",
       "macos-latest / node-22",
       "windows-latest / node-22",
     ]);
+    const unixPrefix = /^\$\{\{ (.+) && 'body edit \/ ' \|\| '' \}\}/u.exec(
+      unixJob?.name ?? "",
+    )!;
+    const windowsPrefix = /^\$\{\{ (.+) && 'body edit \/ ' \|\| '' \}\}/u.exec(
+      windowsJob?.name ?? "",
+    )!;
+    const groupSuffix = /\$\{\{ (.+) && '-body-edit' \|\| '' \}\}$/u.exec(
+      workflow.concurrency.group.slice(sourceGroup.length),
+    )!;
+    expect(unixPrefix).not.toBeNull();
+    expect(windowsPrefix).not.toBeNull();
+    expect(groupSuffix).not.toBeNull();
+    expect(workflow.concurrency.group).toBe(sourceGroup + groupSuffix[0]);
 
-    expect(
-      fullNames.filter((name) => requiredContexts.has(name)).sort(),
-    ).toEqual([...requiredContexts].sort());
+    for (const [action, body, title, base, runSource] of [
+      ["null", "null", "null", "null", true], // push
+      ["opened", "null", "null", "null", true],
+      ["reopened", "null", "null", "null", true],
+      ["synchronize", "null", "null", "null", true],
+      ["edited", "changed", "null", "null", false],
+      ["edited", "null", "changed", "null", true],
+      ["edited", "changed", "changed", "null", true],
+      ["edited", "null", "null", "changed", true],
+      ["edited", "changed", "null", "changed", true],
+      ["edited", "null", "null", "null", true],
+    ] as const) {
+      const values = {
+        "always()": "true",
+        "github.event.action": action,
+        "github.event.changes.body": body,
+        "github.event.changes.title": title,
+        "github.event.changes.base": base,
+      };
+      const guards = ["validate-title", "required-test", "windows"].map(
+        (job) => workflow.jobs[job]?.if ?? "",
+      );
+      const results = await evaluateWorkflowConditions(
+        [...guards, unixPrefix[1]!, windowsPrefix[1]!, groupSuffix[1]!].map(
+          (condition) => ({ condition, values }),
+        ),
+      );
+      expect(results, JSON.stringify(values)).toEqual([
+        runSource,
+        runSource,
+        runSource,
+        !runSource,
+        !runSource,
+        !runSource,
+      ]);
+      const prefix = results[3] ? "body edit / " : "";
+      const names = [
+        ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
+          renderName(unixJob!.name.replace(unixPrefix[0], prefix), { os }),
+        ),
+        ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
+          renderName(windowsJob!.name.replace(windowsPrefix[0], prefix), {
+            node,
+          }),
+        ),
+      ];
+      expect(names).toEqual(
+        [
+          "ubuntu-latest / node-22",
+          "macos-latest / node-22",
+          "windows-latest / node-22",
+          "windows-latest / node-24",
+        ].map((name) => prefix + name),
+      );
+      expect(names.filter((name) => requiredContexts.has(name)).sort()).toEqual(
+        runSource ? [...requiredContexts].sort() : [],
+      );
+      expect(
+        workflow.concurrency.group.replace(
+          groupSuffix[0],
+          results[5] ? "-body-edit" : "",
+        ),
+      ).toBe(sourceGroup + (runSource ? "" : "-body-edit"));
+    }
   });
 
   test("documents a canonical historical-summary prefix block", () => {

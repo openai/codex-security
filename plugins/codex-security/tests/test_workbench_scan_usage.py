@@ -165,6 +165,7 @@ def _rollout(
     parent_thread_id: str | None = None,
     recorded_thread_id: str | None = None,
     include_task_start: bool = True,
+    include_task_complete: bool = True,
     include_task_start_timestamp: bool = True,
     task_started_at: datetime | None = None,
     session_started_at: datetime | None = None,
@@ -198,6 +199,14 @@ def _rollout(
             )
         records.append(event)
     records.extend(events)
+    if events and parent_thread_id is not None and include_task_complete:
+        records.append(
+            {
+                "timestamp": events[-1]["timestamp"],
+                "type": "event_msg",
+                "payload": {"type": "task_complete"},
+            }
+        )
     rollout.write_text(
         "".join(f"{json.dumps(item, separators=(',', ':'))}\n" for item in records),
         encoding="utf-8",
@@ -365,16 +374,20 @@ def test_completion_counts_native_responses_and_compaction_without_legacy_duplic
             _token_event(counted, 170, 17),
             compaction,
             _response_event(counted, "scan-parent", "last", 30, 4, turn_usage=(90, 9)),
+            _event(counted, "event_msg", {"type": "task_complete"}),
         ],
     )
     _state_graph(fixture.environment, {"scan-parent": parent}, [])
 
-    assert _complete_scan(fixture)["scan"]["usage"] == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(140, 0, 14),
-        "threadCount": 1,
-    }
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(140, 0, 14),
+            "threadCount": 1,
+        }.items()
+    )
 
 
 @pytest.mark.parametrize(
@@ -411,17 +424,20 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
         else _token_event(started, 10, 1),
     ]
     events.insert(0 if scope == "before" else len(events), marker)
+    events.append(_event(completed, "event_msg", {"type": "task_complete"}))
     parent = _rollout(tmp_path, "scan-parent", events)
     helper = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=started,
         completed_at=completed,
         completed_turn_id="turn-scan-parent" if scope == "completion_turn" else None,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == _counts(10, 0, 1)
     assert warnings == ({"compaction_usage_unavailable"} if expected_warning else set())
@@ -437,17 +453,20 @@ def test_legacy_compaction_warning_survives_a_later_native_turn(tmp_path: Path) 
             _event(started, "compacted", {"message": "Summary.", "replacement_history": []}),
             _event(started, "event_msg", {"type": "task_started", "turn_id": "native-turn"}),
             _response_event(started, "scan-parent", "native", 20, 2, turn_id="native-turn"),
+            _event(started, "event_msg", {"type": "task_complete"}),
         ],
     )
     helper = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == _counts(30, 0, 3)
     assert warnings == {"compaction_usage_unavailable"}
@@ -472,6 +491,7 @@ def test_native_usage_respects_scan_window_and_preserves_cache_details(tmp_path:
             _token_event(before, 100, 10),
             response,
             _token_event(started, 120, 12),
+            _event(completed, "event_msg", {"type": "task_complete"}),
             _response_event(
                 completed + timedelta(seconds=1),
                 "scan-parent",
@@ -486,11 +506,13 @@ def test_native_usage_respects_scan_window_and_preserves_cache_details(tmp_path:
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=started,
         completed_at=completed,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == _counts(20, 3, 2, cache_write_input_tokens=4)
     assert warnings == set()
@@ -510,11 +532,13 @@ def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(tmp_p
             owned,
             inherited,
             _token_event(started, 1_020, 102),
+            _event(started, "event_msg", {"type": "task_complete"}),
             _event(started, "event_msg", {"type": "task_started", "turn_id": "resumed-turn"}),
             _response_event(
                 started, "scan-worker", "resumed-response", 30, 3, turn_id="resumed-turn"
             ),
             _token_event(started, 1_050, 105),
+            _event(started, "event_msg", {"type": "task_complete"}),
             _event(started, "event_msg", {"type": "task_started", "turn_id": "legacy-turn"}),
             _token_event(started, 1_060, 106),
         ],
@@ -525,11 +549,13 @@ def test_native_worker_usage_excludes_inherited_totals_and_survives_resume(tmp_p
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-worker", "scan-parent", worker),
         started_at=started,
         completed_at=started,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == _counts(60, 0, 6)
     assert warnings == set()
@@ -554,6 +580,7 @@ def test_native_usage_only_marks_receipt_gaps_inside_scan_window(tmp_path: Path,
                 turn_usage=(baseline, 0),
             ),
             _response_event(started, "scan-parent", "counted", 30, 0, turn_usage=(in_window, 0)),
+            _event(started, "event_msg", {"type": "task_complete"}),
             _response_event(
                 started + timedelta(seconds=1),
                 "scan-parent",
@@ -568,11 +595,13 @@ def test_native_usage_only_marks_receipt_gaps_inside_scan_window(tmp_path: Path,
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == _counts(30, 0, 0)
     assert warnings == ({"token_record_incomplete"} if gap == "inside" else set())
@@ -595,17 +624,20 @@ def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
             turn_started,
             _response_event(started, "scan-parent", "recovered", 20, 2, turn_usage=(30, 3)),
             _token_event(started, 30, 3),
+            _event(started, "event_msg", {"type": "task_complete"}),
         ],
     )
     helper = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == _counts(30, 0, 3)
     assert warnings == set()
@@ -630,11 +662,13 @@ def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, fai
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
 
-    usage, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=started,
         completed_at=started,
     )
+    usage = measurement.tokens
+    warnings = measurement.warnings
 
     assert usage == (_counts(20, 0, 2) if failure == "missing_receipt" else _counts(10, 0, 1))
     assert warnings == {
@@ -642,7 +676,8 @@ def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, fai
         if failure == "missing_receipt"
         else "rollout_record_incomplete"
         if failure == "truncated"
-        else "token_record_invalid"
+        else "token_record_invalid",
+        "turn_in_progress",
     }
 
 
@@ -697,7 +732,18 @@ def test_completion_counts_only_scan_owned_parent_and_descendants(
         "threadCount": 3,
     }
     assert completed["scan"]["mode"] == mode
-    assert completed["scan"]["usage"] == expected
+    usage = completed["scan"]["usage"]
+    assert usage.items() >= expected.items()
+    assert usage["byRole"] == {
+        "parent": {**_counts(50, 25, 15), "threadCount": 1},
+        "workers": {**_counts(38, 12, 10), "threadCount": 2},
+    }
+    assert datetime.fromisoformat(usage["window"]["startedAt"]) == fixture.started_at
+    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == counted
+    assert datetime.fromisoformat(usage["observedAt"]) >= datetime.fromisoformat(
+        usage["window"]["endedAt"]
+    )
+    expected = usage
     assert completed["workspace"]["results"]["usage"] == expected
     assert "byModel" not in completed["scan"]["usage"]
     assert (
@@ -750,12 +796,15 @@ def test_completion_includes_cached_and_cache_write_tokens(
 
     usage = _complete_scan(fixture)["scan"]["usage"]
 
-    assert usage == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(120, 30, 15, cache_write_input_tokens=12),
-        "threadCount": 1,
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(120, 30, 15, cache_write_input_tokens=12),
+            "threadCount": 1,
+        }.items()
+    )
 
 
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
@@ -784,12 +833,15 @@ def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Pat
         [("scan-parent", "first-worker"), ("scan-parent", "second-worker")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(240, 65, 42),
-        "threadCount": 3,
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(240, 65, 42),
+            "threadCount": 3,
+        }.items()
+    )
 
 
 def test_completion_ignores_worker_families_started_before_scan(tmp_path: Path) -> None:
@@ -816,12 +868,15 @@ def test_completion_ignores_worker_families_started_before_scan(tmp_path: Path) 
         {"scan-parent": parent, "old-worker": worker, "old-descendant": descendant},
         [("scan-parent", "old-worker"), ("old-worker", "old-descendant")],
     )
-    assert _complete_scan(fixture)["scan"]["usage"] == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(10, 0, 0),
-        "threadCount": 1,
-    }
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(10, 0, 0),
+            "threadCount": 1,
+        }.items()
+    )
 
 
 @pytest.mark.parametrize(
@@ -908,12 +963,15 @@ def test_completion_reads_usage_from_literal_home(
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage == {
-        "coverage": "unavailable",
-        "source": "codex_rollout",
-        "threadCount": 0,
-        "warnings": ["codex_state_unavailable"],
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["codex_state_unavailable"],
+        }.items()
+    )
     assert "totalTokens" not in usage
 
 
@@ -944,12 +1002,15 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     symlink = canonical.with_name("linked-rollout.jsonl")
     symlink.symlink_to(canonical)
     _state_graph(fixture.environment, {"scan-parent": symlink}, [])
-    assert _complete_scan(fixture)["scan"]["usage"] == {
-        "coverage": "unavailable",
-        "source": "codex_rollout",
-        "threadCount": 0,
-        "warnings": ["rollout_unavailable", "scan_thread_unavailable"],
-    }
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["rollout_unavailable", "scan_thread_unavailable"],
+        }.items()
+    )
 
 
 def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> None:
@@ -986,12 +1047,15 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(37, 0, 10),
+            "threadCount": 3,
+        }.items()
+    )
 
 
 @pytest.mark.parametrize("owner_first", [True, False])
@@ -1044,22 +1108,39 @@ def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
             completed_at=counted.isoformat(),
         )
 
-    assert usage == {
-        "coverage": "partial",
-        "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
-        "missingThreadCount": 1,
-        "warnings": ["rollout_unavailable"],
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "partial",
+            "source": "codex_rollout",
+            **_counts(37, 0, 10),
+            "threadCount": 3,
+            "missingThreadCount": 1,
+            "warnings": ["rollout_unavailable"],
+        }.items()
+    )
 
 
-def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delayed_cache_counts", [False, True])
+def test_completion_preserves_explicit_legacy_cost(
+    tmp_path: Path, delayed_cache_counts: bool
+) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     _state_graph(
         fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 15, 6)])},
+        {
+            "scan-parent": _rollout(
+                tmp_path,
+                "scan-parent",
+                [
+                    _token_event(fixture.started_at - timedelta(seconds=1), 100, 0),
+                    _token_event(
+                        counted, 115, 6, cached_input_tokens=100 if delayed_cache_counts else 0
+                    ),
+                ],
+            )
+        },
         [],
     )
     cost = {
@@ -1082,7 +1163,12 @@ def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
         environment=fixture.environment,
     )["scan"]
     assert completed["cost"] == cost
-    assert "usage" not in completed
+    if delayed_cache_counts:
+        assert completed["usage"]["coverage"] == "unavailable"
+        assert completed["usage"]["warnings"] == ["token_breakdown_unavailable"]
+        assert "totalTokens" not in completed["usage"]
+    else:
+        assert completed["usage"]["totalTokens"] == 21
 
 
 def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:
@@ -1135,14 +1221,17 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
     )
     initial = _complete_scan(fixture, "--thread-id", "scan-parent", "--turn-id", turn_id)["scan"]
     completion = {"threadId": "scan-parent", "turnId": turn_id, "finalized": False}
-    assert initial["usage"] == {
-        "coverage": "partial",
-        "source": "codex_rollout",
-        **_counts(30, 0, 5),
-        "threadCount": 2,
-        "warnings": ["turn_in_progress"],
-        "completion": completion,
-    }
+    assert (
+        initial["usage"].items()
+        >= {
+            "coverage": "partial",
+            "source": "codex_rollout",
+            **_counts(30, 0, 5),
+            "threadCount": 2,
+            "warnings": ["turn_in_progress"],
+            "completion": completion,
+        }.items()
+    )
     sealed_files = {
         name: (fixture.scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
@@ -1188,13 +1277,18 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
         *arguments,
         environment=fixture.environment,
     )["scan"]
-    assert finalized["usage"] == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(110, 0, 14),
-        "threadCount": 2,
-        "completion": {**completion, "finalized": True},
-    }
+    assert (
+        finalized["usage"].items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(110, 0, 14),
+            "threadCount": 2,
+            "completion": {**completion, "finalized": True},
+        }.items()
+    )
+    assert datetime.fromisoformat(finalized["usage"]["tokensUpdatedAt"]) == late
+    assert datetime.fromisoformat(finalized["usage"]["window"]["endedAt"]) == late
     later_events = [
         _event(late, "event_msg", {"type": "task_complete", "turn_id": turn_id}),
         _event(late, "event_msg", {"type": "task_started", "turn_id": "later-turn"}),
@@ -1207,12 +1301,14 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
     helper = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
     )
-    measured, warnings = helper["_read_rollout_usage"](
+    measurement = helper["_read_rollout_usage"](
         helper["RolloutSession"]("scan-parent", None, parent),
         started_at=fixture.started_at,
         completed_at=datetime.fromisoformat(stopped_at.replace("Z", "+00:00")),
         completed_turn_id=turn_id,
     )
+    measured = measurement.tokens
+    warnings = measurement.warnings
     assert measured == _counts(90, 0, 11)
     assert warnings == set()
     assert (
@@ -1260,16 +1356,19 @@ def test_host_final_usage_preserves_missing_worker_warning(
         turn_status,
         environment=fixture.environment,
     )["scan"]["usage"]
-    assert usage == {
-        "coverage": "partial",
-        "source": "codex_rollout",
-        **_counts(10, 0, 2),
-        "threadCount": 1,
-        "missingThreadCount": 1,
-        "warnings": ["rollout_unavailable"]
-        + ([] if turn_status == "completed" else [f"scan_turn_{turn_status}"]),
-        "completion": {"threadId": "scan-parent", "turnId": turn_id, "finalized": True},
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "partial",
+            "source": "codex_rollout",
+            **_counts(10, 0, 2),
+            "threadCount": 1,
+            "missingThreadCount": 1,
+            "warnings": ["rollout_unavailable"]
+            + ([] if turn_status == "completed" else [f"scan_turn_{turn_status}"]),
+            "completion": {"threadId": "scan-parent", "turnId": turn_id, "finalized": True},
+        }.items()
+    )
 
 
 def test_host_final_usage_retries_a_locked_native_database_without_losing_counts(
@@ -1310,13 +1409,16 @@ def test_host_final_usage_retries_a_locked_native_database_without_losing_counts
         *arguments,
         environment=fixture.environment,
     )["scan"]["usage"]
-    assert finalized == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(30, 0, 5),
-        "threadCount": 1,
-        "completion": {**initial["completion"], "finalized": True},
-    }
+    assert (
+        finalized.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(30, 0, 5),
+            "threadCount": 1,
+            "completion": {**initial["completion"], "finalized": True},
+        }.items()
+    )
 
 
 def test_host_final_usage_recovers_initially_unavailable_records(tmp_path: Path) -> None:
@@ -1367,7 +1469,10 @@ def test_host_final_usage_does_not_invent_an_unrecorded_completion_turn(tmp_path
             "scan-parent": _rollout(
                 tmp_path,
                 "scan-parent",
-                [_response_event(fixture.started_at, "scan-parent", "earlier-response", 10, 2)],
+                [
+                    _response_event(fixture.started_at, "scan-parent", "earlier-response", 10, 2),
+                    _event(fixture.started_at, "event_msg", {"type": "task_complete"}),
+                ],
             )
         },
         [],
@@ -1525,12 +1630,15 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
             ],
         )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(67, 0, 18),
-        "threadCount": 4,
-    }
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(67, 0, 18),
+            "threadCount": 4,
+        }.items()
+    )
 
 
 @pytest.mark.cross_platform
@@ -1594,3 +1702,364 @@ def test_worker_discovery_matches_platform_path_spelling(
     assert {session.thread_id for session in sessions} == expected_threads
     assert missing == set()
     assert warnings == set()
+
+
+def test_completion_uses_latest_account_snapshot_across_owned_sessions(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    first = fixture.started_at + timedelta(microseconds=1)
+    latest = first + timedelta(microseconds=1)
+
+    def allowance(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
+        return _event(
+            timestamp,
+            "event_msg",
+            {
+                "type": "token_count",
+                "info": None,
+                "rate_limits": {
+                    "limit_id": limit,
+                    "primary": {
+                        "used_percent": percent,
+                        "window_minutes": 10080,
+                        "resets_at": 1800000000,
+                    },
+                    "secondary": None,
+                },
+            },
+        )
+
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _token_event(first, 10, 3),
+            allowance(first, 6),
+            allowance(first, 2, "another-limit"),
+            allowance(first + timedelta(days=1), 99),
+        ],
+    )
+    worker = _rollout(
+        tmp_path,
+        "worker",
+        [
+            _token_event(first, 20, 5),
+            allowance(latest, 69),
+            allowance(first, 6),
+        ],
+        parent_thread_id="scan-parent",
+    )
+    unrelated = _rollout(tmp_path, "unrelated", [allowance(latest, 100)])
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": parent,
+            "worker": worker,
+            "unrelated": unrelated,
+        },
+        [("scan-parent", "worker")],
+    )
+
+    completed = _complete_scan(fixture)
+    usage = completed["scan"]["usage"]
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 38
+    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == first
+    limits = {item["limitId"]: item for item in usage["accountRateLimits"]}
+    assert limits["codex"] == {
+        "limitId": "codex",
+        "observedAt": latest.isoformat(),
+        "primary": {"usedPercent": 69, "windowMinutes": 10080, "resetsAt": 1800000000},
+        "secondary": None,
+    }
+    assert limits["another-limit"]["primary"]["usedPercent"] == 2
+
+
+@pytest.mark.parametrize("terminal", [None, "task_complete", "turn_aborted"])
+def test_completion_marks_worker_without_token_receipt_partial(
+    tmp_path: Path, terminal: str | None
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 12, 3)])
+    worker = _rollout(
+        tmp_path,
+        "worker",
+        [_event(counted, "event_msg", {"type": terminal})] if terminal else [],
+        parent_thread_id="scan-parent",
+        task_started_at=counted,
+        include_task_complete=False,
+    )
+    _state_graph(
+        fixture.environment, {"scan-parent": parent, "worker": worker}, [("scan-parent", "worker")]
+    )
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "partial"
+    expected_warnings = {"token_record_missing"}
+    if terminal is None:
+        expected_warnings.add("turn_in_progress")
+    elif terminal == "turn_aborted":
+        expected_warnings.add("turn_interrupted")
+    assert set(usage["warnings"]) == expected_warnings
+    assert usage["totalTokens"] == 15
+    assert usage["threadCount"] == 2
+    assert usage["byRole"]["workers"] == {**_counts(0, 0, 0), "threadCount": 1}
+    assert usage["accountRateLimits"] == []
+
+
+def test_completion_marks_in_flight_usage_partial_even_with_earlier_receipts(
+    tmp_path: Path,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": "scan-turn"}),
+            _token_event(counted, 12, 3),
+            _event(counted + timedelta(days=1), "event_msg", {"type": "task_complete"}),
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "partial"
+    assert usage["totalTokens"] == 15
+    assert usage["warnings"] == ["turn_in_progress"]
+
+
+@pytest.mark.parametrize("gap", ["aborted", "in_progress", "completed_without_receipt"])
+def test_completion_preserves_receipts_when_later_worker_usage_is_missing(
+    tmp_path: Path, gap: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 12, 3)])
+    events = [_response_event(counted, "worker", "measured-response", 20, 5)]
+    if gap == "aborted":
+        events.append(_event(counted, "event_msg", {"type": "turn_aborted"}))
+        expected_warning = "turn_interrupted"
+    elif gap == "completed_without_receipt":
+        events.extend(
+            [
+                _event(counted, "event_msg", {"type": "task_complete"}),
+                _event(counted, "event_msg", {"type": "task_started", "turn_id": "later-turn"}),
+                _event(counted, "event_msg", {"type": "task_complete", "turn_id": "later-turn"}),
+            ]
+        )
+        expected_warning = "token_record_missing"
+    else:
+        expected_warning = "turn_in_progress"
+    worker = _rollout(
+        tmp_path,
+        "worker",
+        events,
+        parent_thread_id="scan-parent",
+        include_task_complete=False,
+    )
+    _state_graph(
+        fixture.environment, {"scan-parent": parent, "worker": worker}, [("scan-parent", "worker")]
+    )
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "partial"
+    assert usage["warnings"] == [expected_warning]
+    assert usage["totalTokens"] == 40
+    assert usage["byRole"]["workers"]["totalTokens"] == 25
+
+
+@pytest.mark.parametrize("worker", [False, True])
+@pytest.mark.parametrize("terminal", ["task_complete", "turn_aborted"])
+@pytest.mark.parametrize("receipt", ["none", "native", "legacy", "zero"])
+def test_closed_turn_coverage_survives_later_success(
+    tmp_path: Path, worker: bool, terminal: str, receipt: str
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    thread_id = "worker" if worker else "scan-parent"
+    parent_id = "scan-parent" if worker else None
+    events = [_event(started, "event_msg", {"type": "task_started", "turn_id": "first"})]
+    if receipt in {"native", "zero"}:
+        events.append(
+            _response_event(
+                started,
+                thread_id,
+                "first-response",
+                20 if receipt == "native" else 0,
+                3 if receipt == "native" else 0,
+                turn_id="first",
+            )
+        )
+    elif receipt == "legacy":
+        events.append(_token_event(started, 20, 3))
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": terminal, "turn_id": "first"}),
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "second"}),
+            _response_event(started, thread_id, "second-response", 10, 2, turn_id="second"),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "second"}),
+        ]
+    )
+    rollout = _rollout(
+        tmp_path, thread_id, events, parent_thread_id=parent_id, include_task_start=False
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"](thread_id, parent_id, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == (_counts(30, 0, 5) if receipt in {"native", "legacy"} else _counts(10, 0, 2))
+    assert warnings == ({"token_record_missing"} if receipt == "none" else set()) | (
+        {"turn_interrupted"} if terminal == "turn_aborted" else set()
+    )
+
+
+@pytest.mark.parametrize("receipt", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+def test_closed_turn_coverage_retains_before_window_receipt_evidence(
+    tmp_path: Path, receipt: bool, native: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:01+00:00")
+    before = started - timedelta(seconds=1)
+    events = [_event(before, "event_msg", {"type": "task_started", "turn_id": "first"})]
+    if receipt:
+        events.append(
+            _response_event(before, "scan-parent", "before", 20, 3, turn_id="first")
+            if native
+            else _token_event(before, 20, 3)
+        )
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "first"}),
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "second"}),
+            _response_event(started, "scan-parent", "counted", 10, 2, turn_id="second"),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "second"}),
+        ]
+    )
+    rollout = _rollout(tmp_path, "scan-parent", events)
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == (set() if receipt else {"token_record_missing"})
+
+
+def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(tmp_path: Path) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    rollout = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "first"}),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "first"}),
+            _response_event(started, "scan-parent", "late", 10, 2, turn_id="first"),
+        ],
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == set()
+
+
+def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
+    tmp_path: Path,
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    rollout = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "same-turn"}),
+            _event(started, "event_msg", {"type": "turn_aborted", "turn_id": "same-turn"}),
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "same-turn"}),
+            _response_event(started, "scan-parent", "recovered", 10, 2, turn_id="same-turn"),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "same-turn"}),
+        ],
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == {"turn_interrupted"}
+
+
+def test_closed_turn_coverage_ignores_inherited_and_outside_window_interruptions(
+    tmp_path: Path,
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    before = started - timedelta(seconds=1)
+    after = started + timedelta(seconds=1)
+    rollout = _rollout(
+        tmp_path,
+        "worker",
+        [
+            _response_event(started, "worker", "counted", 10, 2),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "turn-worker"}),
+            _event(after, "event_msg", {"type": "task_started", "turn_id": "later"}),
+            _event(after, "event_msg", {"type": "turn_aborted", "turn_id": "later"}),
+        ],
+        parent_thread_id="scan-parent",
+        copied_events=[
+            _event(before, "event_msg", {"type": "turn_aborted", "turn_id": "inherited"}),
+        ],
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("worker", "scan-parent", rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == set()
+
+
+def test_completion_marks_closed_turn_without_receipt_partial(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": "empty"}),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": "empty"}),
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": "measured"}),
+            _response_event(counted, "scan-parent", "response", 10, 2, turn_id="measured"),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": "measured"}),
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "partial",
+            "source": "codex_rollout",
+            **_counts(10, 0, 2),
+            "threadCount": 1,
+            "warnings": ["token_record_missing"],
+        }.items()
+    )
