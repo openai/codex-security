@@ -1784,9 +1784,9 @@ export class CodexSecurity {
             modelProvider,
           ),
         ),
-        ...selectedProviderHeaderEnvironment(
+        ...selectedProviderEnvironment(
           effectiveConfig,
-          runtime.environment,
+          this.#dependencies.environment,
         ),
         ...(session.apiKey === null
           ? {}
@@ -3375,9 +3375,9 @@ export class CodexSecurity {
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment({
       ...withoutOpenAiApiKeys(environment),
-      ...selectedProviderHeaderEnvironment(
+      ...selectedProviderEnvironment(
         session.effectiveConfig,
-        environment,
+        this.#dependencies.environment,
       ),
       ...(providerEnvKey === undefined || apiKey === null
         ? {}
@@ -5161,13 +5161,18 @@ function environmentApiKey(
   );
 }
 
-function selectedProviderHeaderEnvironment(
+export function selectedProviderEnvironment(
   config: JsonObject,
   environment: ProcessEnvironment,
+  authentication?: ScanAuthentication,
 ): ProcessEnvironment {
   const headers = scanProviderConfiguration(config)?.["env_http_headers"];
+  const names = isRecord(headers) ? Object.values(headers) : [];
+  const key = scanProviderEnvironmentKey(config);
+  if (authentication?.method === "api_key" && key !== undefined)
+    names.push(key);
   return Object.fromEntries(
-    (isRecord(headers) ? Object.values(headers) : []).flatMap((name) => {
+    names.flatMap((name) => {
       const value =
         typeof name === "string"
           ? environmentEntry(environment, name)

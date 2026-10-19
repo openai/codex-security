@@ -1643,8 +1643,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             },
             provider,
             providerConfig,
-            providerEnvKey,
-            providerHeaderKey,
             environment:
               index === 0
                 ? undefined
@@ -2018,27 +2016,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
-            assert.equal(
-              invocation.providerKey,
-              index === 2 ? undefined : providerKeys[index],
-            );
-            assert.equal(
-              invocation.alternateProviderKey,
-              index === 2 ? providerKeys[index] : undefined,
-            );
-            assert.equal(
-              invocation.providerHeader,
-              workerConfigurations[index].environment?.SYNTHETIC_HEADER_VALUE,
-            );
-            for (const name of ["CODEX_API_KEY", "OPENAI_API_KEY"]) {
-              assert.equal(
-                workerLaunch.environment![name],
-                workerConfigurations[index].environment?.[name],
-              );
-              assert.equal(
-                invocation.providerHeaderCredentials[name],
-                workerConfigurations[index].environment?.[name],
-              );
+            for (const name of [
+              "SYNTHETIC_GATEWAY_KEY",
+              "SYNTHETIC_ALTERNATE_KEY",
+              "SYNTHETIC_HEADER_VALUE",
+              "CODEX_API_KEY",
+              "OPENAI_API_KEY",
+            ]) {
+              const expected = workerConfigurations[index].environment?.[name];
+              assert.equal(workerLaunch.environment![name], expected);
+              assert.equal(invocation.providerCredentials[name], expected);
             }
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
@@ -2287,21 +2274,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 `state-${workerConfigurations.indexOf(selectedProvider)}`,
               ),
             );
-            assert.equal(
-              preflight.providerKey,
-              selectedProvider.environment?.SYNTHETIC_GATEWAY_KEY,
-            );
-            assert.equal(
-              preflight.alternateProviderKey,
-              selectedProvider.environment?.SYNTHETIC_ALTERNATE_KEY,
-            );
-            assert.equal(
-              preflight.providerHeader,
-              selectedProvider.environment?.SYNTHETIC_HEADER_VALUE,
-            );
-            for (const name of ["CODEX_API_KEY", "OPENAI_API_KEY"]) {
+            for (const name of [
+              "SYNTHETIC_GATEWAY_KEY",
+              "SYNTHETIC_ALTERNATE_KEY",
+              "SYNTHETIC_HEADER_VALUE",
+              "CODEX_API_KEY",
+              "OPENAI_API_KEY",
+            ]) {
               assert.equal(
-                preflight.providerHeaderCredentials[name],
+                preflight.providerCredentials[name],
                 selectedProvider.environment?.[name],
               );
             }

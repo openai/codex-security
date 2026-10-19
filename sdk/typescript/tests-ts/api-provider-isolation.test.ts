@@ -724,15 +724,17 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 
 test.each([
-  ["SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
-  ["CODEX_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
-  ["OPENROUTER_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
-  ["FIREWORKS_API_KEY", "SYNTHETIC_CUSTOM_HEADER"],
-  ["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY"],
-  ["SYNTHETIC_CUSTOM_API_KEY", "OPENAI_API_KEY"],
+  ["SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER", "synthetic.gateway"],
+  ["CODEX_API_KEY", "SYNTHETIC_CUSTOM_HEADER", "synthetic.gateway"],
+  ["OPENROUTER_API_KEY", "SYNTHETIC_CUSTOM_HEADER", "openrouter"],
+  ["FIREWORKS_API_KEY", "SYNTHETIC_CUSTOM_HEADER", "fireworks"],
+  ["SYNTHETIC_CUSTOM_API_KEY", "CODEX_API_KEY", "synthetic.gateway"],
+  ["SYNTHETIC_CUSTOM_API_KEY", "OPENAI_API_KEY", "synthetic.gateway"],
+  ["CODEX_API_KEY", "OPENAI_API_KEY", "openrouter"],
+  ["OPENAI_API_KEY", "CODEX_API_KEY", "openrouter"],
 ])(
-  "native plugin workers recover selected %s and header %s",
-  async (providerKey, configuredHeaderKey) => {
+  "native plugin workers recover selected %s and header %s for %s",
+  async (providerKey, configuredHeaderKey, providerId) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
@@ -745,9 +747,6 @@ test.each([
     const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
       providerKey,
     );
-    const providerId = external
-      ? providerKey.split("_")[0]!.toLowerCase()
-      : "synthetic.gateway";
     const headerKey =
       process.platform === "win32" &&
       configuredHeaderKey === "SYNTHETIC_CUSTOM_HEADER"
@@ -886,9 +885,9 @@ test.each([
       },
     );
     try {
-      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        "synthetic native plugin environment checked",
-      );
+      await expect(
+        client.run(repository, { mode: "deep", auth: "api-key" }),
+      ).rejects.toThrow("synthetic native plugin environment checked");
     } finally {
       await client.close();
     }

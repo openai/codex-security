@@ -33,6 +33,7 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvironmentKey,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -600,9 +601,11 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-      undefined,
+      scanProviderEnvironmentKey(providerSettings) !== undefined
+        ? undefined
+        : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+          environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
+          undefined,
     config: {
       ...sdkConfig,
       windows,

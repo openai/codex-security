@@ -1677,43 +1677,67 @@ test.each([
   },
 );
 
-test.each(["root", "profile"])(
-  "component preflight uses the %s native provider environment key",
-  async (selection) => {
+test.each(
+  ["root", "profile"].flatMap((selection) =>
+    ["gateway", "openrouter"].flatMap((provider) =>
+      ["SYNTHETIC_PROVIDER_KEY", "CODEX_API_KEY", "OPENAI_API_KEY"].map(
+        (key) => ({ selection, provider, key }),
+      ),
+    ),
+  ),
+)(
+  "component planning and matching preserve $selection $provider credentials from $key",
+  async ({ selection, provider, key }) => {
     const paths = await fixture();
-    const plan = mock(async () => ({ components }));
+    const header =
+      key === "OPENAI_API_KEY" ? "CODEX_API_KEY" : "OPENAI_API_KEY";
+    const environment = {
+      [key]: " synthetic-provider-key ",
+      [header]: " synthetic-provider-header ",
+    };
+    const plan = mock(async (_repository, options) => {
+      expect(options.environment).toEqual(environment);
+      return { components };
+    });
+    const match = mock(async (_input, options) => {
+      expect(options.environment).toEqual(environment);
+      return noMatches;
+    });
     const config = {
       codexOverrides: {
-        model_providers: { gateway: { env_key: "SYNTHETIC_PROVIDER_KEY" } },
+        model_providers: {
+          [provider]: {
+            env_key: key,
+            env_http_headers: { "X-Synthetic": header },
+          },
+        },
         ...(selection === "profile"
           ? {
               profile: "selected",
-              profiles: { selected: { model_provider: "gateway" } },
+              profiles: { selected: { model_provider: provider } },
             }
-          : { model_provider: "gateway" }),
+          : { model_provider: provider }),
       },
     };
     const options = {
       components: undefined,
       auto: true,
-      planOnly: true,
       config,
       scanOptions: { auth: "api-key" as const },
       planComponents: plan,
+      matchFindings: match,
     };
-    const result = await scan(paths, {
-      ...options,
-      environment: { SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key" },
-    });
-    expect(result.total).toBe(components.length);
+    const result = await scan(paths, { ...options, environment });
+    expect(result.completed).toBe(components.length);
     expect(plan).toHaveBeenCalledTimes(1);
+    expect(match).toHaveBeenCalledTimes(components.length - 1);
     plan.mockClear();
     await expect(
       scan(paths, {
         ...options,
-        environment: { OPENAI_API_KEY: "synthetic-unrelated" },
+        environment: { SYNTHETIC_UNRELATED_KEY: "synthetic-unrelated" },
       }),
-    ).rejects.toThrow("SYNTHETIC_PROVIDER_KEY");
+    ).rejects.toThrow(key);
     expect(plan).not.toHaveBeenCalled();
   },
 );
