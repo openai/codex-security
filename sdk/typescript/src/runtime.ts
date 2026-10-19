@@ -126,6 +126,7 @@ const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "CHEAPER_INFERENCE_API_KEY",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
 from pathlib import Path
@@ -2020,8 +2021,8 @@ async function prepareOutputDirectory(
     const created = await mkdtemp(
       join(temporaryRoot, `codex-security-${safePrefix(repositoryName)}-`),
     );
-    if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
     try {
+      if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
       return await validatePreparedOutputDir(created, validateLocation);
     } catch (error) {
       await rmdir(created).catch(() => undefined);
@@ -3141,6 +3142,7 @@ export async function runCodexCommand(
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
+  const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
@@ -3149,7 +3151,7 @@ export async function runCodexCommand(
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      signal: cancellation?.signal ?? signal,
+      signal: commandSignal,
     },
   );
   let stdout = "";
@@ -3190,6 +3192,17 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
+  const releaseCanceledPipes = () => {
+    if (!commandSignal?.aborted) return;
+    if (child.exitCode === null && child.signalCode === null) return;
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  };
+  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
+    once: true,
+  });
+  child.once("exit", releaseCanceledPipes);
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -3201,6 +3214,8 @@ export async function runCodexCommand(
     return await completion;
   } finally {
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
+    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
+    child.removeListener("exit", releaseCanceledPipes);
   }
 }
 

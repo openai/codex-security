@@ -23,6 +23,18 @@ afterEach(cleanup);
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
   [
+    "fractional investigation minutes",
+    { scan: { max_time_minutes: 0.5 } },
+    true,
+  ],
+  ["unset Standard cap", { scan: { max_time_minutes: 6000 } }, true],
+  [
+    "nonpositive investigation minutes",
+    { scan: { max_time_minutes: 0 } },
+    false,
+  ],
+  ["minute strings", { scan: { max_time_minutes: "15" } }, false],
+  [
     "Cyber selection",
     { scan: { cyber_access_program: "daybreak_blue" } },
     true,
@@ -130,6 +142,65 @@ const cases: [string, unknown, boolean][] = [
   ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
+
+test("minute and deprecated hour settings follow source precedence", () => {
+  const directory = process.cwd();
+  for (const [scan, overrides, expected, sourceKey, source] of [
+    [
+      { mode: "standard", max_time_minutes: 15 },
+      {},
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 30, deep: { max_time_hours: 2 } },
+      { maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 15, deep: { max_time_hours: 1 } },
+      { maxTimeHours: 2 },
+      { maxTimeMinutes: undefined, maxTimeHours: 2 },
+      "scan.deep.max_time_hours",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 90, deep: { max_time_hours: 1.5 } },
+      {},
+      { maxTimeMinutes: 90, maxTimeHours: 1.5 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 15, deep: { max_time_hours: 2 } },
+      {},
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 6000 },
+      { mode: "deep", maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+  ] as const) {
+    const resolved = resolveScanSettings(
+      { input: { scan }, directory },
+      overrides,
+      directory,
+    );
+    expect({
+      maxTimeMinutes: resolved.options.maxTimeMinutes,
+      maxTimeHours: resolved.options.maxTimeHours,
+    }).toMatchObject(expected);
+    expect(resolved.sources[sourceKey]).toBe(source);
+  }
+});
 
 describe("project configuration input contract", () => {
   const validate = new Ajv({ strict: true, allErrors: true }).compile(

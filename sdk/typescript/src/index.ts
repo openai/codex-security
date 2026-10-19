@@ -235,6 +235,17 @@ export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
 export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
 
+export {
+  classifySeverityRecords,
+  classifySeverityRecordsInputSchema,
+} from "./classify-severity-records.js";
+export type {
+  ClassifySeverityRecordsInput,
+  ClassifySeverityRecordsOptions,
+  ClassifySeverityRecordsResult,
+  CanonicalSeverityAssessment,
+  SeverityClassificationReviewRequest,
+} from "./classify-severity-records.js";
 export { validateRecords } from "./validation-records.js";
 export type {
   ValidateRecordsInput,

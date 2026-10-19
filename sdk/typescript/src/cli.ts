@@ -103,6 +103,11 @@ import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runRecordsProtocol } from "./deduplication/records-protocol.js";
+import { runHostRecordsProtocol } from "./host-records-protocol.js";
+import {
+  classifySeverityRecords,
+  type ClassifySeverityRecordsInput,
+} from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
@@ -225,6 +230,7 @@ import {
   sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
+  type PluginPythonOptions,
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
@@ -297,7 +303,7 @@ import {
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
-import { resolveDeepScanConfig } from "./deep-config.js";
+import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
@@ -383,7 +389,13 @@ const PROJECT_CONFIG_OPTION = optionValue("--config")
   );
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .enum([
+    "openai",
+    "openrouter",
+    "fireworks",
+    "cheaperinference",
+    "amazon-bedrock",
+  ])
   .default("openai")
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
@@ -1175,11 +1187,13 @@ interface CliDependencies {
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   importScan?: typeof importScan;
+  readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
     args: readonly string[],
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1264,7 +1278,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
+  runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1274,6 +1288,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         python: await resolvePluginPython({
           configuredPath: pythonPath,
           environment,
+          protectedRoot,
           signal,
         }),
         pluginRoot: await bundledPluginRoot(),
@@ -1723,7 +1738,9 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   if (
-    (((argv[0] === "dedupe" || argv[0] === "validate") &&
+    (((argv[0] === "dedupe" ||
+      argv[0] === "validate" ||
+      argv[0] === "classify-severity") &&
       argv.includes("--records")) ||
       (argv[0] === "scan" &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
@@ -1749,11 +1766,23 @@ export async function main(
           : argv[0] === "validate"
             ? runValidationRecordsProtocol
             : runRecordsProtocol;
-      const code = await runProtocol(
-        dependencies.recordsInput ?? process.stdin,
-        output,
-        controller.signal,
-      );
+      const code =
+        argv[0] === "classify-severity"
+          ? await runHostRecordsProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
+              (value, options) =>
+                classifySeverityRecords(
+                  value as ClassifySeverityRecordsInput,
+                  options,
+                ),
+              controller.signal,
+            )
+          : await runProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
+              controller.signal,
+            );
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -1821,10 +1850,17 @@ export async function main(
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
+        await dependencies.runWorkbench(
+          args,
+          undefined,
+          undefined,
+          pythonPath,
+          protectedRoot,
+        ),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -1836,6 +1872,7 @@ export async function main(
     count = 1,
     status: "complete" | "any" = "complete",
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       workbenchArgs("list-scans", {
@@ -1855,6 +1892,7 @@ export async function main(
         return value;
       },
       pythonPath,
+      protectedRoot,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
@@ -3608,6 +3646,7 @@ export async function main(
           mode: ScanSettingsSchema.shape.mode.describe(
             "Scan mode (default: standard); deep supports repository and path targets.",
           ),
+          maxTime: ScanSettingsSchema.shape.maxTimeMinutes,
           ...DEEP_SCAN_OPTION_SCHEMAS,
           ...modelOptions(
             `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
@@ -3713,6 +3752,7 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
+              maxTimeMinutes: options.maxTime,
               codexOverrides: parseCodexOverrides(
                 options.codex,
                 options.model,
@@ -3923,11 +3963,17 @@ export async function main(
       },
     })
     .command("classify-severity", {
-      description: "Assess severity for saved findings.",
-      hint: "Use --rubric to classify findings with a policy. The assessment is saved separately.",
+      description: "Assess severity for saved findings or canonical records.",
+      hint: "Use --rubric for saved findings or --records alone for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
+        records: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; use alone.",
+          ),
         reprocess: z
           .boolean()
           .default(false)
@@ -3964,6 +4010,10 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ options }) {
+        if (options.records)
+          throw new CodexSecurityError(
+            "Use classify-severity --records alone.",
+          );
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
@@ -4319,6 +4369,7 @@ export async function main(
             directory,
           );
           const settings = resolved.options;
+          deepScanOptions(settings);
           if (settings.outputDir === undefined)
             throw new ConfigurationError(
               "--output-dir or output.directory is required for component scans.",
@@ -4559,21 +4610,6 @@ export async function main(
             currentDirectory,
           );
           const settings = resolved.options;
-          // A CSV row may choose a different mode; resolve the same file for both
-          // modes so inactive deep defaults remain available to deep rows.
-          const scanOptionsByMode =
-            project === undefined
-              ? undefined
-              : Object.fromEntries(
-                  SCAN_MODES.map((mode) => [
-                    mode,
-                    resolveScanSettings(
-                      project,
-                      { ...overrides, mode },
-                      currentDirectory,
-                    ).options,
-                  ]),
-                );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -4606,6 +4642,19 @@ export async function main(
             inputPath = resolveCliPath(currentDirectory, args.input);
             outputDir = settings.outputDir;
           }
+          const scanOptionsByMode =
+            project === undefined
+              ? undefined
+              : Object.fromEntries(
+                  SCAN_MODES.map((mode) => [
+                    mode,
+                    resolveScanSettings(
+                      project,
+                      { ...overrides, mode },
+                      currentDirectory,
+                    ).options,
+                  ]),
+                );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -4825,11 +4874,21 @@ export async function main(
             options.artifact,
             options.exportFormat,
           );
+          const sourceRoot =
+            options.sourceRoot === undefined
+              ? undefined
+              : resolveCliPath(currentDirectory, options.sourceRoot);
+          const protectedRoot =
+            sourceRoot === undefined
+              ? undefined
+              : [currentDirectory, sourceRoot];
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
             const scanId =
               options.scan ??
-              (await latestScans(1, "complete", options.python))?.[0]?.scanId;
+              (
+                await latestScans(1, "complete", options.python, protectedRoot)
+              )?.[0]?.scanId;
             if (scanId === undefined) return;
             scanDir = await resolveSavedArtifactDirectory(
               scanId,
@@ -4841,6 +4900,7 @@ export async function main(
                   undefined,
                   undefined,
                   options.python,
+                  protectedRoot,
                 ),
             );
           }
@@ -4855,10 +4915,7 @@ export async function main(
                     currentDirectory,
                     options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
                   ),
-            sourceRoot:
-              options.sourceRoot === undefined
-                ? undefined
-                : resolveCliPath(currentDirectory, options.sourceRoot),
+            sourceRoot,
             pythonPath: options.python,
           };
           try {
@@ -5804,6 +5861,7 @@ export async function main(
           dependencies,
         );
         const resolved = resolveScanSettings(project, {}, directory);
+        deepScanOptions(resolved.options);
         const codex = await mergedCodexConfig(resolved.config);
         const deep =
           resolved.options.mode === "deep"
@@ -6445,6 +6503,14 @@ async function prepareScanArgumentsFromRecipe(
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
+  const maxTimeMinutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
+    recipe["maxTimeMinutes"],
+  );
+  if (!maxTimeMinutes.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid investigation time limit.",
+    );
+  }
   if (!deepScan.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid deep scan settings.",
@@ -6527,6 +6593,7 @@ async function prepareScanArgumentsFromRecipe(
       : { ...config, approval_policy: "never" },
     failureSeverity: threshold.data,
     maxCostUsd,
+    maxTimeMinutes: maxTimeMinutes.data,
     dryRun: false,
     parentScanId,
     ...(recipe["mock"] === true ? { mock: true } : {}),
@@ -6800,11 +6867,62 @@ async function selectSavedFindings(
       "The requested finding does not belong to the selected scan.",
     );
   }
+  const fullFindings =
+    selected.length === 0
+      ? []
+      : await (dependencies.readSavedFindings ?? readSavedFindings)(
+          scan.scanId,
+          dependencies.runWorkbench,
+        );
+  const byOccurrence = new Map(
+    fullFindings.map((finding) => [finding.occurrenceId, finding]),
+  );
   return {
     repository: scan.targetPath,
     scanId: scan.scanId,
-    findings: selected,
+    findings: selected.map((finding) => {
+      const full = byOccurrence.get(finding.occurrenceId);
+      if (full === undefined || full.findingId !== finding.findingId) {
+        throw new CodexSecurityError(
+          `Finding ${finding.occurrenceId} is missing from the saved scan artifacts.`,
+        );
+      }
+      const hydrated = { ...finding, ...full };
+      // Sealed artifacts supply evidence; the workbench owns live and derived state.
+      for (const key of [
+        "createdAt",
+        "triage",
+        "remediationState",
+        "matches",
+        "knownSince",
+        "knownScanIds",
+        "related",
+        "sourceExcerpt",
+        "artifactPaths",
+      ]) {
+        if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
+        else delete hydrated[key];
+      }
+      return hydrated;
+    }),
   };
+}
+
+async function readSavedFindings(
+  scanId: string,
+  workbench: CliDependencies["runWorkbench"],
+): Promise<readonly Finding[]> {
+  const directory = await resolveSavedArtifactDirectory(
+    scanId,
+    "findings",
+    "json",
+    workbench,
+  );
+  const { findings } = await loadContract(directory, {
+    pluginRoot: await bundledPluginRoot(),
+    expectedScanId: scanId,
+  });
+  return findings.findings;
 }
 
 function patchExitCode(patches: readonly FindingPatch[]): number {
@@ -8306,6 +8424,7 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
+    deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = arguments_.target;
@@ -9375,11 +9494,14 @@ async function readDeepScanStop(
   const elapsedHours =
     (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
   if (elapsedHours >= maxTimeHours) {
+    let maxTimeMinutes = maxTimeHours * 60;
+    const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
+    if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
-      reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,
+      reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
       nextStep:
         maxTimeHours < 96
-          ? "To scan further, rerun with a higher --max-time-hours."
+          ? `To scan further, rerun with --max-time greater than ${maxTimeMinutes}.`
           : "To scan a smaller part of the repository, rerun with --path.",
     };
   }

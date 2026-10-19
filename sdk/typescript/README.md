@@ -194,6 +194,11 @@ Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
+Saved-history excerpts use scanned Git objects without fetching missing data.
+Working-tree diff scans omit excerpts, as do historical scans whose source or
+scope cannot be established. Unambiguous older scans remain readable. An omitted
+excerpt does not remove the finding.
+
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
 
@@ -331,6 +336,19 @@ console.log(plan);
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 
+### Set investigation time
+
+```ts
+await security.run("/path/to/repository", { maxTimeMinutes: 15 });
+```
+
+`maxTimeMinutes` accepts positive fractional minutes. Standard scans use an
+advisory allowance, unset by default; Deep scans retain their enforced discovery
+limit. Scans may finish early and reporting may run longer. The CLI equivalent is
+`scan --max-time 15`; project files use `scan.max_time_minutes`. See
+[investigation time](docs/cli.md#set-investigation-time) for lifecycle and limit
+semantics. `maxCostUsd` and `signal` keep their existing behavior.
+
 ### Configure deep scans
 
 ```ts
@@ -341,7 +359,7 @@ const result = await security.run("/path/to/repository", {
   stopAfterNoNew: 3,
   stopAfterConsecutiveErrors: 3,
   maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
+  maxTimeMinutes: 90,
 });
 ```
 
@@ -349,6 +367,8 @@ const result = await security.run("/path/to/repository", {
 within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
+Deep discovery retains its enforced deadline, with a default and maximum of
+5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
 
 ### Progress and cost
 
@@ -566,16 +586,18 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
-Export saved findings or a threat model without starting another analysis:
+Export a completed scan's findings to a SARIF file:
 
 ```bash
-cs export --scan SCAN_ID --export-format sarif --output results.sarif
-cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export /path/to/scan-results --output results.sarif
 ```
 
-The SDK provides `exportArtifact()` for the same offline operations. See
-[exports and CI](docs/cli.md#exports-and-ci) for details. For repository or pull
-request scans in GitHub Actions, use the
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+Export reads saved results, so you don't need to rerun the scan or sign in.
+
+See [exports and CI](docs/cli.md#exports-and-ci) for source fingerprints, other
+formats, threat models, and the `exportArtifact()` SDK method. For repository or
+pull request scans in GitHub Actions, use the
 [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md).
 Separate examples cover
 [GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
@@ -588,6 +610,9 @@ changing their original severity or evidence. The SDK exposes `classifySeverity(
 `classifyScanSeverity()`, and `classifyScanDirectorySeverity()`. See
 [severity classification](docs/cli.md#classify-finding-severity) for selection,
 checkpointing, and publication behavior.
+
+For canonical records without a saved scan, use `classify-severity --records`
+or `classifySeverityRecords()` with [host-provided execution](docs/classify-severity-records.md).
 
 ### Suggest finding owners
 
