@@ -455,7 +455,7 @@ test.each([
     }
     expect(existsSync(sharedHome)).toBe(true);
   },
-  30_000,
+  Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
 );
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
