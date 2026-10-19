@@ -413,6 +413,11 @@
   },
   {
     "version": 50,
+    "name": "persist authorized source excerpt scopes",
+    "statements": ["ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"]
+  },
+  {
+    "version": 51,
     "name": "preserve deep scan worker thread history",
     "statements": [
       "CREATE TABLE deep_scan_worker_threads (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL,\n    sdk_thread_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, worker_id, sdk_thread_id)\n);",

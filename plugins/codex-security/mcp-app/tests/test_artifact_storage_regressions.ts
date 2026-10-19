@@ -113,6 +113,89 @@ async function connect(overrides: Record<string, string | undefined> = {}) {
 }
 
 try {
+  await test("standalone persistent storage rejects filesystem-root and contained targets", async () => {
+    const scanRoot = path.join(repository, "root-target-scans");
+    const entries = await fs.readdir(repository);
+    for (const [targetPath, selectedRoot] of [
+      [path.parse(repository).root, scanRoot],
+      [repository, repository],
+      [repository, scanRoot],
+    ]) {
+      for (const create of [true, false]) {
+        await assert.rejects(
+          standaloneArtifactContext(
+            targetPath,
+            workbench,
+            create,
+            selectedRoot,
+            "persistent",
+          ),
+          /Artifact storage must be outside the target repository/,
+        );
+      }
+    }
+    await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+    assert.deepEqual(await fs.readdir(repository), entries);
+  });
+
+  await test("filesystem-root targets retain temporary artifact storage", async () => {
+    const scanRoot = path.join(fixture, "root-temporary-scans");
+    const context = await standaloneArtifactContext(
+      path.parse(repository).root,
+      workbench,
+      true,
+      scanRoot,
+      "temporary",
+    );
+    const saved = await saveCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: "notes.md", content: "temporary evidence" },
+      workbench,
+    );
+    temporaryDirectories.push(saved.directory);
+    const read = await readCodexSecurityArtifact(
+      context,
+      { storage: "temporary", path: "notes.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, "temporary evidence");
+    await assert.rejects(fs.stat(scanRoot), { code: "ENOENT" });
+  });
+
+  await test("standalone persistent storage allows sibling-prefix directories", async () => {
+    const scanRoot = repository + "-scans";
+    const context = await standaloneArtifactContext(
+      repository,
+      workbench,
+      true,
+      scanRoot,
+      "persistent",
+    );
+    const saved = await saveCodexSecurityArtifact(
+      context,
+      {
+        storage: "persistent",
+        path: "threatmodel.md",
+        content: "retained evidence",
+      },
+      workbench,
+    );
+    assert.equal(path.dirname(path.dirname(saved.directory)), scanRoot);
+    const readContext = await standaloneArtifactContext(
+      repository,
+      workbench,
+      false,
+      scanRoot,
+      "persistent",
+    );
+    const read = await readCodexSecurityArtifact(
+      readContext,
+      { storage: "persistent", path: "threatmodel.md", encoding: "utf8" },
+      workbench,
+    );
+    assert.equal(read.content, "retained evidence");
+  });
+
   await test(
     "temporary artifact operations reject a collection owned by another user",
     { skip: typeof process.geteuid !== "function" },

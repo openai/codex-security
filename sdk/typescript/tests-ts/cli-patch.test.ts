@@ -518,6 +518,7 @@ describe("scan and patch workflow", () => {
         ],
         {
           currentDirectory: directory,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             calls++;
@@ -595,6 +596,7 @@ describe("scan and patch workflow", () => {
           ],
           {
             currentDirectory: directory,
+            result,
             onWorkbench: () => savedScan(result, "scan-1", repository),
             onCodex: (args, output) => {
               started = true;
@@ -723,6 +725,7 @@ describe("scan and patch workflow", () => {
         "--json",
       ],
       {
+        result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
@@ -1581,6 +1584,7 @@ describe("scan and patch workflow", () => {
 
         const fixtures: Parameters<typeof dependencies>[0] = {
           currentDirectory: repository,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             modelCalls += 1;
@@ -2113,6 +2117,7 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--severity", "high", "--json"],
       {
+        result,
         onWorkbench: (args): JsonObject => {
           expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
           return savedScan(result);
@@ -2210,6 +2215,7 @@ describe("scan and patch workflow", () => {
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           environment,
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args, target) => {
             expect(target).toBe(SAVED_REPOSITORY);
@@ -2440,6 +2446,7 @@ describe("scan and patch workflow", () => {
               "--json",
             ],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2499,6 +2506,7 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2570,6 +2578,7 @@ describe("scan and patch workflow", () => {
     const calls: Array<readonly string[]> = [];
     let patched: Finding[] = [];
     const outcome = await runWorkflow(["patch", "occ_1"], {
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-global-findings") {
@@ -2599,6 +2608,7 @@ describe("scan and patch workflow", () => {
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "latest"], {
       currentDirectory: SAVED_REPOSITORY,
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-scans") {
@@ -2619,6 +2629,7 @@ describe("scan and patch workflow", () => {
     const patched: Finding[] = [];
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "scan-1"], {
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "get-scan") {
