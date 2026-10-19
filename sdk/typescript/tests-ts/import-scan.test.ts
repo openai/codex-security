@@ -98,7 +98,7 @@ async function fixture(format: "csv" | "json" = "csv") {
   if (format === "json") {
     const example = JSON.parse(
       await readFile(
-        join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+        join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
         "utf8",
       ),
     ) as FindingsDocument;
@@ -325,10 +325,11 @@ test.each(["csv", "json"] as const)(
     expect(result.manifest.scan.sealedAt).toBeTruthy();
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
-    expect(result.coverage).not.toHaveProperty("completeness");
-    expect(result.coverage.surfaces).toMatchObject([
-      { disposition: "reported" },
-    ]);
+    expect(result.review).not.toHaveProperty("status");
+    expect(result.review).toEqual({ excludedPaths: [] });
+    expect(
+      result.manifest.scan.artifacts.map((artifact) => artifact.path),
+    ).not.toContain("coverage.json");
     expect(result.turnResult["imported"]).toBe(true);
     expect(result.threadId).toBe("");
     expect(await readFile(result.reportPath, "utf8")).toContain(
@@ -339,7 +340,8 @@ test.each(["csv", "json"] as const)(
     ).toEqual({
       manifest: result.manifest,
       findings: result.findings,
-      coverage: result.coverage,
+      review: result.review,
+      mode: result.mode,
     });
     const sourceRef = `artifacts/import/source.${format}`;
     expect(result.manifest.scan["extensions"]).toMatchObject({
@@ -475,9 +477,7 @@ test.each(["csv", "json"] as const)(
     );
     expect(result.manifest.scan.status).toBe("completed");
     expect(result.findings.findings).toEqual([]);
-    expect(result.coverage).toMatchObject({
-      surfaces: [],
-    });
+    expect(result.review).toEqual({ excludedPaths: [] });
     const sourceRef = `artifacts/import/source.${format}`;
     expect(result.manifest.scan["extensions"]).toMatchObject({
       import: { format, sourceRef, findingCount: 0 },

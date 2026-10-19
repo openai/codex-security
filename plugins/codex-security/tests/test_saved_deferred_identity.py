@@ -19,6 +19,7 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     fail_deep_scan,
     preserve_scan_results,
+    read_review_state,
     run_workbench,
     saved_discovery_worker,
     saved_draft,
@@ -458,7 +459,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     preserve_scan_results(
         state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    return prepared_coverage[0], json.loads((scan_dir / "coverage.json").read_text())
+    return prepared_coverage[0], read_review_state(state, scan_dir)
 
 
 @pytest.mark.parametrize("named_history", [False, True])
@@ -575,7 +576,7 @@ def test_unsafe_deferred_update_keeps_the_earlier_valid_path(
 
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert [row["paths"] for row in coverage["deferred"] if "paths" in row] == [["app.py"]]
     warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
     assert any("expected a safe repository-relative POSIX path" in warning for warning in warnings)

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import read_review_state
 
 
 def stage_publication(scan, *, generation, result_path, title, complete=True):
@@ -214,19 +215,13 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
     assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert [finding["title"] for finding in findings] == [scan.findings[0]["title"]]
-    assert (
-        json.loads((scan.scan_dir / "coverage.json").read_text())["deferred"]
-        == scan.coverage["deferred"]
-    )
+    assert read_review_state(workbench_db, scan.scan_dir)["deferred"] == scan.coverage["deferred"]
 
 
 @pytest.mark.parametrize(
     "failure",
-    ["validation", "findings.json", "coverage.json", "scan-manifest.json"]
-    + [
-        f"windows-emulated:{name}"
-        for name in ("findings.json", "coverage.json", "scan-manifest.json")
-    ],
+    ["validation", "findings.json", "scan-manifest.json"]
+    + [f"windows-emulated:{name}" for name in ("findings.json", "scan-manifest.json")],
 )
 def test_failed_publication_does_not_acknowledge_staged_input(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
@@ -381,6 +376,14 @@ def test_receipt_io_failure_preserves_successful_publication(
     saved._populate_unsealed_artifact_envelope(
         draft["manifest"], draft["findings"], draft["coverage"], binding
     )
+    from review_state import checkpoint_review_state, review_summary
+
+    draft["manifest"]["scan"].pop("coverageRef", None)
+    draft["manifest"]["scan"].update(
+        mode=draft["coverage"]["mode"],
+        review=review_summary(draft["coverage"]),
+        reviewState=checkpoint_review_state(draft["coverage"]),
+    )
     staged = {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()}
     saved_results = workbench_api["saved_results"]
     original_write = saved_results.write_scan_local_bytes
@@ -389,10 +392,9 @@ def test_receipt_io_failure_preserves_successful_publication(
 
     def fail_receipt(filename):
         failures.append(filename)
-        # The fault occurs only after all three canonical files have been published.
+        # The fault occurs only after both canonical files have been published.
         for name, document in (
             ("findings.json", draft["findings"]),
-            ("coverage.json", draft["coverage"]),
             ("scan-manifest.json", draft["manifest"]),
         ):
             assert json.loads((scan.scan_dir / name).read_text()) == document

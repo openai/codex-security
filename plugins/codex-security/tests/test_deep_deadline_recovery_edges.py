@@ -18,6 +18,7 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     finish_deep_scan,
     get_scan,
+    read_review_state,
     run_workbench,
     saved_draft,
     worker_paths,
@@ -171,7 +172,7 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
     assert terminal["terminalReason"] == "capped"
     assert_retained_finding(scan)
     warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
-    coverage = json.loads((scan.directory / "coverage.json").read_text())
+    coverage = read_review_state(scan.state, scan.directory)
     pending = {row["reason"] for row in coverage["deferred"]}
     for field in defects:
         field_warnings = [warning for warning in warnings if field in warning]
@@ -204,7 +205,7 @@ def test_coordinator_deadline_preserves_only_usable_worker_checkpoints(
     findings = scan.directory / "findings.json"
     if checkpoint_kind == "valid":
         assert_retained_finding(scan)
-        coverage = json.loads((scan.directory / "coverage.json").read_text())
+        coverage = read_review_state(scan.state, scan.directory)
         assert "completeness" not in coverage
         assert any(row.get("id", "").endswith("/review") for row in coverage["deferred"])
         manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
@@ -337,7 +338,7 @@ def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication
     assert terminal["status"] == "succeeded"
     assert terminal["terminalReason"] == "capped"
     assert terminal["completionSequence"] == 0
-    recovered = json.loads((scan.directory / "coverage.json").read_text())
+    recovered = read_review_state(scan.state, scan.directory)
     assert recovered["mode"] == "scoped_path"
     assert recovered["inventoryStrategy"] == "scoped_path"
     assert recovered["includePaths"] == ["app.py"]

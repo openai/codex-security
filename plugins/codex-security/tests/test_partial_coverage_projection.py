@@ -10,7 +10,7 @@ from argparse import Namespace
 import pytest
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import write_checkpoint
+from workbench_test_support import read_review_state, write_checkpoint
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    coverage = json.loads(parent.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
     assert len(pending) == int(not newer_parent)
     assert any(
@@ -239,14 +239,13 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    coverage_path = scan.scan_dir / "coverage.json"
-    published = coverage_path.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    assert coverage_path.read_bytes() == published
-    coverage = json.loads(published)
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == 1
     if parent_surfaces == "edited":
@@ -288,7 +287,7 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     )
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())
     assert late.relative_to(scan.scan_dir).as_posix() in manifest["scan"]["preservedSources"]
-    assert coverage_path.read_bytes() == published
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
     assert result.read_bytes() == original
     assert late.read_bytes() == original_late
 
@@ -353,7 +352,7 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     surface = next(
         item for item in coverage["surfaces"] if item["label"] == "Prior unfinished review"
     )
@@ -432,8 +431,7 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    coverage_path = scan.scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert coverage["reviews"] == [review]
     for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
         for item in drafts["failed"]["coverage"][field]:
@@ -448,11 +446,11 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
     assert any(
         item.get("reason") == "accepted source needs proof." for item in coverage["deferred"]
     )
-    published = coverage_path.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert coverage_path.read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
     late = write_checkpoint(
         accepted.parent / "checkpoints",
         {
@@ -466,7 +464,7 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    assert coverage_path.read_bytes() == published
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert late.relative_to(scan.scan_dir).as_posix() in manifest["scan"]["preservedSources"]
     assert all(path.read_bytes() == original for path, original in originals.items())
@@ -580,7 +578,7 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
         "scan"
     ]
     assert recovered["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == worker_count
     by_surface_id = {item["id"]: item for item in coverage["surfaces"]}
@@ -602,9 +600,9 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
         assert len(by_surface_id) == worker_count * len(worker_surfaces)
     assert "completeness" not in coverage
     assert all(path.read_bytes() == data for path, data in originals.items())
-    published = (scan.scan_dir / "coverage.json").read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    assert (scan.scan_dir / "coverage.json").read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
 @pytest.mark.parametrize("attempt", [1, 2])
@@ -664,7 +662,7 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == (0 if attempt == 1 else 1)
     assert result.read_bytes() == original
@@ -721,7 +719,7 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert coverage["openQuestions"] == projected
     assert result.read_bytes() == original
 
@@ -815,7 +813,7 @@ def test_rejected_retry_preserves_original_finding_history(
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     assert recovered["findingCount"] == 0
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     for item in coverage["surfaces"]:
         provenance = item.get("provenance")
         if provenance is None or (
@@ -825,11 +823,11 @@ def test_rejected_retry_preserves_original_finding_history(
         else:
             assert "previousFindings" not in item
     assert all(path.read_bytes() == original for path, original in originals.items())
-    published = (scan.scan_dir / "coverage.json").read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert (scan.scan_dir / "coverage.json").read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
 @pytest.mark.parametrize("older_complete", [False, True])
@@ -950,7 +948,7 @@ def test_stopped_recovery_keeps_current_parent_projection(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     expected_questions = [] if recovery == "fallback-late" else [question]
     if recovery in {"late", "fallback-late"}:
         expected_questions.append({"question": "Late proof gap."})
@@ -969,11 +967,11 @@ def test_stopped_recovery_keeps_current_parent_projection(
     )
     assert all(path.read_bytes() == original for path, original in original_sources.items())
     assert all(path.read_bytes() == original for path, original in frozen_sources.items())
-    published = (scan.scan_dir / "coverage.json").read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert (scan.scan_dir / "coverage.json").read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
 @pytest.mark.parametrize("select_head", [False, True])
@@ -1034,7 +1032,7 @@ def test_matching_accepted_checkpoint_preserves_receipt_path(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     matching = [row for row in coverage["surfaces"] if row.get("label") == "Accepted source review"]
     assert matching
     assert all(
@@ -1075,7 +1073,7 @@ def test_accepted_worker_missing_completeness_keeps_valid_findings(
     assert recovered["resultsRecoveryNeeded"] is False
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert any(row["summary"] == finding["summary"] for row in findings)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert {"workerId": worker_id, "attempt": 1, "completeness": "partial"} in coverage["reviews"]
     assert "completeness" not in coverage
     assert result.read_bytes() == original
@@ -1130,14 +1128,13 @@ def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inferenc
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
-    coverage_path = scan.scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert coverage["surfaces"] == [projected]
-    published = coverage_path.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert coverage_path.read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
     assert all(path.read_bytes() == original for path, original in originals.items())
 
 
@@ -1304,7 +1301,7 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    coverage = json.loads(parent_coverage.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
     assert len(pending) == int(other_worker)
     source_surfaces = [
@@ -1317,11 +1314,11 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
         "needs_follow_up" if other_worker else "no_issue_found"
     )
     assert all(path.read_bytes() == value for path, value in originals.items())
-    published = parent_coverage.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert parent_coverage.read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
 @pytest.mark.parametrize("disposition", ["rejected", "reported"])
@@ -1424,7 +1421,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     if parent_review != "changed-later":
         assert not any(row.get("reason") == task["reason"] for row in coverage["deferred"])
     assert any(
@@ -1438,11 +1435,11 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == int(disposition == "reported")
     assert all(path.read_bytes() == value for path, value in originals.items())
-    published = coverage_path.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert coverage_path.read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
 @pytest.mark.parametrize("retry_publication", [False, True])
@@ -1635,7 +1632,7 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
     assert len(pending) == int(
         change
@@ -1675,11 +1672,11 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
                 for name in ("old", "new")
             }
     assert all(path.read_bytes() == content for path, content in originals.items())
-    published = coverage_path.read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
-    assert coverage_path.read_bytes() == published
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
 def publish_review_projection(workbench_api, connection, scan, coverage):
@@ -1718,10 +1715,10 @@ def stop_and_recover_projection(workbench_api, connection, scan, stop_scan, retr
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     stop_scan(scan, retry)
     saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
-    published = (scan.scan_dir / "coverage.json").read_bytes()
+    published = (scan.scan_dir / "scan-manifest.json").read_bytes()
     saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
-    assert (scan.scan_dir / "coverage.json").read_bytes() == published
-    return json.loads(published)
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
+    return read_review_state(connection, scan.scan_dir)
 
 
 @pytest.mark.parametrize("spelling", ["unchanged", "equivalent", "scan relative", "omitted"])
@@ -1949,7 +1946,7 @@ def test_deferred_projection_preserves_each_referenced_source_surface(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     projected = {row["provenance"]["sourceId"]: row for row in coverage["surfaces"]}
     assert set(projected) == {surface["id"] for surface in surfaces}
     pending = {

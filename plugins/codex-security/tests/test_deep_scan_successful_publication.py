@@ -202,10 +202,17 @@ def assert_published_aggregate(scan):
             value = finding.pop(field)
             assert value
     assert findings == scan.findings
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    for field in ("documentType", "schemaVersion", "scanId"):
-        coverage.pop(field)
-    assert coverage == scan.coverage
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    if "coverageRef" in manifest["scan"]:
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        for field in ("documentType", "schemaVersion", "scanId"):
+            coverage.pop(field)
+        assert coverage == scan.coverage
+    else:
+        assert manifest["scan"]["review"] == {
+            "excludedPaths": [item["pattern"] for item in scan.coverage["explicitExclusions"]],
+        }
+        assert not (scan.scan_dir / "coverage.json").exists()
     assert (scan.scan_dir / "report.md").is_file()
 
 
@@ -363,7 +370,7 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     scan = publication_scan()
     prepared = complete(workbench_api, workbench_db, scan, prepare_only=True)
     assert prepared["progress"]["status"] == "running"
-    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
 
     complete(workbench_api, workbench_db, scan, prepare_only=True)
@@ -699,7 +706,7 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         expected_summaries.add(scan.findings[0]["summary"])
     assert {finding["summary"] for finding in findings} == expected_summaries
 
-    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    artifact_names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
     recovered = recover_scan_results(workbench_api, workbench_db, scan)
     assert recovered["findingCount"] == len(expected_summaries)
@@ -756,7 +763,7 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     )
     assert manifest["scan"]["preservedSources"] == frozen
     assert source_relative not in frozen
-    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    artifact_names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
 
     recovered = recover_scan_results(workbench_api, workbench_db, scan)
@@ -1029,7 +1036,7 @@ def test_stopped_file_scope_filters_siblings_before_assigning_identity(
     assert len(findings) == 1
     assert findings[0]["locations"][0]["path"] == "subdir/extract.py"
     assert findings[0]["identity"] == {"anchor": "candidate-review"}
-    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
     recover_scan_results(workbench_api, workbench_db, scan)
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published

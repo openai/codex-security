@@ -18,7 +18,7 @@ import pytest
 from finalize_sarif_cases import FINALIZER, FinalizerSarifCases
 from workbench_test_support import ScanFixtureTestCase, windows_file_backend
 
-EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
+EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 

@@ -23,6 +23,7 @@ from finalize_scan_contract import (
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
+from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
@@ -147,7 +148,7 @@ def coverage_summary_for_history(
     wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
 ) -> dict[str, Any]:
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
-    coverage_ref = ARTIFACTS["coverage"]
+    coverage_ref = "coverage.json"
     try:
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
@@ -157,7 +158,7 @@ def coverage_summary_for_history(
                 raise ContractError("coverage.mode: must match the workbench scan")
         else:
             # Completion already validated the full scan. History only needs the
-            # pinned manifest and its coverage artifact, not findings or receipts.
+            # pinned manifest and any legacy coverage artifact, not findings or receipts.
             manifest, manifest_bytes = _read_scan_local_json_bytes(
                 scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
             )
@@ -167,11 +168,15 @@ def coverage_summary_for_history(
             ):
                 raise ContractError("The sealed scan manifest changed after completion.")
             sealed_scan = manifest["scan"]
-            if (
-                sealed_scan["id"] != scan["id"]
-                or not sealed_scan.get("sealedAt")
-                or sealed_scan["coverageRef"] != coverage_ref
-            ):
+            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            if "coverageRef" not in sealed_scan:
+                coverage = review_state(sealed_scan)
+                return {
+                    key: coverage[key]
+                    for key in ("mode", "includePaths", "excludePaths", "explicitExclusions")
+                }
+            if sealed_scan["coverageRef"] != coverage_ref:
                 raise ContractError("The sealed coverage does not belong to this scan.")
             coverage, coverage_bytes = _read_scan_local_json_bytes(
                 scan_dir, coverage_ref, coverage_ref

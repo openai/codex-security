@@ -12,7 +12,7 @@ from referencing import Registry, Resource
 from workbench_test_support import saved_coverage
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-EXAMPLE_DIR = PLUGIN_DIR / "examples" / "completed-scan"
+EXAMPLE_DIR = PLUGIN_DIR / "examples" / "legacy-completed-scan"
 SCHEMA_DIR = PLUGIN_DIR / "schemas"
 
 
@@ -59,7 +59,7 @@ class ScanContractExamplesTest(unittest.TestCase):
         scan_draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
         reducer_schema = read_json(SCHEMA_DIR / "tools" / "deep-reducer.schema.json")
         reduction_input = reducer_schema["$defs"]["reductionInput"]
-        self.assertNotIn("coverage", reduction_input["properties"])
+        self.assertNotIn("reviewState", reduction_input["properties"])
         self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
         self.assertFalse(reduction_input["additionalProperties"])
         registry = Registry().with_resources(
@@ -108,27 +108,27 @@ class ScanContractExamplesTest(unittest.TestCase):
             }
         )
         validator.validate({**request, "findings": []})
-        self.assertFalse(validator.is_valid({**request, "coverage": coverage}))
+        self.assertFalse(validator.is_valid({**request, "reviewState": coverage}))
 
         standard_validator = Draft202012Validator(
             scan_draft_schema, registry=registry, format_checker=FormatChecker()
         )
         standard_request = {
             **request,
-            "coverage": {**coverage, "deferred": []},
+            "reviewState": {**coverage, "deferred": []},
         }
         standard_validator.validate(standard_request)
         self.assertFalse(standard_validator.is_valid(request))
-        self.assertFalse(standard_validator.is_valid({**request, "coverage": coverage}))
+        self.assertFalse(standard_validator.is_valid({**request, "reviewState": coverage}))
         for missing_field in ("surfaces", "explicitExclusions", "deferred"):
             with self.subTest(standard_missing_coverage_field=missing_field):
                 self.assertFalse(
                     standard_validator.is_valid(
                         {
                             **standard_request,
-                            "coverage": {
+                            "reviewState": {
                                 field: value
-                                for field, value in standard_request["coverage"].items()
+                                for field, value in standard_request["reviewState"].items()
                                 if field != missing_field
                             },
                         }
@@ -316,7 +316,7 @@ class ScanContractExamplesTest(unittest.TestCase):
         draft = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [draft_finding],
-            "coverage": saved_coverage(),
+            "reviewState": saved_coverage(),
         }
         draft_validator.validate(draft)
 

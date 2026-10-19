@@ -9,7 +9,7 @@ from pathlib import Path
 from workbench_test_support import ScanFixtureTestCase, load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "completed-scan"
+EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "legacy-completed-scan"
 
 
 VALIDATOR = load_script("validate_scan_contract")

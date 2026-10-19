@@ -23,6 +23,7 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import (
     interrupt_publication,
+    read_review_state,
     run_workbench,
     saved_draft,
     sort_checkpoint_entries,
@@ -181,7 +182,7 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
     assert scan["findingCount"] == 1
     findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert [item["identity"]["anchor"] for item in findings] == ["accepted"]
-    retained_coverage = json.loads((scan_dir / "coverage.json").read_text())
+    retained_coverage = read_review_state(state, scan_dir)
     assert "completeness" not in retained_coverage
     assert any(item.get("candidateId") == "pending-query" for item in retained_coverage["deferred"])
     assert any(
@@ -255,7 +256,7 @@ def test_recovery_honors_rejection_committed_before_result_replacement(
     assert any(finding["identity"]["anchor"] == "independent-finding" for finding in findings)
     assert all(path.read_bytes() == contents for path, contents in saved_bytes.items())
     if has_head:
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(workbench_db, scan.scan_dir)
         assert any(
             surface.get("candidateId") == "candidate-rejected"
             and surface.get("disposition") == "rejected"
@@ -411,12 +412,13 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
     original_outputs = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("findings.json", "coverage.json", "scan-manifest.json")
+        if (scan.scan_dir / name).exists()
     }
     write_bytes = finalize_scan_contract.write_scan_local_bytes
     failed_writes = []
 
-    def fail_coverage_write(directory, relative, payload, **kwargs):
-        if relative != "coverage.json" or failed_writes:
+    def fail_manifest_write(directory, relative, payload, **kwargs):
+        if relative != "scan-manifest.json" or failed_writes:
             return write_bytes(directory, relative, payload, **kwargs)
         # Exercise the real writer after findings have reached disk. Remove the
         # temporary obstruction before the publisher restores its old outputs.
@@ -432,7 +434,7 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
             path.write_bytes(previous_bytes)
 
     with monkeypatch.context() as patch:
-        patch.setattr(finalize_scan_contract, "write_scan_local_bytes", fail_coverage_write)
+        patch.setattr(finalize_scan_contract, "write_scan_local_bytes", fail_manifest_write)
         fail_scan(workbench_api, workbench_db, scan, "Audit stopped.")
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
     if not root_head:
@@ -620,7 +622,7 @@ def test_head_reselection_preserves_equal_or_newer_pending_evidence(
 
     fail_scan(workbench_api, workbench_db, scan, "Audit stopped.")
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     key, value = next(iter(identity.items()))
     if generic and not root_head:
         value = f"{result.parent.name}/{value}"
@@ -875,6 +877,7 @@ def test_failed_explicit_recovery_replays_its_frozen_selection(
     original = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("findings.json", "coverage.json", "scan-manifest.json")
+        if (scan.scan_dir / name).exists()
     }
     original_digest = workbench_db.execute(
         "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan.scan_id,)
@@ -1473,7 +1476,8 @@ def test_restored_head_keeps_latest_model_fallback(
     assert not recovered["resultsRecoveryNeeded"]
     published = {
         name: (scan.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in ("scan-manifest.json", "findings.json", "report.md")
+        if (scan.scan_dir / name).exists()
     }
     replayed = preserve_scan_results(workbench_api, workbench_db, scan)
     assert not replayed["resultsRecoveryNeeded"]
@@ -1600,7 +1604,7 @@ def test_restored_observation_keeps_independent_registered_result(
     sources = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
         "preservedSources"
     ]
-    prior_coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    prior_coverage = read_review_state(workbench_db, scan.scan_dir)
     assert not prior_coverage.get("openQuestions")
     assert not prior_coverage["explicitExclusions"]
     original = {path: (scan.scan_dir / path).read_bytes() for path in sources}
@@ -1633,7 +1637,7 @@ def test_restored_observation_keeps_independent_registered_result(
     assert manifest["threatModel"]["summary"] == (
         "Registered reporting model." if registered else "Stale result model."
     )
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     if registered:
         for field in ("surfaces", "openQuestions", "explicitExclusions"):
             assert coverage.get(field) == prior_coverage.get(field)
@@ -1858,7 +1862,7 @@ def test_recovery_keeps_known_model_source_with_equal_model_duplicates(
     os.utime(older, ns=(50, 50))
     if duplicate_order is not None:
         duplicate = copy.deepcopy(canonical)
-        duplicate["coverage"]["openQuestions"] = [{"question": "Earlier synthetic review."}]
+        duplicate["reviewState"]["openQuestions"] = [{"question": "Earlier synthetic review."}]
         duplicate_path = write_checkpoint(scan.scan_dir / "checkpoints", duplicate)
         os.utime(duplicate_path, ns=(50, 50))
         sort_checkpoint_entries(
@@ -2053,7 +2057,7 @@ def test_selected_terminal_coverage_excludes_unselected_history(
         else:
             recover_scan_results(workbench_api, workbench_db, scan)
     replayed = preserve_scan_results(workbench_api, workbench_db, scan)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert [row["label"] for row in coverage["surfaces"]] == [f"{expected} surface"]
     assert [row["question"] for row in coverage["openQuestions"]] == [f"{expected} question"]
     assert [row["pattern"] for row in coverage["explicitExclusions"]] == [f"{expected}/**"]
@@ -2202,7 +2206,7 @@ def test_selected_terminal_coverage_has_root_worker_parity(
         else:
             recover_scan_results(workbench_api, workbench_db, scan)
     replayed = preserve_scan_results(workbench_api, workbench_db, scan)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     expected = {"A"} if terminal else {"A", "B"}
     assert {row["label"] for row in coverage["surfaces"]} == expected
     assert {row["pattern"] for row in coverage["explicitExclusions"]} == {
@@ -2290,7 +2294,7 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
         else:
             recover_scan_results(workbench_api, workbench_db, scan)
     replayed = preserve_scan_results(workbench_api, workbench_db, scan)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     expected = [] if current_terminal else ["Accepted"]
     assert [row["label"] for row in coverage["surfaces"]] == expected
     assert [row["pattern"] for row in coverage["explicitExclusions"]] == (
@@ -2389,7 +2393,7 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
     stopped = fail_scan(workbench_api, workbench_db, scan, "Audit stopped.")
     unverified = receipt_state in {"missing", "shared-collision"}
     assert stopped["findingCount"] == int(unverified)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert ("needs_follow_up" if unverified else "rejected") in {
         surface["disposition"] for surface in coverage["surfaces"]
     }
@@ -2496,6 +2500,7 @@ def test_snapshot_write_failure_keeps_stopped_publication_pending(
     original_outputs = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("findings.json", "coverage.json", "scan-manifest.json")
+        if (scan.scan_dir / name).exists()
     }
     originals = {
         path: path.read_bytes() for path in (result, result.parent / "checkpoint-head.json")
@@ -2673,7 +2678,8 @@ def test_legacy_unreadable_head_does_not_hide_another_workers_new_evidence(
         )
     before = {
         name: (scan.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in ("scan-manifest.json", "findings.json", "report.md")
+        if (scan.scan_dir / name).exists()
     }
     assert (
         workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]["resultsRecoveryNeeded"]
@@ -2747,7 +2753,8 @@ def test_legacy_ordering_failure_does_not_hide_new_worker_evidence(
         ordering_path.write_text("{")
     original = {
         name: (scan.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in ("scan-manifest.json", "findings.json", "report.md")
+        if (scan.scan_dir / name).exists()
     }
     scan.findings[0]["identity"]["anchor"] = "independent-new-worker"
     other = add_worker(workbench_db, scan, status="canceled")
@@ -2780,7 +2787,7 @@ def test_legacy_retained_heads_survive_loss_after_terminal_output(
             "canceled_at = ? WHERE id = ?",
             (scan.timestamp if canceled else None, scan.scan_id),
         )
-    for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md"):
+    for name in ("scan-manifest.json", "findings.json", "report.md"):
         (scan.scan_dir / name).unlink()
     database = tmp_path / "legacy-stop.sqlite3"
     with sqlite3.connect(database) as connection:

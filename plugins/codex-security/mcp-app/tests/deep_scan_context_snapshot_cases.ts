@@ -147,7 +147,7 @@ export async function testDeepScanContextSnapshots({
                     findings: [],
                     ...(request.kind === "discovery"
                       ? {
-                          coverage: {
+                          reviewState: {
                             surfaces: [],
                             explicitExclusions: [],
                             deferred: [],

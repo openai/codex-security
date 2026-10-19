@@ -64,7 +64,7 @@ const scanDraftFinding = {
 const scanDraftInput = {
   scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f49",
   findings: [scanDraftFinding],
-  coverage: {
+  reviewState: {
     completeness: "complete",
     surfaces: [],
     explicitExclusions: [],
@@ -171,7 +171,7 @@ describe("bundled plugin finding detail contracts", () => {
     const [schema, example] = await Promise.all([
       readJson(join(PLUGIN_ROOT, "schemas", "findings.schema.json")),
       readJson(
-        join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+        join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
       ),
     ]);
     const validate = new Ajv2020({ strict: false }).compile(schema);

@@ -50,7 +50,7 @@ interface DraftFixture {
   scope?: Record<string, unknown>;
   threatModel?: Record<string, unknown>;
   findings: Record<string, unknown>[];
-  coverage: Record<string, unknown>;
+  reviewState: Record<string, unknown>;
 }
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
@@ -139,7 +139,7 @@ for (const scenario of cases) {
           provenance: { source: "local_plugin", candidateId: "archive-entry" },
         },
       ],
-      coverage: {
+      reviewState: {
         ...(scenario.legacyCompleteness === undefined
           ? {}
           : { completeness: scenario.legacyCompleteness }),
@@ -178,11 +178,12 @@ for (const scenario of cases) {
         const draft = JSON.parse(
           await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
         );
+        draft.manifest.scan.coverageRef = "coverage.json";
         await Promise.all(
           [
             ["manifest", "scan-manifest.json"],
             ["findings", "findings.json"],
-            ["coverage", "coverage.json"],
+            ["reviewState", "coverage.json"],
           ].map(([key, name]) =>
             writeFile(join(standardRoot, name!), JSON.stringify(draft[key!])),
           ),
@@ -206,7 +207,7 @@ for (const scenario of cases) {
     const coverage = JSON.parse(
       await readFile(join(standardRoot, "coverage.json"), "utf8"),
     );
-    Object.assign(coverage, submitted.coverage);
+    Object.assign(coverage, submitted.reviewState);
     await Promise.all([
       writeFile(join(standardRoot, "findings.json"), JSON.stringify(findings)),
       writeFile(join(standardRoot, "coverage.json"), JSON.stringify(coverage)),
@@ -289,10 +290,10 @@ for (const scenario of cases) {
           await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
         ),
         findings,
-        coverage,
+        reviewState: coverage,
       });
       expect(deepDraft.findings).toEqual(canonicalDraft.findings);
-      expect(deepDraft.coverage).toEqual(canonicalDraft.coverage);
+      expect(deepDraft.reviewState).toEqual(canonicalDraft.reviewState);
       expect(deepDraft.scope).toEqual(canonicalDraft.scope);
       expect(deepDraft.threatModel).toEqual(canonicalDraft.threatModel);
     } else {
@@ -371,7 +372,7 @@ test("sealed legacy evidence stays readable during canonical admission", async (
     scanId: manifest.scan.id,
     manifest,
     findings,
-    coverage,
+    reviewState: coverage,
   });
   expect(canonical.findings[0]?.code_evidence).toEqual([evidence]);
 });
@@ -454,7 +455,7 @@ function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
     locations[0]!["endLine"] = 1;
   }
   if (mutation === "legacy-surface")
-    (draft.coverage["surfaces"] as Record<string, unknown>[])[0]!["id"] =
+    (draft.reviewState["surfaces"] as Record<string, unknown>[])[0]!["id"] =
       "HTTP API";
   if (mutation === "legacy-evidence")
     draft.findings[0]!["code_evidence"] = [

@@ -1582,6 +1582,7 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
     sealed_files = {
         name: (fixture.scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (fixture.scan_dir / name).is_file()
     }
     with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
         stopped_at = connection.execute(

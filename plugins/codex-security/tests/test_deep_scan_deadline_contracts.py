@@ -10,7 +10,7 @@ from test_deep_scan_stop_conditions import canceled_discovery_output, complete, 
 from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
 from test_deep_scan_stop_conditions import publication_scan as publication_scan
 from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
-from workbench_test_support import saved_draft, write_checkpoint
+from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 
 @pytest.mark.parametrize("source", ["result", "checkpoint", "archived-checkpoint"])
@@ -85,7 +85,7 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
     assert rejected["title"] not in titles
     if not terminal or source == "result":
         assert (earlier["title"] in titles) == (not terminal)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(row["reason"] == "Review remains." for row in coverage["deferred"]) == (not terminal)
     assert (
         any(
@@ -193,7 +193,7 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
     }
     retained = next(finding for finding in findings if finding["title"] == sibling["title"])
     assert retained["provenance"]["workerId"] == worker_id
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(row["reason"] == "Review remains." for row in coverage["deferred"])
     assert not any(row["reason"] == "Separate review remains." for row in coverage["deferred"])
     surfaces = {row["label"]: row for row in coverage["surfaces"]}
@@ -305,7 +305,7 @@ def test_deadline_applies_existing_nonblank_surface_label_contract(
     completed = complete(workbench_api, workbench_db, scan)
 
     assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 2
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert len(surfaces) == bool(label.strip())
     if surfaces:
@@ -363,13 +363,11 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
     assert len(findings) == (1 if malformed and field == "finding" else 2)
     assert any("well-formed Unicode" in warning for warning in completed["warnings"]) == malformed
     if field == "resolvedDeferred":
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(workbench_db, scan.scan_dir)
         assert any(row["reason"] == "Review pending." for row in coverage["deferred"]) == malformed
     elif not malformed:
         document = (
-            findings
-            if field == "finding"
-            else json.loads((scan.scan_dir / "coverage.json").read_text())
+            findings if field == "finding" else read_review_state(workbench_db, scan.scan_dir)
         )
         assert text in json.dumps(document, ensure_ascii=False)
     assert checkpoint.read_bytes() == original
@@ -417,12 +415,12 @@ def test_deadline_recovers_historical_closure_text_without_losing_a_valid_siblin
 
     invalid = not reason.strip()
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = {row["reason"] for row in coverage["deferred"]}
     assert ("First review pending." in pending) == invalid
     assert "Valid sibling review pending." not in pending
     report = (scan.scan_dir / "report.md").read_text()
-    assert ("First review pending." in report) == invalid
+    assert "First review pending." not in report
     assert "Valid sibling review pending." not in report
     assert any("expected a non-empty string" in warning for warning in completed["warnings"]) == (
         invalid
@@ -541,7 +539,7 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert any(row["title"] == finding["title"] for row in findings) == terminal_findings
     assert all(row["title"] != rejected["title"] for row in findings)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(
         row.get("workerId") == worker_id and row["label"] == surface["label"]
         for row in coverage["surfaces"]
@@ -599,7 +597,7 @@ def test_standard_parent_closure_preserves_unrelated_task_without_id(
 
     complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(coverage["deferred"]) == 1
     assert coverage["deferred"][0]["id"]
     assert coverage["deferred"][0]["reason"] == "Unrelated pending review."

@@ -88,7 +88,7 @@ export async function completedScan(
     await reseal(outputDir);
   }
   const result = fakeResult([], completeness);
-  return { manifest: result.manifest, coverage: result.coverage } as ScanResult;
+  return { manifest: result.manifest, review: result.review } as ScanResult;
 }
 
 export async function reseal(scanDir: string): Promise<void> {

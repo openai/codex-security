@@ -29,6 +29,7 @@ from workbench_test_support import (
     load_script,
     mark_handoff_delivered,
     mark_remediation_delivered,
+    read_review_state,
     request_remediation,
     request_remediation_action,
     resume_deep_scan,
@@ -256,7 +257,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert manifest["scan"]["sealedAt"]
     assert warning in manifest["scan"]["scope"]["limitations"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
 
     assert coverage["deferred"][0]["id"] == "candidate-1"
@@ -266,7 +267,6 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
     assert "No findings were reported." in report
-    assert "User input reaches a SQL statement" in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -284,7 +284,7 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"][0]["id"] == "candidate-1"
 
@@ -324,7 +324,7 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["surfaces"][0]["disposition"] == surface_disposition
     assert any(row["id"] == "candidate-1" for row in coverage["deferred"]) is deferred
@@ -345,7 +345,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
         coverage_mode="deep_repository",
     )
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(
         {
             "id": "candidate-candidate-1",
@@ -359,7 +359,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["findingCount"] == 1
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert sum(row["id"] == "candidate-candidate-1" for row in preserved["surfaces"]) == 1
     assert preserved["surfaces"][1]["disposition"] == "rejected"
     assert not any(row["id"] == "candidate-1" for row in preserved["deferred"])
@@ -389,7 +389,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     existing = {"id": "existing-proof-gap", "reason": reason, "paths": ["app.py"]}
     coverage["deferred"] = [existing]
     coverage_path.write_text(json.dumps(coverage))
@@ -397,7 +397,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert preserved["deferred"][0] == existing
     assert len(preserved["deferred"]) == 1 + marker_added
     if marker_added:
@@ -414,9 +414,7 @@ def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    assert (
-        json.loads((scan_dir / "coverage.json").read_text())["deferred"][0]["id"] == "candidate-1"
-    )
+    assert read_review_state(state_dir, scan_dir)["deferred"][0]["id"] == "candidate-1"
 
 
 def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path) -> None:
@@ -426,7 +424,7 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"] == [
         {
@@ -442,7 +440,7 @@ def test_budget_exhaustion_preserves_scoped_path_inventory(tmp_path: Path) -> No
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "scoped_path"
     assert coverage["inventoryStrategy"] == "scoped_path"
     assert coverage["includePaths"] == ["app.py"]
@@ -541,7 +539,7 @@ def test_budget_exhaustion_preserves_out_of_scope_supporting_evidence(tmp_path: 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["app.py", "shared/control.py"]
 
 
@@ -562,7 +560,7 @@ def test_budget_exhaustion_preserves_unicode_line_separator_inventory(tmp_path: 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["dir\u2028name.py"]
 
 
@@ -634,7 +632,7 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     completed = scan_command(state_dir, "complete-scan", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
     assert coverage["inventoryStrategy"] == "repository"
 
@@ -2529,7 +2527,7 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert manifest["scan"]["target"]["snapshotDigest"] == diff_target["contentDigest"]
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
     assert coverage["mode"] == "working_tree"

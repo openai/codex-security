@@ -33,7 +33,7 @@ export function loadBundledRuntime(): Promise<string> {
 }
 
 export const copyCompletedScanFixture = (destination: string) =>
-  cp(new URL("examples/completed-scan/", bundledPlugin), destination, {
+  cp(new URL("examples/legacy-completed-scan/", bundledPlugin), destination, {
     recursive: true,
   });
 

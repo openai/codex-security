@@ -40,6 +40,26 @@ def call_workbench(monkeypatch, state, codex_home, *args):
         workbench_db.main()
 
 
+def recovered_review_state(state, scan_dir, scan_id):
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+        ).fetchall()
+    return saved.merge_saved_results(
+        scan_dir,
+        scan_id,
+        workbench_db.workbench_completion_binding(scan, workbench_db.now()),
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=manifest["scan"]["preservedSources"],
+    )[2]
+
+
 @pytest.mark.parametrize("termination", ["canceled", "failed", "interrupted"])
 @pytest.mark.parametrize("latest_pending", [True, False])
 @pytest.mark.parametrize("failure_stage", ["publication", "source-order", "head-and-source-order"])
@@ -135,7 +155,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
         "--thread-id",
         "standard-worker-thread",
     )
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = recovered_review_state(state, scan_dir, scan_id)
     pending_rows = [row for row in coverage["deferred"] if row.get("reason") == "Review remains."]
     assert pending_rows == (
         [
@@ -206,7 +226,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         scan_id,
     )
     assert len(published) == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = recovered_review_state(state, scan_dir, scan_id)
     expected = pending["coverage"]["deferred"][0]
     if layout == "worker":
         expected = {
@@ -230,7 +250,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         "--thread-id",
         "standard-worker-thread",
     )
-    assert json.loads((scan_dir / "coverage.json").read_text()) == coverage
+    assert recovered_review_state(state, scan_dir, scan_id) == coverage
 
 
 @pytest.mark.parametrize("rewritten", ["result", "checkpoint"])
@@ -437,7 +457,7 @@ def test_invalid_explicit_recovery_does_not_replace_first_selection(tmp_path: Pa
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
     artifacts = {
         name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in ("scan-manifest.json", "findings.json", "report.md")
     }
     query = (
         "SELECT seal_manifest_digest, retained_source_digests_json, retained_checkpoint_heads_json "

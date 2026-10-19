@@ -130,7 +130,8 @@ test.each([false, true])(
       const result = new ScanResult({
         manifest: base.manifest,
         findings: base.findings,
-        coverage: base.coverage,
+        review: base.review,
+        mode: base.mode,
         scanDir,
         threadId: base.threadId,
         turnResult: base.turnResult,

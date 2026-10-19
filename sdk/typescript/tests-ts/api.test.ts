@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import {
@@ -98,7 +99,7 @@ import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
@@ -4278,7 +4279,7 @@ if __name__ == "__main__":
         "prompt captured",
       );
       expect(prompt).toContain(
-        `Use exactly "${scanId}" as the scan ID in the manifest, findings, and coverage.`,
+        `Use exactly "${scanId}" as the scan ID in the manifest and findings.`,
       );
       expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
       if (mode === "deep") {
@@ -5049,7 +5050,9 @@ if __name__ == "__main__":
       } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
-        expect((await result).coverage.deferred).toEqual([
+        expect(
+          (await readReviewState((await result).scanDir)).deferred,
+        ).toEqual([
           {
             id: "runtime-note",
             reason: "Optional runtime reproduction was unavailable.",
@@ -5671,7 +5674,7 @@ if __name__ == "__main__":
           }
         } else {
           const recovered = await result;
-          expect(recovered.coverage).not.toHaveProperty("completeness");
+          expect(recovered.review).not.toHaveProperty("status");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
@@ -6896,8 +6899,8 @@ if __name__ == "__main__":
         : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     const bindScopeCommand =
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
+        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
     expect(prompt).toContain(makeScopeCommand);
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -6975,19 +6978,14 @@ if __name__ == "__main__":
     for (const separator of ["\u0085", "\u2028", "\u2029"])
       expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
-    const coverage = join(scanDir, "coverage.json");
     await writeFile(
       manifest,
       JSON.stringify({ scan: { scope: { includePaths: ["wrong"] } } }),
     );
-    await writeFile(coverage, JSON.stringify({ includePaths: ["wrong"] }));
     runScopedHelper(bindScopeCommand);
     expect(
       JSON.parse(await readFile(manifest, "utf8")).scan.scope.includePaths,
     ).toEqual(paths);
-    expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
-      paths,
-    );
     if (process.platform === "win32") {
       const driveRoot = win32.parse(repository).root;
       const absoluteScopes = join(root, "absolute-scopes.json");

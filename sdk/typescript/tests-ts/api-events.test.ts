@@ -946,19 +946,17 @@ describe("one-shot scan events", () => {
   });
 });
 
-test.each([
-  "scan-manifest.json",
-  "findings.json",
-  "coverage.json",
-  "report.md",
-])("missing required artifact %s remains an incomplete scan", async (name) => {
-  const scanDir = await copyCompletedScan(await temporaryDirectory());
-  await rm(join(scanDir, name));
-  await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
-    name: IncompleteScanError.name,
-    message: `Codex Security scan completed without required artifacts: ${name}`,
-  });
-});
+test.each(["scan-manifest.json", "findings.json", "report.md"])(
+  "missing required artifact %s remains an incomplete scan",
+  async (name) => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    await rm(join(scanDir, name));
+    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+      name: IncompleteScanError.name,
+      message: `Codex Security scan completed without required artifacts: ${name}`,
+    });
+  },
+);
 
 test("an aborted completed turn cannot prepare workbench artifacts", async () => {
   const abortController = new AbortController();

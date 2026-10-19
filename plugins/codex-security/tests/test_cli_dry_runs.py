@@ -62,8 +62,8 @@ def test_recover_scan_results_help_describes_its_contract() -> None:
 
 
 def test_finalizer_cli_completes_checked_in_scan_bundle(tmp_path: Path) -> None:
-    scan_dir = tmp_path / "completed-scan"
-    shutil.copytree(PLUGIN_ROOT / "examples" / "completed-scan", scan_dir)
+    scan_dir = tmp_path / "legacy-completed-scan"
+    shutil.copytree(PLUGIN_ROOT / "examples" / "legacy-completed-scan", scan_dir)
 
     result = run_script(
         "finalize_scan_contract.py",

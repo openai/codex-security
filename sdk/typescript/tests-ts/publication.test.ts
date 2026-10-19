@@ -234,7 +234,6 @@ describe("scan publication preparation", () => {
         )
       ).issues[0]!;
 
-      expect(description).toContain(`**Coverage mode:** ${mode}`);
       expect(description).toContain(`**Scan mode:** ${expectedMode}`);
       expect(description).not.toContain("**Scan mode:** unknown");
     },

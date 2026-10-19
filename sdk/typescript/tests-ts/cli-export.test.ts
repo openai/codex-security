@@ -712,7 +712,7 @@ describe("CLI", () => {
         const manifest = JSON.parse(
           await readFile(manifestPath, "utf8"),
         ) as ScanManifest;
-        const coveragePath = join(scan, manifest.scan.coverageRef);
+        const coveragePath = join(scan, manifest.scan.coverageRef!);
         const coverage = JSON.parse(
           await readFile(coveragePath, "utf8"),
         ) as CoverageDocument;

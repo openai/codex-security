@@ -1737,13 +1737,13 @@ console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
   if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
-    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
+    const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
     if (context.claimedWorkerIds) {
       const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
       const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
       writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
     } else {
-      writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
+      writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
     }
     console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));
     console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
@@ -1753,10 +1753,10 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
 setInterval(() => {}, 1_000);
 const stop = (signal) => {
   if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
-    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
+    const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
     const checkpointDir = path.join(root, 'checkpoints');
     mkdirSync(checkpointDir, { recursive: true });
-    writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
+    writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
   }
   appendFileSync(process.env.FAKE_CODEX_EXIT_LOG, JSON.stringify({ pid: process.pid, signal }) + '\\n');
   process.exit(0);

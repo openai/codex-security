@@ -24,6 +24,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    read_review_state,
     request_remediation,
     request_remediation_action,
     resume_deep_scan,
@@ -119,7 +120,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     assert checkpoint_path.read_bytes() == json.dumps(payload).encode()
     recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
     assert recovered["findingCount"] == 2
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert any(item.get("id") == "late-review" for item in coverage["deferred"])
     assert recovered["progress"]["status"] == "failed"
     assert recovered["progress"]["updatedAt"] > stopped["progress"]["updatedAt"]
@@ -227,7 +228,7 @@ def test_stopped_diff_checkpoint_uses_canonical_snapshot_digest(
     ).hexdigest()
     assert target_contract["kind"] == "git_diff"
     assert target_contract["snapshotDigest"] == (f"codex-security-snapshot/v1:sha256:{expected}")
-    assert json.loads((scan_dir / "coverage.json").read_text())["mode"] == coverage_mode
+    assert read_review_state(state_dir, scan_dir)["mode"] == coverage_mode
 
 
 def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) -> None:
@@ -271,7 +272,7 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
         "scanId": scan_id,
         "complete": False,
         "findings": [finding],
-        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+        "coverage": read_review_state(state_dir, scan_dir),
     }
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
@@ -309,7 +310,7 @@ def test_frozen_stopped_results_skip_late_checkpoint_reindexing(tmp_path: Path) 
         "scanId": scan_id,
         "complete": False,
         "findings": [finding],
-        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+        "coverage": read_review_state(state_dir, scan_dir),
     }
     checkpoint_path = write_checkpoint(scan_dir / "checkpoints", checkpoint)
     output_paths = (
@@ -403,7 +404,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     else:
         findings["findings"] = []
     (scan_dir / "findings.json").write_text(json.dumps(findings))
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     disposition = disposition.removeprefix("provenance-")
     coverage["surfaces"][0].update(
         candidateId="candidate-x", disposition=disposition, notes="Final source review disposition."
@@ -412,7 +413,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     for path in (checkpoint, scan_dir / "coverage.json"):
         os.utime(path, ns=(200, 200))
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
-    final_coverage = json.loads((scan_dir / "coverage.json").read_text())
+    final_coverage = read_review_state(state_dir, scan_dir)
     assert completed["progress"]["status"] == "complete"
 
     assert not any(item.get("candidateId") == "candidate-x" for item in final_coverage["deferred"])
@@ -1303,7 +1304,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
     original_write = results.write_scan_local_bytes
 
     def interrupt_coverage(scan_root: Path, relative: str, contents: bytes) -> None:
-        if relative == "coverage.json":
+        if relative == "scan-manifest.json":
             raise OSError("Interrupted canonical publication")
         original_write(scan_root, relative, contents)
 
@@ -1319,7 +1320,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         normalized_path = scan_dir / "checkpoints" / head["checkpoint"]
         normalized_bytes = normalized_path.read_bytes()
         normalized = json.loads(normalized_bytes)
-        assert normalized["coverage"]["deferred"] == documents["coverage"]["deferred"]
+        assert normalized["reviewState"]["deferred"] == documents["coverage"]["deferred"]
         assert normalized["scanId"] == scan_id
         retained = raw
         if mode == "deep":
@@ -1355,7 +1356,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         assert normalized_path.read_bytes() == normalized_bytes
         assert retained_raw.read_bytes() == raw_bytes
-        canonical = json.loads((scan_dir / "coverage.json").read_text())
+        canonical = read_review_state(state_dir, scan_dir)
         assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
         pending = {"id": "stale-review", "reason": "A new caller remains."}
         documents["coverage"]["deferred"].append(pending)
@@ -1389,7 +1390,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         documents["coverage"]["resolvedDeferred"] = raw["coverage"]["resolvedDeferred"]
         staged.write_text(json.dumps(documents))
         results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        canonical = json.loads((scan_dir / "coverage.json").read_text())
+        canonical = read_review_state(state_dir, scan_dir)
         assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
         assert canonical["resolvedDeferred"] == raw["coverage"]["resolvedDeferred"]
 

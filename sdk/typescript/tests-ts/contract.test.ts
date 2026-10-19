@@ -23,7 +23,7 @@ import { createContractTestFixtures } from "./support/contract-fixture.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { temporaryDirectory, cleanup, copyExample } =
   createContractTestFixtures();
 
@@ -398,7 +398,7 @@ describe("canonical scan contract", () => {
       "target_sha256_example",
     );
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
-    expect(contract.coverage.mode).toBe("repository");
+    expect(contract.review).toEqual({ excludedPaths: [] });
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
@@ -1004,7 +1004,6 @@ describe("canonical scan contract", () => {
 
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.scope.includePaths).toEqual([path]);
-      expect(contract.coverage.includePaths).toEqual([path]);
       expect(contract.findings.findings[0]!.locations[0]!.path).toBe(path);
     },
   );
@@ -1041,11 +1040,7 @@ describe("canonical scan contract", () => {
     await reseal(scanDir);
     const sealedBytes = await readFile(coveragePath);
 
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toMatchObject({
-      coverage: { deferred: [{ paths }] },
-    });
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
     expect(await readFile(coveragePath)).toEqual(sealedBytes);
   });
 

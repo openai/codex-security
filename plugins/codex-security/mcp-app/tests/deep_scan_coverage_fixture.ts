@@ -72,8 +72,20 @@ interface PublishedCoverage {
 }
 export async function readFixtureCoverage(
   scanDir: string,
+  stateDir = path.resolve(scanDir, "../../../state"),
 ): Promise<PublishedCoverage> {
-  return readJson(path.join(scanDir, "coverage.json"));
+  const { stdout } = await exec(process.env.PYTHON || "python3", [
+    "-c",
+    `import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_test_support import read_review_state
+print(json.dumps(read_review_state(Path(sys.argv[2]),Path(sys.argv[3]))))`,
+    path.join(pluginRoot, "tests"),
+    stateDir,
+    scanDir,
+  ]);
+  return JSON.parse(stdout);
 }
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -213,7 +225,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           scanId: run.scanId,
           complete: false,
           findings: retryFindings?.[0] ?? [],
-          coverage: retryCoverage[0],
+          reviewState: retryCoverage[0],
         },
       );
       return;
@@ -261,7 +273,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           scanId: run.scanId,
           complete: false,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [
               {
@@ -322,7 +334,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           scanId: run.scanId,
           complete: false,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [
               {
@@ -356,7 +368,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         scanId: run.scanId,
         complete: false,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "partial",
           surfaces: [
             {
@@ -437,7 +449,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         scanId: run.scanId,
         complete: false,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "partial",
           surfaces: [
             {
@@ -478,7 +490,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         scanId: run.scanId,
         complete,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: status,
           surfaces: [
             {
@@ -662,7 +674,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           scanId: run.scanId,
           complete,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: status,
             surfaces: [
               current,
@@ -707,7 +719,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           scanId: run.scanId,
           complete,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: retryPending ? "partial" : status,
             surfaces: [
               {
@@ -754,7 +766,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             scanId: run.scanId,
             complete,
             findings: [],
-            coverage: structuredClone(saved.coverage),
+            reviewState: structuredClone(saved.reviewState),
           },
         );
       }
@@ -1000,7 +1012,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       run.scanId,
     ]);
     assert.equal(recovered.scan.resultsRecoveryNeeded, false);
-    const coveragePath = path.join(run.scanDir, "coverage.json");
+    const coveragePath = path.join(run.scanDir, "scan-manifest.json");
     const published = await readFile(coveragePath, "utf8");
     await runWorkbench(["recover-scan-results", "--scan-id", run.scanId]);
     assert.equal(await readFile(coveragePath, "utf8"), published);
@@ -1026,10 +1038,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       { scanId: run.scanId },
     );
     assert.deepEqual(
-      completed.coverage,
+      completed.review,
       JSON.parse(
-        await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
-      ),
+        await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
+      ).scan.review,
     );
   }
   for (const [file, bytes] of rawSources)

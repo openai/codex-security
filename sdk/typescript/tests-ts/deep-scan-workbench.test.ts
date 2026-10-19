@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CoverageDocument } from "../src/models.js";
+import { loadContract } from "../src/contract.js";
+import { readReviewState } from "./support/review-state.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { workbenchCommand as workbench } from "./support/workbench-command.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -581,22 +583,12 @@ describe("deep scan workbench ownership", () => {
         await readFile(join(scanDir, "findings.json"), "utf8"),
       ) as { findings: unknown[] };
       expect(findings.findings).toEqual([]);
-      const coverage = JSON.parse(
-        await readFile(join(scanDir, "coverage.json"), "utf8"),
-      ) as {
-        inventoryStrategy: string;
-        includePaths: string[];
-        deferred: Array<{
-          id: string;
-          candidateId?: string;
-          reason: string;
-          paths?: string[];
-        }>;
-        surfaces: Array<{ id: string; disposition: string }>;
-      };
+      const coverage = await readReviewState(scanDir);
       expect(coverage).not.toHaveProperty("completeness");
-      expect(coverage).toMatchObject({
-        inventoryStrategy,
+      const manifest = JSON.parse(
+        await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+      );
+      expect(manifest.scan.scope).toMatchObject({
         includePaths: scoped ? ["src"] : ["."],
       });
       if (existingDeferred) {
@@ -673,22 +665,6 @@ describe("deep scan workbench ownership", () => {
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
       expect(report).toContain("No findings were reported.");
-      if (existingDeferred) {
-        expect(report).toContain(
-          "Existing candidate validation dependency was unavailable.",
-        );
-        expect(report).toContain(
-          "Existing runtime policy could not be inspected.",
-        );
-      } else {
-        expect(report).toContain("Possible missing authorization");
-        expect(report).toContain("The request reaches a protected handler.");
-      }
-      expect(report).toContain(
-        "Authorization guard already protects the handler",
-      );
-      expect(report).toContain("Handler cannot receive external requests");
-      expect(report).toContain("Attack path does not cross the trust boundary");
     },
   );
 
@@ -1056,12 +1032,11 @@ describe("deep scan workbench ownership", () => {
     };
     expect(completed.progress.status).toBe("complete");
     expect(completed.findings).toEqual([]);
-    const coverage = JSON.parse(
-      await readFile(join(scanDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readReviewState(scanDir);
     expect(coverage).not.toHaveProperty("completeness");
+    const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(contract.mode).toBe("deep_repository");
     expect(coverage).toMatchObject({
-      mode: "deep_repository",
       deferred: [{ id: "source-review", reason }],
     });
     const report = await readFile(join(scanDir, "report.md"), "utf8");

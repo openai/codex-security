@@ -344,3 +344,21 @@ test('SARIF preparation never rewrites linked report files', async (t) => {
   assert.equal((await analyzeResults(opts)).sarifUploadReady, false);
   assert.deepEqual(await readFile(target), before);
 });
+
+for (const status of ['completed', 'failed'] as const) {
+  test(`reads scan status ${status} without a coverage file`, async (t) => {
+    const options = await fixture(t)
+    await rm(join(options.resultsDirectory, 'coverage.json'))
+    change(options, (value) => {
+      delete value.coverage
+      delete value.manifest.scan.coverageRef
+      value.manifest.scan.status = status
+      value.review = value.manifest.scan.review = { excludedPaths: [] }
+    })
+    const result = await analyzeResults(options)
+    assert.equal(result.scanStatus, status)
+    assert.equal(result.paths.coveragePath, '')
+    assert.equal(result.paths.manifestPath, join(options.resultsDirectory, 'scan-manifest.json'))
+    assert.equal(result.errors.length, status === 'completed' ? 0 : 1)
+  });
+}

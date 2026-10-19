@@ -14,7 +14,12 @@ from test_deep_scan_successful_publication import (
     recover_scan_results,
 )
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import interrupt_publication, saved_draft, write_checkpoint
+from workbench_test_support import (
+    interrupt_publication,
+    read_review_state,
+    saved_draft,
+    write_checkpoint,
+)
 
 
 @pytest.mark.parametrize(
@@ -483,6 +488,7 @@ def test_failed_head_fallback_rejects_changes_before_resume(
     original_outputs = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        if (scan.scan_dir / name).exists()
     }
     write = saved.write_scan_local_bytes
 
@@ -695,7 +701,8 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
                 else:
                     recover_scan_results(workbench_api, workbench_db, scan)
     replayed = preserve_scan_results(workbench_api, workbench_db, scan)
-    _, _, coverage = saved.finalize_scan(scan.scan_dir)
+    saved.finalize_scan(scan.scan_dir)
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     expected = {"Replacement"} if partial_time == 300 or registered else {"Obsolete", "Replacement"}
     assert {row["label"] for row in coverage["surfaces"]} == expected
     assert {row["pattern"] for row in coverage["explicitExclusions"]} == {
@@ -897,7 +904,8 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
                 else:
                     recover_scan_results(workbench_api, workbench_db, scan)
     replayed = preserve_scan_results(workbench_api, workbench_db, scan)
-    _, _, coverage = saved.finalize_scan(scan.scan_dir)
+    saved.finalize_scan(scan.scan_dir)
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     if owner == "worker":
         surface = {**surface, "id": f"{directory.name}/pending-surface", "workerId": directory.name}
         task = {**task, "id": f"{directory.name}/review-task", "workerId": directory.name}
@@ -905,7 +913,7 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
             task["surfaceIds"] = [surface["id"]]
     assert coverage["surfaces"] == ([surface] if pending == "linked" else [])
     assert (task in coverage["deferred"]) is (pending != "closed")
-    assert (surface["label"] in (scan.scan_dir / "report.md").read_text()) is (pending == "linked")
+    assert surface["label"] not in (scan.scan_dir / "report.md").read_text()
     assert not replayed["resultsRecoveryNeeded"]
 
 

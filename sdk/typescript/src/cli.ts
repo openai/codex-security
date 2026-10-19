@@ -2856,7 +2856,7 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings and coverage between scans.",
+      description: "Match and compare findings between scans.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -10758,7 +10758,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope({ mode: result.mode, ...result.manifest.scan.scope, explicitExclusions: result.review.excludedPaths.map((pattern) => ({ pattern, reason: "Excluded from review" })) })}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

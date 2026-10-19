@@ -5487,19 +5487,14 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test.each([
     ["all required draft artifacts", []],
-    ["the manifest draft", ["findings.json", "coverage.json"]],
-    ["the findings draft", ["scan-manifest.json", "coverage.json"]],
-    ["the coverage draft", ["scan-manifest.json", "findings.json"]],
+    ["the manifest draft", ["findings.json"]],
+    ["the findings draft", ["scan-manifest.json"]],
   ] as const)(
     "rejects recipe scans when the agent did not create %s",
     async (_description, present) => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
-      const requiredDrafts = [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ] as const;
+      const requiredDrafts = ["scan-manifest.json", "findings.json"] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -5520,7 +5515,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await Promise.all(
         present.map((filename) =>
           copyFile(
-            join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+            join(PLUGIN_ROOT, "examples", "legacy-completed-scan", filename),
             join(scanDir, filename),
           ),
         ),

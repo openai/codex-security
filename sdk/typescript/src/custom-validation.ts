@@ -58,11 +58,7 @@ export interface CustomValidationResult {
 const DIRECTORY = "artifacts/custom-validation";
 const CANDIDATES = `${DIRECTORY}/candidates.json`;
 const RESULTS = `${DIRECTORY}/results.json`;
-const DOCUMENTS = [
-  "scan-manifest.json",
-  "findings.json",
-  "coverage.json",
-] as const;
+const DOCUMENTS = ["scan-manifest.json", "findings.json"] as const;
 interface Schema {
   $id?: string;
   $defs?: Record<string, Schema>;
@@ -74,6 +70,7 @@ interface DraftManifest {
   scan: {
     id: string;
     threatModel?: unknown;
+    reviewState?: CoverageDocument;
     scope: { validationMode?: string };
     sealedAt?: string;
     artifacts?: unknown;
@@ -210,11 +207,25 @@ export async function runCustomValidation(options: {
       ),
     ),
   );
-  const [manifest, findingsDocument, coverage] = documents as [
+  const [manifest, findingsDocument] = documents as [
     DraftManifest,
     { scanId: string; findings: Finding[] },
-    CoverageDocument,
   ];
+  const legacy = manifest.scan.reviewState === undefined;
+  const coverage: CoverageDocument =
+    manifest.scan.reviewState ??
+    JSON.parse(
+      (
+        await readScanFile(
+          scanDir,
+          "coverage.json",
+          "legacy review state",
+          signal,
+        )
+      ).toString("utf8"),
+    );
+  const documentNames = legacy ? [...DOCUMENTS, "coverage.json"] : DOCUMENTS;
+  if (legacy) documents.push(coverage);
   if (
     manifest.scan?.scope?.validationMode !== "custom_pending" ||
     manifest.scan.sealedAt != null ||
@@ -225,7 +236,7 @@ export async function runCustomValidation(options: {
       )) ||
     manifest.scan.id !== scanId ||
     findingsDocument.scanId !== scanId ||
-    coverage.scanId !== scanId
+    (coverage.scanId !== undefined && coverage.scanId !== scanId)
   ) {
     throw new IncompleteScanError(
       "The scan did not return an unsealed custom-validation draft.",
@@ -236,7 +247,7 @@ export async function runCustomValidation(options: {
     readSchema(options.pluginRoot, "definitions/artifact-common.schema.json"),
     readSchema(options.pluginRoot, "tools/candidate-validations.schema.json"),
     readSchema(options.pluginRoot, "tools/scan-draft.schema.json"),
-    readSchema(options.pluginRoot, "coverage.schema.json"),
+    legacy ? readSchema(options.pluginRoot, "coverage.schema.json") : undefined,
   ]);
   const schema = customValidationSchema(common, candidatesSchema, draft);
   const ajv = new Ajv2020({ strict: false, validateFormats: false });
@@ -274,14 +285,19 @@ export async function runCustomValidation(options: {
   });
   ajv.addSchema(common).addSchema(draft);
   const validFinding = ajv.compile({ $ref: `${draft.$id}#/$defs/finding` });
-  if (!ajv.validate(coverageSchema, coverage))
+  if (
+    !ajv.validate(
+      coverageSchema ?? { $ref: `${draft.$id}#/$defs/reviewState` },
+      coverage,
+    )
+  )
     throw new IncompleteScanError(
-      `Custom validation requires valid provisional coverage: ${ajv.errorsText(ajv.errors, { dataVar: "coverage" })}`,
+      `Custom validation requires valid provisional review state: ${ajv.errorsText(ajv.errors, { dataVar: "coverage" })}`,
     );
   const surfaceIds = new Set(coverage.surfaces.map((surface) => surface.id));
   if (surfaceIds.size !== coverage.surfaces.length)
     throw new IncompleteScanError(
-      "Provisional coverage contains duplicate surface IDs.",
+      "Provisional review state contains duplicate surface IDs.",
     );
   if (!Array.isArray(findings)) {
     throw new IncompleteScanError(
@@ -306,7 +322,7 @@ export async function runCustomValidation(options: {
       ids.some((id) => typeof id !== "string" || !surfaceIds.has(id))
     ) {
       throw new IncompleteScanError(
-        "A provisional finding is missing its coverage surfaces.",
+        "A provisional finding is missing its review-state surfaces.",
       );
     }
     return {
@@ -325,7 +341,7 @@ export async function runCustomValidation(options: {
     )
   ) {
     throw new IncompleteScanError(
-      "A reported coverage surface has no provisional finding.",
+      "A reported review-state surface has no provisional finding.",
     );
   }
   await writeJson(
@@ -395,7 +411,7 @@ export async function runCustomValidation(options: {
         throw new Error("Custom validation omitted one or more candidates.");
     }
   } catch (error) {
-    for (const [index, name] of DOCUMENTS.entries())
+    for (const [index, name] of documentNames.entries())
       await writeJson(scanDir, name, documents[index]);
     throw new IncompleteScanError(
       `Custom validation is incomplete: ${errorMessage(error)}`,
@@ -484,7 +500,7 @@ export async function runCustomValidation(options: {
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.
-  for (const [index, name] of DOCUMENTS.entries())
+  for (const [index, name] of documentNames.entries())
     await writeJson(scanDir, name, documents[index], signal);
   await writeCustomValidationStatus(scanDir, { scanId, ...result }, signal);
 }

@@ -13,6 +13,7 @@ from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
 from test_deep_scan_stop_conditions import publication_scan as publication_scan
 from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
 from workbench_test_support import (
+    read_review_state,
     replay_saved_results,
     saved_binding,
     saved_discovery_worker,
@@ -84,7 +85,7 @@ def test_deadline_surface_links_follow_sources_across_repeated_crashes(
     publications = []
     for hash_seed in (1, 17, 83):
         interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        publications.append(read_review_state(workbench_db, scan.scan_dir))
         with sqlite3.connect(database) as connection:
             assert (
                 connection.execute(
@@ -97,7 +98,7 @@ def test_deadline_surface_links_follow_sources_across_repeated_crashes(
         finish(workbench_api, connection, scan, terminal_reason="capped")
         completed = complete(workbench_api, connection, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert completed["progress"]["status"] == "complete"
     assert all(publication == coverage for publication in publications)
     assert canonical_surface in coverage["surfaces"]
@@ -142,7 +143,7 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     surfaces = [row for row in coverage["surfaces"] if row["label"] in {"download", "upload"}]
     assert len(surfaces) == len({row["id"] for row in surfaces}) == 2
     task = next(
@@ -172,7 +173,7 @@ def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     retained = next(row for row in coverage["surfaces"] if row["label"] == "Earlier review")
     task = next(row for row in coverage["deferred"] if row["reason"] == "Review prior surface.")
     assert task["surfaceIds"] == [retained["id"]] == [f"{worker_id}/prior"]
@@ -217,7 +218,7 @@ def test_deadline_reopened_generic_surface_copy_retains_its_link(
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
     complete(workbench_api, workbench_db, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     retained = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert len(retained) == 1
     assert retained[0]["disposition"] == "needs_follow_up"
@@ -307,13 +308,13 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     publications = []
     for hash_seed in (1, 17, 83):
         interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        publications.append(read_review_state(workbench_db, scan.scan_dir))
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         finish(workbench_api, connection, scan, terminal_reason="capped")
         complete(workbench_api, connection, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert all(publication == coverage for publication in publications)
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert {row["label"] for row in surfaces} == {"download", "upload"}
@@ -379,13 +380,13 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     publications = []
     for hash_seed in (1, 17, 83):
         interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        publications.append(read_review_state(workbench_db, scan.scan_dir))
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         finish(workbench_api, connection, scan, terminal_reason="capped")
         completed = complete(workbench_api, connection, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert completed["progress"]["status"] == "complete"
     assert all(publication == coverage for publication in publications)
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
@@ -470,13 +471,13 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
     publications = []
     for hash_seed in (1, 17, 83):
         interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        publications.append(read_review_state(workbench_db, scan.scan_dir))
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         finish(workbench_api, connection, scan, terminal_reason="capped")
         completed = complete(workbench_api, connection, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert completed["progress"]["status"] == "complete"
     assert all(publication == coverage for publication in publications)
     assert canonical_surface in coverage["surfaces"]
@@ -547,13 +548,13 @@ def test_deadline_candidate_supersession_preserves_independent_surface_links(
     publications = []
     for hash_seed in (1, 17, 83):
         interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        publications.append(read_review_state(workbench_db, scan.scan_dir))
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         finish(workbench_api, connection, scan, terminal_reason="capped")
         completed = complete(workbench_api, connection, scan)
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert completed["progress"]["status"] == "complete"
     assert all(publication == coverage for publication in publications)
     assert canonical_surface in coverage["surfaces"]
