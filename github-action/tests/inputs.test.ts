@@ -65,7 +65,7 @@ test('Deep scan mode and discovery budgets reject unsupported combinations', () 
   assert.throws(() => parse({mode:'deep', scope:'diff'}), /mode: deep requires scope: repository/);
   assert.throws(() => parse({'max-time-hours':'1'}), /max-time-hours requires mode: deep/);
   for (const value of ['NaN', 'Infinity', '-1', '0', '96.1'])
-    assert.throws(() => parse({mode:'deep', 'max-time-hours':value}), /max-time-hours/);
+    assert.throws(() => parse({mode:'deep', 'max-time-hours':value}), {message: 'max-time-hours must be a positive number no greater than 96.'});
   assert.equal(parse({mode:'deep', 'max-time-hours':'96'}).maxTimeHours, 96);
 });
 test('verbose diagnostics default on and can be explicitly disabled', () => {
@@ -79,11 +79,11 @@ test('only repository and diff scopes are supported, with separate path and diff
   assert.throws(() => parse({'diff-base':'HEAD~1'}), /requires scope: diff/);
 });
 test('numeric and boolean parsing follows their documented types', () => {
-  for (const value of ['NaN','Infinity','-1','0','10 dollars']) assert.throws(() => parse({'max-cost':value}));
+  for (const value of ['NaN','Infinity','-1','0','10 dollars']) assert.throws(() => parse({'max-cost':value}), {message: 'max-cost must be a positive number.'});
   assert.equal(parse({'max-cost':'1e99'}).maxCost, 1e99);
   assert.equal(parse({'max-cost':'1e-2'}).maxCost, 0.01);
   for (const value of ['yes','TRUE','1']) assert.throws(() => parse({verbose:value}));
-  for (const value of ['0','1.5','91']) assert.throws(() => parse({'retention-days':value}));
+  for (const value of ['0','1.5','91']) assert.throws(() => parse({'retention-days':value}), {message: 'retention-days must be an integer between 1 and 90.'});
 });
 test('path lists accept literal filenames but reject unsafe locations and option injection', () => {
   assert.deepEqual(parse({paths:'src/my folder\nlib'}).paths, ['src/my folder','lib']);

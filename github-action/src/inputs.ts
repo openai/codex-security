@@ -19,8 +19,12 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
     const value = str(name);
     if (!value) return undefined;
     const n = Number(value);
-    if (!Number.isFinite(n) || (integer && !Number.isSafeInteger(n)) || n < min || n > max)
-      throw new Error(`${name} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}.`);
+    if (!Number.isFinite(n) || (integer && !Number.isSafeInteger(n)) || n < min || n > max) {
+      const bounds = min === Number.MIN_VALUE
+        ? `a positive number${max < Infinity ? ` no greater than ${max}` : ''}`
+        : `${integer ? 'an integer' : 'a number'} between ${min} and ${max}`;
+      throw new Error(`${name} must be ${bounds}.`);
+    }
     return n;
   };
   const list = (name: string) => str(name).split(/\r?\n/).map(v => v.trim()).filter(Boolean);

@@ -25,6 +25,7 @@
 - URL-encode generated schema references ([#981](https://github.com/openai/codex-security/pull/981))
 - detect Windows Yarn global installs in update notices ([#1692](https://github.com/openai/codex-security/pull/1692))
 - add Cheaper Inference inference provider ([#1623](https://github.com/openai/codex-security/pull/1623))
+- describe positive numeric input bounds ([#1605](https://github.com/openai/codex-security/pull/1605))
 
 <!-- release-section: highlights:end -->
 
