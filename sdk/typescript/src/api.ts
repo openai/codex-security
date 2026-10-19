@@ -1794,7 +1794,6 @@ export class CodexSecurity {
           effectiveConfig,
           modelProvider,
           scanDir,
-          runtimeHome,
           workerProviderEnvironment,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
@@ -2387,12 +2386,6 @@ export class CodexSecurity {
           runtimePaths,
           options.auth,
           git,
-          mode === "deep" && typeof sqliteHome === "string"
-            ? {
-                ...resolveCodexProfile(session.sessionConfig),
-                sqlite_home: sqliteHome,
-              }
-            : undefined,
         );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -5564,7 +5557,6 @@ function selectedWorkerRuntimeConfig(
   config: JsonObject,
   selectedProvider: unknown,
   workingDirectory: string,
-  codexHome: string,
   environment: ProcessEnvironment,
 ): JsonObject {
   const provider =
@@ -5606,10 +5598,7 @@ function selectedWorkerRuntimeConfig(
   ]) {
     const file = resolved[key];
     if (typeof file === "string") {
-      resolved[key] = resolve(
-        key === "sqlite_home" ? codexHome : workingDirectory,
-        expandHome(file, environment),
-      );
+      resolved[key] = resolve(workingDirectory, expandHome(file, environment));
     }
   }
   return {
