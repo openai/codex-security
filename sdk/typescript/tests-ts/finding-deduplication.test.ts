@@ -1,6 +1,7 @@
+import { readJson } from "./support/json.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
 import { emptyNeighborhoodReviewer } from "./support/deduplication.js";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, mock } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -28,15 +29,12 @@ import {
   deduplicateScanDirectoryInternal,
   deduplicateScanInternal,
 } from "../src/deduplication/scan.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { JsonObject } from "../src/config.js";
 import { fail } from "./support/errors.js";
 
-const document: FindingsDocument = JSON.parse(
-  await readFile(
-    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
-    "utf8",
-  ),
+const document = await readJson<FindingsDocument>(
+  join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
 );
 function entry(index: number): Finding {
   return {
@@ -1158,10 +1156,9 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
 });
 
 test("resolves a saved scan and retrieves its IDs without uploading or modifying artifacts", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "dedupe-scan-"));
+  const fixture = await workflowFixture();
+  const { scanDir: directory } = fixture;
   try {
-    await copyCompletedScanFixture(directory);
-    if (process.platform !== "win32") await chmod(directory, 0o700);
     const original = await readFile(join(directory, "findings.json"), "utf8");
     for (const [requestedId, allRepositories] of [
       ["scan_example", false],
@@ -1244,16 +1241,14 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
       ),
     ).rejects.toThrow("do not match selected scan");
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await fixture[Symbol.asyncDispose]();
   }
 });
 
 test("deduplicates an explicit sealed scan directory without reading scan history", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "dedupe-directory-"));
-  const repository = await mkdtemp(join(tmpdir(), "dedupe-repository-"));
+  const fixture = await workflowFixture();
+  const { scanDir: directory, repository } = fixture;
   try {
-    await copyCompletedScanFixture(directory);
-    if (process.platform !== "win32") await chmod(directory, 0o700);
     const original = await readFile(join(directory, "findings.json"), "utf8");
     const commands: string[][] = [];
     const requests: string[] = [];
@@ -1301,10 +1296,7 @@ test("deduplicates an explicit sealed scan directory without reading scan histor
       }),
     ).rejects.toThrow("do not match selected scan");
   } finally {
-    await Promise.all([
-      rm(directory, { recursive: true, force: true }),
-      rm(repository, { recursive: true, force: true }),
-    ]);
+    await fixture[Symbol.asyncDispose]();
   }
 });
 
@@ -1337,10 +1329,9 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
 });
 
 test("writes accepted groups only after all reviews and fails on review or write-back errors", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "dedupe-writeback-"));
+  const fixture = await workflowFixture();
+  const { scanDir: directory } = fixture;
   try {
-    await copyCompletedScanFixture(directory);
-    if (process.platform !== "win32") await chmod(directory, 0o700);
     const findings = [document.findings[0]!, entry(2), entry(3)];
     const ids = findings.map((finding) => finding.findingId);
     for (const failure of ["none", "write", "review", "refusal"]) {
@@ -1450,6 +1441,6 @@ test("writes accepted groups only after all reviews and fails on review or write
       JSON.parse(await readFile(join(directory, "findings.json"), "utf8")),
     ).toEqual(document);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await fixture[Symbol.asyncDispose]();
   }
 });

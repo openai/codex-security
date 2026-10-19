@@ -21,3 +21,10 @@ export function parseJson(read: () => string): unknown {
 export const findingEntry = <T extends { findingId: string }>(
   finding: T,
 ): [string, T] => [finding.findingId, finding];
+
+/** @internal Optional observers must not block or interrupt their operation. */
+export function notify(callback: () => unknown): void {
+  try {
+    void Promise.resolve(callback()).catch(() => {});
+  } catch {}
+}

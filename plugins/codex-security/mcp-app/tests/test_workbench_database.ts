@@ -75,6 +75,27 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
     .run(target);
 }
 
+test("retains SQLite open errors and recovery guidance", async () => {
+  const directory = await temporary.create("workbench-database-error-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  await mkdir(databasePath);
+  await assert.rejects(
+    openWorkbenchDatabase(databasePath),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { errcode: number }).errcode, 14);
+      assert.equal(
+        (error as Error & { code: string }).code,
+        "ERR_SQLITE_ERROR",
+      );
+      assert.ok(error.message.includes("unable to open database file"));
+      assert.ok(error.message.includes(databasePath));
+      assert.ok(error.message.includes("CODEX_SECURITY_STATE_DIR"));
+      return true;
+    },
+  );
+});
+
 test("opens a private WAL database at the configured state path", async () => {
   const directory = await temporary.create("workbench-database-");
   const home = join(directory, "codex-home");
@@ -96,11 +117,7 @@ test("opens a private WAL database at the configured state path", async () => {
       database.prepare("PRAGMA journal_mode").get()?.journal_mode,
       "wal",
     );
-    assert.equal(
-      database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()
-        ?.count,
-      migrations.length,
-    );
+    assertMigrationNames(database, ...migrations.map(({ version }) => version));
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
       assert.equal((await stat(databasePath)).mode & 0o777, 0o600);
@@ -152,7 +169,7 @@ test("every released schema upgrades to the same current schema and remains idem
 });
 
 test("log completion migration leaves legacy terminal boundaries unknown", (t) => {
-  const database = memory(t, 47);
+  const database = memory(t, 49);
   insertScan(database);
   database.exec(
     "UPDATE scans SET status = 'complete', completed_at = 'artifact-time', updated_at = 'later-edit'",
@@ -262,11 +279,9 @@ test(
         database.prepare("SELECT value FROM retained").get()?.value,
         "original",
       );
-      assert.equal(
-        database
-          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-          .get()?.version,
-        migrations.at(-1)!.version,
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
       );
     } finally {
       database.close();
@@ -364,7 +379,7 @@ test("legacy execution profiles retain values while allowing independent model s
     database.exec(
       "UPDATE scans SET execution_model = 'synthetic-model', reasoning_effort = 'future-effort'",
     );
-    applyMigrations(database);
+    applyMigrations(database, []);
     const row = database
       .prepare(
         "SELECT model, reasoning_effort, legacy_execution_model, legacy_reasoning_effort FROM scans",
@@ -380,6 +395,7 @@ test("legacy execution profiles retain values while allowing independent model s
       },
     );
     database.exec("UPDATE scans SET model = NULL, reasoning_effort = 'high'");
+    applyMigrations(database);
     assertMigrationNames(database, version);
   }
 });
@@ -753,11 +769,9 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await once(writer, "message");
     const database = await openWorkbenchDatabase(databasePath);
     try {
-      assert.equal(
-        database
-          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
-          .get()?.count,
-        migrations.length,
+      assertMigrationNames(
+        database,
+        ...migrations.map(({ version }) => version),
       );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()

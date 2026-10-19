@@ -22,13 +22,13 @@ async function summary(
 ) {
   const { stdout, stderr, runCli } = createCliTest(main);
 
-  const result = options?.result ?? fakeResult(["high"], "partial");
+  const result = options?.result ?? fakeResult(["high"]);
   expect(
     await runCli(
       ["scan", ...args, "--json"],
       dependencies({ ...options, result }),
     ),
-  ).toBe(result.coverage.completeness === "complete" ? 0 : 2);
+  ).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   return stderr.text();
 }

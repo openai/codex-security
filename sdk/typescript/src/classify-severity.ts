@@ -1,9 +1,10 @@
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 import { findingEntry } from "./value.js";
-import { z } from "incur";
+import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
 import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
-import type { Finding, SeverityLevel } from "./models.js";
+import type { Finding } from "./models.js";
 import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
@@ -35,17 +36,10 @@ export interface ClassifySeverityOptions extends Pick<
   codex?: ReadOnlyCodexOptions["codex"];
 }
 
-export interface SeverityAssessment {
-  findingId: string;
+export interface SeverityAssessment extends z.infer<typeof decisionSchema> {
   occurrenceId: string | null;
   inputSha256: string;
   source: "existing-severity" | "rubric";
-  decision: "assessed" | "excluded";
-  level: SeverityLevel | null;
-  rubricLabel: string | null;
-  rationale: string;
-  confidence: "high" | "medium" | "low" | null;
-  reviewTrigger: string | null;
 }
 
 export interface SeverityClassification {
@@ -66,45 +60,35 @@ export interface SeverityClassificationCheckpoint {
   ): Promise<void>;
 }
 
-const levelSchema = z.enum([
-  "critical",
-  "high",
-  "medium",
-  "low",
-  "informational",
-]);
+const levelSchema = z.enum(SCAN_SEVERITIES);
 const textSchema = z
   .string()
   .min(1)
   .refine((value) => value.trim().length > 0);
-const decisionSchema = z
-  .object({
-    findingId: textSchema,
-    decision: z.enum(["assessed", "excluded"]),
-    level: levelSchema.nullable(),
-    rubricLabel: textSchema.nullable(),
-    rationale: textSchema,
-    confidence: z.enum(["high", "medium", "low"]).nullable(),
-    reviewTrigger: textSchema.nullable(),
-  })
-  .strict();
+const decisionSchema = z.strictObject({
+  findingId: textSchema,
+  decision: z.enum(["assessed", "excluded"]),
+  level: levelSchema.nullable(),
+  rubricLabel: textSchema.nullable(),
+  rationale: textSchema,
+  confidence: z.enum(["high", "medium", "low"]).nullable(),
+  reviewTrigger: textSchema.nullable(),
+});
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 /** @internal */
-export const severityClassificationSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    assessedAt: z.string().datetime(),
-    rubricSha256: digestSchema.nullable(),
-    knowledgeBaseSha256: digestSchema.nullable(),
-    assessments: z.array(
-      decisionSchema.extend({
-        occurrenceId: textSchema.nullable(),
-        inputSha256: digestSchema,
-        source: z.enum(["existing-severity", "rubric"]),
-      }),
-    ),
-  })
-  .strict() satisfies z.ZodType<SeverityClassification>;
+export const severityClassificationSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  assessedAt: z.string().datetime(),
+  rubricSha256: digestSchema.nullable(),
+  knowledgeBaseSha256: digestSchema.nullable(),
+  assessments: z.array(
+    decisionSchema.extend({
+      occurrenceId: textSchema.nullable(),
+      inputSha256: digestSchema,
+      source: z.enum(["existing-severity", "rubric"]),
+    }),
+  ),
+}) satisfies z.ZodType<SeverityClassification>;
 
 /** Classify each supplied report independently, without scanning or writing findings. */
 export async function classifySeverity(

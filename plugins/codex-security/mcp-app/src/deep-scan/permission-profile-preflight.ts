@@ -2,10 +2,11 @@ import type { JsonObject as JsonRecord } from "../types.js";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
+import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import { isPermissionProfileFallbackWarning } from "../../../scripts/codex_profile.mjs";
 
 /** The stable profile id selected by the worker's raw config overrides. */
@@ -63,6 +64,74 @@ export async function readDeepScanRuntimeConfig(
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
     return config;
+  });
+}
+
+/** Persist the owning session and obtain native permissions without a model turn. */
+export async function prepareCliDeepScanSession(
+  options: RuntimeConfigReadOptions & {
+    prompt: string;
+  },
+): Promise<{
+  threadId: string;
+  model: string;
+  reasoningEffort?: string;
+  permissionProfile: unknown;
+}> {
+  return withPreflightClient(options, async (client) => {
+    const response = await client.request("thread/start", {
+      cwd: options.cwd,
+      threadSource: "security_scan",
+      ephemeral: false,
+    });
+    const thread = record(response.thread);
+    if (
+      typeof thread?.id !== "string" ||
+      typeof thread.path !== "string" ||
+      typeof response.model !== "string"
+    ) {
+      throw new Error("Codex did not return the owning Deep Scan session.");
+    }
+    // Native history persistence records the effective turn context, including
+    // managed filesystem denials. No turn/start or model request is needed.
+    await client.request("thread/inject_items", {
+      threadId: thread.id,
+      items: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: options.prompt }],
+        },
+      ],
+    });
+    let permissionProfile: unknown;
+    const input = createReadStream(thread.path, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = record(JSON.parse(line));
+        if (entry?.type === "turn_context") {
+          permissionProfile = record(entry.payload)?.permission_profile;
+        }
+      }
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+    if (permissionProfile === undefined) {
+      throw new Error(
+        "Codex did not persist the Deep Scan session's effective permissions.",
+      );
+    }
+    return {
+      threadId: thread.id,
+      model: response.model,
+      ...(typeof response.reasoningEffort === "string"
+        ? { reasoningEffort: response.reasoningEffort }
+        : {}),
+      permissionProfile,
+    };
   });
 }
 
@@ -158,6 +227,14 @@ class AppServerPreflightClient {
   private closed = false;
   private childClosed = false;
   private readonly removeAbortListener: () => void;
+  private readonly onStdioError = (error: Error): void => {
+    const failure = codexExecutableStdioError(
+      this.options.codexPath,
+      this.options.context,
+    );
+    failure.message += "\n" + error.message;
+    this.fail(failure);
+  };
 
   constructor(private readonly options: RuntimeConfigReadOptions) {
     const args: string[] = [...(options.commandArgs ?? [])];
@@ -188,16 +265,8 @@ class AppServerPreflightClient {
       crlfDelay: Infinity,
     });
     this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    const onStdioError = (error: Error) => {
-      const failure = codexExecutableStdioError(
-        options.codexPath,
-        options.context,
-      );
-      failure.message += "\n" + error.message;
-      this.fail(failure);
-    };
-    this.stdoutLines.on("error", onStdioError);
-    this.child.stdin.on("error", onStdioError);
+    this.stdoutLines.on("error", this.onStdioError);
+    this.child.stdin.on("error", this.onStdioError);
     this.child.on("error", (error) => {
       this.fail(
         codexExecutableStartError(options.codexPath, error, options.context),
@@ -341,14 +410,7 @@ class AppServerPreflightClient {
       return;
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-      if (error) {
-        const failure = codexExecutableStdioError(
-          this.options.codexPath,
-          this.options.context,
-        );
-        failure.message += "\n" + error.message;
-        this.fail(failure);
-      }
+      if (error) this.onStdioError(error);
     });
   }
 

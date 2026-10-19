@@ -13,20 +13,24 @@ describe("CLI launcher", () => {
     const root = await temporaryDirectory("codex-security-cli-bin-");
     try {
       const launcher = join(packageRoot, "src", "cli.ts");
-      const bin =
-        process.platform === "win32" ? launcher : join(root, "codex-security");
-      if (process.platform !== "win32") {
-        await symlink(launcher, bin);
-      }
-      const { status, stdout, stderr } = await runCommand(
-        process.execPath,
-        [bin, "--version"],
-        { timeout: 30_000 },
-      );
+      const bins =
+        process.platform === "win32"
+          ? [launcher]
+          : ["codex-security", "cs"].map((name) => join(root, name));
+      for (const bin of bins) {
+        if (process.platform !== "win32") {
+          await symlink(launcher, bin);
+        }
+        const { status, stdout, stderr } = await runCommand(
+          process.execPath,
+          [bin, "--version"],
+          { timeout: 30_000 },
+        );
 
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-      expect(stdout).toBe(`${VERSION}\n`);
+        expect(status, stderr).toBe(0);
+        expect(stderr).toBe("");
+        expect(stdout).toBe(`${VERSION}\n`);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -38,12 +42,18 @@ describe("CLI launcher", () => {
       const preload = join(root, "unavailable-cwd.mjs");
       await writeFile(
         preload,
-        `Object.defineProperty(process, "cwd", { value() { throw new Error(${JSON.stringify(`working directory is unavailable: ${SYNTHETIC_CREDENTIALS}`)}); } });\n`,
+        'Object.defineProperty(process, "cwd", { value() { throw new Error(process.env.TEST_DIAGNOSTIC); } });\n',
       );
       const { status, stdout, stderr } = await runCommand(
         process.execPath,
         ["--preload", preload, join(packageRoot, "src", "cli.ts"), "scan"],
-        { timeout: 30_000 },
+        {
+          env: {
+            ...process.env,
+            TEST_DIAGNOSTIC: `working directory is unavailable: ${SYNTHETIC_CREDENTIALS}`,
+          },
+          timeout: 30_000,
+        },
       );
 
       expect(status, stderr).toBe(2);
@@ -56,29 +66,51 @@ describe("CLI launcher", () => {
     }
   });
 
-  test("maps installed-launcher failures to a fixed startup error", async () => {
-    const root = await temporaryDirectory("codex-security-cli-bin-failure-");
-    try {
-      const launcher = join(root, "bin", "codex-security.mjs");
-      await mkdir(join(root, "bin"), { recursive: true });
-      await mkdir(join(root, "dist"), { recursive: true });
-      await copyFile(join(packageRoot, "bin", "codex-security.mjs"), launcher);
-      await writeFile(
-        join(root, "dist", "cli.js"),
-        `throw new Error(${JSON.stringify(`failed ${SYNTHETIC_CREDENTIALS}`)});\n`,
-      );
-      const child = await runCommand("node", [launcher], {
-        env: { ...process.env, NODE_NO_WARNINGS: "1" },
-        timeout: 30_000,
-      });
+  test.each(["import", "main", "missing", "success"])(
+    "preserves installed-launcher %s results",
+    async (scenario) => {
+      const root = await temporaryDirectory("codex-security-cli-bin-failure-");
+      try {
+        const launcher = join(root, "bin", "codex-security.mjs");
+        await mkdir(join(root, "bin"), { recursive: true });
+        await mkdir(join(root, "dist"), { recursive: true });
+        await copyFile(
+          join(packageRoot, "bin", "codex-security.mjs"),
+          launcher,
+        );
+        const detail = `EACCES: failed ${SYNTHETIC_CREDENTIALS}\u001b[31m\rnext\nline café 🔒\u001b]52;c;U1lOVEhFVElD\u0007 C1 \u0080\u009b2J\u009bH\u009d52;c;U1lOVEhFVElD\u009c\u009f end`;
+        const display = `EACCES: failed ${SYNTHETIC_CREDENTIALS} [31m next\nline café 🔒 ]52;c;U1lOVEhFVElD  C1   2J H 52;c;U1lOVEhFVElD   end`;
+        if (scenario !== "missing")
+          await writeFile(
+            join(root, "dist", "cli.js"),
+            scenario === "success"
+              ? "export const main = () => 7;\n"
+              : scenario === "main"
+                ? "export const main = async () => { throw process.env.TEST_DIAGNOSTIC; };\n"
+                : "throw new Error(process.env.TEST_DIAGNOSTIC);\n",
+          );
+        const child = await runCommand("node", [launcher], {
+          env: {
+            ...process.env,
+            NODE_NO_WARNINGS: "1",
+            TEST_DIAGNOSTIC: detail,
+          },
+          timeout: 30_000,
+        });
 
-      expect(child.status).toBe(2);
-      expect(child.stdout).toBe("");
-      expect(child.stderr).toBe(
-        "codex-security: Failed to start Codex Security.\n",
-      );
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+        expect(child.status).toBe(scenario === "success" ? 7 : 2);
+        expect(child.stdout).toBe("");
+        if (scenario === "success") expect(child.stderr).toBe("");
+        else if (scenario === "missing") {
+          expect(child.stderr).toContain("Cannot find module");
+          expect(child.stderr).toContain(join(root, "dist", "cli.js"));
+        } else
+          expect(child.stderr).toBe(
+            `codex-security: Failed to start Codex Security: ${display}\n`,
+          );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

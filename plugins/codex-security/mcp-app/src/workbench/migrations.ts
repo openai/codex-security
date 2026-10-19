@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import history from "../../../shared/workbench-migrations.json";
+import repairPlan from "../../../shared/workbench-history-repairs.json";
 import { parseJson, stringifyJson } from "../helpers/json";
 import { transaction } from "./transaction";
+
+const repairHistory = JSON.stringify(history);
 
 export interface Migration {
   version: number;
@@ -36,219 +39,19 @@ function repairAdditive(database: DatabaseSync, version: number): void {
     addColumn(database, statement);
 }
 
-function moveMigration(
-  database: DatabaseSync,
-  from: number,
-  to: number,
-  name: string,
-): void {
-  if (
-    !database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = ? AND name = ?")
-      .get(from, name)
-  )
-    return;
-  database
-    .prepare(
-      "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
-    )
-    .run(to, from, name);
-}
-
-function normalizeExecutionProfiles(database: DatabaseSync): void {
-  const scanColumns = columns(database, "scans");
-  const workspaceColumns = columns(database, "workspaces");
-  const recorded = new Map(
-    database
-      .prepare(
-        "SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 25)",
-      )
-      .all()
-      .map((row) => [Number(row.version), String(row.name)]),
-  );
-  const modelName = migration(25).name;
-  if (recorded.get(25) === "dynamic scan execution profiles") {
-    database
-      .prepare("UPDATE schema_migrations SET name = ? WHERE version = 25")
-      .run(modelName);
-    recorded.set(25, modelName);
-  }
-  const legacyNames = new Map([
-    [11, ["scan execution profiles"]],
-    [12, ["scan execution profiles", "dynamic scan execution profiles"]],
-  ]);
-  const legacyHistory = [...legacyNames].some(([version, names]) =>
-    names.includes(recorded.get(version) ?? ""),
-  );
-  const legacyColumns =
-    scanColumns.has("execution_model") ||
-    workspaceColumns.has("execution_model") ||
-    workspaceColumns.has("reasoning_effort");
-  if (!legacyHistory && !legacyColumns) return;
-  const supported = new Map([
-    [11, ["deep scan orchestration state", "scan execution profiles"]],
-    [
-      12,
-      [
-        "scan continuation threads",
-        "scan execution profiles",
-        "dynamic scan execution profiles",
-      ],
-    ],
-    [25, [modelName]],
-  ]);
-  const invalidHistory = [...supported].some(
-    ([version, names]) =>
-      recorded.has(version) && !names.includes(recorded.get(version)!),
-  );
-  const validColumns = [scanColumns, workspaceColumns].every(
-    (names) =>
-      names.has("execution_model") &&
-      names.has("reasoning_effort") &&
-      !names.has("legacy_execution_model") &&
-      !names.has("legacy_reasoning_effort"),
-  );
-  if (
-    invalidHistory ||
-    (legacyColumns && !validColumns) ||
-    (legacyHistory && !legacyColumns)
-  ) {
-    throw new Error(
-      "The Codex Security database has an unsupported execution-profile migration history.",
-    );
-  }
-  for (const table of ["workspaces", "scans"]) {
-    database.exec(`ALTER TABLE ${table} RENAME COLUMN execution_model TO legacy_execution_model;
-      ALTER TABLE ${table} RENAME COLUMN reasoning_effort TO legacy_reasoning_effort;`);
-  }
-  repairAdditive(database, 25);
-  database.exec(`UPDATE scans SET model = COALESCE(model, legacy_execution_model),
-    reasoning_effort = COALESCE(reasoning_effort, legacy_reasoning_effort)`);
-  const remove = database.prepare(
-    "DELETE FROM schema_migrations WHERE version = ? AND name = ?",
-  );
-  for (const [version, names] of legacyNames)
-    for (const name of names) remove.run(version, name);
-  if (!recorded.has(25)) {
-    database
-      .prepare(
-        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (25, ?, ?)",
-      )
-      .run(modelName, new Date().toISOString());
-  }
-}
-
 function normalizeHistory(database: DatabaseSync): void {
-  const mirror = database
-    .prepare(
-      "SELECT version, name FROM schema_migrations WHERE version BETWEEN 29 AND 32 ORDER BY version",
-    )
-    .all();
-  const mirrorNames = new Map([
-    [29, "freeze stopped scan source digests"],
-    [30, "separate deep scan publication failures"],
-  ]);
-  if (mirror.some((row) => mirrorNames.get(Number(row.version)) === row.name)) {
-    if (
-      mirror.length !== 2 ||
-      mirror.some((row) => mirrorNames.get(Number(row.version)) !== row.name)
-    ) {
-      throw new Error(
-        "The Codex Security database has an unsupported mirror migration history.",
-      );
+  for (const query of repairPlan) {
+    for (const { operation, value } of database
+      .prepare(query.join("\n"))
+      .all({ ":history": repairHistory })) {
+      if (operation === "error") throw new Error(String(value));
+      if (operation === "additive") repairAdditive(database, Number(value));
+      else if (operation === "column") addColumn(database, String(value));
+      else if (operation === "timestamp")
+        database.prepare(String(value)).run(new Date().toISOString());
+      else database.exec(String(value));
     }
-    for (const [from, to] of [
-      [30, 32],
-      [29, 31],
-    ])
-      moveMigration(database, from, to, mirrorNames.get(from)!);
   }
-  moveMigration(
-    database,
-    33,
-    40,
-    "index finding identity and comparison history",
-  );
-  moveMigration(database, 25, 26, "persist scan completion warnings");
-  moveMigration(database, 12, 20, "phase-specific scan progress");
-  normalizeExecutionProfiles(database);
-  moveMigration(database, 13, 21, "current scan preflight state");
-  const shadowed = new Map([
-    [18, ["scan target summaries"]],
-    [
-      19,
-      [
-        "structured scan guidance context",
-        "idempotent scan lifecycle requests",
-      ],
-    ],
-    [
-      20,
-      [
-        "retain superseded scan lifecycle requests",
-        "threat model publication receipts",
-      ],
-    ],
-    [
-      21,
-      [
-        "scan progress projection and activity",
-        "deep coordinator manifest receipts",
-      ],
-    ],
-    [22, ["dynamic scan execution profiles"]],
-  ]);
-  const lookup = database.prepare(
-    "SELECT name FROM schema_migrations WHERE version = ?",
-  );
-  for (const [version, names] of shadowed) {
-    const name = lookup.get(version)?.name;
-    if (typeof name !== "string" || !names.includes(name)) continue;
-    if (version === 18) database.exec(migration(version).statements.join("\n"));
-    else if (version === 19) {
-      for (const sql of migration(version).statements)
-        database.exec(
-          sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "),
-        );
-    } else repairAdditive(database, version);
-    database
-      .prepare("UPDATE schema_migrations SET name = ? WHERE version = ?")
-      .run(migration(version).name, version);
-  }
-  if (lookup.get(2)?.name !== "finding management schema") return;
-  const expected = new Map([
-    [2, "finding management schema"],
-    [3, "scan handoff delivery claims"],
-    [4, "finding remediation action claims"],
-    [5, "scan target snapshot digests"],
-  ]);
-  const legacy = database
-    .prepare(
-      "SELECT version, name FROM schema_migrations WHERE version BETWEEN 2 AND 5",
-    )
-    .all();
-  if (legacy.some((row) => expected.get(Number(row.version)) !== row.name)) {
-    throw new Error(
-      "The Codex Security database has an unsupported pre-release migration history.",
-    );
-  }
-  database.exec("DELETE FROM schema_migrations WHERE version = 5");
-  for (const [from, to] of [
-    [4, 5],
-    [3, 4],
-    [2, 3],
-  ])
-    moveMigration(database, from, to, expected.get(from)!);
-  repairAdditive(database, 2);
-  addColumn(
-    database,
-    "ALTER TABLE scans ADD COLUMN target_snapshot_digest TEXT;",
-  );
-  database
-    .prepare(
-      "INSERT INTO schema_migrations (version, name, applied_at) VALUES (2, ?, ?)",
-    )
-    .run(migration(2).name, new Date().toISOString());
 }
 
 function repairDeepScan(database: DatabaseSync): void {

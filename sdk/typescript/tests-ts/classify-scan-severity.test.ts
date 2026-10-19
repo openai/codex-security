@@ -1,8 +1,15 @@
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
-import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import {
   classifyScanDirectorySeverity,
@@ -18,7 +25,6 @@ import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
-import { resolvePluginPython } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -84,10 +90,7 @@ async function fixture(scanId?: string) {
   };
 }
 
-function classifier(
-  finding: Finding,
-  excluded = false,
-): NonNullable<ClassifySeverityOptions["codex"]> {
+function classifier(finding: Finding, excluded = false) {
   return jsonCodex(() => ({
     findingId: finding.findingId,
     decision: excluded ? "excluded" : "assessed",
@@ -103,10 +106,14 @@ function classifier(
 
 async function query(environment: NodeJS.ProcessEnv, sql: string) {
   const result = spawnSync(
-    await resolvePluginPython({ environment }),
+    Bun.which("node")!,
     [
-      "-c",
-      "import json,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.row_factory=sqlite3.Row; print(json.dumps([dict(r) for r in c.execute(sys.argv[2]) ])); c.commit()",
+      "--input-type=module",
+      "--eval",
+      `import { DatabaseSync } from "node:sqlite";
+const database = new DatabaseSync(process.argv[1]);
+try { console.log(JSON.stringify(database.prepare(process.argv[2]).all())); }
+finally { database.close(); }`,
       join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
       sql,
     ],
@@ -116,24 +123,100 @@ async function query(environment: NodeJS.ProcessEnv, sql: string) {
   return JSON.parse(result.stdout) as Record<string, unknown>[];
 }
 
+test("classification and saved assessments run with Node and no Python", async () => {
+  const { environment, root, scanDirectory, scanId, findings } =
+    await fixture();
+  const withoutPython = {
+    ...environment,
+    PATH: dirname(Bun.which("node")!),
+    PYTHON: join(root, "missing-python"),
+  };
+  const { scanId: _scanId, ...classification } =
+    await classifyScanDirectorySeverity(scanDirectory, {
+      environment: withoutPython,
+    });
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      withoutPython,
+    ),
+  ).toEqual(classification);
+});
+
+test("saved assessments retain embedded NULs in imported scan IDs", async () => {
+  const { environment, scanDirectory, scanId, findings } =
+    await fixture("imported\0scan");
+  const { scanId: classifiedScanId, ...classification } =
+    await classifyScanDirectorySeverity(scanDirectory, { environment });
+  expect(classifiedScanId).toBe(scanId);
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      environment,
+    ),
+  ).toEqual(classification);
+});
+
+test("severity helpers skip Node executables in the caller's enclosing checkout", async () => {
+  const { root, environment, scanDirectory } = await fixture();
+  const repository = join(root, "repository");
+  const bin = join(repository, "bin");
+  const cwd = join(repository, "nested");
+  await mkdir(bin, { recursive: true });
+  await mkdir(cwd);
+  await mkdir(join(repository, ".git"));
+  const marker = join(root, "untrusted-node-ran");
+  const node = join(bin, process.platform === "win32" ? "node.exe" : "node");
+  await writeFile(
+    node,
+    process.platform === "win32"
+      ? "synthetic invalid executable"
+      : '#!/bin/sh\nprintf called > "$NODE_MARKER"\nexit 91\n',
+    { mode: 0o700 },
+  );
+  const entryPoint = new URL(
+    "../src/classify-scan-severity.ts",
+    import.meta.url,
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--eval",
+      `import { classifyScanDirectorySeverity } from ${JSON.stringify(entryPoint.href)};
+await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environment: process.env });`,
+    ],
+    {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...environment,
+        PATH: [bin, dirname(Bun.which("node")!)].join(delimiter),
+        NODE_MARKER: marker,
+      },
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 function recordingClassifier() {
   const calls: string[] = [];
   const control = { failOn: "", excluded: false };
-  const codex: NonNullable<ClassifySeverityOptions["codex"]> = {
-    startThread: (thread) => ({
-      run: async (prompt, turn) => {
-        const { finding } = JSON.parse(prompt.split("\n\n").at(-1)!) as {
-          finding: Finding;
-        };
-        calls.push(finding.findingId);
-        if (finding.findingId === control.failOn)
-          throw new Error("Interrupted model call");
-        return classifier(finding, control.excluded)
-          .startThread(thread)
-          .run(prompt, turn);
-      },
-    }),
-  };
+  const codex = codexWithRun(async (prompt: string) => {
+    const { finding } = JSON.parse(prompt.split("\n\n").at(-1)!) as {
+      finding: Finding;
+    };
+    calls.push(finding.findingId);
+    if (finding.findingId === control.failOn)
+      throw new Error("Interrupted model call");
+    return classifier(finding, control.excluded).startThread().run();
+  });
   return { codex, calls, control };
 }
 

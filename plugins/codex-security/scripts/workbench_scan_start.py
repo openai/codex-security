@@ -167,6 +167,19 @@ def archive_scan(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
                 (str(archived_scan_dir), timestamp, previous_scan["id"]),
             )
+            connection.execute(
+                """UPDATE finding_workflows SET scan_dir = ?,
+                    results_json = CASE WHEN json_extract(results_json, '$.scan.sarifPath') = ?
+                        THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
+                    WHERE scan_id = ? AND scan_dir = ?""",
+                (
+                    str(archived_scan_dir),
+                    str(scan_dir / "exports" / "results.sarif"),
+                    str(archived_scan_dir / "exports" / "results.sarif"),
+                    previous_scan["id"],
+                    str(scan_dir),
+                ),
+            )
             for artifact in artifacts:
                 try:
                     relative_path = Path(artifact["path"]).relative_to(scan_dir)

@@ -162,6 +162,46 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     );
   }
 }
+// Match the complete collection endpoint, allowing prose delimiters.
+for (const repository of ["{owner}/{repo}", "example/project"]) {
+  for (const [behavior, output] of Object.entries({
+    dependabot_malware: `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: advisory`,
+    advisories_private_reports: `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage includes private vulnerability reports. source_type: advisory`,
+  })) {
+    for (const suffix of [
+      "/42/instances",
+      "-wrong",
+      ".json",
+      "_wrong",
+      "Extra",
+    ]) {
+      expectPass(
+        github,
+        output.replaceAll("?", `${suffix}?`),
+        githubContext(behavior),
+        false,
+      );
+    }
+    for (const delimiter of [
+      "\n",
+      "` ",
+      '\" ',
+      " ",
+      ") ",
+      ", ",
+      ". ",
+      "; ",
+      ": ",
+      "] ",
+    ]) {
+      expectPass(
+        github,
+        output.replaceAll("?", `${delimiter}?`),
+        githubContext(behavior),
+      );
+    }
+  }
+}
 const codeScanning = {
   alerts: {
     path: "/repos/example/project/code-scanning/alerts",
@@ -334,6 +374,48 @@ for (const text of [
 ]) {
   expectPass(github, text, githubContext("explicit_connector"), false);
 }
+const restJson = JSON.stringify({ transport: "rest" });
+for (const text of [restJson, `\`\`\`json\n${restJson}\n\`\`\``]) {
+  expectPass(github, text, githubContext("default_rest"));
+}
+for (const invalid of [
+  null,
+  [],
+  {},
+  decision,
+  { transport: "other" },
+  { transport: "rest", findings: [] },
+]) {
+  expectPass(
+    github,
+    JSON.stringify(invalid),
+    githubContext("default_rest"),
+    false,
+  );
+}
+for (const [behavior, answer] of [
+  ["explicit_connector", connectorJson],
+  ["default_rest", restJson],
+]) {
+  for (const extra of [
+    "null",
+    "true",
+    "42",
+    '"extra"',
+    "{}",
+    triage,
+    "{'verdict': 'confirmed'}",
+    '{schema_version: "triage-finding/v0", findings: []}',
+  ]) {
+    for (const text of [
+      `${answer}\n${extra}`,
+      `\`\`\`json\n${answer}\n\`\`\`\n\`\`\`json\n${extra}\n\`\`\``,
+    ]) {
+      expectPass(github, text, githubContext(behavior), false);
+    }
+  }
+}
+
 for (const behavior of ["", "code_scaning", "constructor"]) {
   expectPass(github, "arbitrary text", githubContext(behavior), false);
 }

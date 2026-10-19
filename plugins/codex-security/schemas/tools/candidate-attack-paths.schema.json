@@ -6,8 +6,6 @@
   "$defs": {
     "input": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["scanId", "attackPaths"],
       "properties": {
         "scanId": {
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
@@ -15,47 +13,36 @@
         "attackPaths": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/attackPathUpdate"
+            "$ref": "codex-security://schemas/tools/candidate-attack-paths.schema.json#/$defs/attackPathUpdate"
           }
         }
-      }
-    },
-    "updatesPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["attackPaths"],
-      "properties": {
-        "attackPaths": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/attackPathUpdate"
-          }
-        }
-      }
+      },
+      "required": ["scanId", "attackPaths"],
+      "additionalProperties": false
     },
     "attackPathUpdate": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["candidateId", "attackPath"],
       "properties": {
         "candidateId": {
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
         },
         "attackPath": {
-          "$ref": "#/$defs/attackPath"
+          "$ref": "codex-security://schemas/tools/candidate-attack-paths.schema.json#/$defs/attackPath"
         }
-      }
+      },
+      "required": ["candidateId", "attackPath"],
+      "additionalProperties": false
     },
     "attackPath": {
       "oneOf": [
         {
-          "$ref": "#/$defs/reportableAttackPath"
+          "$ref": "codex-security://schemas/tools/candidate-attack-paths.schema.json#/$defs/reportableAttackPath"
         },
         {
-          "$ref": "#/$defs/ignoredAttackPath"
+          "$ref": "codex-security://schemas/tools/candidate-attack-paths.schema.json#/$defs/ignoredAttackPath"
         },
         {
-          "$ref": "#/$defs/deferredAttackPath"
+          "$ref": "codex-security://schemas/tools/candidate-attack-paths.schema.json#/$defs/deferredAttackPath"
         }
       ]
     },
@@ -69,12 +56,8 @@
       "counterevidence": {
         "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
       },
-      "impact": {
-        "enum": ["high", "medium", "low", "ignore", "unknown"]
-      },
-      "likelihood": {
-        "enum": ["high", "medium", "low", "ignore", "unknown"]
-      },
+      "impact": { "enum": ["high", "medium", "low", "ignore", "unknown"] },
+      "likelihood": { "enum": ["high", "medium", "low", "ignore", "unknown"] },
       "severity_rationale": {
         "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
       },
@@ -84,7 +67,29 @@
     },
     "reportableAttackPath": {
       "type": "object",
-      "additionalProperties": true,
+      "properties": {
+        "decision": { "const": "reportable" },
+        "dataflow": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "reachability": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "counterevidence": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "impact": { "enum": ["high", "medium", "low", "ignore", "unknown"] },
+        "likelihood": {
+          "enum": ["high", "medium", "low", "ignore", "unknown"]
+        },
+        "severity": { "enum": ["critical", "high", "medium", "low"] },
+        "severity_rationale": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "change_conditions": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
       "required": [
         "decision",
         "dataflow",
@@ -96,21 +101,33 @@
         "severity_rationale",
         "change_conditions"
       ],
-      "properties": {
-        "decision": { "const": "reportable" },
-        "dataflow": { "$ref": "#/$defs/attackPathFields/dataflow" },
-        "reachability": { "$ref": "#/$defs/attackPathFields/reachability" },
-        "counterevidence": { "$ref": "#/$defs/attackPathFields/counterevidence" },
-        "impact": { "$ref": "#/$defs/attackPathFields/impact" },
-        "likelihood": { "$ref": "#/$defs/attackPathFields/likelihood" },
-        "severity": { "enum": ["critical", "high", "medium", "low"] },
-        "severity_rationale": { "$ref": "#/$defs/attackPathFields/severity_rationale" },
-        "change_conditions": { "$ref": "#/$defs/attackPathFields/change_conditions" }
-      }
+      "additionalProperties": true
     },
     "ignoredAttackPath": {
       "type": "object",
-      "additionalProperties": true,
+      "properties": {
+        "decision": { "const": "ignore" },
+        "dataflow": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "reachability": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "counterevidence": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "impact": { "enum": ["high", "medium", "low", "ignore", "unknown"] },
+        "likelihood": {
+          "enum": ["high", "medium", "low", "ignore", "unknown"]
+        },
+        "severity": { "const": "ignore" },
+        "severity_rationale": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "change_conditions": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
       "required": [
         "decision",
         "dataflow",
@@ -122,21 +139,38 @@
         "severity_rationale",
         "change_conditions"
       ],
-      "properties": {
-        "decision": { "const": "ignore" },
-        "dataflow": { "$ref": "#/$defs/attackPathFields/dataflow" },
-        "reachability": { "$ref": "#/$defs/attackPathFields/reachability" },
-        "counterevidence": { "$ref": "#/$defs/attackPathFields/counterevidence" },
-        "impact": { "$ref": "#/$defs/attackPathFields/impact" },
-        "likelihood": { "$ref": "#/$defs/attackPathFields/likelihood" },
-        "severity": { "const": "ignore" },
-        "severity_rationale": { "$ref": "#/$defs/attackPathFields/severity_rationale" },
-        "change_conditions": { "$ref": "#/$defs/attackPathFields/change_conditions" }
-      }
+      "additionalProperties": true
     },
     "deferredAttackPath": {
       "type": "object",
-      "additionalProperties": true,
+      "properties": {
+        "decision": { "const": "deferred" },
+        "dataflow": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "reachability": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "counterevidence": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "impact": { "enum": ["high", "medium", "low", "ignore", "unknown"] },
+        "likelihood": {
+          "enum": ["high", "medium", "low", "ignore", "unknown"]
+        },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low", "unknown"]
+        },
+        "severity_rationale": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "change_conditions": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "proof_gap": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        }
+      },
       "required": [
         "decision",
         "dataflow",
@@ -149,20 +183,7 @@
         "change_conditions",
         "proof_gap"
       ],
-      "properties": {
-        "decision": { "const": "deferred" },
-        "dataflow": { "$ref": "#/$defs/attackPathFields/dataflow" },
-        "reachability": { "$ref": "#/$defs/attackPathFields/reachability" },
-        "counterevidence": { "$ref": "#/$defs/attackPathFields/counterevidence" },
-        "impact": { "$ref": "#/$defs/attackPathFields/impact" },
-        "likelihood": { "$ref": "#/$defs/attackPathFields/likelihood" },
-        "severity": { "enum": ["critical", "high", "medium", "low", "unknown"] },
-        "severity_rationale": { "$ref": "#/$defs/attackPathFields/severity_rationale" },
-        "change_conditions": { "$ref": "#/$defs/attackPathFields/change_conditions" },
-        "proof_gap": {
-          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-        }
-      }
+      "additionalProperties": true
     }
   }
 }
