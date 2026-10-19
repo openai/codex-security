@@ -162,7 +162,7 @@ export async function loadContractWithScanDirectory(
     );
   }
 
-  validateCanonicalContract(manifest, findings);
+  validateCanonicalContract(manifest, findings, coverage);
 
   await validateSeal(
     scanDir,
@@ -204,6 +204,7 @@ function normalizePersistedFindings(payload: unknown): unknown {
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
+  coverage: CoverageDocument,
 ): void {
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
@@ -253,6 +254,20 @@ function validateCanonicalContract(
       } catch (error) {
         throw new ContractValidationError(
           `manifest.scan.scope.${field}[${index}]: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
+    }
+  }
+
+  for (const [index, deferred] of coverage.deferred.entries()) {
+    for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
+      const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
+      try {
+        safeRelativePath(path, context, true);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${context}: expected a safe repository-relative POSIX path.`,
           { cause: error },
         );
       }
@@ -674,12 +689,16 @@ async function verifyScanRoot(
   }
 }
 
-function safeRelativePath(value: string, context: string): string {
+function safeRelativePath(
+  value: string,
+  context: string,
+  allowDot = false,
+): string {
   const parts = value.split("/");
   if (
     value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
+    (!allowDot && value === ".") ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
@@ -692,7 +711,7 @@ function safeRelativePath(value: string, context: string): string {
   }
   const normalized = posix.normalize(value).replace(/\/+$/, "");
   if (
-    normalized === "." ||
+    (!allowDot && normalized === ".") ||
     normalized.startsWith("../") ||
     isAbsolute(normalized)
   ) {
