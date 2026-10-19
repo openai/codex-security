@@ -364,6 +364,7 @@ async function runCampaign(
   if (pending.length === 0) return summarize();
 
   let next = 0;
+  let receiptTail = Promise.resolve();
   const worker = async (
     security: Pick<CodexSecurity, "run" | "close">,
   ): Promise<void> => {
@@ -587,7 +588,11 @@ async function runCampaign(
           ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
           policyFailed: attemptPolicyFailed,
         };
-        await appendReceipt(ledger, `${JSON.stringify(receipt)}\n`);
+        const receiptLine = `${JSON.stringify(receipt)}\n`;
+        receiptTail = receiptTail.then(() =>
+          appendReceipt(ledger, receiptLine),
+        );
+        await receiptTail;
         if (recoveryCheckout !== undefined) {
           reportedError = await removeCheckout(recoveryCheckout);
         }

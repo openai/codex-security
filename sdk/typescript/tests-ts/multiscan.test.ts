@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
@@ -156,7 +156,220 @@ function options(
 
 const results = readJsonLines<Record<string, unknown>>;
 
+function receiptCost(onSerialized: () => void) {
+  const cost = {
+    model: "synthetic-model",
+    inputTokens: 1,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 1,
+    estimatedUsd: 0,
+  };
+  return {
+    ...cost,
+    toJSON() {
+      onSerialized();
+      return cost;
+    },
+  };
+}
+
 describe("multiscan", () => {
+  test("serializes receipt writes through close and drains workers before unlocking", async () => {
+    const { paths, source } = await repositoryFixture("receipt-order", "first");
+    await appendFile(paths.input, `second,${source.path},${source.revision}\n`);
+    const pause = () => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      return {
+        entered: entered.promise,
+        release: release.resolve,
+        async wait() {
+          entered.resolve();
+          await release.promise;
+        },
+      };
+    };
+    const firstWrite = pause();
+    const firstSync = pause();
+    const firstClose = pause();
+    const secondClose = pause();
+    const secondSerialized = Promise.withResolvers<void>();
+    const firstCompleted = Promise.withResolvers<void>();
+    const clientsClosing = Promise.withResolvers<void>();
+    const releaseClients = Promise.withResolvers<void>();
+    const ledger = join(paths.output, "results.jsonl");
+    const originalOpen = filesystem.open;
+    let opens = 0;
+    let closes = 0;
+    let settled = false;
+    const openSpy = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof originalOpen>) => {
+        const ordinal = String(args[0]) === ledger ? ++opens : 0;
+        const file = await Reflect.apply(originalOpen, filesystem, args);
+        if (ordinal === 0) return file;
+        const write = file.writeFile.bind(file);
+        const sync = file.sync.bind(file);
+        const close = file.close.bind(file);
+        file.writeFile = async (...writeArgs) => {
+          if (ordinal === 1) await firstWrite.wait();
+          await write(...writeArgs);
+        };
+        file.sync = async () => {
+          if (ordinal === 1) await firstSync.wait();
+          await sync();
+        };
+        file.close = async () => {
+          await (ordinal === 1 ? firstClose : secondClose).wait();
+          await close();
+        };
+        return file;
+      },
+    );
+    const configured = options(
+      paths,
+      client(
+        async (_repository, scanOptions = {}) => {
+          const second = basename(dirname(scanOptions.outputDir!)) === "second";
+          if (second) await firstWrite.entered;
+          return Object.assign(await completedScan(scanOptions.outputDir!), {
+            threatModelPath: null,
+            cost: second ? receiptCost(secondSerialized.resolve) : null,
+          });
+        },
+        async () => {
+          if (++closes === 2) clientsClosing.resolve();
+          await releaseClients.promise;
+        },
+      ),
+      {
+        workers: 2,
+        onProgress: (event) => {
+          if (event.repository === "first" && event.status === "completed") {
+            firstCompleted.resolve();
+          }
+        },
+      },
+    );
+    const operation = runMultiscan(configured);
+    void operation.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    try {
+      // Serialization is the final synchronous step before enqueueing the row.
+      await secondSerialized.promise;
+      for (const stage of [firstWrite, firstSync, firstClose]) {
+        await stage.entered;
+        expect(opens).toBe(1);
+        stage.release();
+      }
+      await secondClose.entered;
+      await firstCompleted.promise;
+      expect(opens).toBe(2);
+      expect(settled).toBe(false);
+      await expect(runMultiscan(configured)).rejects.toThrow(
+        "A multiscan supervisor is already running.",
+      );
+      secondClose.release();
+      await clientsClosing.promise;
+      expect(settled).toBe(false);
+      expect((await lstat(join(paths.output, ".lock"))).isDirectory()).toBe(
+        true,
+      );
+      releaseClients.resolve();
+      expect(await operation).toMatchObject({ completed: 2, failed: 0 });
+      expect(await results(ledger)).toMatchObject([
+        { id: "first", status: "completed" },
+        { id: "second", status: "completed" },
+      ]);
+      await expect(lstat(join(paths.output, ".lock"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      for (const stage of [firstWrite, firstSync, firstClose, secondClose]) {
+        stage.release();
+      }
+      releaseClients.resolve();
+      await operation.catch(() => {});
+      openSpy.mockRestore();
+    }
+  });
+
+  test.each(["open", "write", "sync", "close"])(
+    "stops queued receipt appends after a receipt %s failure",
+    async (failure) => {
+      const { paths, source } = await repositoryFixture(
+        "receipt-failure",
+        "first",
+      );
+      await appendFile(
+        paths.input,
+        `second,${source.path},${source.revision}\n`,
+      );
+      const failing = Promise.withResolvers<void>();
+      const secondSerialized = Promise.withResolvers<void>();
+      const injected = new Error(`Synthetic receipt ${failure} failure`);
+      const rejectAppend = async () => {
+        failing.resolve();
+        await secondSerialized.promise;
+        throw injected;
+      };
+      const ledger = join(paths.output, "results.jsonl");
+      const originalOpen = filesystem.open;
+      let opens = 0;
+      const openSpy = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof originalOpen>) => {
+          const ordinal = String(args[0]) === ledger ? ++opens : 0;
+          if (ordinal === 1 && failure === "open") await rejectAppend();
+          const file = await Reflect.apply(originalOpen, filesystem, args);
+          if (ordinal !== 1) return file;
+          const write = file.writeFile.bind(file);
+          const sync = file.sync.bind(file);
+          const close = file.close.bind(file);
+          file.writeFile = async (...writeArgs) => {
+            if (failure === "write") await rejectAppend();
+            await write(...writeArgs);
+          };
+          file.sync = async () => {
+            if (failure === "sync") await rejectAppend();
+            await sync();
+          };
+          file.close = async () => {
+            await close();
+            if (failure === "close") await rejectAppend();
+          };
+          return file;
+        },
+      );
+      const close = mock(async () => {});
+      const security = client(async (_repository, scanOptions = {}) => {
+        const second = basename(dirname(scanOptions.outputDir!)) === "second";
+        if (second) await failing.promise;
+        return Object.assign(await completedScan(scanOptions.outputDir!), {
+          threatModelPath: null,
+          cost: second ? receiptCost(secondSerialized.resolve) : null,
+        });
+      }, close);
+      try {
+        await expect(
+          runMultiscan(options(paths, security, { workers: 2 })),
+        ).rejects.toBe(injected);
+        expect(opens).toBe(1);
+        expect(close).toHaveBeenCalledTimes(2);
+        await expect(lstat(join(paths.output, ".lock"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        openSpy.mockRestore();
+      }
+    },
+  );
+
   test.each([false, true])(
     "only links current models from failed child runs with recovery=%p",
     async (recovery) => {
