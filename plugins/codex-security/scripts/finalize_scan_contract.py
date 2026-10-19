@@ -2197,8 +2197,8 @@ def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
     tags = {"security", *categories}
     for cwe in cwes:
         match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
-        if match and int(match[1]) > 0:
-            tags.add(f"external/cwe/cwe-{int(match[1]):03d}")
+        if match and (digits := match[1].lstrip("0")):
+            tags.add(f"external/cwe/cwe-{digits.zfill(3)}")
     description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
     if cwes:
         description += f" Weaknesses: {', '.join(cwes)}."
