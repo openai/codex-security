@@ -325,6 +325,103 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("umask", [0o022, 0o777])
+@pytest.mark.parametrize("malformed_source", [False, True])
+def test_sqlite_snapshot_new_destination_is_private_during_backup(
+    tmp_path: Path, umask: int, malformed_source: bool
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    if malformed_source:
+        source.write_text("not a SQLite database")
+    else:
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO records VALUES ('sealed')")
+    namespace = runpy.run_path(str(SNAPSHOT_SCRIPT))
+    real_connect = sqlite3.connect
+    modes = []
+
+    def observe_connect(database, *args, **kwargs):
+        if database == snapshot:
+            modes.append(snapshot.stat().st_mode & 0o777 if snapshot.exists() else None)
+        return real_connect(database, *args, **kwargs)
+
+    previous_umask = os.umask(umask)
+    try:
+        with (
+            mock.patch.object(sys, "argv", [str(SNAPSHOT_SCRIPT), str(source), str(snapshot)]),
+            mock.patch.object(sqlite3, "connect", side_effect=observe_connect),
+        ):
+            if malformed_source:
+                with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+                    namespace["main"]()
+            else:
+                namespace["main"]()
+    finally:
+        os.umask(previous_umask)
+    assert modes == [0o600]
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+    if not malformed_source:
+        with sqlite3.connect(snapshot) as connection:
+            assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("destination_kind", ["regular", "symlink", "hardlink"])
+@pytest.mark.parametrize("malformed_source", [False, True])
+def test_sqlite_snapshot_preserves_existing_destination(
+    tmp_path: Path, destination_kind: str, malformed_source: bool
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    existing = tmp_path / "existing.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    if malformed_source:
+        source.write_text("not a SQLite database")
+    else:
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO records VALUES ('sealed')")
+    with sqlite3.connect(existing) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('original')")
+    existing.chmod(0o644)
+    if destination_kind == "symlink":
+        snapshot.symlink_to(existing)
+    elif destination_kind == "hardlink":
+        snapshot.hardlink_to(existing)
+    else:
+        snapshot = existing
+    original_inode = existing.stat().st_ino
+    namespace = runpy.run_path(str(SNAPSHOT_SCRIPT))
+    real_connect = sqlite3.connect
+    modes = []
+
+    def observe_connect(database, *args, **kwargs):
+        connection = real_connect(database, *args, **kwargs)
+        if database == snapshot:
+            modes.append(snapshot.stat().st_mode & 0o777)
+        return connection
+
+    with (
+        mock.patch.object(sys, "argv", [str(SNAPSHOT_SCRIPT), str(source), str(snapshot)]),
+        mock.patch.object(sqlite3, "connect", side_effect=observe_connect),
+    ):
+        if malformed_source:
+            with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+                namespace["main"]()
+        else:
+            namespace["main"]()
+    assert modes == [0o644]
+    assert snapshot.stat().st_mode & 0o777 == (0o644 if malformed_source else 0o600)
+    assert snapshot.stat().st_ino == existing.stat().st_ino == original_inode
+    assert snapshot.is_symlink() == (destination_kind == "symlink")
+    with sqlite3.connect(existing) as connection:
+        expected = "original" if malformed_source else "sealed"
+        assert connection.execute("SELECT value FROM records").fetchone() == (expected,)
+
+
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 extended-length paths")
 def test_sqlite_snapshot_reads_windows_extended_length_source(tmp_path: Path) -> None:
