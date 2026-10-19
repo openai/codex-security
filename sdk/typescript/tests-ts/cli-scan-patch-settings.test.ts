@@ -40,6 +40,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (request.method === "model/list") {
     send({ id: request.id, result: { data: [{ model: "gpt-6.1-sol", availableAccessPrograms: { cyber: JSON.parse(process.env.SYNTHETIC_CYBER_PROGRAMS) } }], nextCursor: null } });
   } else if (request.method === "thread/start") {
+    receipt.daybreakEnabled = request.params.daybreakEnabled ?? null;
     receipt.approvalPolicy = request.params.approvalPolicy;
     receipt.sandbox = request.params.sandbox;
     send({ id: request.id, result: { thread: { id: "synthetic-thread" }, model: "gpt-6.1-sol", modelProvider: "openai", sandbox: { type: "workspaceWrite" } } });
@@ -63,6 +64,7 @@ interface ChildReceipt {
   sandbox: string;
   preflightSandbox: string;
   cyberAccessProgram: string | null;
+  daybreakEnabled: boolean | null;
   experimentalApi: boolean;
   features: Record<string, boolean>;
 }
@@ -286,6 +288,7 @@ describe("patch Daybreak configuration", () => {
       expect(child.cyberAccessProgram).toBe(
         daybreak === false ? "standard" : "daybreakBlue",
       );
+      expect(child.daybreakEnabled).toBe(daybreak === false ? null : true);
       expect(child.experimentalApi).toBe(true);
     },
   );
@@ -326,6 +329,7 @@ describe("patch Daybreak configuration", () => {
       expect(child.cyberAccessProgram).toBe(
         daybreak ? "daybreakBlue" : "standard",
       );
+      expect(child.daybreakEnabled).toBe(daybreak ? true : null);
     },
   );
 
@@ -342,11 +346,13 @@ describe("patch Daybreak configuration", () => {
       standalone: true,
     });
     expect(child.cyberAccessProgram).toBeNull();
+    expect(child.daybreakEnabled).toBe(true);
   });
 
   test("defaults a standalone turn to advertised standard", async () => {
     const child = await patchSettings([], { standalone: true });
     expect(child.cyberAccessProgram).toBe("standard");
+    expect(child.daybreakEnabled).toBeNull();
   });
 
   test.each([
@@ -368,6 +374,7 @@ describe("patch Daybreak configuration", () => {
         { homeConfig: "features.cli_daybreak = false\n" },
       );
       expect(child.cyberAccessProgram).toBe(expected);
+      expect(child.daybreakEnabled).toBe(daybreak ? true : null);
     },
   );
 

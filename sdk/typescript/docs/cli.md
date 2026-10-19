@@ -114,6 +114,7 @@ to explicitly turn it off.
 The setting carries through saved scan recipes, resumed scans, Deep Scan
 discovery and reducer workers, and `scan --patch`. Standalone `validate`,
 `patch`, and `verify-fix` accept the same `--codex daybreak=true` override.
+Threads created by these commands retain the setting when resumed in Codex.
 Scans use isolated configuration, so set it on the CLI, SDK client, or project
 file even if it is enabled in your personal Codex configuration.
 

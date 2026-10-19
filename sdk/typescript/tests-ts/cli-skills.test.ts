@@ -1699,7 +1699,7 @@ lines.on("line", (line) => {
     expect(stderr.text()).toBe("");
   });
 
-  test("starts verification app-server threads with a read-only sandbox", async () => {
+  test("preserves Daybreak when sandboxing verification app-server threads", async () => {
     const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
@@ -1712,7 +1712,7 @@ lines.on("line", (line) => {
       cwd: ${JSON.stringify(process.cwd())},
       includeLayers: true,
     });
-    send({ id: 4, result: { layers: [
+    send({ id: 4, result: { config: { daybreak: true }, layers: [
       { name: { type: "project" }, config: { mcp_servers: { repository: { command: "untrusted" } } } },
       { name: { type: "user" }, config: { mcp_servers: { trusted: { command: "trusted" } } } },
     ] } });
@@ -1722,11 +1722,13 @@ lines.on("line", (line) => {
       threadSource: "security_validation",
       approvalPolicy: "on-request",
       sandbox: "read-only",
+      daybreakEnabled: true,
       config: { mcp_servers: { repository: { enabled: false } } },
     });
     send({ id: 2, result: { thread: { id: "verification" } } });
   }
   if (request.method === "turn/start") {
+    assert.equal(request.params.cyberAccessProgram, "standard");
     send({ id: 3, result: { turn: { id: "verification-turn" } } });
     send({ method: "item/started", params: {
       threadId: "another-thread", turnId: "verification-turn",
@@ -1767,6 +1769,7 @@ lines.on("line", (line) => {
               "Verify the synthetic finding without editing the repository",
             threadSource: "security_validation",
             sandbox: "read-only",
+            cyberAccessProgram: "standard",
             onEvent: (event) => activity.push(event),
           },
         },

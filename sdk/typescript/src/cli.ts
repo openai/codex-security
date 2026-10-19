@@ -7864,7 +7864,7 @@ export async function readSkillCommandOutput(
       },
     );
   };
-  const startThread = (config?: JsonObject): void => {
+  const startThread = (threadConfig?: JsonObject): void => {
     if (appServer === undefined) return;
     send({
       id: 2,
@@ -7879,7 +7879,8 @@ export async function readSkillCommandOutput(
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
-        ...(config === undefined ? {} : { config }),
+        ...(config["daybreak"] === true ? { daybreakEnabled: true } : {}),
+        ...(threadConfig === undefined ? {} : { config: threadConfig }),
       },
     });
   };
