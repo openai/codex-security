@@ -3063,6 +3063,7 @@ export class CodexSecurity {
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
+        scanProgressTracker?.stop();
         try {
           for await (const event of (await runPostScan()).events) {
             if (event.type === "turn.failed") {

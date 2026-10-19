@@ -3582,74 +3582,81 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("preserves follow-up worker status after reporting", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const statuses: ScanWorkerStatus[] = [];
-    const warnings: string[] = [];
-    let progressSignal: AbortSignal | undefined;
-    let turns = 0;
-    const status = {
-      kind: "dispatch",
-      phase: "validation",
-      planned: 2,
-      started: 2,
-    } as const;
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (options, args, input) => {
-        if (args[0] === "register-cli-scan") {
-          return { ...mockScanRegistration(args, input), scopeFileCount: 1 };
-        }
-        if (args[0] === "get-scan") {
-          progressSignal ??= options.signal;
-          return {
-            scan: {
-              progress: {
-                phase: "reporting",
-                coverage: { filesTotal: 1, closedRows: 1, worklistRows: 1 },
-              },
-            },
-          };
-        }
-        return mockWorkbench(args, input);
-      },
-      createCodex: codexFactory(async () => {
-        if (++turns === 1) {
-          await copyCompletedScan(root);
-          return { events: completedEvents() };
-        }
-        expect(progressSignal?.aborted).toBe(true);
-        return {
-          events: completedEvents(
-            "thread-1",
-            (async function* (): AsyncGenerator<ThreadEvent> {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: "follow-up-dispatch",
-                  type: "agent_message",
-                  text: `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(status)}`,
+  test.each([false, true])(
+    "stops polling before follow-up (failed=%p)",
+    async (primaryFails) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const statuses: ScanWorkerStatus[] = [];
+      const warnings: string[] = [];
+      let progressSignal: AbortSignal | undefined;
+      let turns = 0;
+      const status = {
+        kind: "dispatch",
+        phase: "validation",
+        planned: 2,
+        started: 2,
+      } as const;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 1 };
+          }
+          if (args[0] === "get-scan") {
+            progressSignal ??= options.signal;
+            return {
+              scan: {
+                progress: {
+                  phase: "reporting",
+                  coverage: { filesTotal: 1, closedRows: 1, worklistRows: 1 },
                 },
-              };
-            })(),
-          ),
-        };
-      }, "thread-1"),
-    });
-    try {
-      await client.run(repository, {
-        postScanPrompt: "Review the synthetic fix.",
-        onProgress() {},
-        onWorkerStatus: (update) => statuses.push(update),
-        onWarning: (warning) => warnings.push(warning),
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          if (++turns === 1) {
+            if (primaryFails) return { events: failedEvents() };
+            await copyCompletedScan(root);
+            return { events: completedEvents() };
+          }
+          expect(progressSignal?.aborted).toBe(true);
+          return {
+            events: completedEvents(
+              "thread-1",
+              (async function* (): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "item.completed",
+                  item: {
+                    id: "follow-up-dispatch",
+                    type: "agent_message",
+                    text: `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(status)}`,
+                  },
+                };
+              })(),
+            ),
+          };
+        }, "thread-1"),
       });
-      expect(turns).toBe(2);
-      expect(warnings).toEqual([]);
-      expect(statuses).toEqual([status]);
-    } finally {
-      await client.close();
-    }
-  });
+      try {
+        const result = client.run(repository, {
+          postScanPrompt: "Review the synthetic fix.",
+          onProgress() {},
+          onWorkerStatus: (update) => statuses.push(update),
+          onWarning: (warning) => warnings.push(warning),
+        });
+        if (primaryFails)
+          await expect(result).rejects.toThrow("Could not draft fixes.");
+        else await result;
+        expect(turns).toBe(2);
+        expect(warnings).toEqual([]);
+        expect(statuses).toEqual(primaryFails ? [] : [status]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each([
     "marker-free",
