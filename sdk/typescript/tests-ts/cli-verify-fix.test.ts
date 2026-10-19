@@ -418,19 +418,70 @@ describe("read-only finding verification", () => {
   ] as const)(
     "maps Codex exit %i to verification exit %i",
     async (codexStatus, expectedStatus) => {
-      const stdout = captureCli(main, "stdout");
+      for (const flags of [
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "yaml", "--full-output"],
+        ["--token-count"],
+      ]) {
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            ["verify-fix", "Synthetic finding", ...flags],
+            dependencies({ onCodex: () => codexStatus }),
+          ),
+        ).toBe(expectedStatus);
+        expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
+  test.each([
+    ["fixed", 0],
+    ["still_vulnerable", 1],
+    ["inconclusive", 2],
+  ] as const)(
+    "retains completed %s results with full output",
+    async (status, code) => {
+      const { stdout, runCli } = createCliTest(main);
+      const results = [
+        {
+          id: "finding-1",
+          status,
+          evidence: "Synthetic verification evidence.",
+        },
+      ];
       expect(
-        await stdout.run(
-          [
-            "verify-fix",
-            "A previously reported authorization bypass",
-            "--json",
-          ],
-          dependencies({ onCodex: () => codexStatus }),
+        await runCli(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(JSON.stringify({ results }));
+              return 0;
+            },
+          }),
         ),
-      ).toBe(expectedStatus);
-      expect(stdout.text()).toBe("");
+      ).toBe(code);
+      expect(JSON.parse(stdout.text()).data.results).toEqual(results);
+    },
+  );
+
+  test.each([130, 143])(
+    "preserves interrupted status %i without writing a success envelope",
+    async (status) => {
+      const { stderr } = createCliTest(main);
+      const write = mock(() => {
+        throw new Error("Unexpected stdout write.");
+      });
+      expect(
+        await main(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          { write },
+          stderr.stream,
+          dependencies({ onCodex: () => status }),
+        ),
+      ).toBe(status);
+      expect(write).not.toHaveBeenCalled();
     },
   );
 
