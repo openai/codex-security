@@ -3964,7 +3964,7 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "Use --rubric for saved findings or --records alone for host-provided classification.",
+      hint: "Use --rubric to override the built-in policy or --records alone for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
@@ -3989,7 +3989,7 @@ export async function main(
         rubric: optionValue("--rubric")
           .optional()
           .describe(
-            "Classification policy document; omit to inherit existing severity without a model call.",
+            "Classification policy document; omit to classify with the built-in severity rubric.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))

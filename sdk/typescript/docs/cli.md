@@ -1209,8 +1209,12 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` inherits original severity without model calls. Rubrics and
-repeatable `--knowledge-base` context accept text, PDF, DOCX, and directories.
+Omitting `--rubric` runs classification with the [built-in severity rubric](../src/default-severity-rubric.ts).
+It evaluates attacker access, boundary crossing, additional harm, and evidence for
+Critical, High, Medium, Low, and Informational findings. Confidence remains separate
+from severity; missing proof alone does not justify a downgrade. An explicit
+`--rubric` replaces the default policy completely. Rubrics and repeatable
+`--knowledge-base` context accept text, PDF, DOCX, and directories.
 Each finding is classified three times in independent read-only turns using the
 same report, rubric, and supplied context, without tools or source inspection.
 The most common normalized severity wins; if all three differ, the highest wins
@@ -1219,7 +1223,10 @@ vote: two exclusions win, but an assessed severity wins a three-way tie with an
 exclusion. The first answer matching the winner supplies its label, rationale,
 confidence, and review trigger. All three reviews must succeed; failures or invalid
 answers fail that finding without saving a partial vote. This uses three model
-calls per uncached finding. Codex retains usage for each independent turn.
+calls per uncached finding, including when no custom rubric is supplied, and
+requires the same Codex authentication and model access as custom classification.
+Codex retains usage for each independent turn. There is no fallback to scanner
+severity if classification fails.
 `--model` and `--effort` override Codex's configured model and the default medium effort.
 
 Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
@@ -1229,7 +1236,12 @@ Finding/occurrence IDs and input hashes bind each assessment to its evidence.
 
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, and context hashes; failed/canceled runs keep completed
-work. Use `--reprocess` to replace assessments, including when changing only model
+work. Default-rubric assessments use `source: "rubric"` and a content hash; former
+no-rubric inherited assessments have no rubric hash and are automatically
+reclassified on the next classification run. Changes to the bundled policy or
+switching between default and custom policies also invalidate matching checkpoints.
+Older results remain readable; publication does not silently run a model.
+Use `--reprocess` to replace assessments, including when changing only model
 or effort, or to replace assessments cached before three-review voting. A successful
 run also writes `severity-classification.json`, but publication reads the database. Original findings and sealed artifacts remain
 unchanged.
@@ -1302,8 +1314,9 @@ await publishScan(scanDirectory, {
 ```
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
-evidence/metadata. Imported reports may lack severity or occurrence IDs; missing
-severity requires a rubric. Scan wrappers persist checkpoints (including for
+evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
+`rubricPath` uses the built-in policy even when a scanner severity is present.
+Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and
 publication. Older JSON-only assessments need reclassification once. All

@@ -1,3 +1,4 @@
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
@@ -11,7 +12,9 @@ import { capture, dependencies } from "./cli-fixtures.js";
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
-function input(): ClassifySeverityRecordsInput {
+function input(): ClassifySeverityRecordsInput & {
+  rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
+} {
   const markdown =
     "# Severity\nHigh: unauthorized access to private records.\n";
   const findingJson =
@@ -53,6 +56,9 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
         requests.push(request);
         expect(request.model).toBe(original.model);
         expect(request.effort).toBe("high");
+        expect(JSON.parse(request.prompt).rubric).toEqual([
+          original.rubric.markdown,
+        ]);
         expect(request.trustedInstructions).toContain("Do not use tools");
         expect(request.schema).toHaveProperty("required");
         expect(request.prompt).toContain(original.records[0]!.findingJson);
@@ -226,6 +232,7 @@ test("cancellation rejects even when the host review does not settle", async () 
 
 test.each([
   "completed",
+  "default-rubric",
   "host-error",
   "wrong-response",
   "disconnect",
@@ -279,18 +286,21 @@ test.each([
       capture().stream,
       deps,
     );
+    const params: ClassifySeverityRecordsInput = input();
+    if (scenario === "default-rubric") delete params.rubric;
+    const completed = scenario === "completed" || scenario === "default-rubric";
     stream.write(
-      `${JSON.stringify({ jsonrpc: "2.0", id: "run-one", method: "run", params: input() })}\n`,
+      `${JSON.stringify({ jsonrpc: "2.0", id: "run-one", method: "run", params })}\n`,
     );
     expect(await result).toBe(
-      scenario === "completed" ? 0 : scenario === "host-error" ? 1 : 2,
+      completed ? 0 : scenario === "host-error" ? 1 : 2,
     );
     expect(
       messages.filter((message) => message.method === "review.run"),
-    ).toHaveLength(scenario === "completed" ? 3 : 1);
+    ).toHaveLength(completed ? 3 : 1);
     const final = messages.at(-1);
     expect(final.id).toBe("run-one");
-    if (scenario === "completed")
+    if (completed)
       expect(final.result.assessments[0]).toHaveProperty("id", "canonical-one");
     else if (scenario === "host-error")
       expect(final.result).toMatchObject({
@@ -385,7 +395,9 @@ test.each([2, 3])(
   async (failedRun) => {
     for (const invalid of [false, true]) {
       let calls = 0;
-      const result = await classifySeverityRecords(input(), {
+      const data: ClassifySeverityRecordsInput = input();
+      delete data.rubric;
+      const result = await classifySeverityRecords(data, {
         reviewRunner: {
           async run(request) {
             if (++calls !== failedRun) return answer(request);
@@ -427,3 +439,28 @@ test.each([2, 3])(
     expect(calls).toBe(canceledRun);
   },
 );
+
+test("omitted canonical rubric uses the bundled policy and returns its exact binding", async () => {
+  const data: ClassifySeverityRecordsInput = input();
+  delete data.rubric;
+  const requests: SeverityClassificationReviewRequest[] = [];
+  const result = await classifySeverityRecords(data, {
+    reviewRunner: {
+      async run(request) {
+        requests.push(request);
+        expect(JSON.parse(request.prompt).rubric).toEqual([
+          defaultSeverityRubric,
+        ]);
+        return answer(request);
+      },
+    },
+  });
+  expect(requests).toHaveLength(3);
+  expect(new Set(requests.map(({ requestId }) => requestId)).size).toBe(3);
+  expect(result).toMatchObject({
+    status: "completed",
+    rubric: { revision: 1, sha256: hash(defaultSeverityRubric) },
+    assessments: [{ level: "high" }],
+  });
+  expect(data.rubric).toBeUndefined();
+});

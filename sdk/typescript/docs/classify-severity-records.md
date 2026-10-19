@@ -3,7 +3,7 @@
 `codex-security classify-severity --records` accepts canonical reports without a
 repository, saved scan, synthetic provenance, local Codex login, or filesystem
 state. It uses the same bidirectional JSON-RPC transport as [record deduplication](dedupe-records.md).
-Use `--records` alone; saved-scan classification remains unchanged.
+Use `--records` alone; model execution remains host-provided.
 
 The SDK exports `classifySeverityRecords`, `classifySeverityRecordsInputSchema`,
 and their input, result, and review-request types. The protocol and input have
@@ -25,6 +25,15 @@ Send one newline-delimited JSON-RPC request with `method: "run"` and these param
 }
 ```
 
+The `rubric` field is optional. Omit it to classify with the
+[built-in severity rubric](../src/default-severity-rubric.ts), using the same three
+independent host reviews and usage accounting. The result echoes its built-in
+revision (currently `1`) and exact Markdown SHA-256. Supplying a custom rubric
+replaces the default completely and preserves the supplied revision/hash binding.
+Do not reuse cached results across differing rubric hashes; preserve the default
+snapshot from the review prompt alongside its returned binding. Default revisions
+are local to the bundled policy, not workspace rubric revisions.
+
 `findingJson` is the exact JSON text of an object with nonblank `findingId`,
 `title`, and `summary`. `findingId` must equal the canonical `id`. Optional
 `severity.level` uses `critical`, `high`, `medium`, `low`, or `informational`.
@@ -36,7 +45,7 @@ normalizing newlines, whitespace, Unicode, object key order, or JSON numbers.
 Compute `inputSha256` from `findingJson`, not from its parsed/reserialized object.
 For example, Node uses `createHash("sha256").update(text, "utf8").digest("hex")`;
 Python uses `hashlib.sha256(text.encode("utf-8")).hexdigest()`.
-The CLI recomputes both hashes before requesting any review. Rubric revisions are
+The CLI recomputes supplied hashes before requesting any review. Rubric revisions are
 positive safe integers; record revisions are nonnegative safe integers. Duplicate
 canonical IDs and invalid records reject the entire input before host work.
 The implementation snapshots caller input before awaiting model execution and

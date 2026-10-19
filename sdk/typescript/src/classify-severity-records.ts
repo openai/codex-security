@@ -1,4 +1,5 @@
 import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { defaultSeverityRubric } from "./default-severity-rubric.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { abortable } from "./targets.js";
@@ -42,7 +43,8 @@ export const classifySeverityRecordsInputSchema = z
         markdown: text,
         sha256: digest,
       })
-      .strict(),
+      .strict()
+      .optional(),
     model: text,
     effort: z.enum([
       "minimal",
@@ -132,7 +134,12 @@ export async function classifySeverityRecords(
 ): Promise<ClassifySeverityRecordsResult> {
   options.signal?.throwIfAborted();
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
-  if (sha256(data.rubric.markdown) !== data.rubric.sha256)
+  const rubric = data.rubric ?? {
+    revision: 1,
+    markdown: defaultSeverityRubric,
+    sha256: sha256(defaultSeverityRubric),
+  };
+  if (sha256(rubric.markdown) !== rubric.sha256)
     throw new Error("Rubric SHA-256 does not match its exact UTF-8 Markdown.");
   const ids = new Set<string>();
   for (const record of data.records) {
@@ -149,7 +156,7 @@ export async function classifySeverityRecords(
   }
   const binding: RecordsResultBinding = {
     version: 1,
-    rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
+    rubric: { revision: rubric.revision, sha256: rubric.sha256 },
   };
   const assessments: CanonicalSeverityAssessment[] = [];
   for (const record of data.records) {
@@ -168,7 +175,7 @@ export async function classifySeverityRecords(
                 model: data.model,
                 effort: data.effort,
                 trustedInstructions: severityReviewInstructions,
-                prompt: `{"rubric":${JSON.stringify([data.rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
+                prompt: `{"rubric":${JSON.stringify([rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
                 schema: z.toJSONSchema(severityDecisionSchema),
               },
               { signal: options.signal },

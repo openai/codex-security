@@ -134,6 +134,7 @@ test("classification and saved assessments run with Node and no Python", async (
   const { scanId: _scanId, ...classification } =
     await classifyScanDirectorySeverity(scanDirectory, {
       environment: withoutPython,
+      codex: recordingClassifier().codex,
     });
   expect(
     await readScanSeverityClassification(
@@ -150,7 +151,10 @@ test("saved assessments retain embedded NULs in imported scan IDs", async () => 
   const { environment, scanDirectory, scanId, findings } =
     await fixture("imported\0scan");
   const { scanId: classifiedScanId, ...classification } =
-    await classifyScanDirectorySeverity(scanDirectory, { environment });
+    await classifyScanDirectorySeverity(scanDirectory, {
+      environment,
+      codex: recordingClassifier().codex,
+    });
   expect(classifiedScanId).toBe(scanId);
   expect(
     await readScanSeverityClassification(
@@ -189,7 +193,7 @@ test("severity helpers skip Node executables in the caller's enclosing checkout"
     [
       "--eval",
       `import { classifyScanDirectorySeverity } from ${JSON.stringify(entryPoint.href)};
-await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environment: process.env });`,
+await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environment: process.env, findingIds: [] });`,
     ],
     {
       cwd,
@@ -225,9 +229,9 @@ function recordingClassifier() {
 }
 
 test("checkpoints each finding, resumes missing work, and reprocesses only the selection", async () => {
-  const { environment, scanDirectory, rubricPath, findings } = await fixture();
+  const { environment, scanDirectory, findings } = await fixture();
   const { codex, calls, control } = recordingClassifier();
-  const options = { environment, rubricPath, codex };
+  const options = { environment, codex };
   control.failOn = findings[1]!.findingId;
   control.failOnRun = 3;
   await expect(
@@ -394,7 +398,7 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
   const environment = first.environment;
   const { scanId, ...classification } = await classifyScanDirectorySeverity(
     first.scanDirectory,
-    { environment },
+    { environment, codex: recordingClassifier().codex },
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DELETE FROM schema_migrations WHERE version = 43");
@@ -413,7 +417,10 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
       "SELECT version FROM schema_migrations WHERE version = 43",
     ),
   ).toEqual([]);
-  await classifyScanDirectorySeverity(second.scanDirectory, { environment });
+  await classifyScanDirectorySeverity(second.scanDirectory, {
+    environment,
+    codex: recordingClassifier().codex,
+  });
   await expect(
     readScanSeverityClassification(
       first.scanDirectory,
@@ -424,8 +431,12 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     ),
   ).rejects.toThrow("incomplete");
   expect(
-    (await classifyScanDirectorySeverity(first.scanDirectory, { environment }))
-      .assessments,
+    (
+      await classifyScanDirectorySeverity(first.scanDirectory, {
+        environment,
+        codex: recordingClassifier().codex,
+      })
+    ).assessments,
   ).toEqual(classification.assessments);
   expect(
     await query(
@@ -611,7 +622,10 @@ test("exclusions and empty dedupe selections do not create tickets", async () =>
 
 test("failed or canceled reassessment leaves the last successful assessment intact", async () => {
   const { environment, scanDirectory, rubricPath, findings } = await fixture();
-  await classifyScanDirectorySeverity(scanDirectory, { environment });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    environment,
+    codex: recordingClassifier().codex,
+  });
   const path = join(scanDirectory, "severity-classification.json");
   const before = await readFile(path);
   await expect(
@@ -644,6 +658,7 @@ test("publication reads SQLite even when the JSON export is modified or symlinke
   const { environment, root, scanDirectory, findings } = await fixture();
   const result = await classifyScanDirectorySeverity(scanDirectory, {
     environment,
+    codex: recordingClassifier().codex,
   });
   const path = join(scanDirectory, "severity-classification.json");
   await writeFile(path, JSON.stringify({ ...result, scanId: "other-scan" }));
@@ -655,9 +670,10 @@ test("publication reads SQLite even when the JSON export is modified or symlinke
       })
     ).issues,
   ).toHaveLength(findings.length);
-  const stale = await classifySeverity([
-    { ...findings[0]!, summary: "Different report" },
-  ]);
+  const stale = await classifySeverity(
+    [{ ...findings[0]!, summary: "Different report" }],
+    { codex: classifier(findings[0]!) },
+  );
   await expect(
     prepareScanPublication(scanDirectory, {
       environment,
@@ -677,7 +693,10 @@ test("publication reads SQLite even when the JSON export is modified or symlinke
       })
     ).issues,
   ).toHaveLength(findings.length);
-  await classifyScanDirectorySeverity(scanDirectory, { environment });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    environment,
+    codex: recordingClassifier().codex,
+  });
   expect(await readFile(external, "utf8")).toBe(JSON.stringify(result));
 });
 
@@ -688,7 +707,7 @@ test.each(["latest", "scan_prefix"])(
     const seen: string[][] = [];
     const result = await classifyScanSeverityInternal(
       selector,
-      { environment },
+      { environment, codex: recordingClassifier().codex },
       {
         currentDirectory: () => scanDirectory,
         runWorkbench: async (args): Promise<JsonObject> => {
@@ -722,7 +741,10 @@ test.each(["latest", "scan_prefix"])(
 
 test("migrates existing databases without changing findings and reads older state without writes", async () => {
   const { environment, scanDirectory } = await fixture();
-  await classifyScanDirectorySeverity(scanDirectory, { environment });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    environment,
+    codex: recordingClassifier().codex,
+  });
   const original = await query(
     environment,
     "SELECT * FROM findings ORDER BY id",
@@ -748,7 +770,10 @@ test("migrates existing databases without changing findings and reads older stat
       "SELECT version FROM schema_migrations WHERE version = 41",
     ),
   ).toEqual([]);
-  await classifyScanDirectorySeverity(scanDirectory, { environment });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    environment,
+    codex: recordingClassifier().codex,
+  });
   expect(
     await query(
       environment,
@@ -806,4 +831,61 @@ test("classifying another scan preserves both recurring-finding assessments", as
     await classifyScanDirectorySeverity(scan.scanDirectory, options);
   }
   expect(calls).toEqual([]);
+});
+
+test("default rubric replaces legacy inherited assessments and respects custom policy changes", async () => {
+  const { environment, scanDirectory, rubricPath, findings, scanId } =
+    await fixture();
+  const { codex, calls } = recordingClassifier();
+  const options = { environment, codex };
+  await classifyScanDirectorySeverity(scanDirectory, options);
+  // Recreate the provenance emitted by the former no-rubric inheritance path.
+  for (const table of [
+    "scan_severity_assessments",
+    "finding_severity_assessments",
+  ]) {
+    await query(
+      environment,
+      `UPDATE ${table} SET rubric_sha256 = NULL, source = 'existing-severity', level = 'high', rubric_label = NULL, confidence = NULL`,
+    );
+  }
+  await query(
+    environment,
+    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL",
+  );
+  const legacy = await readScanSeverityClassification(
+    scanDirectory,
+    scanId,
+    findings,
+    undefined,
+    environment,
+  );
+  expect(
+    legacy?.assessments.every((a) => a.source === "existing-severity"),
+  ).toBe(true);
+  calls.length = 0;
+  const result = await classifyScanDirectorySeverity(scanDirectory, options);
+  expect(calls).toHaveLength(6);
+  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(
+    result.assessments.every(
+      (a) => a.source === "rubric" && a.level === "medium",
+    ),
+  ).toBe(true);
+  calls.length = 0;
+  expect(
+    (await classifyScanDirectorySeverity(scanDirectory, options)).assessments,
+  ).toEqual(result.assessments);
+  expect(calls).toHaveLength(0);
+  const custom = await classifyScanDirectorySeverity(scanDirectory, {
+    ...options,
+    rubricPath,
+  });
+  expect(calls).toHaveLength(6);
+  expect(custom.rubricSha256).not.toBe(result.rubricSha256);
+  calls.length = 0;
+  expect(
+    (await classifyScanDirectorySeverity(scanDirectory, options)).rubricSha256,
+  ).toBe(result.rubricSha256);
+  expect(calls).toHaveLength(6);
 });

@@ -1,4 +1,4 @@
-import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { defaultSeverityRubric } from "./default-severity-rubric.js";
 import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
@@ -34,7 +34,7 @@ export interface ClassifySeverityOptions extends Pick<
   | "signal"
   | "workingDirectory"
 > {
-  /** Classification policy. Omit to inherit existing severity without a model call. */
+  /** Classification policy override. Omit to use the built-in severity rubric. */
   rubricPath?: string;
   /** Supporting evidence, separate from classification policy. */
   knowledgeBasePaths?: readonly string[];
@@ -66,7 +66,6 @@ export interface SeverityClassificationCheckpoint {
   ): Promise<void>;
 }
 
-const levelSchema = z.enum(SCAN_SEVERITIES);
 const textSchema = z
   .string()
   .min(1)
@@ -114,7 +113,7 @@ export async function classifySeverityInternal(
   }
   const rubric =
     options.rubricPath === undefined
-      ? null
+      ? [defaultSeverityRubric]
       : await readDocuments([options.rubricPath], options.signal);
   const knowledge = options.knowledgeBasePaths?.length
     ? await readDocuments(options.knowledgeBasePaths, options.signal)
@@ -122,7 +121,7 @@ export async function classifySeverityInternal(
   const result: SeverityClassification = {
     schemaVersion: 1,
     assessedAt: new Date().toISOString(),
-    rubricSha256: rubric === null ? null : workflowDigest(rubric),
+    rubricSha256: workflowDigest(rubric),
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
@@ -138,59 +137,38 @@ export async function classifySeverityInternal(
       result.assessments.push(previous);
       continue;
     }
-    let decision: z.infer<typeof decisionSchema>;
-    if (rubric === null) {
-      const parsed = levelSchema.safeParse(finding.severity?.level);
-      if (!parsed.success) {
+    const prompt = [
+      severityReviewInstructions,
+      JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
+    ].join("\n\n");
+    const decision = await reviewSeverityThreeTimes(async () => {
+      options.signal?.throwIfAborted();
+      const response = await runReadOnlyCodex(
+        prompt,
+        z.toJSONSchema(decisionSchema),
+        options,
+        {
+          surface,
+          command: "classify-severity",
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.severityClassification,
+        },
+      );
+      options.signal?.throwIfAborted();
+      try {
+        return parseSeverityDecision(JSON.parse(response), finding.findingId);
+      } catch (error) {
         throw new CodexSecurityError(
-          `Finding ${finding.findingId} has no existing severity; supply a rubric.`,
+          "Severity classification returned an invalid assessment.",
+          { cause: error },
         );
       }
-      decision = {
-        findingId: finding.findingId,
-        decision: "assessed",
-        level: parsed.data,
-        rubricLabel: null,
-        rationale:
-          finding.severity?.rationale?.trim() ||
-          "Inherited the finding's existing severity.",
-        confidence: null,
-        reviewTrigger: finding.severity?.changeConditions?.trim() || null,
-      };
-    } else {
-      const prompt = [
-        severityReviewInstructions,
-        JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
-      ].join("\n\n");
-      decision = await reviewSeverityThreeTimes(async () => {
-        options.signal?.throwIfAborted();
-        const response = await runReadOnlyCodex(
-          prompt,
-          z.toJSONSchema(decisionSchema),
-          options,
-          {
-            surface,
-            command: "classify-severity",
-            threadSource: CODEX_SECURITY_THREAD_SOURCES.severityClassification,
-          },
-        );
-        options.signal?.throwIfAborted();
-        try {
-          return parseSeverityDecision(JSON.parse(response), finding.findingId);
-        } catch (error) {
-          throw new CodexSecurityError(
-            "Severity classification returned an invalid assessment.",
-            { cause: error },
-          );
-        }
-      });
-    }
+    });
     options.signal?.throwIfAborted();
     const assessment: SeverityAssessment = {
       ...decision,
       occurrenceId: finding.occurrenceId ?? null,
       inputSha256,
-      source: rubric === null ? "existing-severity" : "rubric",
+      source: "rubric",
     };
     await checkpoint?.save(finding, assessment, result);
     result.assessments.push(assessment);

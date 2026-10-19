@@ -67,7 +67,7 @@ test.each([
   },
 );
 
-test("classify-severity accepts external scan directories and defaults to existing severity", async () => {
+test("classify-severity accepts external scan directories and uses the default rubric when none is supplied", async () => {
   const deps = dependencies();
   let called = false;
   deps.classifyScanDirectorySeverity = async (directory, options, surface) => {
