@@ -4531,6 +4531,55 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 
+  test("preserves the public Windows ACL diagnosis for long ancestor paths", async () => {
+    const root = await temporaryDirectory();
+    const ancestor = join(
+      root,
+      ...Array.from({ length: 8 }, (_, index) =>
+        `ancestor-${index}-`.padEnd(80, "x"),
+      ),
+    );
+    const home = join(ancestor, "codex-home");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const descriptor = `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
+    const failure = await requirePrivateCredentialHome(
+      await lstat(root),
+      home,
+      {
+        platform: "win32",
+        secureWindowsHome: async (path) => {
+          await inspectWindowsCredentialAclSnapshot(path, sid, {
+            command: process.execPath,
+            args: [
+              "--eval",
+              `process.stdout.write(${JSON.stringify(`${descriptor}\n`)})`,
+            ],
+          });
+        },
+      },
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "Unable to create a private Windows credential home",
+    );
+    expect((failure as Error).message).toContain(
+      `ancestor could not be trusted: ${ancestor}.`,
+    );
+    expect((failure as Error).message).toContain(
+      "owner is not a trusted principal: S-1-1-0",
+    );
+    expect((failure as Error).message).toContain(
+      "Choose a location outside this ancestor with trusted ownership and permissions.",
+    );
+    expect((failure as Error).cause).toMatchObject({
+      cause: {
+        message:
+          "Windows credential ACL owner is not a trusted principal: S-1-1-0",
+      },
+    });
+  });
+
   test("preserves Windows ACL subprocess failures", async () => {
     const { home } = await credentialHome(false);
     const metadata = await lstat(home);

@@ -423,10 +423,7 @@ function windowsCredentialAclFailure(error: unknown): string {
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
       : errorMessage(error);
-  const normalized = errorMessage(detail)
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 512);
+  const normalized = errorMessage(detail).replace(/\s+/gu, " ").trim();
   return normalized === "" ? "" : `. ${normalized}`;
 }
 
