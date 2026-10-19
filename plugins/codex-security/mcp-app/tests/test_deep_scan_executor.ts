@@ -1,8 +1,8 @@
+import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
-  privateWindowsOutputRoot,
-  windowsAcl,
-} from "./support/windows-output-fixture.ts";
-import { fakeCodexSource } from "./support/fake-codex-source.ts";
+  createFakeCodexFixture,
+  emptyWorkerPermissionProfile,
+} from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -81,6 +81,10 @@ export { parseDeepScan } from "./response.js";`,
 });
 
 const temporaryDirectories = createTemporaryDirectories(true);
+const fakeCodexFixture = createFakeCodexFixture.bind(
+  null,
+  temporaryDirectories,
+);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const trustedParentSandbox = Object.freeze({
   filesystemDenies: [],
@@ -97,11 +101,6 @@ const trustedParentSandboxWithDenials = Object.freeze({
   literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
   globScanMaxDepth: 3,
 });
-const emptyWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: { ":root": "read" },
-  network: { enabled: false },
-};
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 const deniedWorkerPermissionProfile = {
@@ -3793,34 +3792,6 @@ async function runFixtureWorker(
     await writeFile(promptPath, `${prompt}\n`);
     return await runWorker(promptPath, workingDirectory, { kind, subagents });
   });
-}
-
-async function fakeCodexFixture(
-  preflightProfile = emptyWorkerPermissionProfile,
-  preflightAllowed = true,
-  accountResult: {
-    account: { type: string } | null;
-    requiresOpenaiAuth: boolean;
-  } = { account: { type: "apiKey" }, requiresOpenaiAuth: true },
-  privateWindowsRoot = false,
-) {
-  let root = await temporaryDirectories.create("codex-security-sdk-executor-");
-  if (privateWindowsRoot) root = await privateWindowsOutputRoot(root);
-  const markerPath = path.join(root, "invocation.json");
-  const preflightMarkerPath = path.join(root, "preflight.json");
-  const scriptPath = path.join(root, "fake-codex.mjs");
-  await writeFile(
-    scriptPath,
-    fakeCodexSource(
-      preflightProfile,
-      preflightAllowed,
-      accountResult,
-      preflightMarkerPath,
-    ),
-  );
-  await chmod(scriptPath, 0o755);
-  process.env.FAKE_CODEX_MARKER = markerPath;
-  return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
 }
 
 function assertReadOnlyWorkerPolicy(args: readonly string[]) {
