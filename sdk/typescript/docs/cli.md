@@ -374,6 +374,13 @@ Legacy completeness values affect neither.
 Bulk and component summaries report completed and failed scans without an
 `incomplete` count. Component matching errors have status `failed`.
 
+Usage coverage is separate from execution status. A recorded interruption or a
+closed turn without a numeric usage receipt makes usage coverage `partial`, even
+if a later turn succeeds. Recorded numeric zero is distinct from a missing
+receipt. These checks describe available local records; they cannot reconstruct
+requests whose usage was never persisted locally or prove an exhaustive billing
+total.
+
 New drafts use the current finding schema: `codeEvidence`, `rootCause`,
 `attackPath.dataflow`, and `evidenceRefs`. Source snippets belong in
 `codeEvidence`; `rootCause.evidenceRefs` links to them. Legacy aliases and
@@ -728,6 +735,19 @@ Token totals include input plus output; cache reads and writes are subsets of
 input. Missing cache-write usage makes the uncached/cache-write breakdown
 unavailable. The CLI cannot recover missing information already recorded as zero
 by the runtime.
+
+Completed scan history also saves rollout observations under `usage`, alongside
+any `cost` estimate. `byRole` separates parent tokens from combined worker tokens.
+`window` bounds the counted events, `observedAt` records collection time, and
+`tokensUpdatedAt` records the newest token receipt. Partial coverage means some
+work could not be measured, including in-flight turns or missing earlier attempts.
+The parent can continue after report completion, so final CLI tokens can exceed
+the saved measurement window.
+
+`usage.accountRateLimits` saves the latest observed account-wide readings with
+their own timestamps, window durations, and reset times. These are historical
+observations, not a live allowance check or scan-only consumption. Empty readings
+mean allowance was unavailable. There is no token-to-allowance conversion here.
 
 Cost displays use [standard API prices](https://developers.openai.com/api/docs/pricing)
 and show a short/long-context range. They estimate model usage, excluding other

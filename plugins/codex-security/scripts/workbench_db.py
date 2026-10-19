@@ -1639,13 +1639,15 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    if cost_json is None:
-        measured_usage = scan_usage.collect_scan_usage(
+    cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
+    if "usage" not in cost_fields:
+        cost_fields["usage"] = scan_usage.collect_scan_usage(
             connection,
             scan,
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
+        measured_usage = cost_fields["usage"]
         if thread_id is not None and turn_id is not None:
             measured_usage["completion"] = {
                 "threadId": thread_id,
@@ -1654,11 +1656,10 @@ def complete_scan_locked(
             }
             if measured_usage["coverage"] == "complete":
                 measured_usage["coverage"] = "partial"
-            measured_usage["warnings"] = [
-                *measured_usage.get("warnings", []),
-                "turn_in_progress",
-            ]
-        cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
+            measured_usage["warnings"] = sorted(
+                {*measured_usage.get("warnings", []), "turn_in_progress"}
+            )
+    cost_json = parse_scan_cost(json.dumps(cost_fields))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = manifest["scan"]["completedAt"]

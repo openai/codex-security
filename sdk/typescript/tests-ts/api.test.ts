@@ -877,7 +877,8 @@ describe("CodexSecurity orchestration", () => {
           "workbench usage captured",
         );
         expect(measured).toMatchObject({
-          coverage: "complete",
+          coverage: "partial",
+          warnings: ["turn_in_progress"],
           inputTokens: 100,
           outputTokens: 10,
           totalTokens: 110,
