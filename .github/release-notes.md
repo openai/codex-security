@@ -30,6 +30,7 @@
 - normalize CWE identifiers without integer conversion ([#1723](https://github.com/openai/codex-security/pull/1723))
 - remove the empty editable Python distribution ([#1724](https://github.com/openai/codex-security/pull/1724))
 - delete whole characters when editing patch instructions ([#1549](https://github.com/openai/codex-security/pull/1549))
+- adopt the registered target kind when sealing a scan draft ([#828](https://github.com/openai/codex-security/pull/828))
 
 <!-- release-section: highlights:end -->
 
