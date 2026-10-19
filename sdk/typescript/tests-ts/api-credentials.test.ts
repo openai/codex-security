@@ -66,6 +66,10 @@ describe("CodexSecurity orchestration", () => {
         name: "Synthetic",
         base_url: "https://provider.example/v1",
         wire_api: "responses",
+        env_http_headers: {
+          "X-OpenAI": "OPENAI_API_KEY",
+          "X-Codex": "CODEX_API_KEY",
+        },
         auth,
       };
       const rootDefinition = {

@@ -151,7 +151,11 @@ export async function runComponentScans(
     );
     environment = {
       ...selectedScanEnvironment(source, auth, provider),
-      ...selectedProviderEnvironment(configuration, source, authentication),
+      ...selectedProviderEnvironment(
+        configuration,
+        selectedScanEnvironment(source, auth),
+        authentication,
+      ),
     };
   }
   const repository = await normalizeRepository(

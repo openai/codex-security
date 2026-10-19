@@ -1786,7 +1786,12 @@ export class CodexSecurity {
         ),
         ...selectedProviderEnvironment(
           effectiveConfig,
-          this.#dependencies.environment,
+          selectedScanEnvironment(
+            authentication.method === "command"
+              ? withoutOpenAiApiKeys(this.#dependencies.environment)
+              : this.#dependencies.environment,
+            options.auth,
+          ),
         ),
         ...(session.apiKey === null
           ? {}
@@ -3377,7 +3382,12 @@ export class CodexSecurity {
       ...withoutOpenAiApiKeys(environment),
       ...selectedProviderEnvironment(
         session.effectiveConfig,
-        this.#dependencies.environment,
+        selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : this.#dependencies.environment,
+          auth,
+        ),
       ),
       ...(providerEnvKey === undefined || apiKey === null
         ? {}

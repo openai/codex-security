@@ -1487,58 +1487,77 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("removes ambient API keys from explicitly selected ChatGPT scans", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const createCodex = mock((_options: CodexOptions) => {
-      throw new Error("ChatGPT scan reached");
-    });
-    let pythonEnvironment: Record<string, string | undefined> | undefined;
-    const onAuthentication =
-      mock<(authentication: ScanAuthentication) => void>();
-    const client = TestClient.withDependencies({
-      environment: {
-        OPENAI_API_KEY: "synthetic-openai-key",
-        Codex_Api_Key: "synthetic-codex-key",
-      },
-      prepareRuntime: runtimePreparer(codexHome, () => ({
-        environment: {
-          CODEX_HOME: codexHome,
-          OpenAi_Api_Key: "synthetic-forwarded-openai-key",
-          codex_api_key: "synthetic-forwarded-codex-key",
+  test.each(["openai", "synthetic.gateway"])(
+    "removes ambient API keys from explicitly selected %s ChatGPT scans",
+    async (provider) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const createCodex = mock((_options: CodexOptions) => {
+        throw new Error("ChatGPT scan reached");
+      });
+      let pythonEnvironment: Record<string, string | undefined> | undefined;
+      const onAuthentication =
+        mock<(authentication: ScanAuthentication) => void>();
+      const client = new TestClient(
+        {
+          codexOverrides: {
+            model_provider: provider,
+            model_providers: {
+              [provider]: {
+                requires_openai_auth: true,
+                env_http_headers: {
+                  "X-OpenAI": "OPENAI_API_KEY",
+                  "X-Codex": "Codex_Api_Key",
+                },
+              },
+            },
+          },
         },
-      })),
-      resolvePluginPython: async (options) => {
-        pythonEnvironment = options?.environment;
-        return "/managed/python";
-      },
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      createCodex,
-    });
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-openai-key",
+            Codex_Api_Key: "synthetic-codex-key",
+          },
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            environment: {
+              CODEX_HOME: codexHome,
+              OpenAi_Api_Key: "synthetic-forwarded-openai-key",
+              codex_api_key: "synthetic-forwarded-codex-key",
+            },
+          })),
+          resolvePluginPython: async (options) => {
+            pythonEnvironment = options?.environment;
+            return "/managed/python";
+          },
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex,
+        },
+      );
 
-    await expect(
-      client.run(repository, {
-        auth: "chatgpt",
-        onAuthentication,
-      }),
-    ).rejects.toThrow("ChatGPT scan reached");
-    expect(onAuthentication.mock.lastCall?.[0]).toEqual({
-      method: "stored_credentials",
-      verified: false,
-    });
-    for (const environment of [
-      pythonEnvironment,
-      createCodex.mock.lastCall?.[0]?.env,
-    ]) {
-      expect(environment).toBeDefined();
-      expect(
-        Object.keys(environment!).some((name) =>
-          ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-        ),
-      ).toBe(false);
-    }
-    await client.close();
-  });
+      await expect(
+        client.run(repository, {
+          auth: "chatgpt",
+          onAuthentication,
+        }),
+      ).rejects.toThrow("ChatGPT scan reached");
+      expect(onAuthentication.mock.lastCall?.[0]).toEqual({
+        method: "stored_credentials",
+        verified: false,
+      });
+      for (const environment of [
+        pythonEnvironment,
+        createCodex.mock.lastCall?.[0]?.env,
+      ]) {
+        expect(environment).toBeDefined();
+        expect(
+          Object.keys(environment!).some((name) =>
+            ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+          ),
+        ).toBe(false);
+      }
+      await client.close();
+    },
+  );
 
   test.each([
     ["auto", "root"],
