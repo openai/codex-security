@@ -1799,7 +1799,7 @@ def test_completion_marks_worker_without_token_receipt_partial(
     if terminal is None:
         expected_warnings.add("turn_in_progress")
     elif terminal == "turn_aborted":
-        expected_warnings.add("turn_aborted")
+        expected_warnings.add("turn_interrupted")
     assert set(usage["warnings"]) == expected_warnings
     assert usage["totalTokens"] == 15
     assert usage["threadCount"] == 2
@@ -1838,7 +1838,7 @@ def test_completion_preserves_receipts_when_later_worker_usage_is_missing(
     events = [_response_event(counted, "worker", "measured-response", 20, 5)]
     if gap == "aborted":
         events.append(_event(counted, "event_msg", {"type": "turn_aborted"}))
-        expected_warning = "turn_aborted"
+        expected_warning = "turn_interrupted"
     elif gap == "completed_without_receipt":
         events.extend(
             [
@@ -1866,3 +1866,200 @@ def test_completion_preserves_receipts_when_later_worker_usage_is_missing(
     assert usage["warnings"] == [expected_warning]
     assert usage["totalTokens"] == 40
     assert usage["byRole"]["workers"]["totalTokens"] == 25
+
+
+@pytest.mark.parametrize("worker", [False, True])
+@pytest.mark.parametrize("terminal", ["task_complete", "turn_aborted"])
+@pytest.mark.parametrize("receipt", ["none", "native", "legacy", "zero"])
+def test_closed_turn_coverage_survives_later_success(
+    tmp_path: Path, worker: bool, terminal: str, receipt: str
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    thread_id = "worker" if worker else "scan-parent"
+    parent_id = "scan-parent" if worker else None
+    events = [_event(started, "event_msg", {"type": "task_started", "turn_id": "first"})]
+    if receipt in {"native", "zero"}:
+        events.append(
+            _response_event(
+                started,
+                thread_id,
+                "first-response",
+                20 if receipt == "native" else 0,
+                3 if receipt == "native" else 0,
+                turn_id="first",
+            )
+        )
+    elif receipt == "legacy":
+        events.append(_token_event(started, 20, 3))
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": terminal, "turn_id": "first"}),
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "second"}),
+            _response_event(started, thread_id, "second-response", 10, 2, turn_id="second"),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "second"}),
+        ]
+    )
+    rollout = _rollout(
+        tmp_path, thread_id, events, parent_thread_id=parent_id, include_task_start=False
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"](thread_id, parent_id, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == (_counts(30, 0, 5) if receipt in {"native", "legacy"} else _counts(10, 0, 2))
+    assert warnings == ({"token_record_missing"} if receipt == "none" else set()) | (
+        {"turn_interrupted"} if terminal == "turn_aborted" else set()
+    )
+
+
+@pytest.mark.parametrize("receipt", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+def test_closed_turn_coverage_retains_before_window_receipt_evidence(
+    tmp_path: Path, receipt: bool, native: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:01+00:00")
+    before = started - timedelta(seconds=1)
+    events = [_event(before, "event_msg", {"type": "task_started", "turn_id": "first"})]
+    if receipt:
+        events.append(
+            _response_event(before, "scan-parent", "before", 20, 3, turn_id="first")
+            if native
+            else _token_event(before, 20, 3)
+        )
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "first"}),
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "second"}),
+            _response_event(started, "scan-parent", "counted", 10, 2, turn_id="second"),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "second"}),
+        ]
+    )
+    rollout = _rollout(tmp_path, "scan-parent", events)
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == (set() if receipt else {"token_record_missing"})
+
+
+def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(tmp_path: Path) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    rollout = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "first"}),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "first"}),
+            _response_event(started, "scan-parent", "late", 10, 2, turn_id="first"),
+        ],
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == set()
+
+
+def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
+    tmp_path: Path,
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    rollout = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "same-turn"}),
+            _event(started, "event_msg", {"type": "turn_aborted", "turn_id": "same-turn"}),
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "same-turn"}),
+            _response_event(started, "scan-parent", "recovered", 10, 2, turn_id="same-turn"),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "same-turn"}),
+        ],
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == {"turn_interrupted"}
+
+
+def test_closed_turn_coverage_ignores_inherited_and_outside_window_interruptions(
+    tmp_path: Path,
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    before = started - timedelta(seconds=1)
+    after = started + timedelta(seconds=1)
+    rollout = _rollout(
+        tmp_path,
+        "worker",
+        [
+            _response_event(started, "worker", "counted", 10, 2),
+            _event(started, "event_msg", {"type": "task_complete", "turn_id": "turn-worker"}),
+            _event(after, "event_msg", {"type": "task_started", "turn_id": "later"}),
+            _event(after, "event_msg", {"type": "turn_aborted", "turn_id": "later"}),
+        ],
+        parent_thread_id="scan-parent",
+        copied_events=[
+            _event(before, "event_msg", {"type": "turn_aborted", "turn_id": "inherited"}),
+        ],
+    )
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    measurement = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("worker", "scan-parent", rollout),
+        started_at=started,
+        completed_at=started,
+    )
+    usage, warnings = measurement.tokens, measurement.warnings
+    assert usage == _counts(10, 0, 2)
+    assert warnings == set()
+
+
+def test_completion_marks_closed_turn_without_receipt_partial(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": "empty"}),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": "empty"}),
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": "measured"}),
+            _response_event(counted, "scan-parent", "response", 10, 2, turn_id="measured"),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": "measured"}),
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "partial",
+            "source": "codex_rollout",
+            **_counts(10, 0, 2),
+            "threadCount": 1,
+            "warnings": ["token_record_missing"],
+        }.items()
+    )

@@ -374,6 +374,13 @@ Legacy completeness values affect neither.
 Bulk and component summaries report completed and failed scans without an
 `incomplete` count. Component matching errors have status `failed`.
 
+Usage coverage is separate from execution status. A recorded interruption or a
+closed turn without a numeric usage receipt makes usage coverage `partial`, even
+if a later turn succeeds. Recorded numeric zero is distinct from a missing
+receipt. These checks describe available local records; they cannot reconstruct
+requests whose usage was never persisted locally or prove an exhaustive billing
+total.
+
 New drafts use the current finding schema: `codeEvidence`, `rootCause`,
 `attackPath.dataflow`, and `evidenceRefs`. Source snippets belong in
 `codeEvidence`; `rootCause.evidenceRefs` links to them. Legacy aliases and
