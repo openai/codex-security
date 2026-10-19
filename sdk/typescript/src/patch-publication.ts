@@ -98,9 +98,10 @@ export function createGitLabPatchPublisher({
   project: string;
   run: RunPatchReviewCommand;
 }): PatchReviewPublisher {
-  const repository = project.includes("://")
-    ? project
-    : `ssh://${project.replace(":", "/")}`;
+  const remote = parseGitRemote(project);
+  const repository = remote?.scpStyle
+    ? `${remote.url}/${remote.path}`
+    : project;
   return {
     label: "Merge request",
     findExisting: (branch) =>

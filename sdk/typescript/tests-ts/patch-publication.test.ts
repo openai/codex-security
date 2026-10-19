@@ -184,31 +184,52 @@ test.each([
   [
     "https://gitlab.com/group/project.git",
     "https://gitlab.com/group/project.git",
+    {},
   ],
   [
     "ssh://git@gitlab.com/group/project.git",
     "ssh://git@gitlab.com/group/project.git",
+    {},
   ],
   [
     "git@gitlab.com:group/project.git",
     "ssh://git@gitlab.com/group/project.git",
+    {},
+  ],
+  [
+    "git@[2001:db8::1]:group/subgroup/project.git",
+    "ssh://git@[2001:db8::1]/group/subgroup/project.git",
+    { GITLAB_HOST: "[2001:db8::1]" },
+  ],
+  [
+    "ssh://git@[2001:db8::1]:2222/group/project.git",
+    "ssh://git@[2001:db8::1]:2222/group/project.git",
+    { GITLAB_HOST: "[2001:db8::1]" },
   ],
 ] as const)(
   "routes GitLab remote %s without changing the review project",
-  async (origin, expectedProject) => {
+  async (origin, expectedProject, environment) => {
     const calls: { executable: string; args: readonly string[] }[] = [];
     const publisher = resolvePatchReviewPublisher(
       origin,
-      {},
+      environment,
       async (executable, args) => {
         calls.push({ executable, args });
-        return "[]";
+        return "";
       },
     );
     await publisher.findExisting(request.branch);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.executable).toBe("glab");
-    expect(calls[0]?.args).toContain(expectedProject);
+    await publisher.createDraft(request);
+    expect(calls.map(({ args }) => args.slice(0, 2))).toEqual([
+      ["mr", "list"],
+      ["mr", "create"],
+    ]);
+    for (const { executable, args } of calls) {
+      expect(executable).toBe("glab");
+      expect(args[args.indexOf("--repo") + 1]).toBe(expectedProject);
+    }
+    const create = calls[1]!.args;
+    expect(create[create.indexOf("--head") + 1]).toBe(expectedProject);
   },
 );
 
