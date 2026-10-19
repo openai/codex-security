@@ -55748,6 +55748,28 @@ async function runProcess(executable, args, options) {
   });
 }
 
+// ../sdk/typescript/src/git-remote.ts
+function parseGitRemote(remote) {
+  if (remote.includes("://")) {
+    const url2 = new URL(remote);
+    return {
+      url: url2,
+      path: url2.pathname.slice(1),
+      scpStyle: false
+    };
+  }
+  const scp = /^((?:[^@/:\s?#]+@)?(?:\[[^\]]+\]|[^@/:\s?#]+)):(.+)$/u.exec(
+    remote
+  );
+  if (scp === null) return void 0;
+  return {
+    url: new URL(`ssh://${scp[1]}`),
+    // An SCP path's ?, #, and dot segments are literal Git path characters.
+    path: scp[2],
+    scpStyle: true
+  };
+}
+
 // src/targets.ts
 var SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 function validateEvent(event) {
@@ -55820,13 +55842,13 @@ function originMatches(url2, repository, serverUrl) {
   try {
     const host = new URL(serverUrl).hostname;
     const sshUser = host === "github.com" ? "git" : host.slice(0, -".ghe.com".length);
-    const scp = /^([^/@:]+@[a-z0-9.-]+):(.+)$/i.exec(url2);
-    const parsed = new URL(scp ? `ssh://${scp[1]}` : url2);
+    const remote = parseGitRemote(url2);
+    if (!remote) return false;
+    const parsed = remote.url;
     const ssh = parsed.protocol === "ssh:";
     const originHost = parsed.hostname.toLowerCase();
     const matchesHost = originHost === host || host === "github.com" && ssh && originHost === "ssh.github.com" && parsed.port === "443";
-    const repositoryPath = scp ? scp[2] : parsed.pathname.slice(1);
-    return matchesHost && !parsed.password && (ssh ? parsed.username === sshUser : parsed.protocol === "https:" && !parsed.username) && repositoryPath.replace(/\/$/, "").replace(/\.git$/, "").toLowerCase() === repository.toLowerCase();
+    return matchesHost && !parsed.password && (ssh ? parsed.username === sshUser : parsed.protocol === "https:" && !parsed.username) && remote.path.replace(/\/$/, "").replace(/\.git$/, "").toLowerCase() === repository.toLowerCase();
   } catch {
     return false;
   }

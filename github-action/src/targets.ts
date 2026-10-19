@@ -2,6 +2,7 @@ import { lstat, realpath } from 'node:fs/promises';
 import { resolve, relative, sep, isAbsolute } from 'node:path';
 import { runProcess, safeLogLines, type ProcessResult } from './process.js';
 import type { Inputs } from './inputs.js';
+import { parseGitRemote } from '../../sdk/typescript/src/git-remote.js';
 
 export interface EventContext {
   eventName: string;
@@ -79,17 +80,16 @@ function originMatches(url: string, repository: string, serverUrl: string): bool
   try {
     const host = new URL(serverUrl).hostname;
     const sshUser = host === 'github.com' ? 'git' : host.slice(0, -'.ghe.com'.length);
-    // Keep SCP paths literal: URL parsing would interpret their ? and # characters.
-    const scp = /^([^/@:]+@[a-z0-9.-]+):(.+)$/i.exec(url);
-    const parsed = new URL(scp ? `ssh://${scp[1]}` : url);
+    const remote = parseGitRemote(url);
+    if (!remote) return false;
+    const parsed = remote.url;
     const ssh = parsed.protocol === 'ssh:';
     const originHost = parsed.hostname.toLowerCase();
     const matchesHost = originHost === host ||
       (host === 'github.com' && ssh && originHost === 'ssh.github.com' && parsed.port === '443');
-    const repositoryPath = scp ? scp[2] : parsed.pathname.slice(1);
     return matchesHost && !parsed.password &&
       (ssh ? parsed.username === sshUser : parsed.protocol === 'https:' && !parsed.username) &&
-      repositoryPath.replace(/\/$/, '').replace(/\.git$/, '').toLowerCase() === repository.toLowerCase();
+      remote.path.replace(/\/$/, '').replace(/\.git$/, '').toLowerCase() === repository.toLowerCase();
   } catch { return false; }
 }
 

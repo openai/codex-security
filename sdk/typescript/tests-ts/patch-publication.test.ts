@@ -180,6 +180,38 @@ test("rechecks the provider after a create response is lost", async () => {
   expect(events).toEqual(["find", "push", "create", "find"]);
 });
 
+test.each([
+  [
+    "https://gitlab.com/group/project.git",
+    "https://gitlab.com/group/project.git",
+  ],
+  [
+    "ssh://git@gitlab.com/group/project.git",
+    "ssh://git@gitlab.com/group/project.git",
+  ],
+  [
+    "git@gitlab.com:group/project.git",
+    "ssh://git@gitlab.com/group/project.git",
+  ],
+] as const)(
+  "routes GitLab remote %s without changing the review project",
+  async (origin, expectedProject) => {
+    const calls: { executable: string; args: readonly string[] }[] = [];
+    const publisher = resolvePatchReviewPublisher(
+      origin,
+      {},
+      async (executable, args) => {
+        calls.push({ executable, args });
+        return "[]";
+      },
+    );
+    await publisher.findExisting(request.branch);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.executable).toBe("glab");
+    expect(calls[0]?.args).toContain(expectedProject);
+  },
+);
+
 test("keeps native gh repository resolution for an unrecognized remote host", async () => {
   const url = "https://forge.example.test/team/project/pull/42";
   const calls: Array<readonly string[]> = [];
