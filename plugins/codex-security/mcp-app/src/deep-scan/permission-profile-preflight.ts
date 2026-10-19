@@ -1,4 +1,5 @@
 import type { JsonObject as JsonRecord } from "../types.js";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
@@ -64,6 +65,65 @@ export async function readDeepScanRuntimeConfig(
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
     return config;
+  });
+}
+
+export interface DeepScanParentTurn {
+  readonly threadId: string;
+  readonly turnId: string;
+}
+
+/** Read the program of the exact parent turn that invoked the plugin. */
+export async function readDeepScanParentCyberAccessProgram(
+  options: RuntimeConfigReadOptions & {
+    readonly parentTurn: DeepScanParentTurn;
+  },
+): Promise<CyberAccessProgram | undefined> {
+  return withPreflightClient(options, async (client) => {
+    let response: JsonRecord;
+    try {
+      response = await client.request("thread/read", {
+        threadId: options.parentTurn.threadId,
+        includeTurns: false,
+      });
+    } catch (error) {
+      const nativeError = record(
+        error instanceof Error ? error.cause : undefined,
+      );
+      // Ephemeral parent threads have no persisted rollout for this separate client.
+      if (
+        nativeError?.code === -32600 &&
+        nativeError.message ===
+          `thread not loaded: ${options.parentTurn.threadId}`
+      )
+        return undefined;
+      throw error;
+    }
+    const thread = record(response.thread);
+    if (
+      thread?.id !== options.parentTurn.threadId ||
+      typeof thread.path !== "string"
+    )
+      return undefined;
+    const input = createReadStream(thread.path, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = record(JSON.parse(line));
+        if (entry?.type !== "turn_context") continue;
+        const context = record(entry.payload);
+        if (context?.turn_id !== options.parentTurn.turnId) continue;
+        const program = context.cyber_access_program;
+        return typeof program === "string"
+          ? (program as CyberAccessProgram)
+          : undefined;
+      }
+      return undefined;
+    } finally {
+      lines.close();
+      input.destroy();
+    }
   });
 }
 
@@ -648,6 +708,7 @@ function jsonRpcPreflightError(
       subject(context) +
       " did not run." +
       (typeof error?.message === "string" ? "\n" + error.message : ""),
+    { cause: value },
   );
 }
 

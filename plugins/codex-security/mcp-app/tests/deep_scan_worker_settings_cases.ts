@@ -46,6 +46,10 @@ export async function testWorkerCyberAccessSettings({
     workerDaybreak?: boolean;
     nativeProfile?: string;
     program?: string;
+    parentProgram?: string;
+    parentTurn?: { threadId: string; turnId: string };
+    missingParentTurn?: boolean;
+    failParentReadOnce?: boolean;
     serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
@@ -104,6 +108,46 @@ export async function testWorkerCyberAccessSettings({
       },
     },
     {
+      name: "parent-standard",
+      configuration:
+        'daybreak = true\n[codex_security]\ncyber_access_program = "daybreak_blue"\n',
+      daybreak: true,
+      program: "standard",
+      parentProgram: "standard",
+      parentTurn: { threadId: "parent-standard", turnId: "active-standard" },
+    },
+    {
+      name: "parent-blue",
+      configuration:
+        'daybreak = false\n[codex_security]\ncyber_access_program = "daybreak_red"\n',
+      daybreak: false,
+      program: "daybreak_blue",
+      parentProgram: "daybreak_blue",
+      parentTurn: { threadId: "parent-blue", turnId: "active-blue" },
+      failParentReadOnce: true,
+    },
+    {
+      name: "parent-red",
+      configuration:
+        'daybreak = false\n[codex_security]\ncyber_access_program = "standard"\n',
+      daybreak: false,
+      workerDaybreak: false,
+      nativeProfile: "parent_profile_fixture",
+      program: "daybreak_red",
+      parentProgram: "daybreak_red",
+      parentTurn: { threadId: "parent-red", turnId: "active-red" },
+    },
+    {
+      name: "parent-turn-unavailable",
+      configuration:
+        'daybreak = false\n[codex_security]\ncyber_access_program = "daybreak_blue"\n',
+      daybreak: false,
+      program: "daybreak_blue",
+      parentProgram: "daybreak_red",
+      parentTurn: { threadId: "parent-unavailable", turnId: "active-missing" },
+      missingParentTurn: true,
+    },
+    {
       name: "snapshot-enabled",
       configuration: "daybreak = false\n",
       daybreak: true,
@@ -127,6 +171,19 @@ export async function testWorkerCyberAccessSettings({
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   const fixture = await fakeCodexFixture();
+  const writeParentTurn = (threadId: string, turnId: string, program: string) =>
+    writeFile(
+      path.join(fixture.root, `${threadId}.jsonl`),
+      [
+        { type: "session_meta", payload: { id: threadId } },
+        {
+          type: "turn_context",
+          payload: { turn_id: turnId, cyber_access_program: program },
+        },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n") + "\n",
+    );
   const promptPath = path.join(fixture.root, "prompt.md");
   const launches: {
     args: readonly string[];
@@ -187,10 +244,56 @@ export async function testWorkerCyberAccessSettings({
           "",
         );
       }
+      if (testCase.parentTurn !== undefined) {
+        await writeParentTurn(
+          testCase.parentTurn.threadId,
+          testCase.missingParentTurn
+            ? "different-turn"
+            : testCase.parentTurn.turnId,
+          testCase.parentProgram!,
+        );
+      }
       testCase.executor = new CodexSdkWorkerExecutor({
         model: testCase.name,
         parentSandbox,
+        parentTurn: testCase.parentTurn,
       });
+    }
+    for (const testCase of cases.filter(
+      ({ failParentReadOnce }) => failParentReadOnce,
+    )) {
+      await writeFile(
+        path.join(
+          fixture.root,
+          `${testCase.parentTurn!.threadId}.read-fails-once`,
+        ),
+        "",
+      );
+      process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
+      restoreEnv(
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        testCase.workerConfigPath,
+      );
+      await assert.rejects(
+        testCase.executor!.run(workerRequest(promptPath, fixture.root, {})),
+        /synthetic parent read temporary failure/,
+      );
+      assert.equal(
+        launches.some(({ args }) => args[0] === "exec"),
+        false,
+      );
+      const failedParentReads = (
+        await Promise.all(
+          launches.map(({ markerPath }) => readJson(markerPath)),
+        )
+      ).flatMap((launch) =>
+        launch.requests.filter(
+          (request: { method: string }) => request.method === "thread/read",
+        ),
+      );
+      assert.deepEqual(failedParentReads, [
+        { method: "thread/read", threadId: testCase.parentTurn!.threadId },
+      ]);
     }
     for (const kind of ["discovery", "dedup"] as const) {
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
@@ -223,6 +326,9 @@ export async function testWorkerCyberAccessSettings({
           const preflight = launches.find(
             (entry) =>
               entry.args.includes("app-server") &&
+              entry.args.some((arg) =>
+                arg.startsWith("default_permissions="),
+              ) &&
               entry.configPath === configPath,
           );
           assert.ok(preflight);
@@ -269,13 +375,45 @@ export async function testWorkerCyberAccessSettings({
           assertReadOnlyWorkerPolicy(invocation.argv);
           assertWorkerSubagentPolicy(invocation.argv, 0);
         }
+        const parentReads = (
+          await Promise.all(
+            launches
+              .filter(({ args }) => args.includes("app-server"))
+              .map(({ markerPath }) => readJson(markerPath)),
+          )
+        ).flatMap((launch) =>
+          launch.requests.filter(
+            (request: { method: string }) => request.method === "thread/read",
+          ),
+        );
+        assert.deepEqual(
+          parentReads
+            .map((request: { threadId: string }) => request.threadId)
+            .sort(),
+          kind === "discovery" && resumeThreadId === undefined
+            ? cases
+                .flatMap(({ parentTurn }) =>
+                  parentTurn ? [parentTurn.threadId] : [],
+                )
+                .sort()
+            : [],
+        );
         // Running coordinators and their resumed workers retain their own settings.
         for (const {
           configPath,
           workerConfigPath,
           daybreak,
           features,
+          parentTurn,
+          parentProgram,
         } of cases) {
+          if (parentTurn !== undefined) {
+            await writeParentTurn(
+              parentTurn.threadId,
+              parentTurn.turnId,
+              parentProgram === "standard" ? "daybreak_blue" : "standard",
+            );
+          }
           await writeFile(
             configPath!,
             `daybreak = ${!daybreak}\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\ncli_daybreak = ${!features?.cli_daybreak}\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n`,
