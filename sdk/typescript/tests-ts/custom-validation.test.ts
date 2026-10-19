@@ -429,6 +429,7 @@ describe("custom validation", () => {
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
+      const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -511,6 +512,7 @@ describe("custom validation", () => {
             },
         {
           environment: { CODEX_SECURITY_STATE_DIR: stateDir },
+          now: () => Date.UTC(2026, 0, 1),
           prepareRuntime: async () => {
             const runtime = preparedRuntime(codexHome);
             runtime.plugin.version = (
@@ -551,6 +553,9 @@ describe("custom validation", () => {
                     );
                     turns += 1;
                     if (turns === 1) {
+                      expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
+                        maxTimeMinutes !== undefined,
+                      );
                       expect(prompt).not.toContain(workflow);
                       expect(prompt).toContain("SDK-owned discovery workflow");
                       expect(prompt).not.toContain(
@@ -610,6 +615,7 @@ describe("custom validation", () => {
                       expect(progress.at(-1)?.phase).toBe("validation");
                     }
                     expect(prompt).toContain(workflow);
+                    expect(prompt).not.toContain("2026-01-01T00:05:00.000Z");
                     const pendingManifest = await json<ScanManifest>(
                       join(scanDir, "scan-manifest.json"),
                     );
@@ -720,6 +726,7 @@ describe("custom validation", () => {
       try {
         const pending = client.run(repository, {
           cyberAccessProgram: "daybreak_blue",
+          maxTimeMinutes,
           ...(scenario === "standard"
             ? { validationPromptFile: workflowFile }
             : { validationPrompt: workflow }),

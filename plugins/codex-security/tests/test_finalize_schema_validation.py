@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from workbench_test_support import load_script
 

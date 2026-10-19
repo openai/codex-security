@@ -488,6 +488,17 @@ describe("scan cost", () => {
     ).toBe(0.0042);
   });
 
+  test.each(Object.getOwnPropertyNames(Object.prototype))(
+    "does not inherit prices for unknown model %s",
+    (model) => {
+      for (const selected of [model, `openai.${model}`]) {
+        expect(
+          estimateScanCost(selected, { input_tokens: 1, output_tokens: 1 }),
+        ).toBeNull();
+      }
+    },
+  );
+
   test("does not invent prices for unknown models or incomplete usage", () => {
     for (const [model, usage] of [
       ["unknown-model", { input_tokens: 1, output_tokens: 1 }],
@@ -1789,7 +1800,7 @@ describe("live scan cost tracking", () => {
       threadId: childUuid7Thread,
       codexHome: home,
     });
-    const ownedEvents = [rollout[0]!, ...rollout.slice(-2)];
+    const ownedEvents = [rollout[0]!, ...rollout.slice(-3)];
     expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
     expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });

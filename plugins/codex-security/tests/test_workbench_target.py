@@ -293,6 +293,90 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
 
 
 @pytest.mark.parametrize(
+    "link_kind",
+    [
+        pytest.param("absolute", marks=pytest.mark.cross_platform),
+        pytest.param("relative", marks=pytest.mark.cross_platform),
+        pytest.param(
+            "junction",
+            marks=[
+                pytest.mark.native_windows,
+                pytest.mark.skipif(os.name != "nt", reason="requires native Windows junctions"),
+            ],
+        ),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested"])
+@pytest.mark.parametrize("unrelated_change", [False, True], ids=["reviewed", "unrelated"])
+def test_reviewed_patch_does_not_copy_through_indexed_directory_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_kind: str,
+    nested: bool,
+    unrelated_change: bool,
+) -> None:
+    import workbench_db
+
+    repository = tmp_path / "source" / "repository"
+    repository.parent.mkdir()
+    revision = initialize_git_repository(repository)
+    source = repository / "component"
+    link = source / ("linked/nested" if nested else "linked")
+    link.mkdir(parents=True)
+    (link / "file.txt").write_text("indexed child\n")
+    (source / "app.txt").write_text("before\n")
+    subprocess.run(["git", "add", "component"], cwd=repository, check=True)
+    shutil.rmtree(link)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("original outside contents\n")
+    if link_kind == "junction":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True)
+    else:
+        link_target = (
+            "../" * (4 if nested else 3) + "outside" if link_kind == "relative" else str(outside)
+        )
+        link.symlink_to(link_target, target_is_directory=True)
+    original_link = os.readlink(link)
+
+    staging = tmp_path / "staging"
+    sentinel = staging / "outside"
+    sentinel.mkdir(parents=True)
+    (sentinel / "file.txt").write_text("staged outside sentinel\n")
+    # A relative link resolves to this different directory after materialization.
+    monkeypatch.setattr(workbench_db.tempfile, "tempdir", str(staging))
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": revision,
+        "scan_dir": str(scan_dir),
+    }
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": workbench_db.worktree_content_digest(source),
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / "app.txt").write_text("after\n")
+    if unrelated_change:
+        (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+        with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    else:
+        assert workbench_db.require_reviewed_patch_applied(
+            scan, remediation, "reviewed.patch"
+        ) == workbench_db.worktree_content_digest(source)
+    assert (outside / "file.txt").read_text() == "original outside contents\n"
+    assert (sentinel / "file.txt").read_text() == "staged outside sentinel\n"
+    assert (source / "app.txt").read_text() == "after\n"
+    assert os.readlink(link) == original_link
+    assert list(staging.iterdir()) == [sentinel]
+
+
+@pytest.mark.parametrize(
     "case",
     [
         "ordering",
