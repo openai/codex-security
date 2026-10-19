@@ -1,3 +1,4 @@
+import { win32 } from "node:path";
 import { isRecord } from "./record.js";
 import { parseJson } from "./value.js";
 
@@ -371,9 +372,21 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
+function relativeRepositoryPath(
+  value: string,
+  repository: string,
+): string | null {
+  const normalized = repository.replaceAll("\\", "/");
+  const prefix = `${normalized.replace(/\/$/u, "")}/`;
+  const matches =
+    win32.isAbsolute(normalized) && win32.parse(normalized).root.length > 1
+      ? value.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
+      : value.startsWith(prefix);
+  return matches ? value.slice(prefix.length) : null;
+}
+
 function commandRepositoryPaths(command: string, repository: string): string[] {
   const paths = new Set<string>();
-  const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
     const singleQuoted = value.startsWith("'") && value.endsWith("'");
@@ -387,14 +400,14 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
         "$CODEX_SECURITY_REPOSITORY/",
       );
     }
-    for (const prefix of [
-      "$CODEX_SECURITY_REPOSITORY/",
-      "${CODEX_SECURITY_REPOSITORY}/",
-      `${repositoryPrefix}/`,
+    for (const root of [
+      "$CODEX_SECURITY_REPOSITORY",
+      "${CODEX_SECURITY_REPOSITORY}",
+      repository,
     ]) {
-      if (!value.startsWith(prefix)) continue;
-      const path = value
-        .slice(prefix.length)
+      const relative = relativeRepositoryPath(value, root);
+      if (relative === null) continue;
+      const path = relative
         .replace(/["'\r\n].*$/u, "")
         .trim()
         .replace(/\/+$/u, "")
@@ -416,14 +429,13 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
   const paths = new Set<string>();
-  const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
-    const normalized = candidate.replaceAll("\\", "/");
-    if (normalized.startsWith(prefix)) {
-      const path = normalized.slice(prefix.length);
-      if (!path.split("/").includes("..")) paths.add(path);
-    }
+    const path = relativeRepositoryPath(
+      candidate.replaceAll("\\", "/"),
+      repository,
+    );
+    if (path !== null && !path.split("/").includes("..")) paths.add(path);
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
   return [...paths];
