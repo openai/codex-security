@@ -95,10 +95,7 @@ import {
   type ScanWorkerEvent,
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
-import {
-  DeepScanProgressTracker,
-  type DeepScanProgress,
-} from "./deep-progress.js";
+import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import { runDeepScan } from "./deep-scan.js";
 import {
@@ -190,6 +187,7 @@ import {
 } from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
+  scanPhaseSchema,
   workerStatusFromEvent,
   type ScanProgress,
   type ScanWorkerStatus,
@@ -1562,7 +1560,7 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
-    let deepProgressTracker: DeepScanProgressTracker | null = null;
+    let scanProgressTracker: ScanProgressTracker | null = null;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
@@ -1897,6 +1895,8 @@ export class CodexSecurity {
       }
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
+      let latestPhase: ScanProgress["phase"] = "preflight";
+      let reviewItems: ScanProgress["reviewItems"];
       const reportProgress = (progress: ScanProgress): void => {
         if (
           scopeFileCount === null ||
@@ -1906,10 +1906,37 @@ export class CodexSecurity {
           return;
         }
         reviewedFileCount = progress.filesCompleted;
+        if (
+          mode === "deep" ||
+          scanPhaseSchema.options.indexOf(progress.phase) >
+            scanPhaseSchema.options.indexOf(latestPhase)
+        ) {
+          latestPhase = progress.phase;
+        }
         notifyObserver(
           options,
           "onProgress",
-        )({ ...progress, filesTotal: scopeFileCount });
+        )({
+          ...progress,
+          phase: latestPhase,
+          filesTotal: scopeFileCount,
+          ...(reviewItems === undefined ? {} : { reviewItems }),
+        });
+      };
+      const reportWorkerStatus = (status: ScanWorkerStatus): void => {
+        if (mode !== "deep") {
+          const phase =
+            status.phase === "ranking" || status.phase === "file_review"
+              ? "discovery"
+              : status.phase;
+          if (
+            scanPhaseSchema.options.indexOf(phase) <
+            scanPhaseSchema.options.indexOf(latestPhase)
+          )
+            return;
+          latestPhase = phase;
+        }
+        notifyObserver(options, "onWorkerStatus")(status);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
@@ -1955,7 +1982,14 @@ export class CodexSecurity {
             ? undefined
             : (event) => notifyObserver(options, "onSessionEvent")(event),
         onProgress:
-          options.onProgress === undefined ? undefined : reportProgress,
+          options.onProgress === undefined
+            ? undefined
+            : (progress) =>
+                reportProgress({
+                  ...progress,
+                  // Worker counts belong to the parent scan's current phase.
+                  phase: mode === "deep" ? progress.phase : latestPhase,
+                }),
         onCost:
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
@@ -2224,9 +2258,13 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       throwIfAborted(signal, scanDir);
-      if (mode === "deep" && options.onDeepProgress !== undefined) {
+      if (
+        this.#dependencies.hostedScan === undefined &&
+        ((mode !== "deep" && options.onProgress !== undefined) ||
+          (mode === "deep" && options.onDeepProgress !== undefined))
+      ) {
         let progressWarningReported = false;
-        deepProgressTracker = new DeepScanProgressTracker({
+        scanProgressTracker = new ScanProgressTracker({
           read: (progressSignal) =>
             workbench(
               {
@@ -2235,18 +2273,39 @@ export class CodexSecurity {
               },
               workbenchArgs("get-scan", { scanId }),
             ),
-          onProgress: (progress) =>
-            notifyObserver(options, "onDeepProgress")(progress),
+          onProgress:
+            mode === "deep"
+              ? undefined
+              : (progress) => {
+                  reviewItems = progress.reviewItems;
+                  if (scopeFileCount === null && progress.filesTotal !== null) {
+                    scopeFileCount = progress.filesTotal;
+                    tracker.setExpectedFilesTotal(scopeFileCount);
+                  }
+                  if (scopeFileCount === null) return;
+                  reportProgress({
+                    phase: progress.phase,
+                    filesCompleted: reviewedFileCount,
+                    filesTotal: scopeFileCount,
+                  });
+                },
+          onDeepProgress:
+            mode === "deep"
+              ? (progress) =>
+                  notifyObserver(options, "onDeepProgress")(progress)
+              : undefined,
           onError: (error) => {
             if (progressWarningReported) return;
             progressWarningReported = true;
             notifyObserver(
               options,
               "onWarning",
-            )(`Could not track Deep Scan progress: ${errorMessage(error)}`);
+            )(
+              `Could not track ${mode === "deep" ? "Deep Scan" : "scan"} progress: ${errorMessage(error)}`,
+            );
           },
         });
-        deepProgressTracker.start();
+        scanProgressTracker.start();
       }
       if (options.validationPrompt !== undefined) {
         await writeCustomValidationStatus(
@@ -2503,6 +2562,9 @@ export class CodexSecurity {
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
+                // This turn follows the primary scan's reporting phase.
+                scanProgressTracker?.stop();
+                latestPhase = "validation";
                 if (scopeFileCount !== null)
                   reportProgress({
                     phase: "validation",
@@ -2611,7 +2673,7 @@ export class CodexSecurity {
           }
           reportProgress(progress);
         },
-        onWorkerStatus: options.onWorkerStatus,
+        onWorkerStatus: reportWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,
       });
@@ -2664,6 +2726,7 @@ export class CodexSecurity {
         }
       }
       if (runPostScan !== null) {
+        scanProgressTracker?.stop();
         const followUp = runPostScan;
         runPostScan = null;
         const completedArtifacts = await Promise.all(
@@ -2990,7 +3053,7 @@ export class CodexSecurity {
       throw failure;
     } finally {
       budgetAbortController.abort();
-      deepProgressTracker?.stop();
+      scanProgressTracker?.stop();
       // Temporary-input cleanup must not replace the scan's outcome.
       try {
         for (const cleanup of await Promise.allSettled([

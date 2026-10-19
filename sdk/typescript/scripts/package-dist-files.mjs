@@ -28,7 +28,7 @@ const distModules = [
   "custom-validation",
   "custom-validation-prompt",
   "custom-publish",
-  "deep-progress",
+  "scan-progress",
   "deep-scan",
   "deep-config",
   "deep-scan-defaults",
