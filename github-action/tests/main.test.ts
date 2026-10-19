@@ -171,7 +171,7 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
   assert.equal(result.outputs['scanned-sha'], app.sha); assert.equal(result.outputs['high-count'], '1');
   assert.equal(result.outputs['estimated-cost'], '0.125'); assert.ok(result.outputs['sarif-path']);
   assert.ok(result.args.includes('--model=gpt-5.6-luna'));
-  assert.equal(result.args[result.args.indexOf('--effort') + 1], 'medium');
+  assert.ok(result.args.includes('--effort=medium'));
   assert.ok(!result.args.includes('--max-cost'));
   assert.match(result.logs, /::error::Scan completed\. Findings meet the configured failure threshold\./);
   assert.match(result.summary, /^## Codex Security\n\n\*\*Scan completed\. Findings meet the configured failure threshold\.\*\*/);
@@ -205,7 +205,7 @@ test('unrelated ambient input variables do not reject a valid scan', async (t) =
   app.setInput('effort', 'medium');
   const result = await app.run();
   assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
-  assert.equal(result.args[result.args.indexOf('--effort') + 1], 'medium');
+  assert.ok(result.args.includes('--effort=medium'));
 });
 
 test('Deep scans forward their budget and publish completed reports with cleanup', async (t) => {

@@ -984,9 +984,8 @@ def copy_git_worktree_files(
             continue
         source_path = repository / relative
         try:
-            if _WINDOWS:
-                source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
-                relative = source_path.relative_to(repository)
+            source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
+            relative = source_path.relative_to(repository)
             metadata = source_path.lstat()
         except FileNotFoundError:
             continue

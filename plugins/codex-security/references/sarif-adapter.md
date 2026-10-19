@@ -14,6 +14,7 @@ The adapter:
 - keeps the root-control location first for GitHub annotation when available and emits every distinct affected or code-evidence location in `locations`, so vulnerable sinks remain matchable
 - preserves the semantic fingerprint under `codexSecurity/v1`
 - emits GitHub's source-line `primaryLocationLineHash` when it can safely hash a bounded regular non-symlink source file inside the available source root
+- captures optional source-line hashes in one eager pass and reuses those captured values; later source-root changes do not trigger rereads
 - maps categorical severity to SARIF `level`
 - sets GitHub's rule-level `security-severity` to the highest finding score. Unscored critical, high, medium, low, and informational findings use 9.5, 8.0, 5.0, 2.0, and 0.0. A rule with no positive score omits this field. These defaults are display values, not calculated CVSS scores.
 - preserves a deep scan's canonical `candidateId` under each child result's properties so consumers can group results without changing the original SARIF result presentation

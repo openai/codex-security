@@ -1,8 +1,10 @@
 import path from "node:path";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import Ajv2020 from "ajv/dist/2020.js";
 import { importSource } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
+import { finding as fixtureFinding } from "./scan-draft-fixture.ts";
 
 const { artifactSchemaDocuments } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
@@ -95,6 +97,70 @@ for (const [path, name, value, message] of [
 // SDK JSON consumers disable formats; native tools retain Zod's UUID and safe
 // integer validation. Generated exports must preserve both existing contracts.
 const common = artifactSchemaDocuments["definitions/artifact-common"].$defs;
+const requiredTextValues = [
+  "",
+  " \t\r\n",
+  "\u0085",
+  "\u001c\u001d\u001e\u001f",
+  "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000",
+  "\uFEFF",
+  "\u0085\uFEFF\u001c",
+  "  Required text. \n",
+];
+const commonJson = await readJson(
+  import.meta.dirname,
+  "../../schemas/definitions/artifact-common.schema.json",
+);
+const pythonTextResults = JSON.parse(
+  execFileSync(
+    process.env.PYTHON || "python3",
+    [
+      "-c",
+      "import json, re, sys; values, pattern = json.load(sys.stdin.buffer); print(json.dumps([[bool(value.strip()), bool(re.search(pattern, value))] for value in values]))",
+    ],
+    {
+      input: JSON.stringify([
+        requiredTextValues,
+        commonJson.$defs.nonEmptyText.pattern,
+      ]),
+      encoding: "utf8",
+    },
+  ),
+) as [boolean, boolean][];
+const draftFinding = artifactSchemaDocuments["tools/scan-draft"].$defs.finding;
+for (const [index, value] of requiredTextValues.entries()) {
+  const [valid, pythonSchemaValid] = pythonTextResults[index]!;
+  assert.equal(pythonSchemaValid, valid);
+  assert.equal(common.nonEmptyText.safeParse(value).success, valid);
+  assert.equal(
+    jsonSchema("definitions/artifact-common", "nonEmptyText")(value),
+    valid,
+  );
+  for (const field of [
+    "title",
+    "summary",
+    "remediation",
+    "confidence.rationale",
+    "taxonomy.category",
+    "provenance.source",
+    "severity.scoringSystem",
+  ]) {
+    const finding: Record<string, unknown> = {
+      ...fixtureFinding("text", "src/file.ts"),
+      severity: { level: "high", score: 5, scoringSystem: "synthetic" },
+    };
+    const parts = field.split(".");
+    const object =
+      parts.length === 1
+        ? finding
+        : (finding[parts[0]!] as Record<string, unknown>);
+    object[parts.at(-1)!] = value;
+    const parsed = draftFinding.safeParse(finding);
+    assert.equal(parsed.success, valid, `${field}: ${JSON.stringify(value)}`);
+    if (parsed.success) assert.deepEqual(parsed.data, finding);
+    assert.equal(jsonSchema("tools/scan-draft", "finding")(finding), valid);
+  }
+}
 const uuid = "61a20957-1be8-4ccf-8de8-eab4061e8cc3";
 for (const [value, valid] of [
   [uuid, true],

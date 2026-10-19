@@ -11,7 +11,7 @@ export function bundledCodexSdkEnvironment(
   let toolsDirectory: string;
   try {
     toolsDirectory = join(
-      dirname(realpathSync.native(dirname(command))),
+      dirname(dirname(realpathSync.native(command))),
       "codex-path",
     );
     if (!statSync(toolsDirectory).isDirectory()) return environment;

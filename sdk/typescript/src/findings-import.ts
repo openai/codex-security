@@ -1,5 +1,9 @@
 import { isRecord } from "./record.js";
-import { deriveFindingIdentity, sha256Text as sha256 } from "./contract.js";
+import {
+  deriveFindingIdentity,
+  hasRequiredFindingText,
+  sha256Text as sha256,
+} from "./contract.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -309,7 +313,7 @@ export function csvRowFinding(row: CsvFindingRow): Finding {
 }
 
 function requiredCsvText(column: string) {
-  return z.string().refine((value) => value.trim().length > 0, {
+  return z.string().refine(hasRequiredFindingText, {
     error: `requires ${column}`,
   });
 }

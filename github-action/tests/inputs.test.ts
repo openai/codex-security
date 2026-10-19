@@ -35,6 +35,14 @@ test('provider and model inputs map directly to scan CLI arguments in both modes
   }
   assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
 });
+test('reasoning efforts pass through to both scan modes', () => {
+  for (const mode of ['standard', 'deep']) for (const effort of ['ultra', 'synthetic-future-effort', '--help']) {
+    const args = scanArguments(parse({mode, effort}), {repository:'/checkout'}, '/results');
+    assert.ok(args.includes(`--effort=${effort}`));
+    assert.ok(!args.includes(effort));
+  }
+  assert.equal(parse({effort:'  '}).effort, 'xhigh');
+});
 test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
   for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
     const args = scanArguments(parse({mode, 'cyber-access-program':program}), {repository:'/checkout'}, '/results');
@@ -117,7 +125,7 @@ test('CLI arguments preserve literal values and enforce CI policy', () => {
   assert.ok(!args.some(arg => arg.startsWith('approval_policy=')));
   assert.ok(!args.some(arg => arg.startsWith('approvals_reviewer=')));
   assert.ok(args.includes('analytics.enabled=false'));
-  assert.equal(args[args.indexOf('--effort') + 1], 'medium');
+  assert.ok(args.includes('--effort=medium'));
   assert.equal(args[args.indexOf('--max-cost') + 1], '5');
   assert.equal(args[args.indexOf('--fail-on-severity') + 1], 'high');
   assert.ok(!args.some(value => value.includes('API_KEY')));

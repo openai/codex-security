@@ -667,21 +667,45 @@ jobs:
           fi
           cp github-action/build/release-manifest.json "$RUNNER_TEMP/action-release-manifest.json"
           cp github-action/build/sbom.cdx.json "$RUNNER_TEMP/action-sbom.cdx.json"
-          existing_assets="$(gh release view "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          comparison="$(mktemp -d)"
-          trap 'rm -rf "$comparison"' EXIT
-          for asset in action-release-manifest.json action-sbom.cdx.json; do
-            if grep -Fxq "$asset" <<< "$existing_assets"; then
-              gh release download "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
-                --pattern "$asset" --dir "$comparison"
-              if ! cmp "$RUNNER_TEMP/$asset" "$comparison/$asset"; then
-                echo "Published Action metadata differs: $asset" >&2
+          action_tag="action-v$RELEASE_VERSION"
+          if release_state="$(gh release view "$action_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets)"; then
+            existing_assets="$(jq -r '.assets[].name' <<< "$release_state")"
+            is_draft="$(jq -r '.isDraft' <<< "$release_state")"
+            comparison="$(mktemp -d)"
+            trap 'rm -rf "$comparison"' EXIT
+            for asset in action-release-manifest.json action-sbom.cdx.json; do
+              if grep -Fxq "$asset" <<< "$existing_assets"; then
+                gh release download "$action_tag" --repo "$GITHUB_REPOSITORY" \
+                  --pattern "$asset" --dir "$comparison"
+                if ! cmp "$RUNNER_TEMP/$asset" "$comparison/$asset"; then
+                  echo "Published Action metadata differs: $asset" >&2
+                  exit 1
+                fi
+              elif [[ "$is_draft" == true ]]; then
+                gh release upload "$action_tag" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/$asset"
+              else
+                echo "Published Action release is missing metadata: $asset" >&2
                 exit 1
               fi
-            else
-              gh release upload "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/$asset"
+            done
+            if [[ "$is_draft" == true ]]; then
+              gh release edit "$action_tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
             fi
-          done
+          else
+            notes="$RUNNER_TEMP/action-release-notes.md"
+            {
+              printf 'GitHub Action for [Codex Security %s](%s/%s/releases/tag/npm-v%s).\n\n' \
+                "$RELEASE_VERSION" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
+              printf 'Installs `@openai/codex-security@%s`.\n\n' "$RELEASE_VERSION"
+              printf '```yaml\nuses: %s@%s # %s\n```\n' \
+                "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "$action_tag"
+            } > "$notes"
+            # gh attaches both assets to a draft before publishing the immutable release.
+            gh release create "$action_tag" \
+              "$RUNNER_TEMP/action-release-manifest.json" "$RUNNER_TEMP/action-sbom.cdx.json" \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+              --title "Codex Security GitHub Action $RELEASE_VERSION" --notes-file "$notes"
+          fi
           {
             printf '### Codex Security %s\n\n' "$RELEASE_VERSION"
             printf 'CLI source: `%s`\n\n' "$RELEASE_SHA"
