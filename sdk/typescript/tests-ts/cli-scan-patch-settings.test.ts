@@ -35,6 +35,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       ...(daybreak === null ? {} : { daybreak: JSON.parse(daybreak) }),
       features,
     }, layers: [] } });
+  } else if (request.method === "experimentalFeature/list") {
+    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: receipt.features.cli_daybreak }], nextCursor: null } });
   } else if (request.method === "account/read") {
     send({ id: request.id, result: { account: { type: "apiKey" } } });
   } else if (request.method === "model/list") {

@@ -1,8 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 import { expect, test } from "bun:test";
 import { runCodexSkillCommand } from "../src/cli.js";
 import {
@@ -127,6 +129,8 @@ const disabledDaybreakFeatures = {
 async function withStoredApiKey(
   command: "patch" | "verify-fix",
   check: (fixture: {
+    root: string;
+    environment: Record<string, string>;
     ambientHome: string;
     sharedHome: string;
     repository: string;
@@ -165,6 +169,8 @@ async function withStoredApiKey(
       { mode: 0o600 },
     );
     await check({
+      root,
+      environment,
       ambientHome,
       sharedHome,
       repository,
@@ -325,6 +331,168 @@ test.each(["patch", "verify-fix"] as const)(
           daybreakEnabled: true,
           daybreakFeatures: { cli_daybreak: false },
         });
+      },
+    );
+  },
+);
+
+test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
+  "stored API-key patches preserve %s settings for an active scan's later workers",
+  async (settings) => {
+    await withStoredApiKey(
+      "patch",
+      async ({
+        root,
+        environment,
+        ambientHome,
+        sharedHome,
+        repository,
+        run,
+      }) => {
+        await writeCodexConfig(join(ambientHome, "config.toml"), {});
+        const scanConfig = join(root, "scan.toml");
+        const workerConfig = join(root, "workers.toml");
+        const workerRuntime: JsonObject =
+          settings !== "explicit"
+            ? {}
+            : {
+                daybreak: false,
+                features: {
+                  cli_daybreak: true,
+                  api_key_cyber_access_programs: true,
+                  api_key_model_discovery: true,
+                },
+              };
+        await writeCodexConfig(scanConfig, {});
+        await writeCodexConfig(workerConfig, { worker_runtime: workerRuntime });
+        const prompt = join(root, "prompt.md");
+        await writeFile(prompt, "Synthetic worker request.");
+        const executor = new URL(
+          "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+          import.meta.url,
+        );
+        const catalog = join(root, "catalog.json");
+        await writeFile(
+          catalog,
+          JSON.stringify({
+            models: [
+              {
+                slug: "gpt-test",
+                display_name: "Synthetic",
+                base_instructions: "Synthetic instructions",
+                supported_reasoning_levels: [],
+                shell_type: "disabled",
+                visibility: "list",
+                supported_in_api: true,
+                priority: 0,
+                support_verbosity: false,
+                truncation_policy: { mode: "tokens", limit: 10000 },
+                experimental_supported_tools: [],
+                available_access_programs: {
+                  cyber: ["standard", "daybreak_red", "daybreak_blue"],
+                },
+              },
+            ],
+          }),
+        );
+        const child = spawn(
+          process.execPath,
+          [
+            fileURLToPath(
+              new URL(
+                "./fixtures/stored-daybreak-workers.mjs",
+                import.meta.url,
+              ),
+            ),
+            fileURLToPath(executor),
+            prompt,
+          ],
+          {
+            cwd: repository,
+            env: {
+              ...environment,
+              CODEX_HOME: sharedHome,
+              CODEX_CLI_PATH: environment["SYNTHETIC_NATIVE_CODEX"],
+              CODEX_API_KEY: "SYNTHETIC_KEY",
+              CODEX_SECURITY_CONFIG_PATH: scanConfig,
+              CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfig,
+            },
+            stdio: ["pipe", "pipe", "pipe"],
+            windowsHide: true,
+          },
+        );
+        const closed = once(child, "close");
+        let stderr = "";
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        const lines = createInterface({ input: child.stdout });
+        const responses = lines[Symbol.asyncIterator]();
+        const response = async () => {
+          const next = await responses.next();
+          expect(next.done, stderr).toBe(false);
+          return JSON.parse(next.value!);
+        };
+        const worker = async (
+          kind: "discovery" | "dedup",
+          resumeThreadId?: string,
+        ) => {
+          child.stdin.write(JSON.stringify({ kind, resumeThreadId }) + "\n");
+          return await response();
+        };
+        try {
+          const { baseUrl } = await response();
+          await writeCodexConfig(join(sharedHome, "config.toml"), {
+            model_catalog_json: catalog,
+            openai_base_url: baseUrl,
+            cli_auth_credentials_store: "file",
+            features: { plugins: false },
+            analytics: { enabled: false },
+          });
+          // The first worker initializes the executor's per-scan snapshot.
+          const { threadId, resumed, ...baseline } = await worker("discovery");
+          expect(threadId).toBeString();
+          expect(resumed).toBe(false);
+          expect(baseline.program).toBe("standard");
+          expect(baseline.daybreak).toBe(
+            settings === "explicit" ? false : null,
+          );
+          if (settings === "explicit")
+            expect(baseline.daybreakFeatures).toEqual(
+              workerRuntime["features"],
+            );
+          const reducer = await worker("dedup");
+          expect(reducer).toMatchObject({ ...baseline, resumed: false });
+          const previousThreads = {
+            discovery: threadId,
+            dedup: reducer.threadId,
+          };
+          const features =
+            settings === "omitted" ? undefined : disabledDaybreakFeatures;
+          await writeCodexConfig(join(ambientHome, "config.toml"), {
+            daybreak: true,
+            ...(features === undefined ? {} : { features }),
+          });
+          expect(await run()).toMatchObject({
+            daybreak: true,
+            ...(features === undefined ? {} : { daybreakFeatures: features }),
+          });
+          for (const kind of ["discovery", "dedup"] as const) {
+            for (const resume of [false, true]) {
+              const receipt = await worker(
+                kind,
+                resume ? previousThreads[kind] : undefined,
+              );
+              expect(receipt).toMatchObject({ ...baseline, resumed: resume });
+              if (resume) expect(receipt.threadId).toBe(previousThreads[kind]);
+            }
+          }
+        } finally {
+          lines.close();
+          child.stdin.end();
+          child.kill();
+          await closed;
+        }
       },
     );
   },

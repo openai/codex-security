@@ -2066,7 +2066,9 @@ describe("skill authentication", () => {
         ...(loginFailure && usesSessionKey
           ? []
           : ["config/read", "thread/start"]),
-        ...(loginFailure ? [] : ["command/exec", "turn/start"]),
+        ...(loginFailure
+          ? []
+          : ["command/exec", "experimentalFeature/list", "turn/start"]),
       ]);
       expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
         stored,

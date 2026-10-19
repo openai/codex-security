@@ -2,6 +2,7 @@ import { send, completeTurn } from "./app-server-messages.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
+const methods = new Map();
 const child = spawn(process.env.SYNTHETIC_NATIVE_CODEX, process.argv.slice(2), {
   env: process.env,
   stdio: ["pipe", "pipe", "pipe"],
@@ -16,6 +17,7 @@ await Promise.all([
   (async () => {
     for await (const line of createInterface({ input: process.stdin })) {
       const request = JSON.parse(line);
+      if (request.id !== undefined) methods.set(request.id, request.method);
       if (request.method === "thread/start") {
         daybreakEnabled = request.params.daybreakEnabled ?? null;
       }
@@ -39,8 +41,10 @@ await Promise.all([
   (async () => {
     for await (const line of createInterface({ input: child.stdout })) {
       const response = JSON.parse(line);
-      if (response.id === 2) modelProvider = response.result?.modelProvider;
-      if (response.id === 4) initialConfig = response.result?.config;
+      if (methods.get(response.id) === "thread/start")
+        modelProvider = response.result?.modelProvider;
+      if (methods.get(response.id) === "config/read")
+        initialConfig = response.result?.config;
       if (response.id !== "inspect-config") {
         process.stdout.write(line + "\n");
         continue;

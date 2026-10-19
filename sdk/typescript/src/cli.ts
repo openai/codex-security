@@ -2,6 +2,7 @@
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
+import { withCodexPreflightLock } from "./provider-profile.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
@@ -46,7 +47,11 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify, stripVTControlCharacters } from "node:util";
+import {
+  isDeepStrictEqual,
+  promisify,
+  stripVTControlCharacters,
+} from "node:util";
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
@@ -1472,31 +1477,6 @@ export async function runCodexSkillCommand(
           if (value === undefined) delete credentialConfig[key];
           else credentialConfig[key] = value;
         }
-        if (output.appServer !== undefined) {
-          // Keep ambient Daybreak settings in the home layer so native project
-          // configuration and per-launch overrides retain their precedence.
-          const daybreak = ambientConfig["daybreak"];
-          if (daybreak === undefined) delete credentialConfig["daybreak"];
-          else credentialConfig["daybreak"] = daybreak;
-          const features = isJsonObject(credentialConfig["features"])
-            ? credentialConfig["features"]
-            : {};
-          const ambientFeatures = ambientConfig["features"];
-          for (const key of [
-            "cli_daybreak",
-            "api_key_cyber_access_programs",
-            "api_key_model_discovery",
-          ]) {
-            const value = isJsonObject(ambientFeatures)
-              ? ambientFeatures[key]
-              : undefined;
-            if (value === undefined) delete features[key];
-            else features[key] = value;
-          }
-          if (Object.keys(features).length === 0)
-            delete credentialConfig["features"];
-          else credentialConfig["features"] = features;
-        }
         if (typeof provider === "string")
           credentialConfig["model_provider"] = provider;
         else delete credentialConfig["model_provider"];
@@ -1533,6 +1513,32 @@ export async function runCodexSkillCommand(
           output.auth,
           provider,
         );
+        if (output.appServer !== undefined) {
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(
+            DEFAULT_DEPENDENCIES,
+            controller,
+          );
+          try {
+            args = [
+              ...args,
+              ...(await skillDaybreakConfigOverrides(
+                args,
+                command,
+                selected,
+                directory,
+                ambientConfig,
+                controller.signal,
+              )),
+            ];
+          } catch (error) {
+            if (controller.signal.aborted)
+              return controller.signal.reason === "SIGINT" ? 130 : 143;
+            throw error;
+          } finally {
+            removeSignals();
+          }
+        }
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
@@ -1744,6 +1750,97 @@ export async function runCodexSkillCommand(
   } finally {
     await releaseCredentialHome?.();
   }
+}
+
+/**
+ * Stored auth switches homes. Native origins preserve ambient settings at
+ * app-server startup, where model discovery gates cannot be set per thread.
+ */
+async function skillDaybreakConfigOverrides(
+  args: readonly string[],
+  command: CodexCommand,
+  environment: NodeJS.ProcessEnv,
+  directory: string,
+  ambientConfig: JsonObject,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const ambientFeatures = isJsonObject(ambientConfig["features"])
+    ? ambientConfig["features"]
+    : {};
+  const settings: [string, JsonValue | undefined][] = [
+    ["daybreak", ambientConfig["daybreak"]],
+    ...[
+      "cli_daybreak",
+      "api_key_cyber_access_programs",
+      "api_key_model_discovery",
+    ].map((key): [string, JsonValue | undefined] => [
+      `features.${key}`,
+      ambientFeatures[key],
+    ]),
+  ];
+  if (settings.every(([, value]) => value === undefined)) return [];
+  const nativeEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  const native = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
+  const response = (await withCodexPreflightLock(
+    nativeEnvironment,
+    signal,
+    () =>
+      native.readDeepScanRuntimeConfigWithOrigins({
+        codexPath: command.command,
+        appServerArgs: args,
+        cwd: directory,
+        configOverrides: [],
+        env: nativeEnvironment,
+        signal,
+        context: "helper",
+      }),
+  )) as JsonObject;
+  const origins = response["origins"];
+  const layers = response["layers"];
+  const malformed = () =>
+    new CodexSecurityError(
+      "Codex did not return configuration origins for Daybreak settings.",
+    );
+  if (!isJsonObject(origins) || !Array.isArray(layers)) throw malformed();
+  const userLayer = layers.findIndex((layer) => {
+    const name = isJsonObject(layer) ? layer["name"] : undefined;
+    return (
+      isJsonObject(name) && name["type"] === "user" && name["profile"] == null
+    );
+  });
+  if (userLayer === -1) throw malformed();
+  const overrides: string[] = [];
+  for (const [key, value] of settings) {
+    if (value === undefined) continue;
+    const origin = origins[key];
+    if (origin !== undefined) {
+      if (!isJsonObject(origin) || !isJsonObject(origin["name"]))
+        throw malformed();
+      const layer = layers.findIndex(
+        (entry) =>
+          isJsonObject(entry) &&
+          isDeepStrictEqual(entry["name"], origin["name"]),
+      );
+      if (layer === -1) throw malformed();
+      // Native returns layers from highest to lowest priority. Ambient values
+      // replace the user-home fallback without overriding project or CLI choices.
+      if (layer < userLayer) continue;
+    }
+    overrides.push("--config", `${key}=${inlineToml(value)}`);
+  }
+  return overrides;
 }
 
 export async function main(
@@ -7848,6 +7945,7 @@ export async function readSkillCommandOutput(
             config,
             model,
             provider,
+            threadId!,
             (method, params) =>
               new Promise<JsonObject>((resolve, reject) => {
                 const id = `daybreak-${daybreakRequestId++}`;

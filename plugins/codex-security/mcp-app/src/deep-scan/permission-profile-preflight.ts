@@ -50,6 +50,8 @@ type RuntimeConfigReadOptions = Pick<
   "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
 > & {
   readonly commandArgs?: readonly string[];
+  /** Full app-server invocation for callers that already constructed its arguments. */
+  readonly appServerArgs?: readonly string[];
   readonly providerConfigOverrides?: readonly string[];
 };
 
@@ -66,6 +68,15 @@ export async function readDeepScanRuntimeConfig(
     if (!config) throw malformedPreflightError(options.context);
     return config;
   });
+}
+
+/** Read native origins and ordered layers without starting a thread. */
+export async function readDeepScanRuntimeConfigWithOrigins(
+  options: RuntimeConfigReadOptions,
+): Promise<JsonRecord> {
+  return withPreflightClient(options, (client) =>
+    client.request("config/read", { cwd: options.cwd, includeLayers: true }),
+  );
 }
 
 export interface DeepScanParentTurn {
@@ -297,15 +308,19 @@ class AppServerPreflightClient {
   };
 
   constructor(private readonly options: RuntimeConfigReadOptions) {
-    const args: string[] = [...(options.commandArgs ?? [])];
-    for (const override of options.configOverrides) {
-      args.push("--config", override);
+    const args: string[] = [
+      ...(options.appServerArgs ?? options.commandArgs ?? []),
+    ];
+    if (options.appServerArgs === undefined) {
+      for (const override of options.configOverrides) {
+        args.push("--config", override);
+      }
+      // App-server loads credential-free metadata; exec reads private provider profiles.
+      for (const override of options.providerConfigOverrides ?? []) {
+        args.push("--config", override);
+      }
+      args.push("app-server", "--stdio");
     }
-    // App-server loads credential-free metadata; exec reads private provider profiles.
-    for (const override of options.providerConfigOverrides ?? []) {
-      args.push("--config", override);
-    }
-    args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
       cwd: options.cwd,

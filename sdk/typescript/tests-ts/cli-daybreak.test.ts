@@ -2,14 +2,30 @@ import { expect, test } from "bun:test";
 import { appServerCyberAccessProgram } from "../src/cli-daybreak.js";
 import type { JsonObject } from "../src/config.js";
 
+const featureResponse = (enabled = true): JsonObject => ({
+  data: [{ name: "cli_daybreak", enabled }],
+  nextCursor: null,
+});
+
+function withFeature(
+  request: Parameters<typeof appServerCyberAccessProgram>[4],
+): Parameters<typeof appServerCyberAccessProgram>[4] {
+  return async (method, params) =>
+    method === "experimentalFeature/list"
+      ? featureResponse()
+      : request(method, params);
+}
+
 test("resolves the selected model across catalog pages and prefers Blue", async () => {
   const requests: Array<{ method: string; params: JsonObject }> = [];
   const program = await appServerCyberAccessProgram(
-    { daybreak: true },
+    { daybreak: true, features: { cli_daybreak: false } },
     "selected-model",
     "openai",
+    "selected-thread",
     async (method, params): Promise<JsonObject> => {
       requests.push({ method, params });
+      if (method === "experimentalFeature/list") return featureResponse();
       if (method === "account/read") return { account: { type: "apiKey" } };
       return params["cursor"] === "next-page"
         ? {
@@ -35,6 +51,10 @@ test("resolves the selected model across catalog pages and prefers Blue", async 
   );
   expect(program).toBe("daybreakBlue");
   expect(requests).toEqual([
+    {
+      method: "experimentalFeature/list",
+      params: { threadId: "selected-thread" },
+    },
     { method: "account/read", params: { refreshToken: false } },
     { method: "model/list", params: { includeHidden: true } },
     {
@@ -60,7 +80,8 @@ test.each([
         { daybreak, features: { api_key_cyber_access_programs: apiKeyGate } },
         "selected-model",
         "openai",
-        async (method): Promise<JsonObject> =>
+        "selected-thread",
+        withFeature(async (method): Promise<JsonObject> =>
           method === "account/read"
             ? { account: { type: account } }
             : {
@@ -73,29 +94,56 @@ test.each([
                   },
                 ],
               },
+        ),
       ),
     ).toBe(expected);
   },
 );
 
-test("leaves disabled features and other providers to native defaults", async () => {
+test.each(["openai", "custom"])(
+  "honors a managed feature disable for provider %s across native feature pages",
+  async (provider) => {
+    const requests: Array<{ method: string; params: JsonObject }> = [];
+    const program = await appServerCyberAccessProgram(
+      { daybreak: true, features: { cli_daybreak: true } },
+      "selected-model",
+      provider,
+      "selected-thread",
+      async (method, params) => {
+        requests.push({ method, params });
+        return params["cursor"] === "feature-page"
+          ? featureResponse(false)
+          : {
+              data: [{ name: "other_feature", enabled: true }],
+              nextCursor: "feature-page",
+            };
+      },
+    );
+    expect(program).toBeUndefined();
+    expect(requests).toEqual([
+      {
+        method: "experimentalFeature/list",
+        params: { threadId: "selected-thread" },
+      },
+      {
+        method: "experimentalFeature/list",
+        params: { threadId: "selected-thread", cursor: "feature-page" },
+      },
+    ]);
+  },
+);
+
+test("preserves custom-provider behavior when Daybreak is available", async () => {
   const unexpectedRequest = async (): Promise<JsonObject> => {
     throw new Error("No native request expected");
   };
   expect(
     await appServerCyberAccessProgram(
-      { daybreak: true, features: { cli_daybreak: false } },
-      "selected-model",
-      "openai",
-      unexpectedRequest,
-    ),
-  ).toBeUndefined();
-  expect(
-    await appServerCyberAccessProgram(
       {},
       "selected-model",
       "custom",
-      unexpectedRequest,
+      "selected-thread",
+      withFeature(unexpectedRequest),
     ),
   ).toBeUndefined();
   await expect(
@@ -103,7 +151,8 @@ test("leaves disabled features and other providers to native defaults", async ()
       { daybreak: true },
       "selected-model",
       "custom",
-      unexpectedRequest,
+      "selected-thread",
+      withFeature(unexpectedRequest),
     ),
   ).rejects.toThrow("Daybreak requires the OpenAI model provider");
 });
@@ -114,7 +163,8 @@ test("reports unavailable accounts and advertised models without Daybreak", asyn
       { daybreak: true },
       "selected-model",
       "openai",
-      async () => ({ account: null }),
+      "selected-thread",
+      withFeature(async () => ({ account: null })),
     ),
   ).rejects.toThrow(
     "Daybreak requires a signed-in ChatGPT account or an OpenAI API key",
@@ -124,7 +174,8 @@ test("reports unavailable accounts and advertised models without Daybreak", asyn
       { daybreak: true },
       "selected-model",
       "openai",
-      async (method): Promise<JsonObject> =>
+      "selected-thread",
+      withFeature(async (method): Promise<JsonObject> =>
         method === "account/read"
           ? { account: { type: "apiKey" } }
           : {
@@ -135,6 +186,7 @@ test("reports unavailable accounts and advertised models without Daybreak", asyn
                 },
               ],
             },
+      ),
     ),
   ).rejects.toThrow("Daybreak is unavailable for model selected-model");
 });
@@ -148,9 +200,10 @@ test("preserves account diagnostics and native catalog-failure behavior", async 
       { daybreak: true },
       "selected-model",
       "openai",
-      async () => {
+      "selected-thread",
+      withFeature(async () => {
         throw failure;
-      },
+      }),
     ),
   ).rejects.toBe(failure);
   expect(
@@ -158,9 +211,27 @@ test("preserves account diagnostics and native catalog-failure behavior", async 
       {},
       "selected-model",
       "openai",
-      async () => {
+      "selected-thread",
+      withFeature(async () => {
         throw new Error("Synthetic catalog unavailable");
-      },
+      }),
     ),
   ).toBeUndefined();
+});
+
+test("preserves native feature-query diagnostics", async () => {
+  const failure = new Error(
+    "Synthetic native feature failure with diagnostic detail",
+  );
+  await expect(
+    appServerCyberAccessProgram(
+      { daybreak: true },
+      "selected-model",
+      "openai",
+      "selected-thread",
+      async () => {
+        throw failure;
+      },
+    ),
+  ).rejects.toBe(failure);
 });

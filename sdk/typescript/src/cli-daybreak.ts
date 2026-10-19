@@ -9,10 +9,33 @@ export async function appServerCyberAccessProgram(
   config: JsonObject,
   model: string,
   provider: string,
+  threadId: string,
   request: (method: string, params: JsonObject) => Promise<JsonObject>,
 ): Promise<CyberAccessProgram | undefined> {
   const features = isRecord(config["features"]) ? config["features"] : {};
-  if (features["cli_daybreak"] === false) return undefined;
+  let featureCursor: string | undefined;
+  do {
+    const result = await request("experimentalFeature/list", {
+      threadId,
+      ...(featureCursor === undefined ? {} : { cursor: featureCursor }),
+    });
+    const flags = result["data"];
+    const flag = Array.isArray(flags)
+      ? flags.find(
+          (entry) => isRecord(entry) && entry["name"] === "cli_daybreak",
+        )
+      : undefined;
+    if (isRecord(flag)) {
+      if (flag["enabled"] === false) return undefined;
+      break;
+    }
+    if (typeof result["nextCursor"] !== "string") {
+      throw new Error(
+        "Codex did not report the effective cli_daybreak feature",
+      );
+    }
+    featureCursor = result["nextCursor"];
+  } while (featureCursor !== undefined);
   const enabled = config["daybreak"] === true;
   if (provider !== "openai") {
     if (enabled) throw new Error("Daybreak requires the OpenAI model provider");

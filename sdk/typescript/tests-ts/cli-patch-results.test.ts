@@ -80,6 +80,7 @@ const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (["initialize", "account/login/start", "config/read"].includes(request.method)) send({ id: request.id, result: {} });
+  if (request.method === "experimentalFeature/list") send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: true }], nextCursor: null } });
   if (request.method === "thread/start") {
     assert.equal(request.params.sandbox, "workspace-write");
     send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite" } } });
