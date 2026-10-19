@@ -663,13 +663,17 @@ describe("Codex configuration", () => {
         resolveCodexCommand({}).command
       ] = "read";
       await writeCodexConfig(join(codexHome, "config.toml"), config);
-      const sandbox = (operation: "read" | "write", path: string) =>
+      const sandbox = (
+        operation: "read" | "write",
+        path: string,
+        permissionProfile = "codex_security_policy",
+      ) =>
         runPinnedCodex(
           codexHome,
           [
             "sandbox",
             "--permission-profile",
-            "codex_security_policy",
+            permissionProfile,
             "--cd",
             workspace,
             ...(process.platform === "win32"
@@ -686,8 +690,8 @@ describe("Codex configuration", () => {
                   "-NonInteractive",
                   "-Command",
                   operation === "read"
-                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
-                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                    ? "$ErrorActionPreference = 'Stop'; Write-Host -NoNewline (Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw)"
+                    : "$ErrorActionPreference = 'Stop'; Set-Content -LiteralPath $env:POLICY_PROBE_PATH -Value 'probe' -NoNewline",
                 ]
               : [
                   "/bin/sh",
@@ -773,12 +777,28 @@ describe("Codex configuration", () => {
         join(codexHome, "policy.txt"),
         evidence,
       ]) {
-        sandbox("write", path);
+        const denied = sandbox("write", path);
+        if (process.platform === "win32") {
+          expect(
+            denied.exitCode,
+            new TextDecoder().decode(denied.stderr),
+          ).not.toBe(0);
+        }
         if (path === sourceFile)
           expect(await readFile(path, "utf8")).toBe("source");
         else if (path === evidence)
           expect(await readFile(path, "utf8")).toBe("original");
         else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      if (process.platform === "win32") {
+        // The same cmdlet must write when the scan profile permits it.
+        const allowed = join(workspace, "inside.txt");
+        const permitted = sandbox("write", allowed, "codex_security_scan");
+        expect(
+          permitted.exitCode,
+          new TextDecoder().decode(permitted.stderr),
+        ).toBe(0);
+        expect(await readFile(allowed, "utf8")).toBe("probe");
       }
       await requireSecureCredentialHome(codexHome);
     },
