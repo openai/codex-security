@@ -16,6 +16,7 @@
 - honor selected profile approval policy ([#530](https://github.com/openai/codex-security/pull/530))
 - remove reasoning effort allowlist ([#1712](https://github.com/openai/codex-security/pull/1712))
 - use the SHA-256 empty tree for root commit diffs ([#1716](https://github.com/openai/codex-security/pull/1716))
+- read diff blobs with Git before 2.38 ([#1715](https://github.com/openai/codex-security/pull/1715))
 
 <!-- release-section: highlights:end -->
 
