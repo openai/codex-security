@@ -406,9 +406,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: plugins/codex-security/pyproject.toml
+          cache-dependency-path: plugins/codex-security/requirements-test.txt
       - name: Install Python test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+        run: python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
       - name: Install ripgrep
         if: runner.os == 'Linux'
         run: |

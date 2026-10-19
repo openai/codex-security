@@ -27,6 +27,8 @@
 - add Cheaper Inference inference provider ([#1623](https://github.com/openai/codex-security/pull/1623))
 - describe positive numeric input bounds ([#1605](https://github.com/openai/codex-security/pull/1605))
 - import schema APIs directly from Zod ([#1726](https://github.com/openai/codex-security/pull/1726))
+- normalize CWE identifiers without integer conversion ([#1723](https://github.com/openai/codex-security/pull/1723))
+- remove the empty editable Python distribution ([#1724](https://github.com/openai/codex-security/pull/1724))
 
 <!-- release-section: highlights:end -->
 
