@@ -5842,6 +5842,51 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test.each([
+    { name: "scan", prepare: prepareOutputDir },
+    { name: "registration", prepare: prepareScanRegistrationOutput },
+  ])(
+    "cleans up unnamed $name output after chmod failure",
+    async ({ prepare }) => {
+      for (const nonempty of [false, true]) {
+        const root = await temporaryDirectory();
+        const failure = new Error("Synthetic output chmod failure");
+        const originalChmod = fsPromises.chmod;
+        let allocated: string | undefined;
+        const umask = spyOn(process, "umask").mockReturnValue(0o777);
+        const chmodFailure = spyOn(fsPromises, "chmod").mockImplementation(
+          async (path, mode) => {
+            if (typeof path === "string" && dirname(path) === root) {
+              allocated = path;
+              expect(mode).toBe(0o700);
+              if (nonempty)
+                await writeFile(join(path, "keep.txt"), "keep me\n");
+              throw failure;
+            }
+            return originalChmod(path, mode);
+          },
+        );
+        try {
+          await expect(prepare(undefined, "repo", root)).rejects.toBe(failure);
+          expect(allocated).toBeDefined();
+          if (allocated === undefined)
+            throw new Error("Output was not allocated");
+          expect(await readdir(root)).toEqual(
+            nonempty ? [basename(allocated)] : [],
+          );
+          if (nonempty) {
+            expect(await readFile(join(allocated, "keep.txt"), "utf8")).toBe(
+              "keep me\n",
+            );
+          }
+        } finally {
+          chmodFailure.mockRestore();
+          umask.mockRestore();
+        }
+      }
+    },
+  );
+
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
