@@ -589,6 +589,9 @@ changing their original severity or evidence. The SDK exposes `classifySeverity(
 [severity classification](docs/cli.md#classify-finding-severity) for selection,
 checkpointing, and publication behavior.
 
+For canonical records without a saved scan, use `classify-severity --records`
+or `classifySeverityRecords()` with [host-provided execution](docs/classify-severity-records.md).
+
 ### Suggest finding owners
 
 Use `suggest-owners` or the SDK's `suggestOwners()` to suggest contributors based

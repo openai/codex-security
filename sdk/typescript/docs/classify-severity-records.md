@@ -1,0 +1,89 @@
+# Classify canonical records with host-provided execution
+
+`codex-security classify-severity --records` accepts canonical reports without a
+repository, saved scan, synthetic provenance, local Codex login, or filesystem
+state. It uses the same bidirectional JSON-RPC transport as [record deduplication](dedupe-records.md).
+Use `--records` alone; saved-scan classification remains unchanged.
+
+The SDK exports `classifySeverityRecords`, `classifySeverityRecordsInputSchema`,
+and their input, result, and review-request types. The protocol and input have
+version `1`. This is an additive capability: pin an artifact containing this
+implementation until it is included in a published release. A prior CLI that does
+not advertise `--records` in `classify-severity --help` cannot run this protocol.
+
+## Immutable inputs
+
+Send one newline-delimited JSON-RPC request with `method: "run"` and these params:
+
+```ts
+{
+  version: 1,
+  rubric: { revision: 4, markdown: rubricMarkdown, sha256: rubricSha256 },
+  model: "your-authorized-model",
+  effort: "high",
+  records: [{ id: "canonical-one", revision: 7, findingJson, inputSha256 }]
+}
+```
+
+`findingJson` is the exact JSON text of an object with nonblank `findingId`,
+`title`, and `summary`. `findingId` must equal the canonical `id`. Optional
+`severity.level` uses `critical`, `high`, `medium`, `low`, or `informational`.
+Other report fields are preserved as evidence. Missing legacy titles or summaries
+must be resolved by the caller; do not invent evidence or scan metadata.
+
+Both hashes are lowercase SHA-256 hex of the exact UTF-8 string bytes, without
+normalizing newlines, whitespace, Unicode, object key order, or JSON numbers.
+Compute `inputSha256` from `findingJson`, not from its parsed/reserialized object.
+For example, Node uses `createHash("sha256").update(text, "utf8").digest("hex")`;
+Python uses `hashlib.sha256(text.encode("utf-8")).hexdigest()`.
+The CLI recomputes both hashes before requesting any review. Rubric revisions are
+positive safe integers; record revisions are nonnegative safe integers. Duplicate
+canonical IDs and invalid records reject the entire input before host work.
+The implementation snapshots caller input before awaiting model execution and
+preserves the validated report JSON text verbatim in the model prompt, including
+numeric evidence that JavaScript cannot represent exactly.
+
+## Host execution contract
+
+For each record the CLI emits `method: "review.run"`, with a unique request ID
+and params containing `requestId`, `stage: "severity-classification"`, explicit
+`model` and `effort`, `trustedInstructions`, untrusted report/rubric `prompt`, and
+an output JSON `schema`. The host must authorize the requested model and effort,
+create a fresh independent review context, preserve the instruction/data boundary,
+and disable tools, repository access, browsing, and source inspection.
+A managed-agent host can execute this request directly in its existing session
+infrastructure; it does not need a repository checkout. The CLI does not provide
+credentials, create sessions, or select an authentication fallback.
+
+Reply with the same JSON-RPC ID and `result` set to the schema-conforming assessment
+object. Do not wrap the assessment in a string or an array. An assessment contains
+`findingId`, `decision` (`assessed` or `excluded`), normalized `level`, original
+`rubricLabel`, `rationale`, separate `confidence`, and nullable `reviewTrigger`.
+Excluded assessments require null level and label; assessed ones require both.
+
+The host owns model budgets, transport limits, timeouts, and session cancellation.
+Use the transport's `cancel` notification with the active run ID and also stop
+any remote execution. EOF or a broken pipe means disconnection, not successful
+completion. No review is retried automatically, including after an ambiguous
+host execution error.
+
+## Results and persistence
+
+A completed result contains `version: 1`, `status: "completed"`, the rubric's
+`revision` and `sha256`, and `assessments`. Each assessment replaces model-provided
+`findingId` with the verified canonical `id`, `revision`, and `inputSha256`.
+The original report and severity are never rewritten.
+
+Invalid or mismatched model output and host failures return `status: "unresolved"`,
+an empty `assessments` array, and an error with `recordId` and stable code
+`invalid_assessment` or `review_failed`. Earlier assessments in that invocation
+are discarded. Invalid input, protocol errors, and cancellation use JSON-RPC error
+responses. Exit codes are 0 for completion, 1 for unresolved review, and 2 for
+input/protocol failure (130/143 for SIGINT/SIGTERM).
+
+Prefer one canonical record per workflow invocation when the host needs independent
+retries and partial success. The host should retain immutable rubric/report
+snapshots, compare every echoed binding, and conditionally persist only computed
+prioritization fields if the expected canonical version and rubric still apply.
+Keep manual edits and original severity intact. Repeating the same inputs binds
+results to the same hashes; it does not promise deterministic model answers.

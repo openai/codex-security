@@ -2341,6 +2341,55 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_unsupported_port(self) -> None:
+        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_unsafe_authority(self) -> None:
+        for remote in (
+            "https://exa mple.com/repo",
+            "https://example.com>/repo",
+            "https://exa^mple.com/repo",
+            "https://exa|mple.com/repo",
+            "https://:8022/repo",
+            "https://a:b:80/repo",
+            "https://[::1/repo",
+            "https://[example]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_bare_userinfo_separator(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_seals_remote_port_and_ipv6_authority(self) -> None:
+        for remote in (
+            "https://example.com:8022/repo",
+            "https://example.com:/repo",
+            "https://[::1]:8022/repo",
+            "https://[::ffff:1.2.3.4]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                manifest = self.read_json("scan-manifest.json")
+                self.assertEqual(manifest["scan"]["target"]["remote"], remote)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()
@@ -2475,18 +2524,47 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_unsafe_deferred_paths(self) -> None:
-
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+    def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
+        for path in ("src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Synthetic repository evidence.",
+                    }
+                ]
+                self.write_scan()
+                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        for path in (
+            "",
+            "../../outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "/outside.ts",
+            "//server/share",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            "src/\u0000outside.ts",
+            "src/\u0001outside.ts",
+            "src/\toutside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "src/\u2028/../outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]
                 self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-                ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"coverage.*deferred"):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
@@ -2501,7 +2579,27 @@ The extraction root is not enforced.
             }
         ]
 
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+        for path in (
+            ".",
+            "./",
+            "././",
+            "src",
+            "src/parser.ts",
+            "./src/parser.ts",
+            "src/./parser.ts",
+            "src//parser.ts",
+            "src/",
+            "src:parser.ts",
+            "src/a:b.py",
+            "src/.hidden",
+            "src/na\u00efve file.ts",
+            "src/\u007fparser.ts",
+            "src/\u2028parser.ts",
+            "src/\u2029parser.ts",
+            " ",
+            "\u0085",
+            "\ufeff",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}

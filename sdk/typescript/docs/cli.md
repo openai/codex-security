@@ -1062,7 +1062,11 @@ codex-security classify-severity --scan latest --rubric /path/to/policy.md --jso
 codex-security classify-severity --scan-dir /path/to/completed-scan --json
 ```
 
-Use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
+For repository-free canonical records, use `classify-severity --records` alone.
+The [records protocol](classify-severity-records.md) accepts immutable Markdown and
+report snapshots and delegates model execution to the host.
+
+For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
 Omitting `--rubric` inherits original severity without model calls. Rubrics and
 repeatable `--knowledge-base` context accept text, PDF, DOCX, and directories.
 Each finding is classified in a separate read-only turn using its report and
