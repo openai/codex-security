@@ -10,6 +10,35 @@ Read the assigned, already-validated Standard findings and the previous aggregat
 
 Each tool response has one text content block containing `{ json, nextCursor? }`. Parse that block to obtain the page. Its `json` is a fragment, not necessarily a complete JSON value. Follow `nextCursor` until absent, concatenate the fragments inside code mode, and only then parse the assembled document as `{ discoveries, previous }`. Inspect the findings and context selectively; do not print or return the entire assembled document from code mode. Do not concatenate pages from different `findingRef` requests.
 
+Keep fragments, cursor and completion together in one serializable `store` value. An absent terminal cursor must become `null`; `store` cannot save `undefined`. Commit the state only after a successful page, so a retry resumes at the next unread page rather than appending a completed tail again. In code mode, define this helper and call it with your selected byte budget (and optional `findingRef`); inspect only the needed fields of its returned document:
+
+```javascript
+async function readReducerDocument(maxBytes, findingRef = null) {
+  const key = "deep-reducer-pages:" + (findingRef ?? "assigned");
+  let state = load(key) ?? { json: "", cursor: null, done: false };
+  while (!state.done) {
+    const response =
+      await tools.mcp__cs_artifacts__get_codex_security_deep_reducer_inputs({
+        maxBytes,
+        ...(state.cursor === null ? {} : { cursor: state.cursor }),
+        ...(findingRef === null ? {} : { findingRef }),
+      });
+    const body = response.content.find((item) => item.type === "text").text;
+    if (response.isError) throw new Error(body);
+    const page = JSON.parse(body);
+    state = {
+      json: state.json + page.json,
+      cursor: page.nextCursor ?? null,
+      done: page.nextCursor == null,
+    };
+    store(key, state);
+  }
+  return JSON.parse(state.json);
+}
+```
+
+Use the exact exposed tool name if the host uses a different MCP namespace. Code mode has only its documented globals; use `load`/`store` for state between cells and ordinary JSON operations for JSON data, rather than assuming Node.js globals or `structuredClone` are available.
+
 The input view omits the retained `provenance.sourceFindings`, `previousFindings`, and `originalCandidates` bodies. The host preserves those bodies when saving the aggregate. Fetch full details when needed with the same paged tool and `findingRef`: use `source:<sourceFindingId>` for an original source, or `previous:N` for the previous aggregate's zero-based finding index, including its synthesized history. Never copy those retained bodies into your submission; submit the semantic finding and its source refs.
 
 If a response exceeds the IPC frame limit, retry the failed page with a smaller `maxBytes` (halve the budget used for that request), keeping its cursor and findingRef. Do not retry an unchanged oversized request. Preserve already-read fragments and continue from the failed page. If the budget is too small to hold even one character and the page envelope, increase it as directed by the tool's diagnostic.

@@ -1,5 +1,4 @@
 import type { Finding } from "../models.js";
-import type { DashboardQuery, DashboardSnapshot } from "./dashboard-types.js";
 import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 import type {
   FindingNeighborhood,
@@ -26,7 +25,6 @@ export interface FindingsPage {
 
 export interface FindingsStore {
   initialize(): Promise<void>;
-  dashboard(query: DashboardQuery): Promise<DashboardSnapshot>;
   insert(
     entries: readonly EmbeddedFinding[],
     repositoryId?: string,

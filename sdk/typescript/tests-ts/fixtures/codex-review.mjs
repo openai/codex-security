@@ -166,6 +166,14 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
     }
     if (scenario === "exit") process.exit(1);
+    if (scenario === "exit-diagnostic") {
+      process.stdout.end();
+      process.stderr.write(
+        "Permission profile synthetic_profile was rejected: café 🔒\n",
+        () => process.exit(7),
+      );
+      continue;
+    }
     if (scenario === "diagnostics") {
       process.stderr.write("Native diagnostic: Bearer synthetic-review-key\n");
       send({

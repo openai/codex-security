@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { dirname } from "node:path";
-import { parseArgs } from "node:util";
+import { parseArgs, promisify } from "node:util";
 import { createServer } from "./app.mjs";
 
 type HttpResult = {
@@ -64,9 +64,7 @@ async function main(): Promise<number> {
         other_invoice.status === 200 && other_invoice.body.owner === "bob",
     };
   } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-    });
+    await promisify(server.close).call(server);
   }
 
   const proof = { ...evidence, server_stopped: true };
