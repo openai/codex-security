@@ -22,6 +22,12 @@ export interface WindowsHandle {
 /** Paths are UTF-16LE code units without a terminator, including lone surrogates. */
 export interface WindowsBinding {
   windowsArguments(): Buffer[];
+  runWindowsProcess(
+    executable: Buffer,
+    arguments_: Buffer[],
+    cwd?: Buffer,
+    environment?: { name: Buffer; value: Buffer }[],
+  ): { error: number; message?: string | null; status: number };
   windowsEnvironment(name: Buffer): Buffer | null;
   windowsAbsolutePath(path: Buffer): WindowsResult<Buffer>;
   windowsDirectoryEntries(

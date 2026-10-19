@@ -10,7 +10,7 @@ test = [
     "pytest==9.1.1",
     "pytest-xdist==3.8.0",
     "PyYAML==6.0.3",
-    "ruff==0.16.9",
+    "ruff==0.16.10",
 ]
 
 [tool.pytest.ini_options]
@@ -23,7 +23,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-required-version = "==0.16.9"
+required-version = "==0.16.10"
 target-version = "py310"
 
 [tool.ruff.lint]

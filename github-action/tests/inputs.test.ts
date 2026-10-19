@@ -6,8 +6,8 @@ const parse = (values: Record<string, string> = {}) => parseInputs(key => values
 test('defaults are stable across events', () => {
   const input = parse();
   assert.deepEqual(input, {
-    repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard',
-    model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
+    repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
+    provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
     verbose: true, dryRun: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
@@ -16,6 +16,33 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--max-time-hours'));
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
+  assert.ok(!args.includes('--cyber-access-program'));
+});
+test('provider and model inputs map directly to scan CLI arguments in both modes', () => {
+  for (const provider of ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'])
+  for (const mode of ['standard', 'deep']) for (const dryRun of ['false', 'true']) {
+    const input = parse({provider, model:'synthetic/model', mode, 'dry-run':dryRun});
+    const args = scanArguments(input, {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--provider') + 1], provider);
+    assert.equal(args[args.indexOf('--auth') + 1], provider === 'amazon-bedrock' || dryRun === 'true' ? 'auto' : 'api-key');
+    assert.ok(args.includes('--model=synthetic/model'));
+    assert.equal(args.includes('--dry-run'), dryRun === 'true');
+  }
+  assert.throws(() => parse({provider:'unsupported'}), /provider must be one of/);
+  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const model of ['', '  ']) {
+    const args = scanArguments(parse({provider, model}), {repository:'/checkout'}, '/results');
+    assert.ok(!args.some(arg => arg.startsWith('--model')), 'Leave missing model validation to the CLI');
+  }
+  assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
+});
+test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
+  for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
+    const args = scanArguments(parse({mode, 'cyber-access-program':program}), {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--cyber-access-program') + 1], program);
+  }
+  const blank = scanArguments(parse({'cyber-access-program':'  '}), {repository:'/checkout'}, '/results');
+  assert.ok(!blank.includes('--cyber-access-program'));
+  assert.throws(() => parse({'cyber-access-program':'unsupported'}), /cyber-access-program must be one of/);
 });
 test('Deep scans forward an explicit discovery budget and selected repository paths', () => {
   const input = parse({mode:'deep', paths:'./src/\nlib', 'max-time-hours':'1.5'});

@@ -59,7 +59,6 @@ test("shares one native build and container matrix in automatic CI", () => {
     "Reject interactive repository discovery",
     "Verify hardened Codex command sandbox",
     "Verify host-scoped Git credentials",
-    "Verify findings API and persistent storage through consumer Compose",
   ]) {
     expect(steps.filter((step) => step.name === name)).toHaveLength(1);
   }

@@ -3,14 +3,13 @@
 
 This script stays deliberately model-free:
 
-- `make-repo-rank-input` creates the deterministic repository or scoped-path
-  JSONL candidate worklist that ranking subagents consume.
+- `make-repo-scope-input` lists every explicitly scoped repository file.
 - `make-diff-rank-input` creates the deterministic diff-scoped JSONL candidate
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
 
 Candidate selection uses repository scope, native tool ignore rules, and binary detection,
-not filename or directory classifications. Ranking inputs use bounded source previews.
+not filename or directory classifications. Diff inputs use bounded source previews.
 """
 
 from __future__ import annotations
@@ -41,29 +40,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Codex Security scan worklist helper.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    make = subparsers.add_parser(
-        "make-repo-rank-input",
-        help="Create rank_input.jsonl for subagent-based file ranking.",
-    )
-    make.add_argument("--repo", required=True, help="Repository root.")
-    make.add_argument(
-        "--scope",
-        default=".",
-        help="Path within the repository to scan. Defaults to the repository root.",
-    )
-    make.add_argument(
-        "--scopes-file",
-        help="JSON array of repository-relative files and directories to scan together.",
-    )
-    make.add_argument("--out", required=True, help="Output rank_input.jsonl path.")
-    make.add_argument("--area", default="", help="Area label. Defaults to scope.")
-    make.add_argument(
-        "--preview-bytes",
-        type=int,
-        default=DEFAULT_PREVIEW_BYTES,
-        help=f"Maximum UTF-8 bytes in each preview. Defaults to {DEFAULT_PREVIEW_BYTES}.",
-    )
-
     scoped = subparsers.add_parser(
         "make-repo-scope-input",
         help="List every explicitly scoped file without ranking or reading its contents.",
@@ -90,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     )
     diff.add_argument("--head", default="HEAD", help="Git diff head revision.")
     diff.add_argument("--out", required=True, help="Output rank_input.jsonl path.")
-    diff.add_argument("--area", default="diff", help="Area label for ranking rows.")
+    diff.add_argument("--area", default="diff", help="Area label for changed-file rows.")
     diff.add_argument(
         "--preview-bytes",
         type=int,
@@ -101,39 +77,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_scope(
-    repo: Path,
-    scope: str,
-    *,
-    expand_user: bool = True,
-    reject_symlinks: bool = False,
-) -> Path:
-    scope_path = Path(scope).expanduser() if expand_user else Path(scope)
+def resolve_scope(repo: Path, scope: str) -> Path:
+    scope_path = Path(scope)
     stream = windows_stream_component(scope_path)
     if stream is not None:
         raise SystemExit(f"Scope must not use an NTFS alternate data stream: {stream}")
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
-    if reject_symlinks:
-        repository = repo.resolve()
+    repository = repo.resolve()
+    try:
+        relative = scope_path.relative_to(repository)
+    except ValueError as exc:
+        raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
+    ancestor = repository
+    for part in relative.parts:
+        if part == "..":
+            if ancestor == repository:
+                raise SystemExit(f"Scope must be inside repo: {scope_path}")
+            ancestor = ancestor.parent
+            continue
+        ancestor /= part
         try:
-            relative = scope_path.relative_to(repository)
-        except ValueError as exc:
-            raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
-        ancestor = repository
-        for part in relative.parts:
-            if part == "..":
-                if ancestor == repository:
-                    raise SystemExit(f"Scope must be inside repo: {scope_path}")
-                ancestor = ancestor.parent
-                continue
-            ancestor /= part
-            try:
-                metadata = ancestor.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise SystemExit(f"Scope path not found: {ancestor}") from exc
-            if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
-                raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
+            metadata = ancestor.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise SystemExit(f"Scope path not found: {ancestor}") from exc
+        if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
     try:
@@ -221,54 +190,6 @@ def scope_candidates(repo: Path, scope_path: Path) -> Iterable[Path]:
     return (repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
 
 
-def make_repo_rank_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
-    if not repo.is_dir():
-        raise SystemExit(f"Repo path not found: {repo}")
-    scopes = [args.scope]
-    explicit_scopes = args.scopes_file is not None
-    if explicit_scopes:
-        scopes = load_scopes_file(Path(args.scopes_file).expanduser())
-
-    resolved_scopes = [
-        resolve_scope(repo, scope, expand_user=not explicit_scopes) for scope in scopes
-    ]
-    directly_requested_files = {
-        scope_abs for scope_abs in resolved_scopes if explicit_scopes and scope_abs.is_file()
-    }
-    rows_by_path: dict[str, JsonRow] = {}
-    for scope_abs in resolved_scopes:
-        scope_rel = scope_abs.relative_to(repo)
-        area = args.area or scope_rel.as_posix()
-        candidates = scope_candidates(repo, scope_abs)
-        for path in candidates:
-            try:
-                if path.is_symlink() or not path.is_file():
-                    continue
-                path.resolve(strict=True).relative_to(repo)
-            except (OSError, ValueError):
-                continue
-            rel = path.relative_to(repo)
-            directly_requested = path in directly_requested_files
-            if ".git" in rel.parts:
-                continue
-
-            preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary or is_binary_file(path):
-                if not directly_requested:
-                    continue
-                preview = ""
-            rows_by_path.setdefault(
-                rel.as_posix(),
-                {"path": rel.as_posix(), "area": area, "preview": preview},
-            )
-
-    rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
-    write_jsonl(output, rows)
-    print(f"Wrote {len(rows)} rows to {output}")
-
-
 def make_repo_scope_input(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
@@ -277,7 +198,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     scopes = load_scopes_file(Path(args.scopes_file).expanduser())
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
-        scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
+        scope_path = resolve_scope(repo, scope)
         candidates = scope_candidates(repo, scope_path)
         for path in candidates:
             try:
@@ -410,9 +331,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.command == "make-repo-rank-input":
-        make_repo_rank_input(args)
-    elif args.command == "make-repo-scope-input":
+    if args.command == "make-repo-scope-input":
         make_repo_scope_input(args)
     elif args.command == "make-diff-rank-input":
         make_diff_rank_input(args)

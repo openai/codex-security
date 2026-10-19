@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import io
-import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -24,12 +23,6 @@ def test_completed_example_passes_tracking_validation() -> None:
 class ValidateTrackingSourceTest(ScanFixtureTestCase):
     validator = VALIDATOR
     example_scan = EXAMPLE_SCAN
-
-    def write_json(self, name: str, payload: object) -> None:
-        (self.scan_dir / name).write_text(
-            json.dumps(payload, indent=2) + "\n",
-            encoding="utf-8",
-        )
 
     def rewrite_findings_and_seal(self, findings: dict[str, object]) -> None:
         self.write_json("findings.json", findings)

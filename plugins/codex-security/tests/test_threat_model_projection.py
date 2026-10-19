@@ -11,16 +11,14 @@ import unittest.mock
 from pathlib import Path
 
 import test_finalize_scan_contract as fixtures
+from workbench_test_support import ScanFixtureTestCase
 
 FINALIZER = fixtures.FINALIZER
 
 
-class ThreatModelProjectionTest(unittest.TestCase):
+class ThreatModelProjectionTest(ScanFixtureTestCase):
     setUp = fixtures.FinalizeScanContractTest.setUp
-    tearDown = fixtures.FinalizeScanContractTest.tearDown
     write_scan = fixtures.FinalizeScanContractTest.write_scan
-    write_json = fixtures.FinalizeScanContractTest.write_json
-    read_json = fixtures.FinalizeScanContractTest.read_json
 
     def test_saves_and_exports_markdown_threat_model_without_changing_authored_body(self) -> None:
         body = "# Service Model\n\n| Asset | Owner |\n| --- | --- |\n| Queue | Service |\n\n```text\nA -> B\n```\n"

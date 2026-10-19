@@ -7,9 +7,10 @@ interface ToolResponse {
 
 export function assertNoError(response: ToolResponse) {
   assert.equal(response.error, undefined, response.error?.message!);
-  assert.equal(
-    response.result?.isError,
-    undefined,
+  assert.ok(response.result, "Expected a JSON-RPC result");
+  assert.notEqual(
+    response.result.isError,
+    true,
     response.result?.content?.map((item) => item.text).join(" ")!,
   );
 }

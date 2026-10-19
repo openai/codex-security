@@ -35,11 +35,10 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 
 afterEach(cleanup);
 
-interface PostScanContext {
-  artifactPath: string;
-  outside: string;
-  scanDir: string;
-}
+type PostScanContext = Pick<
+  Awaited<ReturnType<typeof startPostScan>>,
+  "artifactPath" | "outside" | "scanDir"
+>;
 
 interface PostScanScenario {
   artifact: string;
