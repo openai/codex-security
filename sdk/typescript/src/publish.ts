@@ -11,6 +11,7 @@ import {
   mkdtemp,
   open,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -1650,8 +1651,15 @@ async function writePublicationReceipt(
     flag: "wx",
     mode: 0o600,
   });
-  await writeFile(join(directory, `${name}.json`), contents, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const temporary = join(directory, `.${name}-${randomUUID()}.json.tmp`);
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.close();
+    await rename(temporary, join(directory, `${name}.json`));
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }

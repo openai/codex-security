@@ -2,6 +2,7 @@ import { sha256 } from "./support/finding-identity.js";
 import { readJsonLines } from "./support/json.js";
 import { cancelInspection } from "./support/workbench-fakes.js";
 import { resolving } from "./support/promises.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
 import * as filesystem from "node:fs/promises";
@@ -3621,64 +3622,225 @@ describe("connected Linear publication", () => {
     expect(second.created[0]!.issueIdentifier).toBe("SEC-2");
   });
 
-  test("preserves both private receipts when the same scan is published concurrently", async () => {
-    const stateDirectory = await temporaryDirectory(
-      "codex-security-concurrent-publication-receipts-",
-    );
-    const publication = preparedPublication();
-    let calls = 0;
+  async function receiptFixture(publication = preparedPublication()) {
+    const state = await temporaryDirectory("codex-security-atomic-receipt-");
+    const directory = join(state, "publications", "linear");
+    const digest = sha256(publication.scanId);
+    const latest = join(directory, `${digest}.json`);
+    await mkdir(directory, { recursive: true });
+    const previous = '{"previous":true}';
+    await writeFile(latest, previous);
     const injected = dependencies(publication, {
-      environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
-      runCodex: async () => {
-        calls += 1;
-        return {
-          exitCode: 0,
-          stdout: issueEvent(publication.issues[0]!, {
-            identifier: `SEC-CONCURRENT-${calls}`,
-          }),
-          stderr: "",
-        };
-      },
+      environment: { CODEX_SECURITY_STATE_DIR: state },
     });
     delete injected.writeReceipt;
+    return { publication, directory, digest, latest, previous, injected };
+  }
 
-    const results = await Promise.all([
-      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
-      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
-    ]);
-    const directory = join(stateDirectory, "publications", "linear");
-    const digest = sha256(publication.scanId);
-    const attempts = (await readdir(directory)).filter(
-      (name) => name.startsWith(`${digest}-`) && name.endsWith(".json"),
-    );
-
-    expect(attempts).toHaveLength(2);
-    const receipts = await Promise.all(
-      attempts.map(async (name) => {
-        const path = join(directory, name);
-        if (process.platform !== "win32") {
-          expect((await stat(path)).mode & 0o077).toBe(0);
+  test("atomically installs whole concurrent publication receipts", async () => {
+    const name = "atomically installs whole concurrent publication receipts";
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const fixture = await receiptFixture(preparedPublication(2));
+    const gate = Promise.withResolvers<void>();
+    const ready = Promise.withResolvers<void>();
+    const replace = filesystem.rename;
+    let waiting = 0;
+    const renamed = spyOn(filesystem, "rename").mockImplementation(
+      async (from, to) => {
+        if (String(from).endsWith(".json.tmp")) {
+          if (++waiting === 2) ready.resolve();
+          await gate.promise;
         }
-        return JSON.parse(await readFile(path, "utf8")) as {
-          created: Array<{ issueIdentifier: string }>;
-        };
-      }),
+        await replace(from, to);
+      },
     );
-    expect(
-      receipts
-        .flatMap((receipt) =>
-          receipt.created.map((issue) => issue.issueIdentifier),
-        )
-        .sort(),
-    ).toEqual(["SEC-CONCURRENT-1", "SEC-CONCURRENT-2"]);
-    const latest = JSON.parse(
-      await readFile(join(directory, `${digest}.json`), "utf8"),
-    ) as (typeof results)[number];
-    expect(results).toContainEqual(latest);
-    expect(
-      results.map((result) => result.created[0]!.issueIdentifier).sort(),
-    ).toEqual(["SEC-CONCURRENT-1", "SEC-CONCURRENT-2"]);
+    const pending = Promise.all(
+      ["A", "B"].map((letter, index) =>
+        publishScanInternal("scan", OPTIONS, {
+          ...fixture.injected,
+          runCodex: async () => ({
+            exitCode: 0,
+            stderr: "",
+            stdout: [
+              issueEvent(fixture.publication.issues[0]!, {
+                identifier: `SEC-${index + 1}`,
+              }),
+              issueEvent(fixture.publication.issues[1]!, {
+                status: "failed",
+                error: `Synthetic ${letter} receipt failure`,
+              }),
+            ].join("\n"),
+          }),
+        }),
+      ),
+    );
+    try {
+      await Promise.race([
+        ready.promise,
+        pending.then(() => {
+          throw new Error("Receipt completed before atomic replacement.");
+        }),
+      ]);
+      expect(await readFile(fixture.latest, "utf8")).toBe(fixture.previous);
+      const attempts = (await readdir(fixture.directory)).filter(
+        (file) =>
+          file.startsWith(`${fixture.digest}-`) && file.endsWith(".json"),
+      );
+      expect(attempts).toHaveLength(2);
+      const archives = await Promise.all(
+        attempts.map(async (file) => {
+          const path = join(fixture.directory, file);
+          if (process.platform !== "win32")
+            expect((await stat(path)).mode & 0o077).toBe(0);
+          return await readFile(path, "utf8");
+        }),
+      );
+      gate.resolve();
+      const results = await pending;
+      expect(results).toContainEqual(
+        JSON.parse(await readFile(fixture.latest, "utf8")),
+      );
+      expect(archives.map((text) => JSON.parse(text))).toEqual(
+        expect.arrayContaining(results),
+      );
+      expect((await readdir(fixture.directory)).sort()).toEqual(
+        [...attempts, `${fixture.digest}.json`, "handoffs"].sort(),
+      );
+      if (process.platform !== "win32")
+        expect((await stat(fixture.latest)).mode & 0o777).toBe(0o600);
+      await writeFile(fixture.latest, '{"edited":true}');
+      expect(
+        await Promise.all(
+          attempts.map((file) =>
+            readFile(join(fixture.directory, file), "utf8"),
+          ),
+        ),
+      ).toEqual(archives);
+    } finally {
+      gate.resolve();
+      await pending.catch(() => undefined);
+      renamed.mockRestore();
+    }
   });
+
+  test.each([
+    "write",
+    "write-close",
+    "close",
+    "rename",
+    "cleanup",
+    "collision",
+  ] as const)(
+    "preserves receipt ownership and primary failures at %s",
+    async (point) => {
+      const name = `preserves receipt ownership and primary failures at ${point}`;
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const fixture = await receiptFixture();
+      const primary = new Error(`Synthetic ${point} receipt failure`);
+      const secondary = new Error("Synthetic receipt cleanup failure");
+      const actual = {
+        open: filesystem.open,
+        rename: filesystem.rename,
+        rm: filesystem.rm,
+      };
+      const handles: filesystem.FileHandle[] = [];
+      const closes: Array<() => Promise<void>> = [];
+      let replacements = 0;
+      const mocks = [
+        spyOn(filesystem, "open").mockImplementation(
+          async (path, flags, mode) => {
+            if (!String(path).endsWith(".json.tmp"))
+              return await actual.open(path, flags, mode);
+            if (point === "collision")
+              await writeFile(path, "foreign sentinel");
+            const handle = await actual.open(path, flags, mode);
+            handles.push(handle);
+            const write = handle.writeFile.bind(handle);
+            const close = handle.close.bind(handle);
+            closes.push(close);
+            handle.writeFile = async (data, options) => {
+              if (point.startsWith("write")) {
+                await write("partial", options);
+                throw primary;
+              }
+              await write(data, options);
+            };
+            let closeFailed = false;
+            handle.close = async () => {
+              if (point === "close" && !closeFailed) {
+                closeFailed = true;
+                throw primary;
+              }
+              await close();
+              if (point === "write-close") throw secondary;
+            };
+            return handle;
+          },
+        ),
+        spyOn(filesystem, "rename").mockImplementation(async (from, to) => {
+          if (String(from).endsWith(".json.tmp")) {
+            replacements += 1;
+            expect(handles.every((handle) => handle.fd === -1)).toBe(true);
+            if (["rename", "cleanup"].includes(point)) throw primary;
+          }
+          await actual.rename(from, to);
+        }),
+        spyOn(filesystem, "rm").mockImplementation(async (path, options) => {
+          if (point === "cleanup" && String(path).endsWith(".json.tmp"))
+            throw secondary;
+          await actual.rm(path, options);
+        }),
+      ];
+      fixture.injected.runCodex = async () => ({
+        exitCode: 0,
+        stderr: "",
+        stdout: issueEvent(fixture.publication.issues[0]!, {
+          status: "failed",
+          error: "Synthetic rejected issue",
+        }),
+      });
+      try {
+        const pending = publishScanInternal("scan", OPTIONS, fixture.injected);
+        if (point === "collision")
+          await expect(pending).rejects.toMatchObject({ code: "EEXIST" });
+        else await expect(pending).rejects.toBe(primary);
+        expect(await readFile(fixture.latest, "utf8")).toBe(fixture.previous);
+        expect(handles.every((handle) => handle.fd === -1)).toBe(true);
+        expect(replacements).toBe(
+          point === "rename" || point === "cleanup" ? 1 : 0,
+        );
+        const files = await readdir(fixture.directory);
+        const attempts = files.filter(
+          (file) =>
+            file.startsWith(`${fixture.digest}-`) && file.endsWith(".json"),
+        );
+        expect(attempts).toHaveLength(1);
+        if (attempts[0])
+          expect(
+            JSON.parse(
+              await readFile(join(fixture.directory, attempts[0]), "utf8"),
+            ).counts,
+          ).toEqual({
+            findings: 1,
+            created: 0,
+            failed: 1,
+          });
+        const temps = files.filter((file) => file.endsWith(".tmp"));
+        expect(temps).toHaveLength(
+          point === "cleanup" || point === "collision" ? 1 : 0,
+        );
+        if (point === "collision")
+          expect(
+            await readFile(join(fixture.directory, temps[0]!), "utf8"),
+          ).toBe("foreign sentinel");
+      } finally {
+        mocks.forEach((item) => item.mockRestore());
+        await Promise.all(
+          closes.map((close) => close().catch(() => undefined)),
+        );
+      }
+    },
+  );
 
   test("keeps publication receipts outside sealed scans and hashes unsafe scan IDs", async () => {
     const stateDirectory = await temporaryDirectory(
