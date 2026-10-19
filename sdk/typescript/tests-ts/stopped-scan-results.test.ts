@@ -12,7 +12,9 @@ const stoppedScanProbe = [
   "plugin = pathlib.Path(sys.argv[1])",
   "root = pathlib.Path(sys.argv[2])",
   "source = sys.argv[3]",
-  "terminal_status = sys.argv[4] if len(sys.argv) > 4 else 'failed'",
+  "terminal_status = sys.argv[4]",
+  "failure_command = sys.argv[5]",
+  "failure_message = sys.argv[6]",
   "state = root / 'state'",
   "home = root / 'codex-home'",
   "target = root / 'target'",
@@ -85,7 +87,7 @@ const stoppedScanProbe = [
   "        frozen = database.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'frozen': json.loads(frozen) if frozen else None}))",
   "    raise SystemExit(0)",
-  "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', terminal_status)",
+  "run(failure_command, '--scan-id', scan_id, '--message', failure_message, *(['--deep-status', terminal_status] if failure_command == 'fail-deep-scan' else []))",
   "if source == 'legacy-seal-io-retry':",
   "    shutil.rmtree(artifact_dir)",
   "    manifest_path = scan_dir / 'scan-manifest.json'",
@@ -146,13 +148,20 @@ const stoppedScanProbe = [
   "elif source == 'distinct-instances':",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'artifactFindingCount': len(findings), 'instances': sorted(finding['identity']['instance'] for finding in findings)}))",
   "else:",
-  "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings)}))",
+  "    manifest = json.loads((scan_dir / 'scan-manifest.json').read_text(encoding='utf-8'))",
+  "    coverage = json.loads((scan_dir / 'coverage.json').read_text(encoding='utf-8'))",
+  "    report = (scan_dir / 'report.md').read_text(encoding='utf-8')",
+  "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'manifestStatus': manifest['scan']['status'], 'failureMessage': stored['failureMessage'], 'candidateId': findings[0]['provenance']['candidateId'], 'deferred': coverage['deferred'], 'report': report}))",
 ].join("\n");
 
 function runStoppedScanProbe(
   source: string,
   prefix: string,
-  terminalStatus?: string,
+  terminalStatus = "failed",
+  failure = {
+    command: "fail-deep-scan",
+    message: "Synthetic worker stopped.",
+  },
 ) {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
@@ -163,24 +172,48 @@ function runStoppedScanProbe(
     PLUGIN_ROOT,
     root,
     source,
-    ...(terminalStatus === undefined ? [] : [terminalStatus]),
+    terminalStatus,
+    failure.command,
+    failure.message,
   ]);
   expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout);
 }
 
-test.each(["accepted", "checkpoint"] as const)(
-  "preserves %s Deep findings when the scan stops",
-  (source) => {
+const cybersecurityRefusal =
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
+
+test.each([
+  ["accepted", "fail-deep-scan"],
+  ["checkpoint", "fail-deep-scan"],
+  ["accepted", "fail-scan"],
+  ["checkpoint", "fail-scan"],
+] as const)(
+  "preserves %s Deep findings after a refusal through %s",
+  (source, command) => {
     const recovered = runStoppedScanProbe(
       source,
       "codex-security-stopped-scan-",
+      "failed",
+      { command, message: cybersecurityRefusal },
     );
-    expect(recovered).toEqual({
+    expect(recovered).toMatchObject({
       findingCount: 1,
       progressStatus: "failed",
       artifactFindingCount: 1,
+      manifestStatus: "failed",
+      failureMessage: cybersecurityRefusal,
+      candidateId: "checkpoint-candidate",
+      deferred: expect.arrayContaining([
+        expect.objectContaining({
+          candidateId: "pending-validation",
+          reason: "Validation stopped with the scan.",
+          paths: ["src/extract.py"],
+        }),
+      ]),
     });
+    expect(recovered.report).toContain("| Scan outcome | failed |");
+    expect(recovered.report).toContain(cybersecurityRefusal);
   },
   30_000,
 );

@@ -31,6 +31,7 @@ import {
   DeepScanRemoteCoordinator,
   AsyncLock,
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   startOrJoinDeepScanCoordinator,
   claimDedupInputs,
   recordSleeps,
@@ -819,48 +820,6 @@ async function testExhaustedRetryFailsScan() {
   assert.equal(terminal.manifestPath, undefined);
 }
 
-async function testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately() {
-  for (const message of [
-    "Request blocked by cyberPolicy.",
-    "Request blocked by a safety policy violation.",
-    "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for potentially high-risk cyber activity.",
-  ]) {
-    const { fixture, store } = await coordinatorFixture({
-      stopAfterNoNew: 4,
-      stopAfterConsecutiveErrors: 3,
-      maxDiscoveryRuns: 3,
-    });
-    const executor = new FakeExecutor({
-      discoveryFailureMessages: { "discovery-0001": message },
-      discoveryCandidateId: "candidate-1",
-    });
-    const sleeps: number[] = [];
-    const terminal = await runCoordinator(fixture, store, executor, {
-      random: () => 0,
-      retryDelaysMs: [1, 3, 9],
-      clock: recordingClock(sleeps),
-    });
-
-    assert.equal(terminal?.status, "succeeded", message);
-    assert.equal(terminal?.terminalReason, "capped");
-    assert.equal(executor.discoveryAttempts.size, 3);
-    assert.equal(executor.discoveryAttempts.get("discovery-0001"), 1, message);
-    assert.deepEqual(
-      sleeps,
-      [],
-      `a refused conversation must not be resumed: ${message}`,
-    );
-    assert.equal(store.run.consecutiveErrors, 0, message);
-    const refusal = [...store.workers.values()].find(
-      (worker) =>
-        path.basename(path.dirname(worker.promptPath)) === "discovery-0001",
-    );
-    assert.equal(refusal?.replaceableFailureKind, "policy_refusal", message);
-    assert.equal(refusal?.status, "canceled");
-  }
-}
-
 async function testTransientDiscoveryErrorsRetainRecovery() {
   for (const message of [
     "RateLimitExhaustedError: request rate limit reached; " +
@@ -903,7 +862,7 @@ async function testTransientDiscoveryErrorsRetainRecovery() {
   }
 }
 
-async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
+async function testConsecutiveTransientFailuresFailAtConfiguredThreshold() {
   const { fixture, store } = await coordinatorFixture({
     stopAfterNoNew: 6,
     stopAfterConsecutiveErrors: 2,
@@ -911,8 +870,8 @@ async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
   });
   const executor = new FakeExecutor({
     discoveryFailureMessages: {
-      "discovery-0001": "Request blocked by cyberPolicy.",
-      "discovery-0002": "Request blocked by cyberPolicy.",
+      "discovery-0001": "Synthetic transient worker failure.",
+      "discovery-0002": "Synthetic transient worker failure.",
     },
   });
   const terminal = await runCoordinator(fixture, store, executor, {
@@ -924,15 +883,15 @@ async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
     terminal?.error ?? "",
     /2 consecutive unsuccessful discovery workers/,
   );
-  assert.match(terminal?.error ?? "", /policy_refusal/);
+  assert.match(terminal?.error ?? "", /transient_error/);
   assert.equal(executor.discoveryAttempts.size, 2);
-  assert.equal(executor.discoveryCalls, 2);
+  assert.equal(executor.discoveryCalls, 8);
   assert.equal(store.run.consecutiveErrors, 2);
   assert.equal(store.finishCalls.length, 0);
   assert.equal(terminal.manifestPath, undefined);
   assert.deepEqual(
     [...store.workers.values()].map((worker) => worker.replaceableFailureKind),
-    ["policy_refusal", "policy_refusal"],
+    ["transient_error", "transient_error"],
   );
 }
 
@@ -944,8 +903,8 @@ async function testSuccessfulDiscoveryResetsConsecutiveFailureThreshold() {
   });
   const executor = new FakeExecutor({
     discoveryFailureMessages: {
-      "discovery-0001": "Request blocked by cyberPolicy.",
-      "discovery-0003": "Request blocked by cyberPolicy.",
+      "discovery-0001": "Synthetic transient worker failure.",
+      "discovery-0003": "Synthetic transient worker failure.",
     },
     discoveryCandidateId: "candidate-1",
   });
@@ -958,7 +917,7 @@ async function testSuccessfulDiscoveryResetsConsecutiveFailureThreshold() {
   assert.equal(store.run.consecutiveErrors, 0);
   assert.equal(
     [...store.workers.values()].filter(
-      (worker) => worker.replaceableFailureKind === "policy_refusal",
+      (worker) => worker.replaceableFailureKind === "transient_error",
     ).length,
     2,
   );
@@ -4039,95 +3998,77 @@ async function testRecoverableWorkerErrorsCannotFailScan() {
   }
 }
 
-async function testPolicyRefusedReducerPreservesInputsAndCommittedAggregate() {
+async function testPolicyRefusedReducerPreservesCommittedAggregate() {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 10,
     stopAfterConsecutiveErrors: 2,
-    maxDiscoveryRuns: 4,
+    maxDiscoveryRuns: 3,
   });
+  const refusalMessage =
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
   const nextDiscovery = Promise.withResolvers<void>();
-  const siblingDiscovery = Promise.withResolvers<void>();
   const normalExecutor = new FakeExecutor({
     discoveryCandidateId: "candidate-1",
     canonicalCandidateId: "candidate-1",
-    discoveryGates: {
-      "discovery-0003": nextDiscovery.promise,
-      "discovery-0004": siblingDiscovery.promise,
-    },
+    discoveryGates: { "discovery-0003": nextDiscovery.promise },
   });
-  let committedResultPath!: string;
-  let committedContent!: Buffer;
   const failedAttempts: (string | undefined)[] = [];
+  const preserved: ScanDraftInput[] = [];
+  let stoppedState: DeepScanRunState | undefined;
+  const sleeps: number[] = [];
   const coordinator = createCoordinator(
     fixture,
     store,
     {
       async run(request) {
-        if (request.kind === "dedup") {
-          const label = (await promptContext(request.promptPath)).reducerLabel;
-          if (label === "dedup-0002") {
-            failedAttempts.push(request.resumeThreadId);
-            await request.onThreadStarted?.("fixture-retired-reducer");
-            throw classifyCodexWorkerError(
-              new Error("Request blocked by cyberPolicy."),
-            );
-          }
-          if (label === "dedup-0003") {
-            assert.equal(request.resumeThreadId, undefined);
-            assert.equal(
-              request.artifactContext!.deepReducer!.previousReducerResultPath,
-              committedResultPath,
-            );
-            assert.deepEqual(
-              store.dedupClaims[2].workerIds,
-              store.dedupClaims[1].workerIds,
-              "the replacement must receive every uncommitted input",
-            );
-            assert.deepEqual(
-              await readFile(committedResultPath),
-              committedContent,
-            );
-            siblingDiscovery.resolve();
-          }
+        if (
+          request.kind === "dedup" &&
+          (await promptContext(request.promptPath)).reducerLabel ===
+            "dedup-0002"
+        ) {
+          failedAttempts.push(request.resumeThreadId);
+          const error = codexWorkerTurnError(refusalMessage);
+          if (error instanceof DeepScanNonRetryableError)
+            request.onNonRetryableError?.(error);
+          throw error;
         }
         return normalExecutor.run(request);
       },
     },
-    { retryDelaysMs: [1, 3, 9] },
+    {
+      clock: recordingClock(sleeps),
+      threadId: "fixture-owning-thread",
+      onStopped: async (stopped) => {
+        stoppedState = stopped;
+        const aggregate = stopped.persistedWorkers?.find(
+          (worker) => worker.kind === "dedup" && worker.status === "succeeded",
+        );
+        preserved.push(await readJson(aggregate!.resultManifestPath!));
+      },
+    },
   );
   coordinator.start();
   await store.dedupCommitted.promise;
-  committedResultPath = store.dedupCommits[0].resultManifestPath;
-  committedContent = await readFile(committedResultPath);
+  const committedResultPath = store.dedupCommits[0].resultManifestPath;
+  const committedContent = await readFile(committedResultPath);
   nextDiscovery.resolve();
 
   const terminal = await coordinator.wait(undefined, 5_000);
 
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(terminal?.status, "failed");
+  assert.equal(terminal?.error, refusalMessage);
   assert.deepEqual(failedAttempts, [undefined]);
-  const discoveries = [...store.workers.values()].filter(
-    (worker) => worker.kind === "discovery",
-  );
-  assert.equal(discoveries.length, 4);
-  assert.equal(
-    discoveries.every((worker) => worker.status === "succeeded"),
-    true,
-  );
-  const retiredReducer = [...store.workers.values()].find(
-    (worker) => worker.kind === "dedup" && worker.status === "failed",
-  );
-  assert.equal(retiredReducer?.attempt, 1);
+  assert.deepEqual(sleeps, []);
+  assert.equal(store.dedupClaims.length, 2);
+  assert.equal(store.dedupCommits.length, 1);
+  assert.equal(store.finishCalls.length, 0);
+  assert.equal(normalExecutor.runningDiscovery, 0);
   assert.deepEqual(await readFile(committedResultPath), committedContent);
-  const manifest = await readJson(terminal.manifestPath);
-  assert.deepEqual(
-    manifest.findings.map(
-      (finding: { provenance: { candidateId: string } }) =>
-        finding.provenance.candidateId,
-    ),
-    ["candidate-1"],
-  );
-  assert.equal(store.failureMessages.length, 0);
+  assert.equal(stoppedState?.status, "failed");
+  assert.equal(stoppedState?.error, refusalMessage);
+  assert.deepEqual(preserved, [JSON.parse(committedContent.toString())]);
+  assert.deepEqual(store.failureMessages, [refusalMessage]);
 }
 
 async function testNonRetryableReducerAbortsScanWithoutRetry(
@@ -4168,8 +4109,10 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
   assert.equal(store.dedupCommits.length, 0);
 }
 
-async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
+async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
   kind: "discovery" | "dedup",
+  message: string,
+  resumed: boolean,
 ) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
@@ -4184,6 +4127,7 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
   const shutdown = Promise.withResolvers<void>();
   const signals: AbortSignal[] = [];
   const sleeps: number[] = [];
+  const attempts: (string | undefined)[] = [];
   let discoveryCalls = 0;
   const terminal = runCoordinator(
     fixture,
@@ -4192,22 +4136,28 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
       async run(request) {
         signals.push(request.signal);
         if (request.kind === "discovery") discoveryCalls++;
-        if (
-          request.kind === kind &&
-          (kind === "dedup" || discoveryCalls === 2)
-        ) {
-          const error = new DeepScanNonRetryableError(
-            "Synthetic usage limit reached",
-          );
-          request.onNonRetryableError?.(error);
+        if (request.kind === kind && (kind === "dedup" || discoveryCalls > 1)) {
+          attempts.push(request.resumeThreadId);
+          await request.onThreadStarted?.("fixture-refused-thread");
+          if (resumed && attempts.length === 1) {
+            throw new Error("Synthetic transient failure before refusal.");
+          }
+          const error = codexWorkerTurnError(message);
+          if (error instanceof DeepScanNonRetryableError)
+            request.onNonRetryableError?.(error);
           notified.resolve();
           await shutdown.promise;
+          if (resumed) throw new Error("Synthetic worker cleanup failure.");
           throw error;
         }
         return normal.run(request);
       },
     },
-    { clock: recordingClock(sleeps) },
+    {
+      clock: recordingClock(sleeps),
+      retryDelaysMs: [1, 3],
+      random: () => 0,
+    },
   );
   try {
     await notified.promise;
@@ -4216,9 +4166,30 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown(
     shutdown.resolve();
     const result = await terminal;
     assert.equal(result?.status, "failed");
-    assert.equal(result?.error, "Synthetic usage limit reached");
+    assert.equal(result?.error, message);
+    const failed = [...store.workers.values()].filter(
+      (worker) => worker.status === "failed",
+    );
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].kind, kind);
+    assert.equal(failed[0].threadId, "fixture-refused-thread");
+    assert.equal(failed[0].error, message);
+    assert.equal(failed[0].attempt, resumed ? 2 : 1);
+    assert.equal(
+      [...store.workers.values()].every(
+        (worker) =>
+          worker.id === failed[0].id ||
+          worker.status === "canceled" ||
+          worker.status === "succeeded",
+      ),
+      true,
+    );
     assert.equal(signals.length, callsAtFailure);
-    assert.deepEqual(sleeps, []);
+    assert.deepEqual(sleeps, resumed ? [1] : []);
+    assert.deepEqual(
+      attempts,
+      resumed ? [undefined, "fixture-refused-thread"] : [undefined],
+    );
   } finally {
     shutdown.resolve();
     await terminal;
@@ -4234,8 +4205,20 @@ try {
     DeepScanCoordinatorRegistry,
     immediateClock,
   });
-  await testQuotaFailureStopsDispatchBeforeWorkerShutdown("discovery");
-  await testQuotaFailureStopsDispatchBeforeWorkerShutdown("dedup");
+  for (const message of [
+    "Quota exceeded. Check your plan and billing details.",
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+  ]) {
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        await testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
+          kind,
+          message,
+          resumed,
+        );
+      }
+    }
+  }
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();
@@ -4265,16 +4248,14 @@ try {
   await testSlowReducerPausesDiscoveryRefill();
   await testSingletonHardCapReduction();
   await testExhaustedRetryFailsScan();
-  await testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately();
   await testTransientDiscoveryErrorsRetainRecovery();
-  await testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold();
+  await testConsecutiveTransientFailuresFailAtConfiguredThreshold();
   await testRecoverableWorkerErrorsCannotFailScan();
   await testSuccessfulDiscoveryResetsConsecutiveFailureThreshold();
   await testExhaustedInvalidDiscoveryArtifactsAreReplaced();
   await testExhaustedMalformedDiscoveryDoesNotRemainPublishable();
   await testTransientExecutionFailureResumesWorkerThread();
   await testConfigurationFailureDoesNotRetry();
-  await testConfigurationFailureDoesNotRetry("Request blocked by cyberPolicy.");
   await testFailureManifestWriteDoesNotMaskOriginalError();
   await testFinishPersistenceFailureRewritesManifestAsFailure();
   await testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest();
@@ -4293,11 +4274,8 @@ try {
   );
   await testMissingReducerResultRetainsSizeDiagnosticAfterOtherFailures();
   await testExhaustedReducerIsReplacedAtDiscoveryLimit();
-  await testPolicyRefusedReducerPreservesInputsAndCommittedAggregate();
+  await testPolicyRefusedReducerPreservesCommittedAggregate();
   await testNonRetryableReducerAbortsScanWithoutRetry();
-  await testNonRetryableReducerAbortsScanWithoutRetry(
-    "Request blocked by cyberPolicy.",
-  );
   await testExhaustedReducerPreservesCommittedArtifacts();
   await testCommittedAggregateIsNotSalvagedWhenUntrusted("missing-owner");
   await testCommittedAggregateIsNotSalvagedWhenUntrusted("wrong-scan");

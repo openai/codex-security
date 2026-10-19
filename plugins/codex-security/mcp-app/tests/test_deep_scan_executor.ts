@@ -61,7 +61,6 @@ const {
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
-  isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = await importModule({
   define: {
@@ -100,6 +99,8 @@ const trustedParentSandboxWithDenials = Object.freeze({
   literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
   globScanMaxDepth: 3,
 });
+const cybersecurityRefusal =
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 const deniedWorkerPermissionProfile = {
@@ -162,10 +163,8 @@ try {
     }
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
-    await testAbortPropagation();
-    await testUnstructuredConfigurationFailureRemainsRetryable();
-    await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresRemainWorkerErrors();
+    await testUnstructuredStartupFailuresRemainRetryable();
+    await testPolicyFailuresAreNonRetryable();
     await testMalformedCommandEventsRemainRetryable();
     await testRateLimitPolicyFailureRemainsRetryable();
     await testArtifactStartupTimeoutClassification();
@@ -273,20 +272,23 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
   );
   assert.equal(classifyCodexWorkerError(explicit), explicit);
 
-  const refusalMessages = [
+  const cybersecurityRefusals = [
     "Request blocked by cyberPolicy.",
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",
+    cybersecurityRefusal,
     "This content was flagged for potentially high-risk cyber activity.",
     "This request has been flagged for possible cybersecurity risk.",
     "This request has been flagged for potentially high-risk cyber activity.",
   ];
-  for (const message of refusalMessages) {
+  for (const message of cybersecurityRefusals) {
     const original = new Error(message);
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified, original);
     assert.equal(classified.name, "Error");
-    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
+    const turnError = codexWorkerTurnError(message);
+    assert.ok(turnError instanceof DeepScanNonRetryableError);
+    assert.equal(turnError.message, message);
 
     const explicitRefusal = new DeepScanNonRetryableError(message);
     assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
@@ -303,7 +305,7 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     ]) {
       const unrelated = new Error(unrecognized);
       assert.equal(classifyCodexWorkerError(unrelated), unrelated);
-      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
+      assert.equal(codexWorkerTurnError(unrecognized).name, "Error");
     }
   }
 
@@ -3414,29 +3416,6 @@ async function testStreamTerminationWithoutTerminalEventFails() {
   );
 }
 
-async function testAbortPropagation() {
-  return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
-    await writeFile(promptPath, "BLOCK_AFTER_START\n");
-    const abortController = new AbortController();
-    const execution = new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
-      signal: abortController.signal,
-      onThreadStarted: () => abortController.abort("fixture cancellation"),
-    });
-    await assert.rejects(
-      execution,
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "AbortError" ||
-        /abort|SIGTERM/i.test(error?.message ?? ""),
-    );
-  });
-}
-
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
   for (const kind of ["discovery", "dedup"] as const) {
@@ -3512,13 +3491,8 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
         ? "COMPLETE_THEN_HANG\n"
         : "COMPLETE_THEN_HANG_IGNORE_TERMINATION\n",
     );
-    execution = new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
+    execution = runWorker(promptPath, workingDirectory, {
       kind: kind ?? "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
       signal: controller.signal,
       ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
       onThreadStarted: async () => {
@@ -3569,29 +3543,26 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
   }
 }
 
-async function testUnstructuredConfigurationFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("CONFIG_ERROR", "setup"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 2:"),
-  );
+async function testUnstructuredStartupFailuresRemainRetryable() {
+  for (const [prompt, exitCode] of [
+    ["CONFIG_ERROR", 2],
+    ["THREAD_START_CONFIG_ERROR", 1],
+  ] as const) {
+    await assert.rejects(
+      runFixtureWorker(prompt, "setup"),
+      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+        error?.name === "Error" &&
+        error.message.startsWith(`Codex Exec exited with code ${exitCode}:`),
+    );
+  }
 }
 
-async function testUnstructuredThreadStartFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("THREAD_START_CONFIG_ERROR", "setup"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 1:"),
-  );
-}
-
-async function testPolicyFailuresRemainWorkerErrors() {
+async function testPolicyFailuresAreNonRetryable() {
   for (const prompt of [
     "CYBER_POLICY_ERROR",
     "SAFETY_POLICY_ERROR",
     "CYBERSECURITY_RISK_ERROR",
+    "CYBERSECURITY_RISK_GUIDANCE_ERROR",
     "HIGH_RISK_CYBER_ACTIVITY_ERROR",
     "UPSTREAM_CYBERSECURITY_RISK_ERROR",
     "UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR",
@@ -3599,7 +3570,7 @@ async function testPolicyFailuresRemainWorkerErrors() {
     await assert.rejects(
       runFixtureWorker(prompt),
       (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error" && isCodexCybersecurityPolicyRefusal(error),
+        error instanceof DeepScanNonRetryableError,
     );
   }
 }
@@ -3944,15 +3915,13 @@ async function testWorkerCancellation() {
       },
     });
     const run = (controller: AbortController, onThreadStarted?: () => void) =>
-      executor.run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: controller.signal,
-        onThreadStarted,
-        artifactContext: { root: workingDirectory, layout: "worker" },
-      });
+      executor.run(
+        workerRequest(promptPath, workingDirectory, {
+          signal: controller.signal,
+          onThreadStarted,
+          artifactContext: { root: workingDirectory, layout: "worker" },
+        }),
+      );
     const preAborted = new AbortController();
     const beforeStartup = new Error(
       "coordinator canceled before worker startup",
@@ -4103,11 +4072,21 @@ async function testWorkerTerminalEvents() {
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
+      { type: "turn.failed", error: { message: cybersecurityRefusal } },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
+      { type: "error", message: cybersecurityRefusal },
       {
         type: "item.completed",
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "refusal-text",
+          type: "agent_message",
+          text: cybersecurityRefusal,
+        },
       },
     ] as const) {
       await writeFile(
@@ -4116,31 +4095,26 @@ async function testWorkerTerminalEvents() {
           ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`
           : "NULL_USAGE\n",
       );
-      for (const kind of ["discovery", "dedup"] as const) {
+      for (const kind of ["setup", "discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           const onNonRetryableError = mock.fn();
-          const execution = new CodexSdkWorkerExecutor({
-            parentSandbox: trustedParentSandbox,
-          }).run({
+          const execution = runWorker(promptPath, fixture.root, {
             kind,
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
             resumeThreadId,
-            signal: new AbortController().signal,
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
-            const isQuota = event.error.message === quotaMessage;
+            const nonRetryable =
+              event.error.message !== "429 Too Many Requests";
             await assert.rejects(execution, {
-              name: isQuota ? "DeepScanNonRetryableError" : "Error",
+              name: nonRetryable ? "DeepScanNonRetryableError" : "Error",
               message: event.error.message,
             });
             assert.deepEqual(
               onNonRetryableError.mock.calls.map(
                 ({ arguments: [error] }) => error.message,
               ),
-              isQuota ? [quotaMessage] : [],
+              nonRetryable ? [event.error.message] : [],
             );
             continue;
           }

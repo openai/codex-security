@@ -904,8 +904,18 @@ report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
 
-When Codex reports an exhausted usage limit, Deep Scan cancels active workers
-and stops retrying or launching replacements. Completed worker artifacts are retained.
+When Codex reports an exhausted usage limit or a known cybersecurity policy
+refusal, Deep Scan cancels active workers and stops retrying or launching
+replacements. The scan fails with the original diagnostic. Completed worker
+artifacts are retained. A successful capability check or advisory access result
+does not guarantee that a later request will be accepted.
+
+Inspect the saved scan with `scans show SCAN_ID` for retained findings and
+unfinished work. A failed scan stays failed even when it has a partial report.
+`scans resume` only continues an interrupted scan that is still running; it does
+not restart a terminal policy refusal. After addressing the reported blocker,
+`scans rerun SCAN_ID` starts a new scan from the saved recipe and does not reuse
+completed discovery from the failed scan.
 
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.

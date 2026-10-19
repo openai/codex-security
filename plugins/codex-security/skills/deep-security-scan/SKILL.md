@@ -67,6 +67,8 @@ Handle the result as follows:
 - `status: "canceled"`: stop all scan work and do not call completion. The workbench preserves saved findings and pending candidates; report those retained results and remaining work without claiming a successful scan or generating a replacement report.
 - Terminal scan failure: surface the exact stable MCP error, then read the existing scan context to report preserved findings, pending candidates, and remaining work. Do not start more scan work, call completion, cancel an already terminal scan, synthesize findings, or claim a successful/no-findings scan. An invocation failure before a scan starts is still a blocker; do not create a replacement scan or infer results.
 
+For a policy refusal, distinguish a recorded worker failure from a parent/coordinator failure when the saved context establishes its source; otherwise say the source is unknown. Preserve the original diagnostic. A successful capability check or advisory access result does not rule out a later request-level refusal, and the refusal alone does not establish missing entitlement. Retained findings or a partial report do not make the scan successful. Rejoining only applies while the scan is still running: a terminal failed scan cannot resume in place. Explain that a new scan requires an explicit user request and does not reuse the failed scan's completed discovery.
+
 The native Security workbench observes durable progress without another scan-start call.
 
 ## Complete the Parent Scan Once
