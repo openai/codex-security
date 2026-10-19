@@ -423,10 +423,7 @@ function windowsCredentialAclFailure(error: unknown): string {
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
       : errorMessage(error);
-  const normalized = errorMessage(detail)
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 512);
+  const normalized = errorMessage(detail).replace(/\s+/gu, " ").trim();
   return normalized === "" ? "" : `. ${normalized}`;
 }
 
@@ -800,9 +797,9 @@ export async function inspectWindowsCredentialAclSnapshot(
   home: WindowsCredentialAcl;
   descendantsArePrivate: boolean;
 }> {
-  let ancestors = 0;
+  const ancestors: string[] = [];
   for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-    ancestors += 1;
+    ancestors.push(ancestor);
     if (ancestor === dirname(ancestor)) break;
   }
 
@@ -837,24 +834,36 @@ export async function inspectWindowsCredentialAclSnapshot(
           inspected += 1;
           await options.resolveDescriptorAliases?.(descriptor);
 
-          if (index < ancestors) {
-            const ancestor = inspectWindowsCredentialAcl(
-              descriptor,
-              currentUserSid,
-              {
-                resolvedAliases: options.resolvedAliases,
-                scope: "ancestor",
-              },
-            );
-            if (ancestor.untrustedPrincipals.length !== 0) {
+          if (index < ancestors.length) {
+            const ancestorPath = ancestors[index]!;
+            try {
+              const ancestor = inspectWindowsCredentialAcl(
+                descriptor,
+                currentUserSid,
+                {
+                  resolvedAliases: options.resolvedAliases,
+                  scope: "ancestor",
+                },
+              );
+              if (ancestor.untrustedPrincipals.length !== 0) {
+                throw new Error(
+                  "Windows credential-home ancestor allows another identity to replace the directory",
+                );
+              }
+            } catch (error) {
+              const guidance =
+                ancestorPath === dirname(ancestorPath)
+                  ? "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this."
+                  : "Choose a location outside this ancestor with trusted ownership and permissions.";
               throw new Error(
-                "Windows credential-home ancestor allows another identity to replace the directory",
+                `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
+                { cause: error },
               );
             }
             return;
           }
 
-          if (index === ancestors) {
+          if (index === ancestors.length) {
             try {
               home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
                 resolvedAliases: options.resolvedAliases,
@@ -889,7 +898,7 @@ export async function inspectWindowsCredentialAclSnapshot(
       if (error instanceof WindowsCredentialDescendantsChangedError) continue;
       throw error;
     }
-    if (inspected <= ancestors) {
+    if (inspected <= ancestors.length) {
       throw new Error("Windows credential-home ancestry could not be verified");
     }
     if (!completed) {

@@ -1,9 +1,6 @@
 import {
   createFakeCodexFixture,
-  deniedWorkerPermissionProfile,
   emptyWorkerPermissionProfile,
-  trustedParentSandbox,
-  trustedParentSandboxWithDenials,
 } from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
@@ -88,8 +85,37 @@ const fakeCodexFixture = createFakeCodexFixture.bind(
   temporaryDirectories,
 );
 const previousMarker = process.env.FAKE_CODEX_MARKER;
+const trustedParentSandbox = Object.freeze({
+  filesystemDenies: [],
+});
+const trustedParentSandboxWithDenials = Object.freeze({
+  filesystemDenies: [
+    "/repo/.env",
+    "/repo/**/.secret",
+    "/repo/**/*.pem",
+    "/repo/temp[1]",
+    "/repo/secret[1]",
+    "/repo/.env",
+  ],
+  literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
+  globScanMaxDepth: 3,
+});
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
+const deniedWorkerPermissionProfile = {
+  extends: ":read-only",
+  filesystem: {
+    ":root": "read",
+    "/repo/.env": "deny",
+    "/repo/**/.secret": "deny",
+    "/repo/**/*.pem": "deny",
+    "/repo/temp[1]": { ".": "deny" },
+    "/repo/secret[1]": { ".": "deny" },
+    "/": { "repo/temp[1]": "deny", "repo/secret[1]": "deny" },
+    glob_scan_max_depth: 3,
+  },
+  network: { enabled: false },
+};
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
@@ -1674,17 +1700,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             configuration: {
               ...parsedConfiguration,
               ...inheritedTelemetry,
-              default_permissions: "codex_security_policy",
-              permissions: {
-                codex_security_policy: {
-                  extends: ":read-only",
-                  filesystem: {
-                    ":root": "read",
-                    [codexHome]: { ".": "deny" },
-                  },
-                  network: { enabled: false },
-                },
-              },
               ...Object.fromEntries(
                 Object.entries(nativePaths).map(([key, value]) => [
                   key,
