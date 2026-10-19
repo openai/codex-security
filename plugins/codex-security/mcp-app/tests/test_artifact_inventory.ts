@@ -221,8 +221,8 @@ async function testPrepareListsIgnoredTrackedFilesOnce() {
 
 async function testPrepareExcludesGitMetadata() {
   const fixture = await createFixture("nested repositories");
+  await runGit(fixture.repoRoot, "init", "-q");
   for (const [name, source] of [
-    [".git/config", "[core]\n"],
     ["vendor/lib/.git/HEAD", "ref: refs/heads/main\n"],
     ["vendor/lib/.git/hooks/example.py", "pass\n"],
     ["vendor/lib/handler.py", "pass\n"],

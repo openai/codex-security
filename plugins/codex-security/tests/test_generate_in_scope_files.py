@@ -298,6 +298,69 @@ def test_inventory_rejects_line_breaks_before_serializing_paths(
     assert list(output.parent.glob(".*.tmp")) == []
 
 
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_inventory_reports_a_failed_ignored_tracked_listing(
+    tmp_path: Path, existing_output: bool
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    git(repository, "config", "core.repositoryformatversion", "1")
+    git(repository, "config", "extensions.exampleUnsupported", "true")
+    output = tmp_path / "in_scope_files.txt"
+    if existing_output:
+        output.write_text("previous.py\n", encoding="utf-8")
+
+    result = run_inventory(repository, ".", output)
+
+    assert result.returncode == 2, result.stdout
+    assert result.stdout == ""
+    assert "git ls-files exited with status" in result.stderr
+    assert "exampleunsupported" in result.stderr.lower()
+    if existing_output:
+        assert output.read_text(encoding="utf-8") == "previous.py\n"
+    else:
+        assert not output.exists()
+    assert list(output.parent.glob(".*.tmp")) == []
+
+
+def test_inventory_reports_a_git_launch_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inventory = runpy.run_path(str(SCRIPT))
+    repository = make_repository(tmp_path)
+    output = tmp_path / "in_scope_files.txt"
+    output.write_text("previous.py\n", encoding="utf-8")
+
+    def fail_git(*args, **kwargs):
+        raise PermissionError("synthetic Git launch failure")
+
+    generate = inventory["generate_in_scope_files"]
+    monkeypatch.setitem(generate.__globals__, "git_command", fail_git)
+
+    with pytest.raises(
+        inventory["InventoryError"],
+        match="could not run git ls-files: synthetic Git launch failure",
+    ):
+        generate(repository, ".", output)
+
+    assert output.read_text(encoding="utf-8") == "previous.py\n"
+    assert list(output.parent.glob(".*.tmp")) == []
+
+
+def test_inventory_without_git_keeps_the_ripgrep_listing(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "ignored/tracked.py")
+    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    # An empty CODEX_SECURITY_GIT selects no Git executable.
+    result = run_inventory(repository, ".", output, env={**os.environ, "CODEX_SECURITY_GIT": ""})
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == standard_inventory(repository, ".")
+
+
 def test_diff_inventory_includes_power_shell_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
