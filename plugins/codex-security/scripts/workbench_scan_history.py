@@ -667,14 +667,14 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
+        after_key = (timestamp_key(after["started_at"]), after["id"])
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute(
-                "SELECT * FROM scans WHERE status = 'complete' "
-                "AND (started_at < ? OR (started_at = ? AND id <= ?))",
-                (after["started_at"], after["started_at"], after["id"]),
+                "SELECT id, started_at, target_id, target_path FROM scans WHERE status = 'complete'"
             )
-            if _same_repository(scan, after)
+            if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
+            and _same_repository(scan, after)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(

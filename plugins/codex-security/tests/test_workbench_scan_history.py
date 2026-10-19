@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_deep_coordinator_succeeded,
     resume_deep_scan,
     run_workbench,
@@ -1065,6 +1067,97 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     latest_finding = get_scan(state_dir, latest["scanId"])["scan"]["findings"][0]
     assert latest_finding["knownScanIds"] == [before["scanId"], latest["scanId"]]
     assert latest_finding["knownSince"] == known_since
+
+
+@pytest.mark.parametrize(
+    "timestamps",
+    [
+        (
+            "2026-08-01T03:00:00+02:00",
+            "2026-08-01T01:15:00Z",
+            "2026-08-01T01:30:00Z",
+            "2026-08-01T00:45:00-01:00",
+        ),
+        (
+            "2026-08-01T01:00:00Z",
+            "2026-08-01T01:00:00.000001Z",
+            "2026-08-01T01:00:00.000002Z",
+            "2026-08-01T01:00:00.000003Z",
+        ),
+        (
+            "2026-08-01t03:00:00.000000+02:00",
+            "2026-08-01T01:00:00Z",
+            "2026-08-01T01:00:00.0Z",
+            "2026-08-01T01:00:00.000Z",
+        ),
+    ],
+    ids=["offsets", "microseconds", "equal-instants"],
+)
+def test_explicit_comparison_uses_chronological_matching_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scans = sorted(
+        (
+            create_cli_scan(
+                state_dir, tmp_path / "scans", repository, identity_anchor=f"synthetic-{index}"
+            )
+            for index in range(4)
+        ),
+        key=lambda scan: scan["scanId"],
+    )
+    middle, after, future = scans[1:]
+    findings = [get_scan(state_dir, scan["scanId"])["scan"]["findings"][0] for scan in scans]
+    for left, right in ((0, 1), (1, 3)):
+        save_scan_matches(
+            state_dir,
+            scans[left],
+            scans[right],
+            confirmed_match(findings[left]["occurrenceId"], findings[right]["occurrenceId"]),
+        )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(timestamp, scan["scanId"]) for timestamp, scan in zip(timestamps, scans)],
+        )
+        original = list(connection.iterdump())
+    expected = [sorted(finding["findingId"] for finding in findings[:2])]
+
+    for before_scan, after_scan in ((middle, after), (after, middle)):
+        compared = compare_scan_pair(
+            state_dir, before_scan, after_scan, "--include-matching-inputs"
+        )
+        assert (compared["beforeScanId"], compared["afterScanId"]) == (
+            before_scan["scanId"],
+            after_scan["scanId"],
+        )
+        assert compared["matchingInputs"]["knownFindingGroups"] == expected
+
+    history = load_script("workbench_scan_history")
+
+    def unexpected_git_lookup(*_args: Any) -> str:
+        raise AssertionError("Future scans must not trigger repository discovery")
+
+    monkeypatch.setattr(history, "git_output", unexpected_git_lookup)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert list(connection.iterdump()) == original
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "UPDATE scans SET target_id = NULL, target_path = ? WHERE id = ?",
+            (str(tmp_path / "future-repository"), future["scanId"]),
+        )
+        compared = history.compare_scans(
+            connection,
+            Namespace(before_scan_id=middle["scanId"], after_scan_id=after["scanId"]),
+            require_scan=lambda db, scan_id: db.execute(
+                "SELECT * FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone(),
+            read_coverage=lambda _: {},
+            include_matching_inputs=True,
+        )
+    assert compared["matchingInputs"]["knownFindingGroups"] == expected
 
 
 def test_semantic_scan_matching_backfills_legacy_finding_details(tmp_path: Path) -> None:

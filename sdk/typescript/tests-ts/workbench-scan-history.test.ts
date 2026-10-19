@@ -106,7 +106,7 @@ for index, (scan, repository) in enumerate([
     ('before', 'selected'), ('after', 'selected')
 ]):
     connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?)',
-                       (scan, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
+                       (scan, str(Path(sys.argv[2]) / repository), 'complete', f'2026-08-01T00:00:0{index}Z'))
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?)', [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
