@@ -26,6 +26,7 @@
 - detect Windows Yarn global installs in update notices ([#1692](https://github.com/openai/codex-security/pull/1692))
 - add Cheaper Inference inference provider ([#1623](https://github.com/openai/codex-security/pull/1623))
 - describe positive numeric input bounds ([#1605](https://github.com/openai/codex-security/pull/1605))
+- import schema APIs directly from Zod ([#1726](https://github.com/openai/codex-security/pull/1726))
 
 <!-- release-section: highlights:end -->
 
