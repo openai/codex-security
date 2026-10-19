@@ -195,11 +195,15 @@ function renderFindingDescription(
     lines.push("", "## Reproduction summary", "", finding.attackPath.summary);
   }
 
-  const rootCause = finding.rootCause;
+  const rootCause = publicationRootCause(finding);
   if (typeof rootCause === "string") {
     lines.push("", "## Root cause", "", rootCause);
-  } else if (rootCause !== undefined) {
-    lines.push("", "## Root cause", "", rootCause.summary);
+  } else if (
+    rootCause !== undefined &&
+    (rootCause.summary !== undefined || rootCause.code !== undefined)
+  ) {
+    lines.push("", "## Root cause");
+    if (rootCause.summary !== undefined) lines.push("", rootCause.summary);
     if (rootCause.code !== undefined) {
       lines.push("", fencedCode(rootCause.code, rootCause.language));
     }
@@ -222,10 +226,11 @@ function renderFindingDescription(
     lines.push(...limits.map((limit) => `- ${limit}`));
   }
 
-  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
+  const codeEvidence = publicationCodeEvidence(finding);
+  if (codeEvidence.length > 0) {
     lines.push("", "## Source-code evidence");
-    for (const evidence of finding.codeEvidence) {
-      lines.push("", ...renderCodeEvidence(scan.target, evidence));
+    for (const [index, evidence] of codeEvidence.entries()) {
+      lines.push("", ...renderCodeEvidence(scan.target, evidence, index));
     }
   }
 
@@ -312,17 +317,76 @@ function renderLocation(
 
 function renderCodeEvidence(
   target: ScanTargetRecord,
-  evidence: FindingCodeEvidence,
+  evidence: PublicationCodeEvidence,
+  index: number,
 ): string[] {
-  return [
-    `### ${evidence.label}`,
-    "",
-    renderLocation(target, evidence),
-    "",
-    fencedCode(evidence.code, evidence.language),
-    "",
-    evidence.explanation,
-  ];
+  const lines = [`### ${evidence.label ?? `Code evidence ${index + 1}`}`, ""];
+  if (evidence.path !== undefined) {
+    lines.push(
+      evidence.startLine === undefined
+        ? `- **${evidence.role === undefined ? "Location" : humanizeRole(evidence.role)}:** \`${evidence.path}\``
+        : renderLocation(target, {
+            ...evidence,
+            path: evidence.path,
+            startLine: evidence.startLine,
+          }),
+      "",
+    );
+  }
+  lines.push(fencedCode(evidence.code, evidence.language));
+  if (evidence.explanation !== undefined) lines.push("", evidence.explanation);
+  return lines;
+}
+
+function publicationRootCause(finding: Finding) {
+  const canonical = finding.rootCause;
+  const legacy = finding.root_cause;
+  if (canonical === undefined) return legacy ?? undefined;
+  if (legacy === undefined || legacy === null) return canonical;
+  const details: Array<{ summary?: string; code?: string; language?: string }> =
+    [canonical, legacy].map((detail) =>
+      typeof detail === "string" ? { summary: detail } : detail,
+    );
+  const summary = details.find((detail) => detail.summary?.trim())?.summary;
+  const code = details.find((detail) => detail.code?.trim())?.code;
+  const language = details.find(
+    (detail) => detail.code === code && detail.language?.trim(),
+  )?.language;
+  return summary === undefined && code === undefined
+    ? undefined
+    : { summary, code, language };
+}
+
+type PublicationCodeEvidence = Partial<FindingCodeEvidence> &
+  Pick<FindingCodeEvidence, "id" | "code">;
+
+function publicationCodeEvidence(finding: Finding): PublicationCodeEvidence[] {
+  const evidence: PublicationCodeEvidence[] = [...(finding.codeEvidence ?? [])];
+  const ids = new Set(evidence.map((item) => item.id));
+  for (const item of finding.code_evidence ?? []) {
+    if (ids.has(item.id)) continue;
+    ids.add(item.id);
+    const entry: PublicationCodeEvidence = { id: item.id, code: item.code };
+    for (const key of [
+      "label",
+      "path",
+      "language",
+      "role",
+      "explanation",
+    ] as const) {
+      const value = item[key];
+      if (typeof value === "string" && value.length > 0) entry[key] = value;
+    }
+    const start = item["startLine"];
+    if (typeof start === "number" && Number.isInteger(start) && start > 0) {
+      entry.startLine = start;
+      const end = item["endLine"];
+      if (typeof end === "number" && Number.isInteger(end) && end >= start)
+        entry.endLine = end;
+    }
+    evidence.push(entry);
+  }
+  return evidence;
 }
 
 function humanizeRole(role: string): string {

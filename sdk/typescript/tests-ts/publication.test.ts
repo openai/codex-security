@@ -366,6 +366,203 @@ describe("scan publication preparation", () => {
     expect(description).not.toContain("Snapshot digest");
   });
 
+  test.each([
+    ["string", undefined, "Legacy root summary.", ["Legacy root summary."], []],
+    [
+      "code only",
+      undefined,
+      { code: "legacy_control()", language: "python" },
+      ["```python\nlegacy_control()\n```"],
+      ["undefined"],
+    ],
+    [
+      "complementary",
+      { summary: "Canonical root summary.", language: "javascript" },
+      {
+        summary: "Shadow summary.",
+        code: "legacy_control()",
+        language: "python",
+      },
+      ["Canonical root summary.", "```python\nlegacy_control()\n```"],
+      ["Shadow summary.", "```javascript"],
+    ],
+    [
+      "conflicting",
+      {
+        summary: "Canonical root summary.",
+        code: "canonical_control()",
+        language: "python",
+      },
+      {
+        summary: "Shadow summary.",
+        code: "legacy_control()",
+        language: "javascript",
+      },
+      ["Canonical root summary.", "```python\ncanonical_control()\n```"],
+      ["Shadow summary.", "legacy_control()"],
+    ],
+    [
+      "different code without canonical language",
+      { summary: "Canonical root summary.", code: "canonical_control()" },
+      { code: "legacy_control()", language: "python" },
+      ["```\ncanonical_control()\n```"],
+      ["```python", "legacy_control()"],
+    ],
+    [
+      "string with complementary code",
+      "Canonical root summary.",
+      { code: "legacy_control()", language: "python" },
+      ["Canonical root summary.", "```python\nlegacy_control()\n```"],
+      [],
+    ],
+    [
+      "same code",
+      { summary: "Canonical root summary.", code: "same_control()" },
+      { code: "same_control()", language: "python" },
+      ["```python\nsame_control()\n```"],
+      [],
+    ],
+    [
+      "blank canonical",
+      { summary: " ", code: "\t", language: "javascript" },
+      {
+        summary: "Legacy root summary.",
+        code: "legacy_control()",
+        language: "python",
+      },
+      ["Legacy root summary.", "```python\nlegacy_control()\n```"],
+      ["```javascript"],
+    ],
+    ["null", undefined, null, [], ["## Root cause"]],
+    ["empty object", undefined, {}, [], ["## Root cause"]],
+  ] as const)(
+    "preserves %s historical root details",
+    async (_name, canonical, legacy, present, absent) => {
+      const scanDirectory = await copyExample();
+      const findingsPath = join(scanDirectory, "findings.json");
+      const findings = await readJson<FindingsDocument>(findingsPath);
+      findings.findings[0]!.rootCause = canonical;
+      findings.findings[0]!.root_cause = legacy;
+      await writeJson(findingsPath, findings);
+      await reseal(scanDirectory);
+      const saved = await readFile(findingsPath, "utf8");
+      const { description } = (
+        await prepareScanPublication(
+          scanDirectory,
+          publicationOptions(scanDirectory),
+        )
+      ).issues[0]!;
+      for (const text of present) expect(description).toContain(text);
+      for (const text of absent) expect(description).not.toContain(text);
+      expect(await readFile(findingsPath, "utf8")).toBe(saved);
+    },
+  );
+
+  test("preserves historical evidence with missing or invalid optional metadata", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const finding = findings.findings[0]!;
+    const canonical = {
+      id: "shared",
+      label: "Canonical source",
+      path: "src/canonical.py",
+      startLine: 12,
+      code: "canonical_source()",
+      explanation: "Canonical explanation.",
+    };
+    finding.codeEvidence = [
+      canonical,
+      { ...canonical, code: "second_canonical_source()" },
+    ];
+    finding.code_evidence = [
+      { id: "shared", code: "shadow_source()" },
+      {
+        id: "minimal",
+        code: "````\nlegacy_minimal()",
+        language: "text\n## injected-language",
+      },
+      { id: "minimal", code: "duplicate_legacy_source()" },
+      {
+        id: "invalid",
+        code: "legacy_invalid_metadata()",
+        label: 42,
+        path: false,
+        role: {},
+        language: [],
+        explanation: true,
+      },
+      { id: "whitespace", code: " \t " },
+      {
+        id: "path-only",
+        code: "legacy_path_only()",
+        path: "src/path-only.py",
+        startLine: true,
+        endLine: 42,
+      },
+      {
+        id: "range",
+        code: "legacy_range()",
+        path: "src/range.py",
+        startLine: 12,
+        endLine: 8,
+        label: "Legacy range",
+        explanation: "Legacy explanation.",
+        role: "source",
+        language: "python",
+      },
+    ];
+    await writeJson(findingsPath, findings);
+    const manifestPath = join(scanDirectory, "scan-manifest.json");
+    const manifest = await readJson<ScanManifest>(manifestPath);
+    manifest.scan.target.kind = "git_revision";
+    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
+    delete manifest.scan.target.snapshotDigest;
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDirectory);
+    const saved = await readFile(findingsPath, "utf8");
+    const { description } = (
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
+    ).issues[0]!;
+    for (const snippet of [
+      "canonical_source()",
+      "second_canonical_source()",
+      "legacy_minimal()",
+      "legacy_invalid_metadata()",
+      "legacy_path_only()",
+      "legacy_range()",
+    ])
+      expect(description).toContain(snippet);
+    expect(description.indexOf("canonical_source()")).toBeLessThan(
+      description.indexOf("second_canonical_source()"),
+    );
+    expect(description.indexOf("second_canonical_source()")).toBeLessThan(
+      description.indexOf("legacy_minimal()"),
+    );
+    expect(description.indexOf("legacy_minimal()")).toBeLessThan(
+      description.indexOf("legacy_invalid_metadata()"),
+    );
+    for (const omitted of [
+      "shadow_source()",
+      "duplicate_legacy_source()",
+      "injected-language",
+      "undefined",
+      "[object Object]",
+    ])
+      expect(description).not.toContain(omitted);
+    expect(description).toContain("`````\n````\nlegacy_minimal()\n`````");
+    expect(description).toContain("```\n \t \n```");
+    expect(description).toContain("`src/path-only.py`");
+    expect(description).not.toContain("[`src/path-only.py");
+    expect(description).toContain("src/range.py#L12)");
+    expect(description).not.toContain("#L12-L8");
+    expect(description).toContain("Legacy explanation.");
+    expect(await readFile(findingsPath, "utf8")).toBe(saved);
+  });
+
   test("does not turn non-HTTPS repository remotes into source links", async () => {
     const scanDirectory = await copyExample();
     const manifestPath = join(scanDirectory, "scan-manifest.json");
@@ -447,6 +644,12 @@ describe("scan publication preparation", () => {
       explanation:
         "Preserve canonical evidence even without a safe source link.",
     }));
+    findings.findings[0]!.code_evidence = paths.map((path, index) => ({
+      id: `legacy-path-${index}`,
+      path,
+      startLine: 41,
+      code: `legacy_preserved_snippet_${index}()`,
+    }));
     await writeJson(findingsPath, findings);
     await reseal(scanDirectory);
 
@@ -463,6 +666,7 @@ describe("scan publication preparation", () => {
     for (const [index, path] of paths.entries()) {
       expect(description).toContain(`**Source:** \`${path}:41\``);
       expect(description).toContain(`preserved_snippet_${index}()`);
+      expect(description).toContain(`legacy_preserved_snippet_${index}()`);
       expect(description).not.toContain(`[\`${path}:41\`](`);
     }
   });
