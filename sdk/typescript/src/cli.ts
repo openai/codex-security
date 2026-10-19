@@ -1330,7 +1330,7 @@ export async function runCodexSkillCommand(
       const overrides = parseToml(
         stringifyToml(output.codexOverrides ?? {}),
       ) as JsonObject;
-      const config = deepMerge(ambientConfig, overrides);
+      const config = deepMerge(structuredClone(ambientConfig), overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
@@ -1457,7 +1457,7 @@ export async function runCodexSkillCommand(
         releaseCredentialHome =
           await acquireCodexSecurityCredentialHomeLock(codexHome);
         let credentialsAvailable: boolean;
-        const ambientConfig = await readCodexHomeConfig(selected);
+        const ambientAuthConfig = await readCodexHomeConfig(selected);
         credentialConfig = await readCodexHomeConfig({
           ...selected,
           CODEX_HOME: codexHome,
@@ -1468,9 +1468,34 @@ export async function runCodexSkillCommand(
           "projects",
           "project_root_markers",
         ]) {
-          const value = ambientConfig[key];
+          const value = ambientAuthConfig[key];
           if (value === undefined) delete credentialConfig[key];
           else credentialConfig[key] = value;
+        }
+        if (output.appServer !== undefined) {
+          // Keep ambient Daybreak settings in the home layer so native project
+          // configuration and per-launch overrides retain their precedence.
+          const daybreak = ambientConfig["daybreak"];
+          if (daybreak === undefined) delete credentialConfig["daybreak"];
+          else credentialConfig["daybreak"] = daybreak;
+          const features = isJsonObject(credentialConfig["features"])
+            ? credentialConfig["features"]
+            : {};
+          const ambientFeatures = ambientConfig["features"];
+          for (const key of [
+            "cli_daybreak",
+            "api_key_cyber_access_programs",
+            "api_key_model_discovery",
+          ]) {
+            const value = isJsonObject(ambientFeatures)
+              ? ambientFeatures[key]
+              : undefined;
+            if (value === undefined) delete features[key];
+            else features[key] = value;
+          }
+          if (Object.keys(features).length === 0)
+            delete credentialConfig["features"];
+          else credentialConfig["features"] = features;
         }
         if (typeof provider === "string")
           credentialConfig["model_provider"] = provider;

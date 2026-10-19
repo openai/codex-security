@@ -180,6 +180,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               throw error;
             }))
         : undefined;
+      const workerFeatures = runtimeSettings.config.features;
+      if (
+        parentProgram !== undefined &&
+        (!isRecord(workerFeatures) ||
+          workerFeatures.api_key_cyber_access_programs === undefined)
+      ) {
+        // Transmitting the inherited program requires this gate for API-key auth.
+        // Explicit per-scan feature settings remain authoritative.
+        configOverrides.push("features.api_key_cyber_access_programs=true");
+      }
       const { useOpenAiApiKey } =
         await preflightDeepScanWorkerPermissionProfile({
           ...preflightOptions,

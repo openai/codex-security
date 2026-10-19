@@ -41,7 +41,8 @@ export async function testWorkerCyberAccessSettings({
 }) {
   const cases: {
     name: string;
-    configuration: string;
+    configuration?: string;
+    workerFeatures?: Record<string, boolean>;
     daybreak?: boolean;
     workerDaybreak?: boolean;
     nativeProfile?: string;
@@ -115,6 +116,7 @@ export async function testWorkerCyberAccessSettings({
       program: "standard",
       parentProgram: "standard",
       parentTurn: { threadId: "parent-standard", turnId: "active-standard" },
+      features: { api_key_cyber_access_programs: true },
     },
     {
       name: "parent-blue",
@@ -124,6 +126,7 @@ export async function testWorkerCyberAccessSettings({
       program: "daybreak_blue",
       parentProgram: "daybreak_blue",
       parentTurn: { threadId: "parent-blue", turnId: "active-blue" },
+      features: { api_key_cyber_access_programs: true },
       failParentReadOnce: true,
     },
     {
@@ -136,7 +139,35 @@ export async function testWorkerCyberAccessSettings({
       program: "daybreak_red",
       parentProgram: "daybreak_red",
       parentTurn: { threadId: "parent-red", turnId: "active-red" },
+      features: { api_key_cyber_access_programs: true },
     },
+    {
+      name: "parent-native-home",
+      program: "standard",
+      parentProgram: "standard",
+      parentTurn: { threadId: "parent-native-home", turnId: "active-native" },
+      features: { api_key_cyber_access_programs: true },
+    },
+    {
+      name: "parent-gate-disabled",
+      configuration: "[features]\napi_key_cyber_access_programs = false\n",
+      program: "daybreak_blue",
+      parentProgram: "daybreak_blue",
+      parentTurn: { threadId: "parent-disabled", turnId: "active-disabled" },
+      features: { api_key_cyber_access_programs: false },
+    },
+    ...[true, false].map((enabled) => ({
+      name: `parent-snapshot-gate-${enabled}`,
+      configuration: `[features]\napi_key_cyber_access_programs = ${!enabled}\n`,
+      workerFeatures: { api_key_cyber_access_programs: enabled },
+      program: "daybreak_red",
+      parentProgram: "daybreak_red",
+      parentTurn: {
+        threadId: `parent-snapshot-${enabled}`,
+        turnId: `active-snapshot-${enabled}`,
+      },
+      features: { api_key_cyber_access_programs: enabled },
+    })),
     {
       name: "parent-turn-unavailable",
       configuration:
@@ -196,6 +227,10 @@ export async function testWorkerCyberAccessSettings({
     process.env.CODEX_CLI_PATH = process.execPath;
     process.env.CODEX_HOME = fixture.root;
     await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH");
+    await writeFile(
+      path.join(fixture.root, "config.toml"),
+      "[features]\napi_key_cyber_access_programs = false\n",
+    );
     childProcess.spawn = ((
       command: string,
       args: readonly string[],
@@ -222,15 +257,25 @@ export async function testWorkerCyberAccessSettings({
     }) as typeof childProcess.spawn;
     syncBuiltinESMExports();
     for (const testCase of cases) {
-      testCase.configPath = path.join(fixture.root, `${testCase.name}.toml`);
-      await writeFile(testCase.configPath, testCase.configuration);
-      if (testCase.workerDaybreak !== undefined) {
+      if (testCase.configuration !== undefined) {
+        testCase.configPath = path.join(fixture.root, `${testCase.name}.toml`);
+        await writeFile(testCase.configPath, testCase.configuration);
+      }
+      if (
+        testCase.workerDaybreak !== undefined ||
+        testCase.workerFeatures !== undefined
+      ) {
         testCase.workerConfigPath = `${testCase.configPath}.deep`;
         await writeFile(
           testCase.workerConfigPath,
           stringifyToml({
             worker_runtime: {
-              daybreak: testCase.workerDaybreak,
+              ...(testCase.workerDaybreak === undefined
+                ? {}
+                : { daybreak: testCase.workerDaybreak }),
+              ...(testCase.workerFeatures === undefined
+                ? {}
+                : { features: testCase.workerFeatures }),
               ...(testCase.nativeProfile === undefined
                 ? {}
                 : { native_profile: testCase.nativeProfile }),
@@ -269,7 +314,7 @@ export async function testWorkerCyberAccessSettings({
         ),
         "",
       );
-      process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
+      restoreEnv("CODEX_SECURITY_CONFIG_PATH", testCase.configPath);
       restoreEnv(
         "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
         testCase.workerConfigPath,
@@ -301,7 +346,7 @@ export async function testWorkerCyberAccessSettings({
         await Promise.all(
           cases.map((testCase) => {
             // Each scan captures its own config before its asynchronous launch.
-            process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
+            restoreEnv("CODEX_SECURITY_CONFIG_PATH", testCase.configPath);
             restoreEnv(
               "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
               testCase.workerConfigPath,
@@ -315,6 +360,14 @@ export async function testWorkerCyberAccessSettings({
           ({ args }) => args[0] === "exec",
         );
         assert.equal(workerLaunches.length, cases.length);
+        const preflights = await Promise.all(
+          launches
+            .filter(({ args }) => args.includes("app-server"))
+            .map(async (launch) => ({
+              ...launch,
+              invocation: await readJson(launch.markerPath),
+            })),
+        );
         for (const {
           name,
           daybreak,
@@ -323,18 +376,22 @@ export async function testWorkerCyberAccessSettings({
           features = {},
           configPath,
         } of cases) {
-          const preflight = launches.find(
+          const preflight = preflights.find(
             (entry) =>
-              entry.args.includes("app-server") &&
-              entry.args.some((arg) =>
-                arg.startsWith("default_permissions="),
-              ) &&
-              entry.configPath === configPath,
+              entry.configPath === configPath &&
+              entry.invocation.requests.some(
+                (request: { method: string }) =>
+                  request.method === "config/read",
+              ),
           );
           assert.ok(preflight);
           assertConfigOverrides(preflight.args, {
             daybreak,
             "features.cli_daybreak": features.cli_daybreak,
+            "features.api_key_cyber_access_programs":
+              features.api_key_cyber_access_programs,
+            "features.api_key_model_discovery":
+              features.api_key_model_discovery,
           });
           const launch = workerLaunches.find(
             ({ args }) => args[args.indexOf("--model") + 1] === name,
@@ -375,14 +432,8 @@ export async function testWorkerCyberAccessSettings({
           assertReadOnlyWorkerPolicy(invocation.argv);
           assertWorkerSubagentPolicy(invocation.argv, 0);
         }
-        const parentReads = (
-          await Promise.all(
-            launches
-              .filter(({ args }) => args.includes("app-server"))
-              .map(({ markerPath }) => readJson(markerPath)),
-          )
-        ).flatMap((launch) =>
-          launch.requests.filter(
+        const parentReads = preflights.flatMap(({ invocation }) =>
+          invocation.requests.filter(
             (request: { method: string }) => request.method === "thread/read",
           ),
         );
@@ -414,10 +465,12 @@ export async function testWorkerCyberAccessSettings({
               parentProgram === "standard" ? "daybreak_blue" : "standard",
             );
           }
-          await writeFile(
-            configPath!,
-            `daybreak = ${!daybreak}\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\ncli_daybreak = ${!features?.cli_daybreak}\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n`,
-          );
+          if (configPath !== undefined) {
+            await writeFile(
+              configPath,
+              `daybreak = ${!daybreak}\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\ncli_daybreak = ${!features?.cli_daybreak}\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n`,
+            );
+          }
           if (workerConfigPath !== undefined) {
             await writeFile(
               workerConfigPath,
