@@ -162,16 +162,18 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         process.arch,
         originalCwd,
       );
+      const preflightOptions = {
+        codexPath,
+        cwd: request.workingDirectory,
+        configOverrides,
+        providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
+        env: childEnv,
+        signal: request.signal,
+      };
       const parentProgram = this.modelSettings.parentTurn
         ? await (this.parentCyberAccessProgram ??=
             readDeepScanParentCyberAccessProgram({
-              codexPath,
-              cwd: request.workingDirectory,
-              configOverrides,
-              providerConfigOverrides:
-                runtimeSettings.preflightProviderOverrides,
-              env: childEnv,
-              signal: request.signal,
+              ...preflightOptions,
               parentTurn: this.modelSettings.parentTurn,
             }).catch((error: unknown) => {
               this.parentCyberAccessProgram = undefined;
@@ -180,14 +182,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         : undefined;
       const { useOpenAiApiKey } =
         await preflightDeepScanWorkerPermissionProfile({
-          codexPath,
-          cwd: request.workingDirectory,
-          configOverrides,
-          providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
+          ...preflightOptions,
           expectedProfile: workerProfile,
-          env: childEnv,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
-          signal: request.signal,
         });
       const prompt = await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {

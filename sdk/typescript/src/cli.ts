@@ -1627,17 +1627,11 @@ export async function runCodexSkillCommand(
                 output.appServer === undefined
                   ? undefined
                   : {
+                      ...output.appServer,
                       apiKey,
                       modelProvider,
                       onThreadStarted: releaseCredentialHome,
-                      directory: output.appServer.directory,
-                      prompt: output.appServer.prompt,
-                      threadSource: output.appServer.threadSource,
                       input: invocation.stdin!,
-                      sandbox: output.appServer.sandbox,
-                      externalSandbox: output.appServer.externalSandbox,
-                      cyberAccessProgram: output.appServer.cyberAccessProgram,
-                      onEvent: output.appServer.onEvent,
                     },
               ),
               new Promise<undefined>((resolve) => {
