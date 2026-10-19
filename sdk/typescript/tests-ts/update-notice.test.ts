@@ -104,6 +104,11 @@ describe("CLI update notice", () => {
       [{}, "/.yarn/global/pkg", `yarn global add ${packageName}`],
       [{}, "/.config/yarn/global/pkg", `yarn global add ${packageName}`],
       [
+        {},
+        "C:\\AppData\\Local\\Yarn\\Data\\global\\node_modules\\pkg",
+        `yarn global add ${packageName}`,
+      ],
+      [
         { npm_config_user_agent: "bun/1.3.0" },
         installed,
         `bun add ${packageName}`,
@@ -264,7 +269,12 @@ describe("CLI update notice", () => {
       ["info", "--json"],
       dependencies({ onUpdateCheck }),
     );
-    for (const argv of [["--help"], ["--version"], ["scan", "--dry-run"]]) {
+    for (const argv of [
+      ["--help"],
+      ["--version"],
+      ["scan", "--dry-run"],
+      ["info", "--workers"],
+    ]) {
       await main(
         argv,
         capture().stream,

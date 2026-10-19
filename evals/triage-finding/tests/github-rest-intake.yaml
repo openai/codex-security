@@ -107,6 +107,27 @@
     - type: javascript
       value: file://./assertions/github-rest-intake.mts
 
+- description: "GitHub intake selects REST without an explicit Connector request"
+  metadata:
+    case_id: github-default-rest
+    source_type: github_repo
+  vars:
+    case_id: github-request-7
+    target_repo: https://github.com/promptfoo/promptfoo
+    source_type_under_test: github_repo
+    finding_input: "Source requested: code scanning."
+    invocation_preamble: "Use $codex-security:triage-finding for code scanning in GitHub repo promptfoo/promptfoo."
+    expected_github_rest_behavior: default_rest
+    eval_instructions: |-
+      This is an automated eval of the transport choice. Do not query live
+      GitHub, inspect code, or emit a triage result. Return one JSON object with
+      only transport, chosen from "rest", "github_connector_read_only", or "other".
+  options:
+    disableDefaultAsserts: true
+  assert:
+    - type: javascript
+      value: file://./assertions/github-rest-intake.mts
+
 - description: "Explicit GitHub Connector request preserves the selected transport"
   metadata:
     case_id: github-explicit-connector

@@ -11,6 +11,9 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 - Keep credential access, storage, and configuration protections, unsafe-path
   checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
+- Accept reasoning-effort values as strings and pass them through unchanged.
+  Do not add wrapper-owned enums or allowlists; let the selected model/provider
+  determine which values it supports.
 - Mention another `openai/` repository in comments or pull request descriptions
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.
@@ -78,6 +81,36 @@ variables, and defaults as public API.
 - Update relevant help, schemas, documentation, and tests in the same change.
   Describe the public CLI change in the pull request.
 
+## Pull request labels
+
+- Use existing labels only when they convey release behavior, dependency updates,
+  material platform impact, or actionable maintainer triage. Labels are not
+  required to open, test, review, or merge a pull request.
+- Start with an accurate Conventional Commit title. For PRs targeting `main`,
+  let `node-release-labels` assign the release category: `feat` → `enhancement`,
+  `fix` → `bug`, `docs` → `documentation`, and `test`, `release`, or
+  `chore(release)` → `skip-release-notes`. A `!` takes precedence and selects
+  `breaking-change`. Other types, including ordinary `chore`, have no automatic
+  category. Follow the same mapping when manual assignment is needed.
+- Preserve maintainer overrides, including manually assigned release labels.
+  Do not replace them based only on the title. Use `breaking-change` for an
+  actual compatibility break; under the current pre-1.0 policy it causes a minor
+  version bump. Use `skip-release-notes` for internal changes that do not affect
+  package users; it hides release notes without removing version impact. See
+  [RELEASING.md](RELEASING.md) for the full semantics.
+- Use `dependencies` for dependency updates across package ecosystems, without
+  adding language or ecosystem labels. Use `platform:windows` only when
+  Windows-specific behavior is material to the change.
+- Do not apply `area:*` labels to PRs. Describe affected surfaces in the title
+  and description; leave issue labels and repository label definitions intact.
+- Retain existing maintainer triage labels while they identify actionable,
+  unresolved work. Do not create new label taxonomies or bulk-edit labels on
+  other PRs unless the user asks.
+
+## Dependency cooldowns
+
+Apply the cooldowns and exclusions in `.github/dependabot.yml` before merging manual or bot dependency upgrades. Devcontainer upgrades must pass the CI publication-age check; missing publication metadata does not make a version eligible. Dependabot can still open an early PR when a feature omits its publication timestamp, so wait for the reported eligibility time and rerun CI before merging.
+
 ## Public repository and pull requests
 
 Everything published in this repository is public. Review branch names before
@@ -105,3 +138,5 @@ attachments, and links for sensitive information.
   pull requests before merging them.
 - Review material before publishing it. Editing or deleting it afterward does
   not guarantee removal from notifications, caches, or public history.
+- Follow the [pull request label policy](CONTRIBUTING.md#pull-request-labels).
+  Keep `area:*` labels on issues, not pull requests.

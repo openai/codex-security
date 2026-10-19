@@ -2,7 +2,9 @@
 import type { CalibrationCase, CalibrationVariant } from "../types.ts";
 
 import fs from "node:fs";
+import { hash } from "node:crypto";
 import path from "node:path";
+import { stringify } from "yaml";
 
 export const DEFAULT_DATASET = path.join(
   import.meta.dirname,
@@ -47,39 +49,28 @@ function parseArgs(argv: string[]) {
   return args;
 }
 
-function quote(value: unknown) {
-  return JSON.stringify(String(value));
+export function variantCaseId(
+  testCase: Pick<CalibrationCase, "case_id">,
+  variant: CalibrationVariant,
+) {
+  return `calibration-${hash("sha256", `${testCase.case_id}\0${variant.checkout_ref}`).slice(0, 16)}`;
 }
 
-function indentedBlock(value: unknown) {
-  return `      ${String(value)
-    .replace(/\r\n?/g, "\n")
-    .replace(/\n/g, "\n      ")}`;
-}
-
-function inputId(testCase: CalibrationCase, variant: CalibrationVariant) {
-  const base =
-    testCase.finding.input_id ||
-    testCase.finding.input_id_base ||
-    testCase.case_id;
-  return `${base}-${variant.variant_id}`;
-}
-
-function evidenceTerms(testCase: CalibrationCase, variant: CalibrationVariant) {
+function evidenceTerms(testCase: CalibrationCase) {
   const terms = (testCase.finding.anchor_locations || []).map(
     (location) => location.path,
   );
-  if (variant.variant_id === "fixed" && testCase.finding.fix_patch_ref) {
-    terms.push(variant.checkout_ref);
-  }
   return [...new Set(terms)];
 }
 
-function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
+export function findingInput(
+  testCase: CalibrationCase,
+  variant: CalibrationVariant,
+) {
   const finding = testCase.finding;
   const lines = [
     `Source type: ${testCase.source_type}`,
-    `1. input_id: ${inputId(testCase, variant)}`,
+    `1. input_id: ${variantCaseId(testCase, variant)}`,
     `   title: ${finding.title}`,
   ];
 
@@ -101,54 +92,46 @@ function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
       .join(", ");
     lines.push(`   anchor locations: ${anchors}`);
   }
-  if (finding.fix_patch_ref) {
-    lines.push(`   fix evidence: ${finding.fix_patch_ref}`);
-  }
-  lines.push(
-    `   repository state: checked out at ${variant.checkout_ref}. Triage whether the original finding affects this exact state.`,
-  );
 
   return lines.join("\n");
 }
 
-function testYaml(
+function buildPromptfooTest(
   testCase: CalibrationCase,
   variant: CalibrationVariant,
   repoRoot: string,
 ) {
-  const generatedCaseId = `${testCase.case_id}-${variant.variant_id}`;
-  const terms = evidenceTerms(testCase, variant);
-  const lines = [
-    `- description: ${quote(`calibration ${variant.variant_id}: ${testCase.case_id}`)}`,
-    "  metadata:",
-    `    case_id: ${generatedCaseId}`,
-    "    suite: calibration-oss",
-    `    calibration_case_id: ${testCase.case_id}`,
-    `    calibration_variant: ${variant.variant_id}`,
-    `    repo: ${quote(testCase.repo.name)}`,
-    `    expected_binary_label: ${variant.expected_binary_label}`,
-    "  vars:",
-    `    case_id: ${generatedCaseId}`,
-    `    target_repo: ${path.posix.join(repoRoot, testCase.case_id, variant.variant_id)}`,
-    `    source_type_under_test: ${testCase.source_type}`,
-    `    expected_ids: ${inputId(testCase, variant)}`,
-    `    expected_source_types: ${testCase.source_type}`,
-    `    expected_verdicts: ${variant.expected_verdict}`,
-    `    expected_binary_label: ${variant.expected_binary_label}`,
-    `    expected_evidence_terms: ${quote(terms.join(", "))}`,
-    "    finding_input: |-",
-    indentedBlock(findingInput(testCase, variant)),
-    "    eval_instructions: |-",
-    indentedBlock(
-      `This is an automated OSS calibration eval. Do not ask follow-up questions.
-Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+  const generatedCaseId = variantCaseId(testCase, variant);
+  const terms = evidenceTerms(testCase);
+  return {
+    description: `calibration ${variant.variant_id}: ${testCase.case_id}`,
+    metadata: {
+      case_id: generatedCaseId,
+      suite: "calibration-oss",
+      calibration_case_id: testCase.case_id,
+      calibration_variant: variant.variant_id,
+      repo: testCase.repo.name,
+      expected_binary_label: variant.expected_binary_label,
+    },
+    vars: {
+      case_id: generatedCaseId,
+      calibration_repo: generatedCaseId,
+      calibration_repo_root:
+        repoRoot === DEFAULT_REPO_ROOT ? "" : path.resolve(repoRoot),
+      source_type_under_test: testCase.source_type,
+      expected_ids: generatedCaseId,
+      expected_source_types: testCase.source_type,
+      expected_verdicts: variant.expected_verdict,
+      expected_binary_label: variant.expected_binary_label,
+      expected_evidence_terms: terms.join(", "),
+      finding_input: findingInput(testCase, variant),
+      eval_instructions: `This is an automated OSS calibration eval. Do not ask follow-up questions.
+Inspect only the supplied repository checkout, the named anchor locations and the smallest related static evidence needed for the verdict.
 Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
 Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
 The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.`,
-    ),
-  ];
-
-  return lines.join("\n");
+    },
+  };
 }
 
 export function selectedVariants(
@@ -175,15 +158,34 @@ export function selectedVariants(
   return variants;
 }
 
-if (import.meta.filename === fs.realpathSync(process.argv[1])) {
-  const args = parseArgs(process.argv.slice(2));
-  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
-  const variants = selectedVariants(dataset, args);
-  const tests = variants.map(({ testCase, variant }) =>
-    testYaml(testCase, variant, args.repoRoot),
+export function generateTests(
+  options: {
+    datasetPath?: string;
+    repoRoot?: string;
+    caseId?: string | null;
+    variantId?: string | null;
+  } = {},
+) {
+  const dataset = JSON.parse(
+    fs.readFileSync(options.datasetPath ?? DEFAULT_DATASET, "utf8"),
   );
-  const output = `${tests.join("\n\n")}\n`;
+  return selectedVariants(dataset, options).map(({ testCase, variant }) =>
+    buildPromptfooTest(
+      testCase,
+      variant,
+      options.repoRoot ?? DEFAULT_REPO_ROOT,
+    ),
+  );
+}
+
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.filename === fs.realpathSync(process.argv[1])
+) {
+  const args = parseArgs(process.argv.slice(2));
+  const tests = generateTests({ ...args, datasetPath: args.dataset });
   fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, output);
-  console.log(`wrote ${variants.length} calibration tests to ${args.output}`);
+  fs.writeFileSync(args.output, stringify(tests));
+  console.log(`wrote ${tests.length} calibration tests to ${args.output}`);
 }

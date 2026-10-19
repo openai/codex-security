@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
+import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   validateDiscoveryArtifacts,
@@ -13,10 +14,10 @@ import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   abortError,
-  errorNameWithCode,
   boundedDeepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
+  confirmedOwnershipChange,
   isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDedupPrompt, renderDiscoveryPrompt } from "./templates.js";
@@ -36,20 +37,17 @@ import type {
 export interface AcceptedDiscovery {
   id: string;
   resultPath: string;
+  result: ScanDraftInput;
   completionSequence: number;
 }
 
 export type DiscoveryOutcome =
   | { type: "discovery"; status: "succeeded"; worker: AcceptedDiscovery }
   | { type: "discovery"; status: "canceled"; workerId: string }
-  | {
+  | (Extract<WorkerAttemptOutcome, { status: "failed" }> & {
       type: "discovery";
-      status: "failed";
       workerId: string;
-      error: Error;
-      replaceableFailureKind?: DeepScanReplaceableFailureKind;
-      consecutiveErrors?: number;
-    };
+    });
 
 export interface SuccessfulDedupOutcome {
   type: "dedup";
@@ -86,6 +84,7 @@ export interface DeepScanWorkerRunnerOptions {
   log: DeepScanLogger;
   retryDelaysMs: readonly number[];
   signal: AbortSignal;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 type WorkerAttemptOutcome =
@@ -129,6 +128,7 @@ export class DeepScanWorkerRunner {
         pluginRoot: this.options.pluginRoot,
         targetPath: run.targetPath,
         scope: run.scope,
+        includePaths: run.includePaths,
         userContext: run.userContext,
         workerLabel,
         subagents: run.config.subagents,
@@ -145,7 +145,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryValidated = false;
+    let discoveryResult: ScanDraftInput | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -155,22 +155,15 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId);
-        discoveryValidated = true;
-      },
-      beforeRetry: async (attempt) => {
-        await archiveDirectory(
-          artifactDir,
-          join(
-            workerRoot,
-            "attempts",
-            `attempt-${String(attempt).padStart(2, "0")}`,
-          ),
+        discoveryResult = await validateDiscoveryArtifacts(
+          artifacts,
+          resultPath,
+          run.scanId,
         );
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      await this.persistWorkerCancellation(
+      outcome = await this.cancelAttempt(
         {
           workerId,
           kind: "discovery",
@@ -180,24 +173,13 @@ export class DeepScanWorkerRunner {
         outcome.attempt,
         outcome.threadId,
       );
-      outcome = { status: "canceled" };
     }
-    if (!discoveryValidated) {
+    if (!discoveryResult) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
-      return {
-        type: "discovery",
-        status: "failed",
-        workerId,
-        error: outcome.error,
-        ...(outcome.replaceableFailureKind
-          ? { replaceableFailureKind: outcome.replaceableFailureKind }
-          : {}),
-        ...(outcome.consecutiveErrors === undefined
-          ? {}
-          : { consecutiveErrors: outcome.consecutiveErrors }),
-      };
+      const { status, ...failure } = outcome;
+      return { type: "discovery", status, workerId, ...failure };
     }
     if (outcome.status === "canceled" || this.options.signal.aborted) {
       return { type: "discovery", status: "canceled", workerId };
@@ -216,12 +198,9 @@ export class DeepScanWorkerRunner {
     };
     let persisted: PersistedDeepScanWorker;
     try {
-      persisted = await this.replayStoreMutation(
-        "discovery_acceptance_replay",
-        workerId,
-        async () => await this.options.store.updateWorker(acceptance),
-      );
+      persisted = await this.options.store.updateWorker(acceptance);
     } catch (error) {
+      if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
       return { type: "discovery", status: "canceled", workerId };
     }
@@ -244,6 +223,7 @@ export class DeepScanWorkerRunner {
       worker: {
         id: workerId,
         resultPath,
+        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
       },
     };
@@ -319,17 +299,9 @@ export class DeepScanWorkerRunner {
           run.scanId,
         );
       },
-      beforeRetry: async (attempt) => {
-        const attemptRoot = join(
-          reducerRoot,
-          "attempts",
-          `attempt-${String(attempt).padStart(2, "0")}`,
-        );
-        await archiveDirectory(artifactDir, attemptRoot);
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      await this.persistWorkerCancellation(
+      outcome = await this.cancelAttempt(
         {
           workerId: reducerId,
           kind: "dedup",
@@ -339,7 +311,6 @@ export class DeepScanWorkerRunner {
         outcome.attempt,
         outcome.threadId,
       );
-      outcome = { status: "canceled" };
     }
     if (outcome.status === "failed") {
       if (outcome.error instanceof DeepScanNonRetryableError)
@@ -360,11 +331,7 @@ export class DeepScanWorkerRunner {
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath,
     };
-    const committed = await this.replayStoreMutation(
-      "dedup_commit_replay",
-      reducerId,
-      async () => await this.options.store.commitDedup(commit),
-    );
+    const committed = await this.options.store.commitDedup(commit);
     this.options.log({
       event: "dedup_committed",
       scanId: run.scanId,
@@ -389,7 +356,6 @@ export class DeepScanWorkerRunner {
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
     validate: () => Promise<void>;
-    beforeRetry: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -434,6 +400,7 @@ export class DeepScanWorkerRunner {
               : join(run.scanDir, "artifacts"),
           subagents: input.subagents,
           signal,
+          onNonRetryableError: this.options.onNonRetryableError,
           resumeThreadId: resumableThreadId,
           continuationPrompt: resumableThreadId
             ? (continuationPrompt ??
@@ -483,6 +450,7 @@ export class DeepScanWorkerRunner {
           threadId: result.threadId ?? activeThreadId,
         };
       } catch (error) {
+        if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
@@ -546,7 +514,7 @@ export class DeepScanWorkerRunner {
         } else {
           resumableThreadId = undefined;
           continuationPrompt = undefined;
-          await input.beforeRetry(attempt);
+          await this.archiveWorkerAttempt(input.artifactDir, attempt);
           if (validationStarted && !validationCompleted) {
             executionPromptPath = await writeValidationRetryPrompt({
               kind: input.kind,
@@ -584,16 +552,25 @@ export class DeepScanWorkerRunner {
     }
   }
 
-  private async persistWorkerCancellation(
-    input: {
-      workerId: string;
-      kind: "discovery" | "dedup";
-      promptPath: string;
-      artifactDir: string;
-    },
+  private async archiveWorkerAttempt(artifactDir: string, attempt: number) {
+    await archiveDirectory(
+      artifactDir,
+      join(
+        dirname(artifactDir),
+        "attempts",
+        `attempt-${String(attempt).padStart(2, "0")}`,
+      ),
+    );
+  }
+
+  private async cancelAttempt(
+    input: Pick<
+      Parameters<DeepScanWorkerRunner["runWorkerWithRetries"]>[0],
+      "workerId" | "kind" | "promptPath" | "artifactDir"
+    >,
     attempt: number,
     threadId: string | undefined,
-  ): Promise<void> {
+  ): Promise<WorkerAttemptOutcome> {
     const coordinatorShutdown =
       this.options.signal.reason === "mcp_transport_closed";
     await this.options.store.updateWorker({
@@ -609,45 +586,6 @@ export class DeepScanWorkerRunner {
         ? { error: "coordinator_shutdown: mcp_transport_closed" }
         : {}),
     });
-  }
-
-  /** Replay idempotent SQLite commits when their process response is ambiguous. */
-  private async replayStoreMutation<T>(
-    event: string,
-    workerId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    try {
-      return await operation();
-    } catch (firstError) {
-      this.options.log({
-        event,
-        scanId: this.options.run.scanId,
-        workerId,
-        reason: errorNameWithCode(asError(firstError)),
-      });
-      try {
-        return await operation();
-      } catch (replayError) {
-        throw new Error(
-          `Deep Scan persistence replay failed: ${asError(replayError).message}`,
-          { cause: firstError },
-        );
-      }
-    }
-  }
-
-  private async cancelAttempt(
-    input: {
-      workerId: string;
-      kind: "discovery" | "dedup";
-      promptPath: string;
-      artifactDir: string;
-    },
-    attempt: number,
-    threadId: string | undefined,
-  ): Promise<WorkerAttemptOutcome> {
-    await this.persistWorkerCancellation(input, attempt, threadId);
     return { status: "canceled" };
   }
 }
@@ -668,7 +606,10 @@ function withWorkerDiagnostics(
   const namespaceFailure = diagnostics.find(
     (diagnostic) => diagnostic.code === "sandbox_namespace_exhausted",
   );
-  const diagnostic = namespaceFailure ?? diagnostics[0];
+  const diagnostic =
+    namespaceFailure ??
+    diagnostics.find((item) => item.code !== "worker_error") ??
+    diagnostics[0];
   const combined = new Error(
     `${diagnostics.map((item) => item.message).join(" ")} Deterministic artifact validation also reported: ${normalized.message}`,
     { cause: normalized },
@@ -685,7 +626,9 @@ function withWorkerDiagnostics(
 function isMissingWorkerResult(error: Error, artifactDir: string): boolean {
   const diagnosed = error as NodeJS.ErrnoException;
   const original =
-    diagnosed.code === "artifact_tool_failed" && error.cause instanceof Error
+    (diagnosed.code === "artifact_tool_failed" ||
+      diagnosed.code === "worker_error") &&
+    error.cause instanceof Error
       ? (error.cause as NodeJS.ErrnoException)
       : diagnosed;
   return (
@@ -718,6 +661,7 @@ function reducerInputRecoveryInstructions(): string[] {
   return [
     "If input retrieval exceeded a response or IPC size limit, call get_codex_security_deep_reducer_inputs({ cursor?, maxBytes, findingRef? }) with a smaller maxBytes budget (for example, halve the failed request's budget), preserving its cursor and findingRef to retry the same page.",
     "Do not repeat an oversized request unchanged. If inputs have not been read yet, paginate all assigned findings and the previous aggregate, assembling each json fragment in code and following nextCursor until absent; inspect assembled data selectively and fetch details by findingRef.",
+    "Persist fragments, cursor: nextCursor ?? null, and completion together in one serializable store value after each successful page. Never store an undefined cursor or append a page already committed before a later cell failure. Check MCP isError before parsing its text as a page.",
     "Preserve pages already read and account for every finding before submitting the aggregate.",
   ];
 }

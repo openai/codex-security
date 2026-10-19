@@ -8,7 +8,7 @@ Create one maintainer-owned private draft for one validated finding. Use the sel
 
 Require a sealed `git_revision`, its verified public canonical non-fork source repository, a default branch, and `ADMIN` viewer permission. Other target types cannot satisfy this contract. Verify the exact revision and every finding path through the main skill's source checks.
 
-Run metadata checks as `GH_HOST=github.com gh repo view github.com/{owner}/{repo}`. Validate `owner` and `repo` as separate path segments. Use authenticated `gh api --hostname github.com` with these headers on every request:
+Run metadata checks as `gh repo view https://github.com/{owner}/{repo}`. Validate `owner` and `repo` as separate path segments. Use authenticated `gh api --hostname github.com` with these headers on every request:
 
 ```text
 Accept: application/vnd.github+json
@@ -43,4 +43,4 @@ Use the main skill's preview and approval flow, including package metadata, the 
 
 Write the approved JSON to a mode-`0600` temporary file outside the repository and scan directory. Review it for sensitive content and send it once with `gh api --hostname github.com --input`; remove it on every exit. Reconcile uncertain creates by exact bindings before considering another mutation.
 
-Read the returned `ghsa_id` through the allowed endpoint. Compare normalized structured readback with the approved payload and require `state: draft` before reporting success.
+Record the accepted create with the returned `ghsa_id` using the main skill's shared issue history, then read it through the allowed endpoint. Compare normalized structured readback with the approved payload and require `state: draft` before reporting success. Record that readback separately from the accepted create.

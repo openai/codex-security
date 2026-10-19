@@ -15,12 +15,17 @@ import {
   reviewSubmissionInstructions,
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
+import {
+  emitDiagnostic,
+  type DeduplicationDiagnosticObserver,
+} from "./diagnostics.js";
 
 // Increment when validation or review execution changes without a prompt/schema change.
-const REVIEW_CONTRACT_VERSION = 3;
+const REVIEW_CONTRACT_VERSION = 6;
 
 export async function reviewSettingsDigest(
   environment: NodeJS.ProcessEnv,
+  modelConfiguration?: JsonObject,
 ): Promise<string> {
   const homes = new Set([
     configuredCodexHome(environment),
@@ -39,6 +44,8 @@ export async function reviewSettingsDigest(
     ),
     command: resolveCodexCommand(environment),
     baseUrl: environment["OPENAI_BASE_URL"],
+    selectedModel: modelConfiguration?.["model"],
+    selectedReasoningEffort: modelConfiguration?.["model_reasoning_effort"],
   });
 }
 
@@ -49,11 +56,14 @@ export class CheckpointedReviewRunner {
     private readonly source: JsonObject,
     private readonly scope: FindingSearchScope,
     private readonly settingsDigest?: string,
+    private readonly onDiagnostic?: DeduplicationDiagnosticObserver,
   ) {}
 
   async assertSourceUnchanged(): Promise<void> {
     const current = await this.workflow.sourceSnapshot(
       this.source["repository"] as string,
+      false,
+      (this.source["privateStatePaths"] ?? []) as string[],
     );
     if (workflowDigest(current) !== workflowDigest(this.source))
       throw new CodexSecurityError(
@@ -80,7 +90,17 @@ export class CheckpointedReviewRunner {
     };
     const key = workflowDigest(binding);
     const saved = await this.workflow.getReview(key);
-    if (saved !== null) return review.validate(saved);
+    if (saved !== null) {
+      const result = review.validate(saved);
+      emitDiagnostic(this.onDiagnostic, {
+        event: "review.reused",
+        stage: review.stage,
+        model: review.model,
+        effort: review.effort,
+        details: { reviewKey: key },
+      });
+      return result;
+    }
     const result = review.validate(await this.runner.run(review));
     await this.assertSourceUnchanged();
     await this.workflow.saveReview(key, binding, result);

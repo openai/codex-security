@@ -14,7 +14,7 @@ export const {
 } = await importModule({
   stdin: {
     contents: `export { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID, preflightDeepScanWorkerPermissionProfile, deepScanPermissionProfileFallbackError } from "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts";
-export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/deep-scan/executable-path.ts";
+export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/executable-path.ts";
 export { inlineToml } from "../../sdk/typescript/src/config.ts";
 export { bundledCodexSdkEnvironment } from "../../sdk/typescript/src/codex-sdk-environment.ts";`,
     resolveDir: import.meta.dirname,
@@ -44,7 +44,7 @@ export async function withEvalState(
   let root;
   let home;
   try {
-    root = await mkdtemp(join(tmpdir(), "source-audit-"));
+    root = await realpath(await mkdtemp(join(tmpdir(), "source-audit-")));
     // Share saved login updates without importing the caller's configuration.
     let auth;
     try {

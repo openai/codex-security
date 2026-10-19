@@ -2,7 +2,11 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export function createTemporaryDirectories(canonicalize = false) {
+export function createTemporaryDirectories(
+  canonicalize = false,
+  removeDirectory = (root: string) =>
+    rm(root, { recursive: true, force: true }),
+) {
   const roots: string[] = [];
   return {
     track(root: string): void {
@@ -14,11 +18,7 @@ export function createTemporaryDirectories(canonicalize = false) {
       return root;
     },
     async cleanup(): Promise<void> {
-      await Promise.all(
-        roots
-          .splice(0)
-          .map((root) => rm(root, { recursive: true, force: true })),
-      );
+      await Promise.all(roots.splice(0).map(removeDirectory));
     },
   };
 }
