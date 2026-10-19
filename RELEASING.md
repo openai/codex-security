@@ -6,8 +6,10 @@ short, reviewed summary with a categorized list of merged pull requests.
 Historical releases may contain generated notes only. The release tag and npm
 package use the same stable version: `npm-vX.Y.Z` and
 `@openai/codex-security@X.Y.Z`. Releases whose source includes the GitHub Action
-also publish `action-vX.Y.Z`, which installs that exact CLI version. The Action's
-manifest and SBOM accompany the npm archive on the same GitHub Release.
+also publish a companion `action-vX.Y.Z` GitHub Release, which installs that
+exact CLI version. The npm release contains the package archive and canonical
+changelog. The Action release contains its manifest and SBOM, links to that
+changelog, and lists the full distribution commit SHA for consumers to pin.
 
 ## Pull request titles and categories
 
@@ -111,11 +113,18 @@ if the last review targets an older head.
 
 The proposal updates the SDK version and the Action version in
 `github-action/package.json` and `github-action/package-lock.json` together.
-The Action's runtime dependency and lockfile keep their previously published
-CLI version until npm publishes the proposed version. Release packaging then
+The Action's runtime dependency and lockfile keep an already published CLI
+baseline until npm publishes the proposed version. This development baseline
+does not necessarily track the latest CLI release. Release packaging then
 updates that pin and lockfile to the verified publication. This lets release
 PRs run CI while the next npm version is still unavailable; `node-ci` also
 tests the Action against the packed CLI candidate before publication.
+
+The standalone workflow in `examples/github-actions/codex-security.yml` also
+pins `CODEX_SECURITY_VERSION` to the proposed release version. Only that value
+changes; other workflow content comes from the latest `main`. After the release
+PR merges, this example can reference the new version before npm publication
+finishes. Wait for publication before using that pin.
 
 If a run reports that GitHub has not exposed the updated PR head, manually
 rerun the updater with **dry_run** disabled after the PR catches up. This
@@ -136,8 +145,9 @@ pauses updates; restore its `main` base before resuming. Both ready proposals
 and existing drafts receive updates. Existing drafts can be marked ready
 without pausing the updater. Review the current head before merging if
 `main` has advanced. The updater rechecks pause conditions before advancing
-the branch. Changes to other files on the release branch, or to package
-fields other than the version, also pause the
+the branch. Changes to other files on the release branch, to package
+fields other than the version, or to the standalone example beyond its CLI
+version also pause the
 updater so those edits cannot be lost. These intentional pauses return
 `action: "held"` and leave the workflow successful. Preserve or merge the
 additional changes, then rerun the updater to resume.
@@ -214,7 +224,7 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
 1. Choose the next stable version and update `sdk/typescript/package.json`,
    `github-action/package.json`, and both root version fields in
    `github-action/package-lock.json`. The rolling release PR normally prepares
-   these changes. Keep the Action runtime pin on the previously published CLI;
+   these changes. Keep the Action runtime pin on its published CLI baseline;
    release packaging updates it after npm publication.
 2. Update `.github/release-notes.md`. Its first line must be
    `<!-- release-version: X.Y.Z -->` with the exact package version.
@@ -254,9 +264,11 @@ for that exact commit:
    permissions. A fresh publisher checks out the same
    source, downloads only the tested runtime lock by artifact ID, and rebuilds
    and verifies the bundles without executing the CLI. It creates
-   `action-vX.Y.Z` and uploads the Action release manifest and SBOM to the
-   existing `npm-vX.Y.Z` GitHub Release. A final status job reports publication,
-   installation smoke, and Action results.
+   `action-vX.Y.Z` and publishes a companion GitHub Release with the Action
+   manifest and SBOM attached before publication makes those assets immutable.
+   The companion links to the `npm-vX.Y.Z` changelog and lists the full Action
+   distribution commit SHA. It is never marked Latest. A final status job
+   reports publication, installation smoke, and Action results.
 
 The Action tag points to a generated distribution commit whose parent is the
 CLI release commit. That additional commit contains the runnable Action bundle
@@ -297,13 +309,16 @@ Check the published state before announcing the release:
 - `npm-vX.Y.Z` points to the merged release commit.
 - `npm view @openai/codex-security@X.Y.Z` reports the expected version and
   commit, and the provenance check passed in `node-release`.
-- The GitHub release is stable, has the correct title, and contains one verified
-  npm package archive plus the Action manifest and SBOM when applicable.
+- The npm GitHub Release is stable, has the correct title, and contains one
+  verified npm package archive.
 - The exact-version published installation checks succeeded.
 - For releases with the Action, `action-vX.Y.Z` points to the distribution
   commit recorded in its manifest, whose parent is the CLI release commit.
-  The manifest and runtime lock identify the same CLI version and npm integrity.
-- The newest version is marked Latest. A historical backfill is not.
+  Its companion GitHub Release contains the manifest and SBOM, links to the
+  npm changelog, and lists that full distribution commit SHA. The manifest and
+  runtime lock identify the same CLI version and npm integrity.
+- The newest npm release is marked Latest. Action releases and historical
+  backfills are not.
 - For releases created under this process, the reviewed highlights, category
   headings, documentation links, and full comparison link are correct.
   Historical releases may have generated notes only.
@@ -342,10 +357,15 @@ If `action-vX.Y.Z` already exists, recovery checks its package manifests and
 lockfiles against the reviewed source and CLI release identity before installing
 dependencies or running package scripts. It then reuses that distribution commit.
 Do not move that tag or regenerate the release from newer Action source.
-A failure after npm publication can leave
-the npm package or GitHub Release visible while later checks or Action
-publication remain incomplete; use the final workflow status to identify the
-remaining work.
+The workflow verifies existing Action release assets and can finish a partial
+draft before publishing it. It does not replace assets on a published release.
+
+For example, if `npm-v0.4.0` is already immutable and its Action publication
+failed, rerun `node-github-release` from `main` with `tag: npm-v0.4.0`. The retry
+creates the missing `action-v0.4.0` companion release without adding or replacing
+assets on the npm release. A failure after npm publication can leave the npm
+package or GitHub Release visible while later checks or Action publication
+remain incomplete; use the final workflow status to identify the remaining work.
 
 To repair categories on an existing release, correct the merged pull request's
 title or release label first, then rerun `node-github-release` for the tag. For

@@ -2473,10 +2473,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     ]);
   });
 
-  test("upgrades a cached plugin without deleting persistent credentials", async () => {
+  test("upgrades the prior 0.1.25 bundle without deleting persistent credentials", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.4");
+    const previous = await plugin(join(root, "previous"), "0.1.25");
     const home = join(root, "home");
     const configPath = join(home, "config.toml");
     const marketplace = join(home, "sdk-marketplace");
@@ -2544,12 +2543,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
 
     expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "1.2.3",
+      "0.1.25",
     );
-    const upgraded = await bootstrapPlugin(home, next, options);
+    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
 
-    expect(upgraded.version).toBe("1.2.4");
-    expect(upgraded.installedRoot).toBe(join(pluginCache, "1.2.4"));
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.installedRoot).toBe(
+      join(pluginCache, BUNDLED_PLUGIN_VERSION),
+    );
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
       '{"token":"preserved"}\n',
     );
@@ -2559,7 +2560,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(await readFile(configPath, "utf8")).toContain(
       `[projects.${JSON.stringify(join(root, "unrelated-project"))}]`,
     );
-    expect(existsSync(join(pluginCache, "1.2.3"))).toBe(false);
+    expect(existsSync(join(pluginCache, "0.1.25"))).toBe(false);
     expect(calls).toEqual([
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
@@ -5839,6 +5840,51 @@ describe("runtime directories and plugin Python boundary", () => {
         ),
       ).toBe(output);
       expect(archived).toHaveLength(1);
+    },
+  );
+
+  test.each([
+    { name: "scan", prepare: prepareOutputDir },
+    { name: "registration", prepare: prepareScanRegistrationOutput },
+  ])(
+    "cleans up unnamed $name output after chmod failure",
+    async ({ prepare }) => {
+      for (const nonempty of [false, true]) {
+        const root = await temporaryDirectory();
+        const failure = new Error("Synthetic output chmod failure");
+        const originalChmod = fsPromises.chmod;
+        let allocated: string | undefined;
+        const umask = spyOn(process, "umask").mockReturnValue(0o777);
+        const chmodFailure = spyOn(fsPromises, "chmod").mockImplementation(
+          async (path, mode) => {
+            if (typeof path === "string" && dirname(path) === root) {
+              allocated = path;
+              expect(mode).toBe(0o700);
+              if (nonempty)
+                await writeFile(join(path, "keep.txt"), "keep me\n");
+              throw failure;
+            }
+            return originalChmod(path, mode);
+          },
+        );
+        try {
+          await expect(prepare(undefined, "repo", root)).rejects.toBe(failure);
+          expect(allocated).toBeDefined();
+          if (allocated === undefined)
+            throw new Error("Output was not allocated");
+          expect(await readdir(root)).toEqual(
+            nonempty ? [basename(allocated)] : [],
+          );
+          if (nonempty) {
+            expect(await readFile(join(allocated, "keep.txt"), "utf8")).toBe(
+              "keep me\n",
+            );
+          }
+        } finally {
+          chmodFailure.mockRestore();
+          umask.mockRestore();
+        }
+      }
     },
   );
 

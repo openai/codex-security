@@ -20,7 +20,13 @@ function pattern(schema: z.ZodString, source: string) {
   });
 }
 
-const nonEmptyText = z.string().min(1).regex(/\S/);
+// Match Python str.strip in both runtimes; \S differs on BOM and C0/NEL whitespace.
+const nonEmptyText = z
+  .string()
+  .min(1)
+  .regex(
+    /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/,
+  );
 
 const scanId = z
   .string()

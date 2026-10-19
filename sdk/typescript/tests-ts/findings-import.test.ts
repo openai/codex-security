@@ -88,7 +88,7 @@ describe("findings import formats", () => {
     ).rejects.toThrow("duplicate occurrence_id");
   });
 
-  test("round-trips literal apostrophes and spreadsheet escapes through the exporter", async () => {
+  test("round-trips required text and spreadsheet escapes through the exporter", async () => {
     const {
       findings: [finding],
     } = await sourceDocument();
@@ -100,6 +100,9 @@ describe("findings import formats", () => {
       "''-x",
       "''literal",
       "ordinary λ",
+      "\uFEFF",
+      "\u0085\uFEFF\u001c",
+      "  Required text. \n",
       "=formula",
       "\u0085=formula",
       "\u001c=formula",
@@ -142,6 +145,25 @@ describe("findings import formats", () => {
         locations: source.locations,
       });
     }
+  });
+
+  test.each(
+    (["title", "summary", "remediation"] as const).flatMap((field) =>
+      [" \t\r\n", "\u0085", "\u001c\u001d\u001e\u001f"].map(
+        (value) => [field, value] as const,
+      ),
+    ),
+  )("rejects canonical whitespace in CSV %s %j", async (field, value) => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    await expect(
+      parseImportedFindings(
+        exportCsv([{ ...finding!, [field]: value }]),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow(`requires ${field}`);
   });
 
   test("retains a literal apostrophe before a non-whitespace byte order mark", async () => {

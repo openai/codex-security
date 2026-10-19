@@ -84,9 +84,20 @@ The requirements file is the single list of pinned Python test dependencies. Ruf
 - Test observable results, failures, cancellation, and cleanup. Prefer a
   regression case that fails before a fix over assertions about private calls
   or exact prose.
+- Pair a fault case with a healthy control when that shows the failure's cause.
+  For ordering bugs, coordinate the relevant events explicitly rather than
+  relying on sleeps: for example, persist a checkpoint before cancellation or
+  fail an operation before its cleanup runs.
 - Keep fixtures synthetic and independent. Use real temporary directories,
   Git repositories, SQLite databases, and installed packages when those
   boundaries are the behavior under test. Do not use live model credentials.
+- Follow the changed behavior through its consumer. Parser checks alone do not
+  prove public API output, persisted state, child-process settings, or installed
+  package behavior. Use the relevant boundary without repeating every test at
+  every layer. See the [source map](../../CONTRIBUTING.md#where-to-make-a-change).
+- When a result can be partial, assert what was retained and what remains
+  unknown. Distinguish empty results from unavailable results, and checkpointed
+  worker output from accepted results and published scan artifacts.
 - Use the typed `TestClient` and `createApiTestFixtures` helpers for API tests.
   Do not add a production abstraction solely to support a mock.
 - Test workflow retry, resume, and checkpoint permutations with the existing

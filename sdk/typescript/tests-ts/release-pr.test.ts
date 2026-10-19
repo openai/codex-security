@@ -26,11 +26,12 @@ type History = {
   packageText: string;
   actionPackageText?: string | null;
   actionLockText?: string | null;
+  exampleWorkflowText?: string | null;
   changes: Change[];
 };
 type Plan = Omit<
   History,
-  "packageText" | "actionPackageText" | "actionLockText"
+  "packageText" | "actionPackageText" | "actionLockText" | "exampleWorkflowText"
 > & {
   version: string;
   branch: string;
@@ -71,6 +72,7 @@ const {
   packagePath,
   actionPackagePath,
   actionLockPath,
+  exampleWorkflowPath,
   notesPath,
   statePath,
   isBreakingChange,
@@ -84,6 +86,7 @@ const {
   packagePath: string;
   actionPackagePath: string;
   actionLockPath: string;
+  exampleWorkflowPath: string;
   notesPath: string;
   statePath: string;
   isBreakingChange: (change: Change) => boolean;
@@ -164,6 +167,20 @@ function actionFiles(dependencyVersion = "1.2.3") {
     [actionPackagePath]: `${JSON.stringify(manifest, null, 2)}\n`,
     [actionLockPath]: `${JSON.stringify(lock, null, 2)}\n`,
   };
+}
+
+function exampleWorkflowText(version = "0.1.23") {
+  return [
+    "name: Code scan",
+    "jobs:",
+    "  scan:",
+    "    env:",
+    `      CODEX_SECURITY_VERSION: "${version}"  # Exact CLI release`,
+    '      OTHER_VERSION: "0.1.23"',
+    "    steps:",
+    '      - run: echo "$CODEX_SECURITY_VERSION"',
+    "",
+  ].join("\n");
 }
 
 function change(
@@ -1028,6 +1045,51 @@ describe("pre-1.0 release policy", () => {
       expect(empty.files[packagePath]).toBe(text);
     },
   );
+
+  test("updates the checked-in example pin without changing the rest of the workflow", () => {
+    const source = readFileSync(
+      new URL(`../../../${exampleWorkflowPath}`, import.meta.url),
+      "utf8",
+    );
+    const plan = createReleasePlan({
+      ...history([change("fix: repair output")]),
+      exampleWorkflowText: source,
+    });
+    expect(plan.files[exampleWorkflowPath]).toBe(
+      source.replace(
+        /CODEX_SECURITY_VERSION: "[^"]+"/u,
+        'CODEX_SECURITY_VERSION: "0.1.24"',
+      ),
+    );
+    expect(plan.files[exampleWorkflowPath]).toContain(
+      'CODEX_SECURITY_VERSION: "0.1.24"',
+    );
+  });
+
+  test("preserves example quotes, CRLF, comments, and unrelated version literals", () => {
+    const source = (version: string) =>
+      exampleWorkflowText(version)
+        .replaceAll('"', "'")
+        .replaceAll("\n", "\r\n");
+    const plan = createReleasePlan({
+      ...history([change("fix: repair output")]),
+      exampleWorkflowText: source("0.1.23"),
+    });
+    expect(plan.files[exampleWorkflowPath]).toBe(source("0.1.24"));
+  });
+
+  test.each([
+    "name: No CLI pin\n",
+    'env:\n  CODEX_SECURITY_VERSION: "latest"\n',
+    exampleWorkflowText() + exampleWorkflowText(),
+  ])("rejects an example without one exact CLI pin (%#)", (source) => {
+    expect(() =>
+      createReleasePlan({
+        ...history([change("fix: repair output")]),
+        exampleWorkflowText: source,
+      }),
+    ).toThrow("Unable to update only the GitHub Actions example CLI version");
+  });
 });
 
 describe("human note ownership", () => {
@@ -1167,6 +1229,47 @@ describe("human note ownership", () => {
 });
 
 describe("rolling release reconciliation", () => {
+  test("adds and refreshes the example pin from current main without introducing it into earlier history", async () => {
+    const fixture = new Fixture();
+    fixture.merge("fix: initial fix");
+    const beforeExample = await fixture.run();
+    expect(beforeExample.plan.files[exampleWorkflowPath]).toBeUndefined();
+    expect(
+      fixture.repo.readFile(beforeExample.headSha!, exampleWorkflowPath),
+    ).toBeNull();
+
+    for (const [title, name, version] of [
+      ["docs: add workflow example", "Code scan", "0.1.24"],
+      ["docs: clarify workflow name", "Weekly code scan", "0.1.24"],
+      ["feat!: change behavior", "Weekly code scan", "0.2.0"],
+    ] as const) {
+      const source = (pin: string) =>
+        exampleWorkflowText(pin).replace("Code scan", name);
+      fixture.merge(title, { [exampleWorkflowPath]: source("0.1.23") });
+      const result = await fixture.run();
+      expect(result.action).toBe("updated");
+      expect(result.pull).toBe(beforeExample.pull);
+      expect(result.plan.version).toBe(version);
+      expect(result.plan.files[exampleWorkflowPath]).toBe(source(version));
+      expect(fixture.repo.readFile(result.headSha!, exampleWorkflowPath)).toBe(
+        source(version),
+      );
+    }
+    const writes = fixture.github.writes.length;
+    expect((await fixture.run()).action).toBe("unchanged");
+    expect(fixture.github.writes).toHaveLength(writes);
+
+    fixture.merge("docs: remove workflow example", {
+      [exampleWorkflowPath]: null,
+    });
+    const removed = await fixture.run();
+    expect(removed.action).toBe("updated");
+    expect(removed.plan.files[exampleWorkflowPath]).toBeUndefined();
+    expect(
+      fixture.repo.readFile(removed.headSha!, exampleWorkflowPath),
+    ).toBeNull();
+  });
+
   test("aligns Action metadata when introduced and refreshed without advancing the published runtime pin", async () => {
     const fixture = new Fixture();
     fixture.merge("fix: initial fix");
@@ -1679,6 +1782,37 @@ describe("rolling release reconciliation", () => {
 });
 
 describe("release proposal pauses", () => {
+  test.each(["comment", "formatting", "deletion"] as const)(
+    "preserves example workflow %s edits on the release branch",
+    async (change) => {
+      const fixture = new Fixture();
+      fixture.merge("docs: add workflow example", {
+        [exampleWorkflowPath]: exampleWorkflowText(),
+      });
+      const first = await fixture.run();
+      const generated = first.plan.files[exampleWorkflowPath]!;
+      const edited =
+        change === "deletion"
+          ? null
+          : change === "comment"
+            ? generated.replace("Exact CLI release", "Reviewed CLI release")
+            : generated.replace('"0.1.24"', "'0.1.24'");
+      const humanSha = fixture.commit(
+        first.plan.branch,
+        { [exampleWorkflowPath]: edited },
+        "docs: adjust workflow example",
+      );
+      fixture.merge("fix: another fix");
+      const writes = fixture.github.writes.length;
+      const result = await fixture.run();
+      expect(result.action).toBe("held");
+      expect(result.reason).toContain("example edits beyond its CLI version");
+      expect(fixture.head(first.plan.branch)).toBe(humanSha);
+      expect(fixture.repo.readFile(humanSha, exampleWorkflowPath)).toBe(edited);
+      expect(fixture.github.writes).toHaveLength(writes);
+    },
+  );
+
   test.each([
     { path: actionPackagePath, change: "dependencies" },
     { path: actionLockPath, change: "dependencies" },

@@ -532,21 +532,12 @@ async function workerRuntimeSettings(
       ? profiles[config.profile]
       : undefined;
   const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
-  for (const key of ["analytics", "responses_api_metadata"]) {
+  for (const key of ["analytics", "responses_api_metadata", "features"]) {
     if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
       selected[key] = { ...config[key], ...profile[key] };
     }
   }
-  const inherited = Object.fromEntries(
-    [
-      "model_reasoning_summary",
-      "service_tier",
-      "analytics",
-      "responses_api_metadata",
-      "skills",
-    ].map((key) => [key, selected[key]]),
-  );
-  const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };
+  const settings: CodexSdkWorkerRuntimeSettings = { config: selected };
   const workerConfigPath = environmentVariable(
     environment,
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -606,19 +597,32 @@ async function workerRuntimeSettings(
     settings.cyberAccessProgram =
       security.cyber_access_program as CyberAccessProgram;
   }
-  const features = isRecord(config.features) ? config.features : {};
   settings.config = {
-    ...inherited,
+    ...selected,
     ...workerConfig,
     features: {
-      ...Object.fromEntries(
-        ["api_key_cyber_access_programs", "api_key_model_discovery"].map(
-          (key) => [key, features[key]],
-        ),
-      ),
+      ...(isRecord(selected.features) ? selected.features : {}),
       ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
     },
   };
+  // Profiles are resolved above; providers stay in their private native file.
+  // Workers register their own tools and verified read-only permission profile.
+  for (const key of [
+    "profile",
+    "profiles",
+    "projects",
+    "model_providers",
+    "codex_security",
+    "mcp_servers",
+    "plugins",
+    "marketplaces",
+    "permissions",
+    "sandbox_mode",
+    "sandbox_workspace_write",
+    "approvals_reviewer",
+  ]) {
+    delete settings.config[key];
+  }
   return settings;
 }
 

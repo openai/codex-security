@@ -107,7 +107,7 @@ export function normalizeHostedPaths(
 /** Validate every path at the frozen commit before registering a scan/executing. */
 async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
   const scope = { paths: normalizeHostedPaths(input.scope?.paths) };
-  const repository = await normalizeRepository(input.repository);
+  const repository = await normalizeRepository(input.repository, signal);
   if ((await repositoryRevision(repository, signal)) !== input.revision)
     throw new HostedScanPreparationError(
       "revision_mismatch",

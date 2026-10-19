@@ -65,7 +65,12 @@ export async function standaloneArtifactContext(
   }
   for (const storagePath of [scanRoot, root]) {
     const existingRoot = await resolveStoragePath(storagePath);
-    if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
+    const relativeRoot = relative(repoRoot, existingRoot);
+    if (
+      !isAbsolute(relativeRoot) &&
+      relativeRoot !== ".." &&
+      !relativeRoot.startsWith(".." + sep)
+    ) {
       throw new Error(
         "Artifact storage must be outside the target repository.",
       );

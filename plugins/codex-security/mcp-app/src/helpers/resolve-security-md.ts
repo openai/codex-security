@@ -34,7 +34,7 @@ type FileInfo = Pick<Stats, "isDirectory" | "isFile" | "isSymbolicLink"> & {
 const statPath = (path: Buffer): FileInfo =>
   windows ? windowsFiles().stat(path) : statSync(path);
 
-function windowsJoin(left: string, right: string): string {
+export function windowsJoin(left: string, right: string): string {
   if (right.startsWith("\\\\?\\") || right.startsWith("\\\\.\\")) return right;
   const namespaced = left.startsWith("\\\\?\\");
   const base = left.startsWith("\\\\?\\UNC\\")
@@ -116,7 +116,7 @@ export function expandHome(
     return namespacedUnc ? win32.toNamespacedPath(expanded) : expanded;
   }
   if (path === "~" || path.startsWith("~/")) {
-    const home = posixHome ?? homedir();
+    const home = (posixHome ?? homedir()).replace(/\/+$/u, "");
     if (home.startsWith("~"))
       throw new Error("Could not determine home directory.");
     return home + path.slice(1) || "/";

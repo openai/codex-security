@@ -12,6 +12,7 @@ import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScanFixture } from "./plugin-root.js";
 import { rejecting, throwing } from "./support/errors.js";
 import {
   createCliTest,
@@ -46,6 +47,45 @@ async function fixture(input: ProjectConfigInput | string) {
     typeof input === "string" ? input : JSON.stringify(input),
   );
   return { root, repository, configDirectory, config };
+}
+
+async function bulkInventory(
+  input: Awaited<ReturnType<typeof fixture>>,
+  rowModes: readonly string[],
+) {
+  execFileSync("git", ["init", "-q", input.repository]);
+  execFileSync("git", [
+    "-C",
+    input.repository,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.test",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "fixture",
+  ]);
+  const revision = execFileSync(
+    "git",
+    ["-C", input.repository, "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  const csv = join(input.root, "repositories.csv");
+  await writeFile(
+    csv,
+    [
+      "id,repository,revision,mode",
+      ...rowModes.map(
+        (mode, index) =>
+          `source-${index},${input.repository},${revision},${mode}`,
+      ),
+      "",
+    ].join("\n"),
+  );
+  return csv;
 }
 
 test.each([
@@ -355,6 +395,53 @@ test.each(["instructions_file", "validation_file"] as const)(
   },
 );
 
+test.each([
+  ["standard", [""], { max_time_minutes: 6000 }, undefined],
+  [
+    "deep",
+    ["standard"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    undefined,
+  ],
+  [
+    "standard",
+    ["standard", "deep"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    "Conflicting",
+  ],
+  ["deep", [""], { max_time_minutes: 6000 }, "5760 minutes"],
+] as const)(
+  "bulk time settings use effective row modes: default %s, rows %j",
+  async (defaultMode, rowModes, time, message) => {
+    const input = await fixture({
+      scan: { mode: defaultMode, ...time },
+      output: { directory: "../batch-results" },
+    });
+    const csv = await bulkInventory(input, rowModes);
+    const selected: ScanOptions[] = [];
+    const { runCli, stderr } = createCliTest(main);
+    const result = await runCli(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.root,
+        onTurn: (_repository, options) => selected.push(options),
+      }),
+    );
+    expect(result, stderr.text()).toBe(message ? 2 : 0);
+    if (message) {
+      expect(stderr.text()).toContain(message);
+      expect(selected).toEqual([]);
+    } else {
+      expect(selected).toHaveLength(1);
+      expect(selected[0]).toMatchObject({
+        mode: "standard",
+        maxTimeMinutes: time.max_time_minutes,
+      });
+      expect(selected[0]?.maxTimeHours).toBeUndefined();
+    }
+  },
+);
+
 test("bulk scans apply config and linked operator prompts, preserve CSV scope overrides, and retain the policy on resume", async () => {
   const config: ProjectConfigInput = {
     auth: "api-key",
@@ -427,17 +514,12 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     return fakeSecurity(async (_repository, options = {}) => {
       selected.push(options);
       const result = fakeResult(["high"]);
-      await mkdir(options.outputDir!, { recursive: true });
-      for (const [name, content] of Object.entries({
-        "scan-manifest.json": result.manifest,
-        "findings.json": result.findings,
-        "coverage.json": result.coverage,
-        "report.md": "Synthetic report.",
-      }))
-        await writeFile(
-          join(options.outputDir!, name),
-          typeof content === "string" ? content : JSON.stringify(content),
-        );
+      await mkdir(options.outputDir!, { recursive: true, mode: 0o700 });
+      await copyCompletedScanFixture(options.outputDir!);
+      await writeFile(
+        join(options.outputDir!, "report.md"),
+        "Synthetic report.",
+      );
       return result;
     });
   };
@@ -1203,6 +1285,9 @@ test("rerun restores all saved deep settings and authentication without loading 
 
 test.each([
   [{ requiresScanPrompt: true }, "additional instructions"],
+  [{ maxTimeMinutes: 0 }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: "15" }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: 1e12 }, "deadline within the supported date range"],
   [
     { mode: "deep", deepScan: { workers: 7 }, deepScanResolved: true },
     "missing resolved deep scan settings",
@@ -1218,11 +1303,11 @@ test.each([
       config: {},
       ...extra,
     };
-    const stderr = captureCli(main, "stderr");
+    const { stdout, stderr, runCli } = createCliTest(main);
     const onRun = mock();
     expect(
-      await stderr.run(
-        ["scans", "rerun", "saved", "--json"],
+      await runCli(
+        ["scans", "rerun", "saved", "--json", "--full-output"],
         dependencies({
           currentDirectory: input.repository,
           onWorkbench: async () => ({ recipe }),
@@ -1231,6 +1316,10 @@ test.each([
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(message);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(message) },
+    });
     expect(onRun).not.toHaveBeenCalled();
   },
 );
