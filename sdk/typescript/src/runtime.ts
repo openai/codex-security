@@ -47,6 +47,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";

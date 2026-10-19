@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -307,11 +308,19 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
             except SystemExit as error:
                 outcomes.append(error)
 
-    mkdir = Path.mkdir
+    creation_owner, creation_method = Path, "mkdir"
+    if os.name == "nt":
+        import windows_scan_local_files
+
+        creation_owner, creation_method = (
+            windows_scan_local_files,
+            "create_directory_with_same_dacl",
+        )
+    create_directory = getattr(creation_owner, creation_method)
     competitor = threading.Thread(target=compete)
 
     def replacement(path, *args, **kwargs):
-        result = mkdir(path, *args, **kwargs)
+        result = create_directory(path, *args, **kwargs)
         if path == scan_dir:
             competitor.start()
             assert waiting.wait(5)
@@ -321,7 +330,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         workbench_schema.backup(first)
         first.row_factory = sqlite3.Row
         with monkeypatch.context() as patch:
-            patch.setattr(Path, "mkdir", replacement)
+            patch.setattr(creation_owner, creation_method, replacement)
             with pytest.raises(SystemExit, match="not found"):
                 register(first, arguments)
         competitor.join(10)
