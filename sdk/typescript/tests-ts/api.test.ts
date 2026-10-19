@@ -3556,6 +3556,9 @@ describe("CodexSecurity orchestration", () => {
         },
       },
     );
+    const python = spyOn(runtime, "resolvePluginPython").mockResolvedValue(
+      "/managed/python",
+    );
     try {
       await expect(
         client.run(repository, {
@@ -3569,6 +3572,7 @@ describe("CodexSecurity orchestration", () => {
         ["validation", 8],
       ]);
     } finally {
+      python.mockRestore();
       await client.close();
     }
   });

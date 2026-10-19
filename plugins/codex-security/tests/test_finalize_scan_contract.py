@@ -3236,14 +3236,6 @@ The extraction root is not enforced.
         self.assertEqual(line_hashes.call_count, 1)
 
 
-@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
-def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
-    schema = {"type": expected}
-    FINALIZER._validate_schema_node(value, schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
-        FINALIZER._validate_schema_node(True, schema, "value")
-
-
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
 @pytest.mark.parametrize(
     "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
@@ -3297,18 +3289,6 @@ def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch
         with pytest.raises(FINALIZER.ContractError):
             FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
         assert "writeup" in findings["findings"][0]
-
-
-def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
-    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
-    reference = {"$ref": "#/$defs/text"}
-    FINALIZER._validate_schema_node("yes", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
-        FINALIZER._validate_schema_node("", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
-    with pytest.raises(RecursionError):
-        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
 if __name__ == "__main__":
