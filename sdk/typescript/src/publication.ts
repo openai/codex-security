@@ -1,4 +1,5 @@
 import { findingEntry } from "./value.js";
+import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import {
   loadContractWithScanDirectory,
@@ -495,10 +496,7 @@ function immutableSourceUrl(
   } catch {
     return undefined;
   }
-  if (
-    remote.protocol !== "https:" ||
-    (remote.hostname !== "github.com" && !remote.hostname.endsWith(".ghe.com"))
-  ) {
+  if (remote.protocol !== "https:" || !isGitHubCloudHost(remote.hostname)) {
     return undefined;
   }
 

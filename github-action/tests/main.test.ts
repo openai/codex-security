@@ -32,7 +32,7 @@ function outputValues(text: string): Record<string, string> {
   return values;
 }
 
-async function harness(t: TestContext, scenario: Scenario = 'schedule') {
+async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUrl = 'https://github.com') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'codex-main-test-')));
   const repository = join(root, 'repo');
   await mkdir(repository);
@@ -40,7 +40,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     '-c', 'user.name=Offline Test', '-c', 'user.email=offline@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args,
   ], { cwd: repository, env: gitEnvironment(), encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
-  git('remote', 'add', 'origin', 'https://github.com/example/repo.git');
+  git('remote', 'add', 'origin', `${serverUrl}/example/repo.git`);
   await writeFile(join(repository, 'app.txt'), 'synthetic source\n');
   git('add', '.'); git('commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
@@ -69,7 +69,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: scenario === 'schedule' ? 'schedule' : 'pull_request',
     GITHUB_REPOSITORY: 'example/repo', GITHUB_WORKSPACE: repository, GITHUB_SHA: sha,
     GITHUB_REF: scenario === 'schedule' ? 'refs/heads/main' : 'refs/pull/4/merge',
-    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: serverUrl,
     GITHUB_OUTPUT: outputPath, GITHUB_STATE: statePath, RUNNER_TEMP: root,
     OPENAI_API_KEY: 'synthetic-offline-test-key', INPUT_SUMMARY: 'true', INPUT_ANNOTATIONS: 'false',
     INPUT_SCOPE: scenario === 'schedule' ? 'repository' : 'diff',
@@ -112,6 +112,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     }
     if (process.env.INPUT_MODE === 'deep') coverage.mode = 'deep_repository';
     sarif.runs[0].versionControlProvenance[0].revisionId = scanSha;
+    sarif.runs[0].versionControlProvenance[0].repositoryUri = `${serverUrl}/example/repo`;
     await writeFile(sarifPath, JSON.stringify(sarif));
     if (configuration.missingSarif) await rm(sarifPath);
     const value = {manifest, coverage, findings: JSON.parse(await readFile(join(runtime.resultsDirectory, 'findings.json'), 'utf8')),
@@ -207,6 +208,32 @@ test('unrelated ambient input variables do not reject a valid scan', async (t) =
   assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
   assert.ok(result.args.includes('--effort=medium'));
 });
+
+for (const [scenario, mode] of [['schedule', 'standard'], ['pr', 'standard'], ['schedule', 'deep']] as const) {
+  test(`enterprise ${scenario} ${mode} scans preserve reports and upload identity`, async t => {
+    const serverUrl = 'https://example-enterprise.ghe.com';
+    const app = await harness(t, scenario, serverUrl);
+    app.setInput('mode', mode); app.setInput('upload-artifacts', 'true'); app.setInput('annotations', 'true');
+    let uploadedFiles: string[] = [];
+    t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
+      assert.equal(process.env.GITHUB_SERVER_URL, serverUrl);
+      uploadedFiles = files.map(file => basename(file));
+      for (const file of files) assert.ok((await readFile(file)).length);
+      return {id:1, size:1};
+    });
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.processes, 1); assert.equal(result.cleanups, 1);
+    assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['report-status'], 'ready');
+    assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
+    assert.equal(result.outputs['scanned-sha'], app.sha);
+    assert.equal(result.outputs['analysis-ref'], scenario === 'pr' ? 'refs/pull/4/head' : 'refs/heads/main');
+    assert.deepEqual(uploadedFiles.sort(), ['coverage.json', 'findings.json', 'results.sarif', 'scan-manifest.json']);
+    const sarif = JSON.parse(await readFile(result.outputs['sarif-path'], 'utf8'));
+    assert.equal(sarif.runs[0].versionControlProvenance[0].repositoryUri, `${serverUrl}/example/repo`);
+    assert.match(result.logs, /^::warning .*file=src\/extract\.py/m);
+    assert.match(result.summary, /Scan completed/);
+  });
+}
 
 test('Deep scans forward their budget and publish completed reports with cleanup', async (t) => {
   const app = await harness(t);

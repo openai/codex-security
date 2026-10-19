@@ -55749,13 +55749,36 @@ async function runProcess(executable, args, options) {
   });
 }
 
+// ../sdk/typescript/src/git-remote.ts
+function parseGitRemote(remote) {
+  if (remote.includes("://")) {
+    const url2 = new URL(remote);
+    return {
+      url: url2,
+      path: url2.pathname.slice(1),
+      scpStyle: false
+    };
+  }
+  const scp = /^((?:[^@/:\s?#]+@)?(?:\[[^\]]+\]|[^@/:\s?#]+)):(.+)$/u.exec(
+    remote
+  );
+  if (scp === null) return void 0;
+  return {
+    url: new URL(`ssh://${scp[1]}`),
+    // An SCP path's ?, #, and dot segments are literal Git path characters.
+    path: scp[2],
+    scpStyle: true
+  };
+}
+
 // src/targets.ts
 var SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 function validateEvent(event) {
   if (!["pull_request", "schedule", "workflow_dispatch", "push"].includes(event.eventName))
     throw new Error(`Unsupported event: ${event.eventName}. Use pull_request, schedule, workflow_dispatch, or push. Privileged PR source-scanning triggers are not supported.`);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(event.repository)) throw new Error("GITHUB_REPOSITORY is invalid.");
-  if (event.serverUrl !== "https://github.com") throw new Error("This release supports GitHub.com only; GitHub Enterprise Server has not been validated.");
+  if (!/^https:\/\/(?:github\.com|[a-z0-9-]+\.ghe\.com)$/.test(event.serverUrl))
+    throw new Error("This release supports GitHub.com and GitHub Enterprise Cloud on *.ghe.com; GitHub Enterprise Server has not been validated.");
   if (event.eventName === "pull_request") {
     const pr = event.payload.pull_request;
     if (!pr || pr.head?.repo?.full_name !== event.repository || pr.base?.repo?.full_name !== event.repository)
@@ -55816,11 +55839,17 @@ async function containedPath(repository, input) {
   if (!info2.isFile() && !info2.isDirectory()) throw new Error("A requested path is not a regular file or directory.");
   return path6;
 }
-function originMatches(url2, repository) {
+function originMatches(url2, repository, serverUrl) {
   try {
-    if (url2.startsWith("git@github.com:")) return url2.slice(15).replace(/\.git$/, "") === repository;
-    const parsed = new URL(url2);
-    return ["https:", "ssh:"].includes(parsed.protocol) && parsed.hostname === "github.com" && !parsed.password && (parsed.protocol === "ssh:" ? parsed.username === "git" : !parsed.username) && parsed.pathname.replace(/^\//, "").replace(/\.git$/, "") === repository;
+    const host = new URL(serverUrl).hostname;
+    const sshUser = host === "github.com" ? "git" : host.slice(0, -".ghe.com".length);
+    const remote = parseGitRemote(url2);
+    if (!remote) return false;
+    const parsed = remote.url;
+    const ssh = parsed.protocol === "ssh:";
+    const originHost = parsed.hostname.toLowerCase();
+    const matchesHost = originHost === host || host === "github.com" && ssh && originHost === "ssh.github.com" && parsed.port === "443";
+    return matchesHost && !parsed.password && (ssh ? parsed.username === sshUser : parsed.protocol === "https:" && !parsed.username) && remote.path.replace(/\/$/, "").replace(/\.git$/, "").toLowerCase() === repository.toLowerCase();
   } catch {
     return false;
   }
@@ -55834,7 +55863,7 @@ async function resolveTarget(inputs, event) {
   if (configKeys.some((key) => /^credential\.|^http\..*extraheader$|^include\.path$|^includeif\..*\.path$|^core\.sshcommand$|^url\..*\.insteadof$/.test(key)))
     throw new Error("The checkout retains Git authentication or external configuration. Use actions/checkout with persist-credentials: false and a dedicated clean job. Credential values have not been printed.");
   const origin = (await git(repository, ["config", "--no-includes", "--get", "remote.origin.url"])).trim();
-  if (!originMatches(origin, event.repository)) throw new Error("The checkout origin does not match GITHUB_REPOSITORY. Cross-repository checkouts are not supported.");
+  if (!originMatches(origin, event.repository, event.serverUrl)) throw new Error("The checkout origin does not match GITHUB_SERVER_URL and GITHUB_REPOSITORY. Cross-repository checkouts are not supported.");
   const scannedSha = await commit(repository, "HEAD");
   const pr = event.eventName === "pull_request" ? event.payload.pull_request : void 0;
   if (pr && scannedSha !== pr.head.sha) throw new Error("PR scans must check out github.event.pull_request.head.sha, not the merge commit.");
