@@ -1,4 +1,7 @@
-import { fakeCodexSource } from "./support/fake-codex-source.ts";
+import {
+  createFakeCodexFixture,
+  emptyWorkerPermissionProfile,
+} from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -55,6 +58,7 @@ const {
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
+  classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
@@ -76,6 +80,10 @@ export { parseDeepScan } from "./response.js";`,
 });
 
 const temporaryDirectories = createTemporaryDirectories(true);
+const fakeCodexFixture = createFakeCodexFixture.bind(
+  null,
+  temporaryDirectories,
+);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const trustedParentSandbox = Object.freeze({
   filesystemDenies: [],
@@ -92,11 +100,6 @@ const trustedParentSandboxWithDenials = Object.freeze({
   literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
   globScanMaxDepth: 3,
 });
-const emptyWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: { ":root": "read" },
-  network: { enabled: false },
-};
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 const deniedWorkerPermissionProfile = {
@@ -225,6 +228,9 @@ try {
     ),
     path.join(originalCwd, "codex"),
   );
+  testOsErrorCodesRemainRetryable();
+  testTextualMissingPathErrorsRemainRetryable();
+  testWorkerErrorClassificationPreservesExplicitFailures();
   await testWindowsAppsCodexFallsBackToRelocatedBinary();
   await testWindowsNpmPackageResolution();
   await testWindowsNpmPackageResolution("managed");
@@ -237,6 +243,90 @@ try {
 } finally {
   restoreEnv("FAKE_CODEX_MARKER", previousMarker);
   await temporaryDirectories.cleanup();
+}
+
+function testOsErrorCodesRemainRetryable() {
+  for (const code of ["ENOENT", "EACCES", "ENOEXEC", "EPERM"]) {
+    const original = Object.assign(new Error(`spawn codex ${code}`), { code });
+    const classified = classifyCodexWorkerError(original);
+    assert.equal(classified, original);
+    assert.equal(classified.name, "Error");
+  }
+}
+
+function testTextualMissingPathErrorsRemainRetryable() {
+  for (const diagnostic of [
+    "Error: No such file or directory (os error 2)",
+    "Error: The system cannot find the file specified. (os error 2)",
+  ]) {
+    const original = new Error(
+      ["Codex Exec exited with code 1:", diagnostic].join("\n"),
+    );
+    const classified = classifyCodexWorkerError(original);
+    assert.equal(classified, original);
+  }
+}
+
+function testWorkerErrorClassificationPreservesExplicitFailures() {
+  const explicit = new DeepScanNonRetryableError(
+    "Explicitly rejected worker permission profile.",
+  );
+  assert.equal(classifyCodexWorkerError(explicit), explicit);
+
+  const refusalMessages = [
+    "Request blocked by cyberPolicy.",
+    "Request blocked by a safety policy violation.",
+    "This content was flagged for possible cybersecurity risk.",
+    "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
+  ];
+  for (const message of refusalMessages) {
+    const original = new Error(message);
+    const classified = classifyCodexWorkerError(original);
+    assert.equal(classified, original);
+    assert.equal(classified.name, "Error");
+    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
+
+    const explicitRefusal = new DeepScanNonRetryableError(message);
+    assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
+
+    for (const unrecognized of [
+      `Source fixture: ${message}`,
+      `${message} Source fixture.`,
+      JSON.stringify({ message }),
+      `Codex Exec exited with code 1: ${message}`,
+      `429 Too Many Requests: ${message}`,
+      ` ${message}`,
+      `${message}\n`,
+      message.toLowerCase(),
+    ]) {
+      const unrelated = new Error(unrecognized);
+      assert.equal(classifyCodexWorkerError(unrelated), unrelated);
+      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
+    }
+  }
+
+  for (const message of [
+    "config parser handles unknown keys",
+    "failed to load configuration: invalid value",
+    "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
+    "authentication required",
+    "not logged in",
+    "missing API key",
+    "Codex Exec exited with code 2: failed to load configuration: invalid value",
+    "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
+    "chatgpt authentication required to sync remote plugins; api key auth is not supported",
+  ]) {
+    const original = new Error(message);
+    assert.equal(classifyCodexWorkerError(original), original);
+  }
+  for (const code of ["ECONNRESET", "EPIPE", "ETIMEDOUT", "cyber_policy"]) {
+    const original = Object.assign(new Error("Unrecognized worker failure"), {
+      code,
+    });
+    assert.equal(classifyCodexWorkerError(original), original);
+  }
 }
 
 async function testWindowsRootRelativePathsStayBoundToOriginalDrive() {
@@ -3691,34 +3781,6 @@ async function runFixtureWorker(
     await writeFile(promptPath, `${prompt}\n`);
     return await runWorker(promptPath, workingDirectory, { kind, subagents });
   });
-}
-
-async function fakeCodexFixture(
-  preflightProfile = emptyWorkerPermissionProfile,
-  preflightAllowed = true,
-  accountResult: {
-    account: { type: string } | null;
-    requiresOpenaiAuth: boolean;
-  } = { account: { type: "apiKey" }, requiresOpenaiAuth: true },
-) {
-  const root = await temporaryDirectories.create(
-    "codex-security-sdk-executor-",
-  );
-  const markerPath = path.join(root, "invocation.json");
-  const preflightMarkerPath = path.join(root, "preflight.json");
-  const scriptPath = path.join(root, "fake-codex.mjs");
-  await writeFile(
-    scriptPath,
-    fakeCodexSource(
-      preflightProfile,
-      preflightAllowed,
-      accountResult,
-      preflightMarkerPath,
-    ),
-  );
-  await chmod(scriptPath, 0o755);
-  process.env.FAKE_CODEX_MARKER = markerPath;
-  return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
 }
 
 function assertReadOnlyWorkerPolicy(args: readonly string[]) {
