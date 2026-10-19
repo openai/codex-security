@@ -97,11 +97,11 @@
     "strip-ansi": "7.2.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@stryker-mutator/core": "10.0.0",
-    "@types/bun": "1.4.2",
+    "@types/bun": "1.4.3",
     "@types/node": "26.6.5",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.3.0",

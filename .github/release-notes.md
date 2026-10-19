@@ -35,6 +35,7 @@
 - validate deferred source paths ([#1573](https://github.com/openai/codex-security/pull/1573))
 - validate code evidence paths ([#1567](https://github.com/openai/codex-security/pull/1567))
 - bump taiki-e/install-action from 2.87.27 to 2.87.28 ([#1742](https://github.com/openai/codex-security/pull/1742))
+- update Zod, OpenCode SDK and Bun types ([#1743](https://github.com/openai/codex-security/pull/1743))
 
 <!-- release-section: highlights:end -->
 
