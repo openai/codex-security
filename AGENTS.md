@@ -21,6 +21,9 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 When changing `plugins/codex-security`, run its portable source checks before
 submitting the change:
 
+Run the commands in order from the repository root. `build:ci` compiles the tracked
+`.mts` source checks into the generated `.mjs` entrypoints used below.
+
 ```bash
 python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
 python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security

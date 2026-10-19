@@ -2501,20 +2501,23 @@ The extraction root is not enforced.
         self.assertEqual(coverage["deferred"], self.coverage["deferred"])
         self.assertEqual(coverage["surfaces"][0]["disposition"], "needs_follow_up")
 
+    def write_code_evidence_scan(self, path: str) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": path,
+                "startLine": 1,
+                "code": "source()",
+                "explanation": "Synthetic source evidence.",
+            }
+        ]
+        self.write_scan()
+
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
             with self.subTest(path=path):
-                self.findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "source",
-                        "label": "Source",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "source()",
-                        "explanation": "Synthetic source evidence.",
-                    }
-                ]
-                self.write_scan()
+                self.write_code_evidence_scan(path)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
                     r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
@@ -2524,17 +2527,7 @@ The extraction root is not enforced.
     def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
         for path in ("src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
-                self.findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "source",
-                        "label": "Source",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "source()",
-                        "explanation": "Synthetic repository evidence.",
-                    }
-                ]
-                self.write_scan()
+                self.write_code_evidence_scan(path)
                 _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
                 self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
 
