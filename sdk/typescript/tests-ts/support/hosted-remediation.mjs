@@ -17,6 +17,14 @@ export const passedChecks = [
   },
 ];
 
+/** @type {import("../../src/remediation.js").FindingVerification} */
+export const verificationResult = {
+  id: "finding-1",
+  status: "fixed",
+  evidence: "Original request rejected; legitimate control passed.",
+  checks: passedChecks,
+};
+
 /**
  * @param {{repository: string, revision: string}} checkout
  * @param {"patch" | "verify"} operation
@@ -46,7 +54,6 @@ export function remediationInput(checkout, operation = "patch") {
  * @returns {import("../../src/hosted-remediation.js").RemediationExecutionResult}
  */
 export function remediationReceipt(request, overrides = {}) {
-  const evidence = "Original request rejected; legitimate control passed.";
   return {
     requestId: request.requestId,
     status: "completed",
@@ -60,19 +67,12 @@ export function remediationReceipt(request, overrides = {}) {
                 occurrenceId: request.findingId,
                 status: "verified",
                 files: ["guard.ts"],
-                verification: evidence,
+                verification: verificationResult.evidence,
               },
             ],
           }
         : {
-            results: [
-              {
-                id: request.findingId,
-                status: "fixed",
-                evidence,
-                checks: passedChecks,
-              },
-            ],
+            results: [{ ...verificationResult, id: request.findingId }],
           },
     ),
     ...overrides,
