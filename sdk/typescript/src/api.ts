@@ -3111,7 +3111,10 @@ export class CodexSecurity {
   public async close(): Promise<void> {
     if (this.#closePromise !== null) return await this.#closePromise;
     this.#closed = true;
-    this.#closePromise = this.#finishClose();
+    const completion = Promise.withResolvers<void>();
+    // Abort listeners can reenter close before finishClose reaches its first await.
+    this.#closePromise = completion.promise;
+    void this.#finishClose().then(completion.resolve, completion.reject);
     await this.#closePromise;
   }
 

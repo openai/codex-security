@@ -5271,6 +5271,144 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each(
+    [false, true].flatMap((reenter) =>
+      [false, true].map((failCleanup) => ({ reenter, failCleanup })),
+    ),
+  )(
+    "close shares cleanup during abort reentry=$reenter and failure=$failCleanup",
+    async ({ reenter, failCleanup }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const prepared: ReturnType<typeof preparedRuntime> = {
+        ...preparedRuntime(codexHome),
+      };
+      const requestStarted = Promise.withResolvers<void>();
+      const operationRelease = Promise.withResolvers<void>();
+      const cleanupStarted = Promise.withResolvers<void>();
+      const cleanupRelease = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const deadline = AbortSignal.timeout(5_000);
+      const rejectReadiness = () => requestStarted.reject(deadline.reason);
+      deadline.addEventListener("abort", rejectReadiness, { once: true });
+      const failure = new Error("synthetic runtime cleanup failure");
+      const closes: Array<{ settled: boolean; result: Promise<unknown> }> = [];
+      const observeClose = (pending: Promise<void>) => {
+        const observed = {
+          settled: false,
+          result: pending.catch((error: unknown) => error),
+        };
+        observed.result = observed.result.finally(() => {
+          observed.settled = true;
+        });
+        closes.push(observed);
+      };
+      let cleanupCalls = 0;
+      let scanSignal: AbortSignal | undefined;
+      let budgetSignal: AbortSignal | undefined;
+      const client = new TestClient(
+        { codexOverrides: { model: "gpt-5.6-sol" } },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: async () => prepared,
+          createCodex: codexFactory(
+            async (_input: string, { signal }: { signal: AbortSignal }) => {
+              scanSignal = signal;
+              prepared.providerProfile = {
+                name: "synthetic-cleanup-observer",
+                path: join(root, "unused-profile.toml"),
+                async cleanup() {
+                  cleanupCalls++;
+                  cleanupStarted.resolve();
+                  await cleanupRelease.promise;
+                  if (failCleanup) throw failure;
+                },
+              };
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await writeUsageSession(codexHome, "scan-thread", {
+                  input_tokens: 900,
+                  output_tokens: 0,
+                });
+                await (signal.aborted ? undefined : once(signal, "abort"));
+                await operationRelease.promise;
+                signal.throwIfAborted();
+              }
+              return { events: events() };
+            },
+          ),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      const scan = client
+        .run(repository, {
+          mode: "standard",
+          maxCostUsd: 0.004,
+          signal: AbortSignal.any([controller.signal, deadline]),
+          onBudgetApproaching: ({ signal }) => {
+            budgetSignal = signal;
+            if (reenter) {
+              signal.addEventListener(
+                "abort",
+                () => observeClose(client.close()),
+                {
+                  once: true,
+                },
+              );
+              signal.addEventListener(
+                "abort",
+                () => observeClose(client[Symbol.asyncDispose]()),
+                { once: true },
+              );
+            }
+            requestStarted.resolve();
+            return undefined;
+          },
+        })
+        .catch((error: unknown) => error);
+      try {
+        await Promise.race([
+          requestStarted.promise,
+          scan.then((result) => {
+            throw new Error("Scan ended before its budget callback", {
+              cause: result,
+            });
+          }),
+        ]);
+        observeClose(client.close());
+        expect(scanSignal?.aborted).toBe(true);
+        expect(budgetSignal?.aborted).toBe(true);
+        observeClose(client.close());
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(cleanupCalls).toBe(0);
+        expect(closes.every(({ settled }) => !settled)).toBe(true);
+        operationRelease.resolve();
+        await cleanupStarted.promise;
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(closes).toHaveLength(reenter ? 4 : 2);
+        expect(closes.every(({ settled }) => !settled)).toBe(true);
+        cleanupRelease.resolve();
+        for (const close of closes) {
+          expect(await close.result).toBe(failCleanup ? failure : undefined);
+        }
+        const late = client.close().catch((error: unknown) => error);
+        expect(await late).toBe(failCleanup ? failure : undefined);
+        expect(cleanupCalls).toBe(1);
+        expect(await scan).toMatchObject({
+          message: "CodexSecurity is closed.",
+        });
+      } finally {
+        clearTimeout(keepAlive);
+        deadline.removeEventListener("abort", rejectReadiness);
+        controller.abort();
+        operationRelease.resolve();
+        cleanupRelease.resolve();
+        await client.close().catch(() => {});
+        await scan;
+        await Promise.all(closes.map(({ result }) => result));
+      }
+    },
+  );
+
   test("raises a live budget twice without restarting or resetting accumulated usage", async () => {
     const { root, repository, codexHome } = await runtimeDirectories();
     const scanDir = join(root, "scan");
