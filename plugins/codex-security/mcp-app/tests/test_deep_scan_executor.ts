@@ -80,7 +80,10 @@ export { parseDeepScan } from "./response.js";`,
 });
 
 const temporaryDirectories = createTemporaryDirectories(true);
-const fakeCodexFixture = createFakeCodexFixture.bind(null, temporaryDirectories);
+const fakeCodexFixture = createFakeCodexFixture.bind(
+  null,
+  temporaryDirectories,
+);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const trustedParentSandbox = Object.freeze({
   filesystemDenies: [],
