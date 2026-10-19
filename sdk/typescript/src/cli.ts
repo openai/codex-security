@@ -148,6 +148,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvironmentKey,
+  scanProviderConfiguration,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -1334,15 +1335,7 @@ export async function runCodexSkillCommand(
       ) as JsonObject;
       const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
-      // Native Codex ignores configured tables for these built-in providers.
-      const providerConfiguration =
-        typeof provider === "string" &&
-        !["openai", "ollama", "lmstudio"].includes(provider)
-          ? (
-              config["model_providers"] as
-                Record<string, JsonObject> | undefined
-            )?.[provider]
-          : undefined;
+      const providerConfiguration = scanProviderConfiguration(config, provider);
       const providerEnvKey =
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]

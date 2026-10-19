@@ -83,7 +83,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvironmentKey,
-  scanProviderHeaderEnvironmentNames,
+  scanProviderConfiguration,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -3491,7 +3491,7 @@ export class CodexSecurity {
         preflightConfig,
         sessionConfig: preflightConfig,
         modelProvider: "host",
-        externalProvider: null,
+        providerEnvKey: undefined,
         apiKey: null,
         scanEnvironment: environment,
         authentication: { method: "host", verified: false },
@@ -5024,11 +5024,12 @@ export function scanAuthentication(
   );
   if (key === null && isExternalModelProvider(modelProvider)) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    const source = providerEnvKey ?? provider.env_key;
     if (preflight && auth === "auto") {
-      return { method: "api_key", source: provider.env_key, verified: false };
+      return { method: "api_key", source, verified: false };
     }
     throw new AuthenticationRequiredError(
-      `Set ${providerEnvKey ?? provider.env_key} to run a scan through ${provider.name}.`,
+      `Set ${source} to run a scan through ${provider.name}.`,
     );
   }
   if (
@@ -5164,9 +5165,13 @@ function selectedProviderHeaderEnvironment(
   config: JsonObject,
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
+  const headers = scanProviderConfiguration(config)?.["env_http_headers"];
   return Object.fromEntries(
-    scanProviderHeaderEnvironmentNames(config).flatMap((name) => {
-      const value = environmentEntry(environment, name);
+    (isRecord(headers) ? Object.values(headers) : []).flatMap((name) => {
+      const value =
+        typeof name === "string"
+          ? environmentEntry(environment, name)
+          : undefined;
       return value === undefined ? [] : [[name, value]];
     }),
   );

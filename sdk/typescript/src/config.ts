@@ -116,7 +116,7 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
-/** @internal Built-in providers ignore custom provider tables in native Codex. */
+/** @internal */
 export function scanProviderEnvironmentKey(
   config: JsonObject,
 ): string | undefined {
@@ -126,20 +126,11 @@ export function scanProviderEnvironmentKey(
     : undefined;
 }
 
-/** @internal Environment values explicitly referenced by the selected provider. */
-export function scanProviderHeaderEnvironmentNames(
+/** @internal Native built-ins ignore custom provider tables. */
+export function scanProviderConfiguration(
   config: JsonObject,
-): string[] {
-  const headers = scanProviderConfiguration(config)?.["env_http_headers"];
-  return isObject(headers)
-    ? Object.values(headers).filter(
-        (name): name is string => typeof name === "string",
-      )
-    : [];
-}
-
-function scanProviderConfiguration(config: JsonObject): JsonObject | undefined {
-  const selected = scanModelProvider(config);
+  selected = scanModelProvider(config),
+): JsonObject | undefined {
   if (
     typeof selected !== "string" ||
     ["openai", "ollama", "lmstudio"].includes(selected)

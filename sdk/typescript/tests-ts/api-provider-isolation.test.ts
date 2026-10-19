@@ -814,74 +814,71 @@ test.each([
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) =>
           codexFactory(async function runStreamed() {
-              expect(options.apiKey).toBeUndefined();
-              expect(options.env?.[providerKey]).toBe(
-                external
-                  ? providerEnvironment[providerKey]!.trim()
-                  : providerEnvironment[providerKey],
-              );
-              expect(options.env?.[headerKey]).toBe(
-                providerEnvironment[headerKey],
-              );
-              for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
-                if (name !== providerKey && name !== headerKey) {
-                  expect(options.env?.[name]).toBeUndefined();
-                }
+            expect(options.apiKey).toBeUndefined();
+            expect(options.env?.[providerKey]).toBe(
+              external
+                ? providerEnvironment[providerKey]!.trim()
+                : providerEnvironment[providerKey],
+            );
+            expect(options.env?.[headerKey]).toBe(
+              providerEnvironment[headerKey],
+            );
+            for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+              if (name !== providerKey && name !== headerKey) {
+                expect(options.env?.[name]).toBeUndefined();
               }
-              const status = await nativeRequest(
-                {
-                  ...options.env!,
-                  ...(options.apiKey === undefined
-                    ? {}
-                    : { CODEX_API_KEY: options.apiKey }),
-                },
-                repository,
-                [],
-                // Tool enumeration starts the real MCP child without a model turn.
-                "mcpServerStatus/list",
-                { serverName: "codex-security", detail: "toolsAndAuthOnly" },
-              );
-              expect(status.data).toHaveLength(1);
-              expect(status.data[0].name).toBe("codex-security");
-              expect(status.data[0].toolsError).toBeNull();
-              expect(status.data[0].tools).toHaveProperty(
-                "synthetic_environment",
-              );
-              expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
-                inherited: {
-                  SYNTHETIC_CUSTOM_API_KEY: null,
-                  SYNTHETIC_CUSTOM_HEADER: null,
-                  SYNTHETIC_REQUIRED_KEY: null,
-                  SYNTHETIC_UNUSED_KEY: null,
-                },
-                recovered: {
-                  ...providerEnvironment,
-                  ...(process.platform === "win32" &&
-                  configuredHeaderKey === "SYNTHETIC_CUSTOM_HEADER"
-                    ? { [headerKey]: " synthetic-child-header " }
-                    : {}),
-                  ...(external
-                    ? { [providerKey]: "synthetic-custom-key" }
-                    : {}),
-                },
-              });
-              for (const text of [
-                await readFile(
-                  options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                  "utf8",
-                ),
-                await readFile(
-                  join(options.env!["CODEX_HOME"]!, "config.toml"),
-                  "utf8",
-                ),
-                JSON.stringify({
-                  config: options.config,
-                  overrides: options.configOverrides,
-                }),
-              ]) {
-                for (const marker of Object.values(providerEnvironment)) {
-                  expect(text).not.toContain(marker);
-                }
+            }
+            const status = await nativeRequest(
+              {
+                ...options.env!,
+                ...(options.apiKey === undefined
+                  ? {}
+                  : { CODEX_API_KEY: options.apiKey }),
+              },
+              repository,
+              [],
+              // Tool enumeration starts the real MCP child without a model turn.
+              "mcpServerStatus/list",
+              { serverName: "codex-security", detail: "toolsAndAuthOnly" },
+            );
+            expect(status.data).toHaveLength(1);
+            expect(status.data[0].name).toBe("codex-security");
+            expect(status.data[0].toolsError).toBeNull();
+            expect(status.data[0].tools).toHaveProperty(
+              "synthetic_environment",
+            );
+            expect(JSON.parse(await readFile(report, "utf8"))).toEqual({
+              inherited: {
+                SYNTHETIC_CUSTOM_API_KEY: null,
+                SYNTHETIC_CUSTOM_HEADER: null,
+                SYNTHETIC_REQUIRED_KEY: null,
+                SYNTHETIC_UNUSED_KEY: null,
+              },
+              recovered: {
+                ...providerEnvironment,
+                ...(process.platform === "win32" &&
+                configuredHeaderKey === "SYNTHETIC_CUSTOM_HEADER"
+                  ? { [headerKey]: " synthetic-child-header " }
+                  : {}),
+                ...(external ? { [providerKey]: "synthetic-custom-key" } : {}),
+              },
+            });
+            for (const text of [
+              await readFile(
+                options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                "utf8",
+              ),
+              await readFile(
+                join(options.env!["CODEX_HOME"]!, "config.toml"),
+                "utf8",
+              ),
+              JSON.stringify({
+                config: options.config,
+                overrides: options.configOverrides,
+              }),
+            ]) {
+              for (const marker of Object.values(providerEnvironment)) {
+                expect(text).not.toContain(marker);
               }
             }
             throw new Error("synthetic native plugin environment checked");

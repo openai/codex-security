@@ -1718,7 +1718,20 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(EXTERNAL_PROVIDER_CASES)(
+  test.each(
+    EXTERNAL_PROVIDER_CASES.flatMap(
+      ([name, provider, apiKey, model, config]) => [
+        [name, provider, apiKey, model, config] as const,
+        [
+          `${name} with a native env_key`,
+          provider,
+          "SYNTHETIC_PROVIDER_KEY",
+          model,
+          { ...config, env_key: "SYNTHETIC_PROVIDER_KEY" },
+        ] as const,
+      ],
+    ),
+  )(
     "preflights %s with auto authentication without credentials or runtime startup",
     async (_name, provider, apiKey, model, providerConfig) => {
       const { repository } = await repositoryDirectories();
