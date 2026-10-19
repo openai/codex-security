@@ -98,6 +98,38 @@ changed; otherwise run `logout`, then `login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
+### Daybreak opt-in
+
+Codex 0.163.0 and later default the Daybreak toggle to off. Enable it through
+the existing native configuration override:
+
+```bash
+codex-security scan . --codex daybreak=true
+codex-security scan . --mode deep --codex daybreak=true
+```
+
+In the SDK, use `new CodexSecurity({ codexOverrides: { daybreak: true } })`.
+In project files, set `daybreak: true` inside the `codex` mapping. Use `false`
+to explicitly turn it off.
+The setting carries through saved scan recipes, resumed scans, Deep Scan
+discovery and reducer workers, and `scan --patch`. Standalone `validate`,
+`patch`, and `verify-fix` accept the same `--codex daybreak=true` override.
+Scans use isolated configuration, so set it on the CLI, SDK client, or project
+file even if it is enabled in your personal Codex configuration.
+
+For the plugin inside Codex, use the desktop Daybreak toggle or `/daybreak` in
+an interactive CLI session. For headless Codex, use `codex exec -c daybreak=true`
+or set top-level `daybreak = true` in the configuration loaded by the runner.
+Deep Scan starts separate Codex processes: a transient desktop or interactive
+toggle is not included in the plugin's turn metadata. Configure `daybreak = true`
+in the Codex home used by those workers, or launch the scan through the CLI or
+SDK with the explicit override above.
+
+Daybreak requires the built-in OpenAI provider and compatible account or API
+project access. Codex selects the available program; this setting does not
+grant access. An explicit [Cyber access program](#select-a-cyber-access-program)
+takes precedence over the toggle for that turn.
+
 ### Daybreak Blue with an API key
 
 The [Responses API defaults](https://developers.openai.com/api/docs/guides/daybreak#understand-defaults-when-omitted)
@@ -632,7 +664,7 @@ or Windows MCP launcher. Saved reports remain readable.
 Multi-agent v2 must remain enabled; `agents.max_threads` is unsupported.
 
 `validate`, `patch`, and `verify-fix` limit native overrides to `model`,
-`model_reasoning_effort`, `model_provider`, `model_providers`, and
+`model_reasoning_effort`, `model_provider`, `model_providers`, `daybreak`, and
 `analytics.enabled`. For a custom provider:
 
 ```bash

@@ -356,6 +356,7 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain("--codex <key=value>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
+        expect(help.text()).toContain("daybreak=true");
         expect(help.text()).toContain("analytics.enabled=false");
         expect(help.text()).not.toContain("--provider");
       }
@@ -1092,13 +1093,15 @@ describe("CLI skill commands", () => {
   );
 
   test.each(["validate", "patch", "verify-fix"] as const)(
-    "passes explicit analytics settings to %s",
+    "passes explicit native settings to %s",
     async (command) => {
-      for (const override of [
-        "analytics.enabled=false",
-        "analytics.enabled=true",
-        "analytics={enabled=false}",
-      ]) {
+      for (const [override, forwarded] of [
+        ["analytics.enabled=false", "analytics.enabled=false"],
+        ["analytics.enabled=true", "analytics.enabled=true"],
+        ["analytics={enabled=false}", "analytics={enabled=false}"],
+        ["daybreak = true", "daybreak=true"],
+        ["daybreak=false", "daybreak=false"],
+      ] as const) {
         let invocation: readonly string[] = [];
         const stderr = captureCli(main, "stderr");
         expect(
@@ -1133,7 +1136,7 @@ describe("CLI skill commands", () => {
           ),
           stderr.text(),
         ).toBe(0);
-        expect(invocation).toContain(override);
+        expect(invocation).toContain(forwarded);
         expect(invocation).toContain('model_reasoning_effort="high"');
       }
 
@@ -1644,6 +1647,8 @@ lines.on("line", (line) => {
     send({ id: 1, result: {} });
   } else if (request.method === "initialized") {
     initialized = true;
+  } else if (request.method === "config/read") {
+    send({ id: request.id, result: { config: {} } });
   } else if (request.method === "thread/start") {
     assert.equal(initialized, true);
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
@@ -1815,6 +1820,7 @@ const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") send({ id: 1, result: {} });
+  if (request.method === "config/read") send({ id: request.id, result: { config: {} } });
   if (request.method === "thread/start") send({ id: 2, result: { thread: { id: "parent" } } });
   if (request.method === "command/exec") send({ id: request.id, result: { exitCode: 0 } });
   if (request.method === "turn/start") process.stdout.write(${JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n")}, () => process.exit(0));

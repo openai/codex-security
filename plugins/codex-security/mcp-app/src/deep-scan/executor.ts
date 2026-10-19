@@ -539,6 +539,7 @@ async function workerRuntimeSettings(
   }
   const inherited = Object.fromEntries(
     [
+      "daybreak",
       "model_reasoning_summary",
       "service_tier",
       "analytics",
@@ -612,9 +613,11 @@ async function workerRuntimeSettings(
     ...workerConfig,
     features: {
       ...Object.fromEntries(
-        ["api_key_cyber_access_programs", "api_key_model_discovery"].map(
-          (key) => [key, features[key]],
-        ),
+        [
+          "cli_daybreak",
+          "api_key_cyber_access_programs",
+          "api_key_model_discovery",
+        ].map((key) => [key, features[key]]),
       ),
       ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
     },

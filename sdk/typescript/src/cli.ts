@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
+import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
@@ -346,7 +347,7 @@ const MATCHING_MODEL_OPTIONS = modelOptions(
   "Matching reasoning effort (default: medium).",
 );
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
+  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
   codex: z
     .array(optionValue("--codex"))
@@ -1035,6 +1036,7 @@ interface SkillCommandOutput {
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
+    readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
 }
@@ -1077,6 +1079,8 @@ interface SkillRunOptions {
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
   serviceTier?: JsonValue;
+  daybreakFeatures?: JsonObject;
+  cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -1632,6 +1636,7 @@ export async function runCodexSkillCommand(
                       input: invocation.stdin!,
                       sandbox: output.appServer.sandbox,
                       externalSandbox: output.appServer.externalSandbox,
+                      cyberAccessProgram: output.appServer.cyberAccessProgram,
                       onEvent: output.appServer.onEvent,
                     },
               ),
@@ -7433,6 +7438,7 @@ async function runSkill(
         key !== "model_reasoning_effort" &&
         key !== "model_provider" &&
         key !== "model_providers" &&
+        key !== "daybreak" &&
         !(
           key === "analytics" &&
           isJsonObject(value) &&
@@ -7441,7 +7447,7 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, daybreak, and analytics.enabled overrides.",
     );
   }
   if (options.serviceTier !== undefined)
@@ -7676,6 +7682,12 @@ async function runSkill(
       ...(options.serviceTier === undefined
         ? []
         : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
+      ...(overrides["daybreak"] === undefined
+        ? []
+        : ["--config", `daybreak=${inlineToml(overrides["daybreak"])}`]),
+      ...Object.entries(options.daybreakFeatures ?? {}).flatMap(
+        ([key, value]) => ["--config", `features.${key}=${inlineToml(value)}`],
+      ),
       ...codex
         .filter(
           (value) =>
@@ -7749,6 +7761,9 @@ async function runSkill(
               prompt,
               threadSource,
               ...(options.externalSandbox ? { externalSandbox: true } : {}),
+              ...(options.cyberAccessProgram === undefined
+                ? {}
+                : { cyberAccessProgram: options.cyberAccessProgram }),
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
@@ -7774,6 +7789,7 @@ export async function readSkillCommandOutput(
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
+    readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
 ): Promise<{
@@ -7788,6 +7804,17 @@ export async function readSkillCommandOutput(
   let turnId: string | undefined;
   let completed = false;
   let sandboxUnavailable = false;
+  let config: JsonObject = {};
+  let model: string;
+  let provider: string;
+  let daybreakRequestId = 0;
+  let daybreakRequest:
+    | {
+        id: string;
+        resolve: (result: JsonObject) => void;
+        reject: (error: Error) => void;
+      }
+    | undefined;
   const externalSandbox = appServer?.externalSandbox
     ? { type: "externalSandbox", networkAccess: "enabled" }
     : undefined;
@@ -7795,15 +7822,47 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const startTurn = (): void => {
-    send({
-      id: 3,
-      method: "turn/start",
-      params: {
-        threadId: threadId!,
-        ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
-        input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
+    const selected = appServer?.cyberAccessProgram;
+    const program =
+      selected === undefined
+        ? appServerCyberAccessProgram(
+            config,
+            model,
+            provider,
+            (method, params) =>
+              new Promise<JsonObject>((resolve, reject) => {
+                const id = `daybreak-${daybreakRequestId++}`;
+                daybreakRequest = { id, resolve, reject };
+                send({ id, method, params });
+              }),
+          )
+        : Promise.resolve(
+            selected === "daybreak_blue"
+              ? "daybreakBlue"
+              : selected === "daybreak_red"
+                ? "daybreakRed"
+                : selected,
+          );
+    void program.then(
+      (cyberAccessProgram) => {
+        send({
+          id: 3,
+          method: "turn/start",
+          params: {
+            threadId: threadId!,
+            ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
+            ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
+            input: [
+              { type: "text", text: appServer!.prompt, text_elements: [] },
+            ],
+          },
+        });
       },
-    });
+      (failure: unknown) => {
+        error = errorMessage(failure);
+        appServer?.input.end();
+      },
+    );
   };
   const startThread = (config?: JsonObject): void => {
     if (appServer === undefined) return;
@@ -7828,7 +7887,10 @@ export async function readSkillCommandOutput(
     send({
       id: 1,
       method: "initialize",
-      params: { clientInfo: { name: "codex-security", version: VERSION } },
+      params: {
+        clientInfo: { name: "codex-security", version: VERSION },
+        capabilities: { experimentalApi: true },
+      },
     });
   }
 
@@ -7854,6 +7916,18 @@ export async function readSkillCommandOutput(
         } catch {}
       }
       if (value["id"] !== undefined) {
+        if (value["id"] === daybreakRequest?.id) {
+          const pending = daybreakRequest;
+          daybreakRequest = undefined;
+          if (value["error"] !== undefined) {
+            pending.reject(
+              new Error((value["error"] as { message: string }).message),
+            );
+          } else {
+            pending.resolve(value["result"] as JsonObject);
+          }
+          continue;
+        }
         if (typeof value["method"] === "string") {
           send({
             id: value["id"] as string | number,
@@ -7875,26 +7949,35 @@ export async function readSkillCommandOutput(
               continue;
             }
           }
-          if (appServer.sandbox === "read-only") {
-            if (appServer.directory === undefined) {
-              error =
-                "Codex did not receive the repository directory required for read-only verification.";
-              appServer.input.end();
-              continue;
-            }
-            send({
-              id: 4,
-              method: "config/read",
-              params: {
-                cwd: appServer.directory,
-                includeLayers: true,
-              },
-            });
-          } else {
-            startThread();
+          if (
+            appServer.sandbox === "read-only" &&
+            appServer.directory === undefined
+          ) {
+            error =
+              "Codex did not receive the repository directory required for read-only verification.";
+            appServer.input.end();
+            continue;
           }
-        } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
+          send({
+            id: 4,
+            method: "config/read",
+            params: {
+              ...(appServer.directory === undefined
+                ? {}
+                : { cwd: appServer.directory }),
+              includeLayers: appServer.sandbox === "read-only",
+            },
+          });
+        } else if (value["id"] === 4) {
           const result = value["result"];
+          config =
+            isJsonObject(result) && isJsonObject(result["config"])
+              ? (result["config"] as JsonObject)
+              : {};
+          if (appServer.sandbox !== "read-only") {
+            startThread();
+            continue;
+          }
           const layers =
             typeof result === "object" && result !== null && "layers" in result
               ? result.layers
@@ -7957,8 +8040,12 @@ export async function readSkillCommandOutput(
           const result = value["result"] as {
             thread: { id: string };
             sandbox: JsonObject;
+            model: string;
+            modelProvider: string;
           };
           threadId = result.thread.id;
+          model = result.model;
+          provider = result.modelProvider;
           if (
             appServer.threadSource === CODEX_SECURITY_THREAD_SOURCES.remediation
           ) {
@@ -8307,6 +8394,8 @@ async function executeScan(
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let patchServiceTier: JsonValue | undefined;
+  let patchDaybreak: JsonValue = false;
+  let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8332,8 +8421,20 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    patchServiceTier =
-      resolveCodexProfile(effectiveConfiguration)["service_tier"] ?? "default";
+    const resolvedConfiguration = resolveCodexProfile(effectiveConfiguration);
+    patchServiceTier = resolvedConfiguration["service_tier"] ?? "default";
+    patchDaybreak = resolvedConfiguration["daybreak"] ?? false;
+    const features = resolvedConfiguration["features"];
+    patchDaybreakFeatures = Object.fromEntries(
+      [
+        "cli_daybreak",
+        "api_key_cyber_access_programs",
+        "api_key_model_discovery",
+      ].map((key) => [
+        key,
+        isJsonObject(features) ? (features[key] ?? true) : true,
+      ]),
+    );
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
@@ -9074,6 +9175,7 @@ async function executeScan(
           codex: [
             `model=${JSON.stringify(effectiveModel)}`,
             `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            `daybreak=${inlineToml(patchDaybreak)}`,
             ...(patchAnalyticsOverride === undefined
               ? []
               : [patchAnalyticsOverride]),
@@ -9084,6 +9186,8 @@ async function executeScan(
         {
           ...providerOptions,
           serviceTier: patchServiceTier,
+          daybreakFeatures: patchDaybreakFeatures,
+          cyberAccessProgram: arguments_.cyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,

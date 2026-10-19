@@ -5381,6 +5381,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "goals",
       "multi_agent",
       "enable_fanout",
+      "cli_daybreak",
       "api_key_cyber_access_programs",
       "api_key_model_discovery",
     ]) {
@@ -5406,6 +5407,9 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
+    if (typeof source["daybreak"] === "boolean") {
+      result["daybreak"] = source["daybreak"];
+    }
     for (const key of [
       "model",
       "model_reasoning_effort",
@@ -5456,8 +5460,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
   }
+  if (typeof resolved["daybreak"] === "boolean") {
+    result["daybreak"] = resolved["daybreak"];
+  }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
+    "cli_daybreak",
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
   ]) {
@@ -5599,6 +5607,7 @@ function selectedWorkerRuntimeConfig(
       [
         ...CODEX_AUTH_CONFIG_KEYS,
         "analytics",
+        "daybreak",
         "responses_api_metadata",
         "openai_base_url",
         "features",

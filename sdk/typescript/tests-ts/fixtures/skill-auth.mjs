@@ -32,6 +32,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       loggedIn = true;
       send({ id: request.id, result: { type: "apiKey" } });
     }
+  } else if (request.method === "config/read") {
+    send({ id: request.id, result: { config: {} } });
   } else if (request.method === "thread/start") {
     if (process.env.SYNTHETIC_CHECK_STARTUP_LOCK) {
       assert.equal(

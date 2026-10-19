@@ -58,6 +58,12 @@ keep their native spelling; names and values are not converted.
 YAML anchors are supported; the parser retains its guard against excessive nested
 alias expansion.
 
+For Daybreak on Codex 0.163.0 or later, set `codex.daybreak` to `true`; the toggle
+defaults off. This native setting is retained in scan recipes and passed to
+Deep Scan discovery and reducer workers, including resumes. An explicit
+`scan.cyber_access_program` takes precedence for each turn. See
+[Daybreak opt-in](../sdk/typescript/docs/cli.md#daybreak-opt-in).
+
 The [YAML example](examples/codex-security.yaml) and equivalent
 [JSON example](examples/codex-security.json) select this repository's TypeScript
 source. After [setting up the source checkout](../sdk/typescript/TESTING.md), try:

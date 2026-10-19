@@ -79,7 +79,7 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (["initialize", "account/login/start", "config/read"].includes(request.method)) send({ id: request.id, result: {} });
   if (request.method === "thread/start") {
     assert.equal(request.params.sandbox, "workspace-write");
     send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite" } } });
@@ -260,7 +260,7 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (["initialize", "account/login/start", "config/read"].includes(request.method)) send({ id: request.id, result: {} });
   if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");

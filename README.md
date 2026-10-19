@@ -55,6 +55,10 @@ If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
 to the scan command. Otherwise, omit the flag or use
 `--cyber-access-program standard`.
 
+To use Codex's Daybreak toggle, pass `--codex daybreak=true`. It defaults off
+and requires compatible access. See [Daybreak configuration](sdk/typescript/docs/cli.md#daybreak-opt-in)
+for SDK and plugin usage, including Deep Scan workers.
+
 To run without a global installation, replace `cs` in these examples with
 `npx @openai/codex-security`, for example:
 

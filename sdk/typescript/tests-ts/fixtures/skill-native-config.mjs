@@ -16,6 +16,8 @@ await Promise.all([
       const request = JSON.parse(line);
       if (request.method === "command/exec") {
         send({ id: request.id, result: { exitCode: 0 } });
+      } else if (request.method === "model/list") {
+        send({ id: request.id, result: { data: [], nextCursor: null } });
       } else if (request.method === "turn/start") {
         turnRequest = request;
         child.stdin.write(
