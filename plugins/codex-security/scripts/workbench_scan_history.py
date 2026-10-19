@@ -308,6 +308,7 @@ def list_scans(
         "scans": [
             {
                 "completedAt": row["completed_at"],
+                "logCompletedAt": row["log_completed_at"],
                 "continuationThreadId": row["continuation_thread_id"],
                 **stored_scan_cost_fields(row["cost_json"]),
                 "findingCount": row["finding_count"],

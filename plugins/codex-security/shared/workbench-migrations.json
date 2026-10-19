@@ -410,5 +410,10 @@
     "statements": [
       "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
     ]
+  },
+  {
+    "version": 50,
+    "name": "persist scan log completion boundaries",
+    "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
   }
 ]
