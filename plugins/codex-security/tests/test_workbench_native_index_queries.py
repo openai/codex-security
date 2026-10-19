@@ -376,6 +376,61 @@ def test_scan_list_probes_requested_repository_once(
     ]
 
 
+def test_unscanned_repository_filters_preserve_latest_scan_order_and_pagination(
+    workbench_api, indexed_collections, tmp_path
+):
+    connection, scanned = indexed_collections
+    unscanned = []
+    timestamp = "2026-08-02T00:00:00Z"
+    with connection:
+        for name in ("needle-unscanned-first", "needle-unscanned-second"):
+            target = (tmp_path / name).resolve()
+            target.mkdir()
+            workbench_api["ensure_security_target"](connection, str(target))
+            unscanned.append(target)
+        connection.execute(
+            "UPDATE scans SET started_at = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+            (timestamp, timestamp, timestamp, SCAN_IDS[0]),
+        )
+        # History sorts by updates, but repository summaries retain latest-started ordering.
+        connection.execute(
+            "UPDATE scans SET updated_at = '2026-08-03T00:00:00Z' WHERE id = ?", (SCAN_IDS[1],)
+        )
+    query = workbench_api["native_indexes"].list_repositories
+    repositories = query(connection)["repositories"]
+    scanned_ids = [stable_target_id(scanned[index]) for index in (0, 2, 1)]
+    unscanned_ids = {stable_target_id(target) for target in unscanned}
+    assert [row["targetId"] for row in repositories[:3]] == scanned_ids
+    assert {row["targetId"] for row in repositories[3:]} == unscanned_ids
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]
+    assert [
+        row["targetId"] for row in query(connection, query_args(status="scanned"))["repositories"]
+    ] == scanned_ids
+    assert {
+        row["targetId"]
+        for row in query(connection, query_args(status="open_findings"))["repositories"]
+    } == set(scanned_ids)
+
+    filters = {"status": "not_scanned", "query": "NeEdLe", "limit": 1}
+    first = query(connection, query_args(**filters))
+    second = query(connection, query_args(**filters, offset=1))
+    assert len(first["repositories"]) == len(second["repositories"]) == 1
+    assert first["nextOffset"] == 1
+    assert second["nextOffset"] is None
+    assert {
+        first["repositories"][0]["targetId"],
+        second["repositories"][0]["targetId"],
+    } == unscanned_ids
+    targeted = query(
+        connection,
+        query_args(status="not_scanned", target_id=stable_target_id(unscanned[0]), limit=None),
+    )
+    assert [row["targetId"] for row in targeted["repositories"]] == [stable_target_id(unscanned[0])]
+    assert (
+        query(connection, query_args(status="not_scanned", query="unrelated"))["repositories"] == []
+    )
+
+
 @pytest.mark.parametrize(
     ("timestamps", "order"),
     [

@@ -79,7 +79,7 @@ describe("CLI workbench", () => {
             ),
           ).toBe(0);
           expect(calls).toEqual([
-            ["list-repositories"],
+            ["list-repositories", "--status", "scanned"],
             ...(includeMatchingAlias
               ? [
                   [
@@ -189,7 +189,7 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("findings list prefers an exact saved repository before directory aliases", async () => {
+  test("findings list prefers an exact scanned repository before directory aliases", async () => {
     const root = await temporaryDirectory("finding-exact-repository-");
     try {
       const repository = join(root, "repository");
@@ -210,7 +210,16 @@ describe("CLI workbench", () => {
         [repository, alias, repository],
         [alias, repository, alias],
         [unsavedAlias, alias, repository],
-      ]) {
+      ] as const) {
+        const repositories = [
+          { targetId: "alias-target", targetPath: first, scanCount: 1 },
+          { targetId: "exact-target", targetPath: exact, scanCount: 1 },
+          {
+            targetId: "unscanned-target",
+            targetPath: unsavedAlias,
+            scanCount: 0,
+          },
+        ];
         for (const args of [[], [requested!]]) {
           const calls: Array<readonly string[]> = [];
           const stdout = captureCli(main, "stdout");
@@ -223,20 +232,23 @@ describe("CLI workbench", () => {
                   calls.push(args);
                   return args[0] === "list-repositories"
                     ? {
-                        repositories: [
-                          { targetId: "alias-target", targetPath: first! },
-                          { targetId: "exact-target", targetPath: exact! },
-                        ],
+                        repositories: repositories.filter(
+                          (entry) =>
+                            args[2] !== "scanned" || entry.scanCount > 0,
+                        ),
                       }
                     : {
-                        findings: [
-                          {
-                            title:
-                              args[2] === "exact-target"
-                                ? "Exact saved finding"
-                                : "Other target finding",
-                          },
-                        ],
+                        findings:
+                          args[2] === "unscanned-target"
+                            ? []
+                            : [
+                                {
+                                  title:
+                                    args[2] === "exact-target"
+                                      ? "Exact saved finding"
+                                      : "Other target finding",
+                                },
+                              ],
                         nextOffset: null,
                       };
                 },
@@ -360,7 +372,7 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
+    expect(calls[0]).toEqual(["list-repositories", "--status", "scanned"]);
     expect(calls[1]).toEqual([
       "list-global-findings",
       "--target-id",
