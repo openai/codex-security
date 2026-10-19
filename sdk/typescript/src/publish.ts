@@ -881,28 +881,35 @@ async function createPublicationHandoff(
   await mkdir(root, { recursive: true, mode: 0o700 });
   const digest = createHash("sha256").update(publication.scanId).digest("hex");
   const directory = await mkdtemp(join(root, `${digest}-`));
-  const file = join(directory, "issues.jsonl");
-  const publicationFile = join(directory, "publication.json");
-  const issues = publication.issues.map((issue) => ({
-    findingId: issue.findingId,
-    occurrenceId: issue.occurrenceId,
-    arguments: linearPublicationArguments(publication.destination, issue),
-  }));
-  const batches = Array.from(
-    { length: Math.ceil(issues.length / 20) },
-    (_, index) => issues.slice(index * 20, index * 20 + 20),
-  );
-  await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
-  await writeFile(
-    publicationFile,
-    JSON.stringify({
-      scanId: publication.scanId,
-      destination: publication.destination,
-      batches,
-    }),
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
-  );
-  return { directory, file, publicationFile };
+  try {
+    const file = join(directory, "issues.jsonl");
+    const publicationFile = join(directory, "publication.json");
+    const issues = publication.issues.map((issue) => ({
+      findingId: issue.findingId,
+      occurrenceId: issue.occurrenceId,
+      arguments: linearPublicationArguments(publication.destination, issue),
+    }));
+    const batches = Array.from(
+      { length: Math.ceil(issues.length / 20) },
+      (_, index) => issues.slice(index * 20, index * 20 + 20),
+    );
+    await writeFile(file, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await writeFile(
+      publicationFile,
+      JSON.stringify({
+        scanId: publication.scanId,
+        destination: publication.destination,
+        batches,
+      }),
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+    return { directory, file, publicationFile };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+    throw error;
+  }
 }
 
 async function readPublicationHandoff(file: string): Promise<string> {

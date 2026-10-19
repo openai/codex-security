@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   InternalLinearError,
   NetworkLinearError,
@@ -39,11 +39,94 @@ import type {
 } from "../src/publication.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
   async (_prepared, issues) => {
     return [...issues];
   };
+
+for (const [fileName, partialWrite, cleanupFails] of [
+  ["issues.jsonl", false, false],
+  ["issues.jsonl", true, false],
+  ["publication.json", false, false],
+  ["publication.json", true, false],
+  ["publication.json", true, true],
+] as const) {
+  const title = `cleans failed handoff construction: ${fileName}, partial=${partialWrite}, cleanupFails=${cleanupFails}`;
+  test(title, async () => {
+    if (runTestInSubprocess(import.meta.path, title)) return;
+    const publication = preparedPublication();
+    const runCodex = mock(async () => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }));
+    const recordPublishedIssues = mock(copyPublishedIssues);
+    const writeReceipt = mock(async () => undefined);
+    const onProgress = mock(() => undefined);
+    const injected = dependencies(publication, {
+      runCodex,
+      recordPublishedIssues,
+      writeReceipt,
+    });
+    const root = publicationHandoffRoot(injected);
+    const sibling = join(root, "existing-evidence");
+    await mkdir(sibling, { recursive: true });
+    await writeFile(join(sibling, "keep"), "existing evidence");
+    const failure = new Error("Synthetic initial handoff write failure");
+    const originalWrite = filesystem.writeFile;
+    const originalRemove = filesystem.rm;
+    let directory = "";
+    const write = spyOn(filesystem, "writeFile").mockImplementation(
+      async (...args) => {
+        const file = String(args[0]);
+        if (basename(file) === fileName) {
+          directory = dirname(file);
+          if (partialWrite) {
+            await originalWrite(
+              file,
+              fileName === "issues.jsonl" ? "" : "{",
+              args[2],
+            );
+          }
+          throw failure;
+        }
+        return originalWrite(...args);
+      },
+    );
+    const remove = spyOn(filesystem, "rm").mockImplementation(
+      async (...args) => {
+        if (cleanupFails) throw new Error("Synthetic cleanup failure");
+        return originalRemove(...args);
+      },
+    );
+    try {
+      await expect(
+        publishScanInternal("scan", { ...OPTIONS, onProgress }, injected),
+      ).rejects.toBe(failure);
+      expect(directory).not.toBe("");
+      expect(remove.mock.calls).toEqual([
+        [directory, { recursive: true, force: true }],
+      ]);
+      expect(await readFile(join(sibling, "keep"), "utf8")).toBe(
+        "existing evidence",
+      );
+      if (cleanupFails) {
+        expect(await readFile(join(directory, fileName), "utf8")).toBe("{");
+      } else {
+        expect(await readdir(root)).toEqual(["existing-evidence"]);
+      }
+      expect(runCodex).not.toHaveBeenCalled();
+      expect(recordPublishedIssues).not.toHaveBeenCalled();
+      expect(writeReceipt).not.toHaveBeenCalled();
+      expect(onProgress).not.toHaveBeenCalled();
+    } finally {
+      write.mockRestore();
+      remove.mockRestore();
+    }
+  });
+}
 
 test("returns completed publication when cancellation arrives during receipt persistence", async () => {
   const publication = preparedPublication();
