@@ -15,7 +15,7 @@ import {
   mergeCodexOverrides,
   type JsonObject,
 } from "./config.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, errorMessage } from "./errors.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
@@ -138,7 +138,7 @@ export async function readProjectConfig(
     text = await readFile(path, "utf8");
   } catch (error) {
     throw new ConfigurationError(
-      `Cannot read project configuration at ${path}.`,
+      `Cannot read project configuration at ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
@@ -154,7 +154,7 @@ export async function readProjectConfig(
     }
   } catch (error) {
     throw new ConfigurationError(
-      `Cannot parse project configuration at ${path}.`,
+      `Cannot parse project configuration at ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
@@ -186,9 +186,9 @@ export function projectConfigStarter(
   );
   const schema = isAbsolute(relativeSchema)
     ? pathToFileURL(schemaPath).href
-    : `${relativeSchema.startsWith(".") ? "" : "./"}${relativeSchema
-        .split(sep)
-        .join("/")}`;
+    : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
+        relativeSchema.split(sep).join("/"),
+      ).replace(/[#?]/gu, encodeURIComponent)}`;
   if (projectConfigExtension(path) === ".json")
     return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
   return [

@@ -6,7 +6,6 @@ import {
   type WorkbenchCommandOptions,
 } from "../runtime.js";
 import { FindingsError } from "./errors.js";
-import type { DashboardQuery, DashboardSnapshot } from "./dashboard-types.js";
 import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 import type {
   FindingNeighborhood,
@@ -25,10 +24,6 @@ export class SqliteFindingsStore implements FindingsStore {
 
   async initialize(): Promise<void> {
     await this.run("database-info");
-  }
-
-  dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
-    return this.run("dashboard", query);
   }
 
   async insert(
@@ -81,7 +76,7 @@ export class SqliteFindingsStore implements FindingsStore {
           ? "A finding identity conflicts with stored data."
           : "Every dedupe group member must already exist in the findings database.",
       finding_not_indexed:
-        "The finding has no current embedding in the requested scope. Import it with the matching repositoryId through POST /v1/bulk/findings before requesting potential duplicates.",
+        "The finding has no current embedding in the requested scope. Prepare its local embeddings or insert it with the matching repositoryId before requesting potential duplicates.",
       embedding_failed:
         "A stored embedding cannot be compared. Reimport the finding.",
     };

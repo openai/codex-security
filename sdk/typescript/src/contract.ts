@@ -1,5 +1,6 @@
+import { isDeepStrictEqual as sameArray } from "node:util";
 import { createHash, hash } from "node:crypto";
-import { isNonEmptyString } from "./value.js";
+import { normalizePersistedFindingDetails } from "./finding-normalization.js";
 import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
@@ -14,8 +15,8 @@ import { regexes } from "zod";
 import { ContractValidationError, abortReason } from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
-  ContractObject as JsonRecord,
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
@@ -33,17 +34,6 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
-const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
-  "scan",
-  "target",
-  "remote",
-  "completedAt",
-  "sealedAt",
-  "artifacts",
-  "findings",
-  "coverage",
-  "scope",
-]);
 interface CheckedScanFile {
   path: string;
   metadata: Stats;
@@ -91,33 +81,25 @@ export async function loadContractWithScanDirectory(
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
-  const payloads = {
-    "scan-manifest.json": await readScanJson(
+  const payloads: Record<string, unknown> = {};
+  for (const filename of Object.keys(DOCUMENTS)) {
+    payloads[filename] = await readScanJson(
       scanDir,
-      "scan-manifest.json",
+      filename as keyof typeof DOCUMENTS,
       documentDigests,
       options.signal,
       scanRoot,
-    ),
-    "findings.json": await readScanJson(
-      scanDir,
-      "findings.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-    "coverage.json": await readScanJson(
-      scanDir,
-      "coverage.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-  };
+    );
+  }
   throwIfAborted(options.signal);
-  let findingsPayload: unknown = payloads["findings.json"];
 
-  const ajv = createValidator();
+  // The plugin schemas are the immutable v0 contract. They are valid Draft
+  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
+  // optional strict-schema linter requires.
+  const ajv = new Ajv2020({ allErrors: false, strict: false }).addFormat(
+    "date-time",
+    { type: "string", validate: validRfc3339DateTime },
+  );
   for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
     const schema = await readJson(
       join(options.pluginRoot, "schemas", schemaName),
@@ -128,10 +110,7 @@ export async function loadContractWithScanDirectory(
     let valid: boolean;
     try {
       validate = ajv.compile(schema);
-      payload =
-        filename === "findings.json"
-          ? findingsPayload
-          : payloads[filename as keyof typeof payloads];
+      payload = payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
         if (typeof result !== "boolean") {
@@ -150,12 +129,12 @@ export async function loadContractWithScanDirectory(
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
-    if (filename === "findings.json") findingsPayload = payload;
+    payloads[filename] = payload;
     throwIfAborted(options.signal);
   }
-  const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = findingsPayload as FindingsDocument;
-  const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  const manifest = payloads["scan-manifest.json"] as ScanManifest;
+  const findings = payloads["findings.json"] as FindingsDocument;
+  const coverage = payloads["coverage.json"] as CoverageDocument;
   if (
     options.expectedScanId !== undefined &&
     manifest.scan.id !== options.expectedScanId
@@ -183,7 +162,7 @@ export async function loadContractWithScanDirectory(
     );
   }
 
-  validateCanonicalContract(manifest, findings);
+  validateCanonicalContract(manifest, findings, coverage);
 
   await validateSeal(
     scanDir,
@@ -210,156 +189,22 @@ export async function loadContractWithScanDirectory(
 }
 
 /** Normalize optional legacy details on a copy, without changing saved artifacts. */
-export function normalizePersistedFindings(payload: unknown): unknown {
+function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    const legacyEvidence = finding["code_evidence"];
-    if (Array.isArray(legacyEvidence)) {
-      finding["code_evidence"] = legacyEvidence.filter(
-        (evidence) =>
-          isRecord(evidence) &&
-          isNonEmptyString(evidence["id"]) &&
-          isNonEmptyString(evidence["code"]),
-      );
-    } else if ("code_evidence" in finding && legacyEvidence !== null) {
-      delete finding["code_evidence"];
-    }
-
-    for (const [sectionName, listFields] of [
-      ["rootCause", ["evidenceRefs", "evidence_refs"]],
-      ["root_cause", ["evidenceRefs", "evidence_refs"]],
-      [
-        "validation",
-        [
-          "assertions",
-          "counterEvidence",
-          "evidenceRefs",
-          "evidence_refs",
-          "limitations",
-        ],
-      ],
-      [
-        "attackPath",
-        [
-          "assumptions",
-          "blindspots",
-          "controls",
-          "evidenceRefs",
-          "evidence_refs",
-          "limitations",
-          "preconditions",
-          "steps",
-        ],
-      ],
-    ] satisfies Array<[string, string[]]>) {
-      const section = finding[sectionName];
-      if (!isRecord(section)) continue;
-      normalizeLegacyStringLists(section, listFields);
-    }
-
-    const legacyRootCause = finding["root_cause"];
-    if (isRecord(legacyRootCause)) {
-      removeUnsupportedLegacyStrings(legacyRootCause, [
-        "summary",
-        "code",
-        "language",
-      ]);
-    } else if (
-      "root_cause" in finding &&
-      legacyRootCause !== null &&
-      typeof legacyRootCause !== "string"
-    ) {
-      delete finding["root_cause"];
-    }
-
-    const validation = finding["validation"];
-    if (isRecord(validation)) {
-      if (!isNonEmptyString(validation["evidence"])) {
-        normalizeLegacyStringLists(validation, ["evidence"]);
-      }
-      removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
-      removeUnsupportedLegacyStrings(
-        validation,
-        ["status", "disposition", "result"].filter(
-          (field) => validation[field] !== null,
-        ),
-      );
-    }
-
-    const attackPath = finding["attackPath"];
-    if (!isRecord(attackPath)) continue;
-    removeUnsupportedLegacyStrings(attackPath, ["summary"]);
-    for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
-      const detail = attackPath[field];
-      if (!isRecord(detail)) {
-        if (!isNonEmptyString(detail)) delete attackPath[field];
-        continue;
-      }
-      removeUnsupportedLegacyStrings(detail, [
-        "summary",
-        "source",
-        "sink",
-        "outcome",
-        ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
-      ]);
-      normalizeLegacyStringLists(detail, [
-        "evidenceRefs",
-        "evidence_refs",
-        "transformations",
-        ...(field === "reachability" ? ["preconditions"] : []),
-      ]);
-    }
-    for (const field of ["impact", "likelihood"]) {
-      const detail = attackPath[field];
-      if (isRecord(detail)) {
-        removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
-      } else if (
-        detail !== undefined &&
-        detail !== null &&
-        !isNonEmptyString(detail)
-      ) {
-        delete attackPath[field];
-      }
-    }
+    normalizePersistedFindingDetails(finding);
   }
   return compatible;
-}
-
-function normalizeLegacyStringLists(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (!(field in section)) continue;
-    const value = section[field];
-    if (Array.isArray(value)) {
-      section[field] = value.filter(isNonEmptyString);
-    } else if (isNonEmptyString(value)) {
-      section[field] = [value];
-    } else {
-      delete section[field];
-    }
-  }
-}
-
-function removeUnsupportedLegacyStrings(
-  section: JsonRecord,
-  fields: string[],
-): void {
-  for (const field of fields) {
-    if (field in section && !isNonEmptyString(section[field])) {
-      delete section[field];
-    }
-  }
 }
 
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
+  coverage: CoverageDocument,
 ): void {
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
@@ -415,6 +260,20 @@ function validateCanonicalContract(
     }
   }
 
+  for (const [index, deferred] of coverage.deferred.entries()) {
+    for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
+      const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
+      try {
+        safeRelativePath(path, context, true);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${context}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
+    }
+  }
+
   const findingIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
@@ -456,22 +315,26 @@ function validateCanonicalContract(
         );
       }
     }
+    for (const [evidenceIndex, evidence] of (
+      finding.codeEvidence ?? []
+    ).entries()) {
+      const evidenceContext = `${context}.codeEvidence[${evidenceIndex}].path`;
+      try {
+        safeRelativePath(evidence.path, evidenceContext);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${evidenceContext}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
+    }
 
-    const fingerprint = `codex-security/v1:sha256:${hash(
-      "sha256",
-      [
-        "codex-security/v1",
-        manifest.scan.target.targetId,
-        finding.ruleId,
-        finding.identity.anchor,
-        finding.identity.instance ?? "",
-      ].join("\0"),
-    )}`;
-    const findingId = `csf_${hash("sha256", fingerprint).slice(0, 24)}`;
-    const occurrenceId = `occ_${hash(
-      "sha256",
-      [manifest.scan.id, fingerprint].join("\0"),
-    ).slice(0, 24)}`;
+    const { findingId, occurrenceId, fingerprints } = deriveFindingIdentity(
+      manifest.scan.id,
+      manifest.scan.target.targetId,
+      finding.ruleId,
+      finding.identity,
+    );
     if (finding.findingId !== findingId) {
       throw new ContractValidationError(
         `${context}.findingId: does not match derived fingerprint identity.`,
@@ -482,7 +345,7 @@ function validateCanonicalContract(
         `${context}.occurrenceId: does not match scan occurrence identity.`,
       );
     }
-    if (finding.fingerprints.primary !== fingerprint) {
+    if (finding.fingerprints.primary !== fingerprints.primary) {
       throw new ContractValidationError(
         `${context}.fingerprints: does not match derived fingerprint.`,
       );
@@ -628,21 +491,32 @@ async function validateSeal(
     }
   }
 
+  const requireSealedReference = (reference: unknown, context: string) => {
+    throwIfAborted(signal);
+    if (typeof reference !== "string") {
+      throw new ContractValidationError(`${context}: expected a string.`);
+    }
+    const normalized = portableRelativePath(reference, context.toLowerCase());
+    if (!normalized.startsWith("artifacts/")) {
+      throw new ContractValidationError(
+        `${context} must be under artifacts/: ${reference}`,
+      );
+    }
+    if (!artifactPaths.has(normalized)) {
+      throw new ContractValidationError(
+        `${context} is missing from sealed artifacts: ${reference}`,
+      );
+    }
+  };
   for (const surface of coverage.surfaces) {
     for (const receipt of surface.receiptRefs) {
-      throwIfAborted(signal);
-      const normalized = portableRelativePath(receipt, "coverage receipt");
-      if (!normalized.startsWith("artifacts/")) {
-        throw new ContractValidationError(
-          `Coverage receipt must be under artifacts/: ${receipt}`,
-        );
-      }
-      if (!artifactPaths.has(normalized)) {
-        throw new ContractValidationError(
-          `Coverage receipt is missing from sealed artifacts: ${receipt}`,
-        );
-      }
+      requireSealedReference(receipt, "Coverage receipt");
     }
+  }
+  const extensions = scan["extensions"];
+  const imported = isRecord(extensions) ? extensions["import"] : undefined;
+  if (isRecord(imported) && "sourceRef" in imported) {
+    requireSealedReference(imported["sourceRef"], "Import source");
   }
 
   for (const [index, finding] of findings.findings.entries()) {
@@ -828,12 +702,16 @@ async function verifyScanRoot(
   }
 }
 
-function safeRelativePath(value: string, context: string): string {
+function safeRelativePath(
+  value: string,
+  context: string,
+  allowDot = false,
+): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
+    (!allowDot && value === ".") ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
@@ -846,7 +724,7 @@ function safeRelativePath(value: string, context: string): string {
   }
   const normalized = posix.normalize(value).replace(/\/+$/, "");
   if (
-    normalized === "." ||
+    (!allowDot && normalized === ".") ||
     normalized.startsWith("../") ||
     isAbsolute(normalized)
   ) {
@@ -859,7 +737,10 @@ function safeRelativePath(value: string, context: string): string {
 
 function portableRelativePath(value: string, context: string): string {
   const normalized = safeRelativePath(value, context);
-  if (value.split("/").some(isWindowsUnsafePathComponent)) {
+  if (
+    value.trim().length === 0 ||
+    value.split("/").some(isWindowsUnsafePathComponent)
+  ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
     );
@@ -867,7 +748,7 @@ function portableRelativePath(value: string, context: string): string {
   return normalized;
 }
 
-function safeScopePath(value: string): string {
+export function safeScopePath(value: string): string {
   return value === "."
     ? value
     : safeRelativePath(value, "manifest scope include path");
@@ -983,21 +864,9 @@ function validateParsedJson(value: unknown, context: string): void {
           `${context}: expected well-formed Unicode JSON keys.`,
         );
       }
-      validateParsedJson(item, `${context}.<property>`);
+      validateParsedJson(item, `${context}[${JSON.stringify(key)}]`);
     }
   }
-}
-
-function createValidator(): Ajv2020 {
-  // The plugin schemas are the immutable v0 contract. They are valid Draft
-  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
-  // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false });
-  ajv.addFormat("date-time", {
-    type: "string",
-    validate: validRfc3339DateTime,
-  });
-  return ajv;
 }
 
 async function sha256ScanFile(
@@ -1156,29 +1025,13 @@ function schemaError(
   errors: readonly ErrorObject[],
 ): ContractValidationError {
   const first = errors[0];
-  const segments = first?.instancePath.split("/").filter(Boolean) ?? [];
-  const location =
-    segments.length === 0
-      ? "<root>"
-      : segments
-          .map((segment) => {
-            if (/^(?:0|[1-9]\d{0,9})$/.test(segment)) return segment;
-            return SAFE_SCHEMA_ERROR_PROPERTIES.has(segment)
-              ? segment
-              : "<property>";
-          })
-          .join(".");
+  const location = first?.instancePath
+    ? JSON.stringify(first.instancePath)
+    : "<root>";
   const keyword = first?.keyword ?? "unknown";
   const count = errors.length;
   return new ContractValidationError(
-    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"}).`,
-  );
-}
-
-function sameArray(left: readonly string[], right: readonly string[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
+    `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"})${first?.message ? `: ${first.message}` : ""}.`,
   );
 }
 
@@ -1191,4 +1044,31 @@ function nodeErrorCode(error: unknown): string | undefined {
 /** @internal */
 export function sha256Text(value: string): string {
   return hash("sha256", value);
+}
+
+export function deriveFindingIdentity(
+  scanId: string,
+  targetId: string,
+  ruleId: string,
+  identity: Finding["identity"],
+) {
+  const fingerprint = `codex-security/v1:sha256:${sha256Text(
+    [
+      "codex-security/v1",
+      targetId,
+      ruleId,
+      identity.anchor,
+      identity.instance ?? "",
+    ].join("\0"),
+  )}`;
+  return {
+    findingId: `csf_${sha256Text(fingerprint).slice(0, 24)}`,
+    occurrenceId: `occ_${sha256Text([scanId, fingerprint].join("\0")).slice(0, 24)}`,
+    ruleId,
+    identity,
+    fingerprints: {
+      algorithm: "codex-security/v1" as const,
+      primary: fingerprint,
+    },
+  };
 }

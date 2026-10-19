@@ -34,6 +34,11 @@ For CI's full archive inspection, pass the exact `.tgz` path printed by
 These checks include native Node contracts for SDK completion, cancellation,
 close cleanup, and CLI terminal sanitization. They use the installed package,
 controlled model output, and the real workbench without live model credentials.
+The installed-package checks also verify hosted SDK exports, input validation,
+and the `scan --host` protocol without preparing a repository or requiring Git.
+The hosted-scan tests cover real repository scans, scope, artifact seals, and
+executor receipts. To rerun just the installed-package check, use
+`node scripts/smoke-hosted-package.mjs /absolute/path/to/node_modules/@openai/codex-security`.
 
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
@@ -62,6 +67,17 @@ Run this command from the repository root before starting the automation.
 Refresh the artifact after changing native source or toolchain. The standalone
 plugin supports a host-only build; that does not satisfy the SDK's universal
 packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
+
+## Python test dependencies
+
+Use Python 3.10 or later. From the repository root, install the Python test and lint dependencies with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
+```
+
+This replaces `pip install -e 'plugins/codex-security[test]'`. Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
+The requirements file is the single list of pinned Python test dependencies. Ruff and pytest settings remain in `plugins/codex-security/pyproject.toml`; the Ruff dependency and its `required-version` setting must agree.
 
 ## Writing tests
 
@@ -108,7 +124,7 @@ default to 100 cases; filesystem contract properties default to 20.
 inspects one package archive, then passes that archive to jobs in the same
 workflow run, using the commit SHA in the artifact name. Every supported Node
 runtime still installs and inspects the package, including a strict NodeNext
-TypeScript consumer, the actual CLI, credential locking, dashboard assets, and
+TypeScript consumer, the actual CLI, credential locking, and
 a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
@@ -120,11 +136,10 @@ package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
-`scripts/run-ci-tests.mts` assigns the longest measured files first. Its
-`ci-test-durations.json` records per-file seconds from CI reports.
-Every new test file is included automatically with a one-second estimate.
-Refresh those estimates from the uploaded reports when adding or splitting
-expensive files; estimates affect scheduling, never whether a test runs.
+`scripts/run-ci-tests.mts` discovers every shared test file and passes the
+inventory to Bun's native `--shard` option. Bun sorts the file paths and assigns
+them round-robin across the shards. New files are included automatically;
+there is no timing table to update when adding or splitting tests.
 To reproduce one Windows shard locally after building the plugin, run
 `node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
 
@@ -149,9 +164,6 @@ that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
 release passes the full SDK suite in every mode. Required CI and the mutation
 trial remain on Bun 1.3.14.
 
-Keep the measured file-balanced runner until the native runner has
-matching inventories and acceptable Windows timings. Before promotion, compare
-native and file-balanced shards using the same commit and Bun version.
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
 runtime are not necessarily part of Bun's import graph.

@@ -1,4 +1,5 @@
 import { loadContractWithScanDirectory } from "../contract.js";
+import type { CodexSecuritySurface } from "../api.js";
 import { environmentEntry } from "../auth.js";
 import {
   bundledPluginRoot,
@@ -96,6 +97,7 @@ export async function deduplicateScanDirectory(
 }
 
 type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
+  surface?: CodexSecuritySurface;
   environment?: NodeJS.ProcessEnv;
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
@@ -306,6 +308,7 @@ async function deduplicateResolvedScan(
         repositoryPath,
         undefined,
         options.onDiagnostic,
+        dependencies.surface ?? "sdk",
       );
     const privateStatePaths: string[] = [];
     if (workflow && !dependencies.reviewer) {

@@ -10,6 +10,7 @@ import { parse as parseToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { InternalSecurity } from "./support/internal-security.js";
+import { VERSION } from "../src/version.js";
 
 const fixtures = createApiTestFixtures();
 
@@ -17,16 +18,19 @@ afterEach(fixtures.cleanup);
 
 describe("delegated scan attribution", () => {
   test.each([
-    ["standard", true, "root"],
-    ["deep", true, "profile-override"],
-    ["standard", false, "unset"],
-    ["deep", false, "profile-only"],
-    ["deep", true, "root"],
-    ["deep", true, "profile-fallback"],
-    ["deep", true, "unset"],
+    ["standard", true, false, "root"],
+    ["deep", true, false, "profile-override"],
+    ["standard", false, false, "unset"],
+    ["deep", false, false, "profile-only"],
+    ["deep", true, false, "root"],
+    ["deep", true, false, "profile-fallback"],
+    ["deep", true, false, "unset"],
+    ["standard", true, false, "unset"],
+    ["standard", false, true, "unset"],
+    ["deep", false, true, "unset"],
   ] as const)(
-    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p and %s endpoint",
-    async (mode, selectProgram, endpointSource) => {
+    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p, explicit models %p and %s endpoint",
+    async (mode, selectProgram, selectModel, endpointSource) => {
       const root = await fixtures.temporaryDirectory();
       const repository = join(root, "repository");
       const ambientHome = join(root, "ambient-home");
@@ -44,6 +48,11 @@ describe("delegated scan attribution", () => {
 
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface) => {
+          const model = selectModel
+            ? surface === "cli"
+              ? "gpt-daybreak-blue-latest"
+              : "gpt-5.6-sol"
+            : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
           const endpoint =
             endpointSource === "unset"
@@ -84,6 +93,13 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                analytics: { enabled: surface === "sdk" },
+                responses_api_metadata: {
+                  custom_attribution: surface,
+                  codex_security_surface: "spoofed",
+                  codex_security_command: "spoofed",
+                  codex_security_package_version: "spoofed",
+                },
                 ...(rootEndpoint === undefined
                   ? {}
                   : { openai_base_url: rootEndpoint }),
@@ -102,6 +118,7 @@ describe("delegated scan attribution", () => {
                     }
                   : {}),
                 ...(surface === "sdk" ? { features } : {}),
+                ...(model === undefined ? {} : { model }),
               },
             },
             {
@@ -120,8 +137,14 @@ describe("delegated scan attribution", () => {
               runWorkbench: async (
                 _options: unknown,
                 args: readonly string[],
+                input?: string,
               ) => {
                 if (args[0] === "register-cli-scan") {
+                  if (model !== undefined) {
+                    expect(JSON.parse(input!).recipe).toMatchObject({
+                      config: { model },
+                    });
+                  }
                   return {
                     scanId: `scan_${surface}`,
                     targetId: `target_${surface}`,
@@ -178,11 +201,36 @@ describe("delegated scan attribution", () => {
                       );
                       expect(options.config).toMatchObject({
                         features,
+                        ...(model === undefined ? {} : { model }),
+                        analytics: { enabled: surface === "sdk" },
                         responses_api_metadata: {
+                          custom_attribution: surface,
                           codex_security_surface: surface,
+                          codex_security_command: "scan",
+                          codex_security_package_version: VERSION,
                         },
                       });
+                      const deepConfigPath =
+                        options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                      const deepConfig =
+                        mode === "deep"
+                          ? await readFile(deepConfigPath!, "utf8")
+                          : undefined;
+                      if (deepConfig !== undefined) {
+                        expect(
+                          parseToml(deepConfig)["worker_runtime"],
+                        ).toMatchObject({
+                          analytics: { enabled: surface === "sdk" },
+                          responses_api_metadata:
+                            options.config?.["responses_api_metadata"],
+                        });
+                      }
                       expect(threadOptions.threadSource).toBe("security_scan");
+                      if (model !== undefined) {
+                        expect(
+                          threadOptions.model ?? options.config?.["model"],
+                        ).toBe(model);
+                      }
                       const configPath =
                         options.env?.["CODEX_SECURITY_CONFIG_PATH"];
                       expect(configPath).toBeString();
@@ -208,7 +256,10 @@ describe("delegated scan attribution", () => {
                             endpoint,
                           );
                       }
-                      expect(runtimeConfig).toMatchObject({ features });
+                      expect(runtimeConfig).toMatchObject({
+                        features,
+                        ...(model === undefined ? {} : { model }),
+                      });
                       expect(initialConfig).not.toContain("openai_base_url");
                       expect(initialConfig).not.toContain("synthetic-password");
                       if (program === undefined) {
@@ -235,7 +286,9 @@ describe("delegated scan attribution", () => {
                       expect(sharedConfig).not.toHaveProperty(
                         "responses_api_metadata",
                       );
+                      expect(sharedConfig).not.toHaveProperty("model");
                       expect(sharedConfig).not.toHaveProperty("codex_security");
+                      expect(sharedConfig).not.toHaveProperty("analytics");
                       expect(JSON.stringify(sharedConfig)).not.toContain(
                         "openai_base_url",
                       );
@@ -258,6 +311,11 @@ describe("delegated scan attribution", () => {
                         initialConfig,
                       );
                       expect(options.env).toEqual(initialEnvironment);
+                      if (deepConfig !== undefined) {
+                        expect(await readFile(deepConfigPath!, "utf8")).toBe(
+                          deepConfig,
+                        );
+                      }
                       throw new Error("delegated attribution observed");
                     } finally {
                       active -= 1;
@@ -272,6 +330,18 @@ describe("delegated scan attribution", () => {
       );
 
       try {
+        if (selectModel) {
+          await Promise.all(
+            clients.map(async (client, index) => {
+              expect(
+                await client.preflight(repository, { mode }),
+              ).toMatchObject({
+                model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
+                authentication: { method: "api_key", verified: false },
+              });
+            }),
+          );
+        }
         const results = await Promise.allSettled(
           clients.map((client, index) =>
             client
