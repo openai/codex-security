@@ -1,4 +1,5 @@
 import { delimiter, isAbsolute, resolve } from "node:path";
+import { isNumberObject } from "node:util/types";
 import {
   bundledPluginRoot,
   workbenchEnvironment,
@@ -71,6 +72,7 @@ export class SqliteFindingsStore implements FindingsStore {
       payload,
       command === "store-findings"
         ? (_key, value: unknown) => {
+            if (isNumberObject(value)) value = +value;
             if (typeof value === "number" && !Number.isFinite(value))
               throw new TypeError(
                 "Stored finding JSON cannot contain non-finite numbers.",

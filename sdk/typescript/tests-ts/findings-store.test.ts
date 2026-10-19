@@ -288,7 +288,7 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
   ]);
 });
 
-for (const location of ["vector", "extension"] as const) {
+for (const location of ["vector", "extension", "boxed extension"] as const) {
   test.each([NaN, Infinity, -Infinity])(
     `rejects %s in a later entry's ${location} without changing stored findings`,
     async (value) => {
@@ -297,7 +297,15 @@ for (const location of ["vector", "extension"] as const) {
       await store.insert([original], "repository-a");
       const invalid = embedded(3);
       if (location === "vector") invalid.embedding.vector = [1, value];
-      else invalid.finding.extensions = { nested: [{ measurement: value }] };
+      else
+        invalid.finding.extensions = {
+          nested: [
+            {
+              measurement:
+                location === "boxed extension" ? new Number(value) : value,
+            },
+          ],
+        };
       const workbench = spyOn(runtime, "runWorkbench");
       try {
         await expect(
@@ -329,6 +337,11 @@ test("serializes getters and toJSON once and preserves their emitted values in S
   const { store, environment } = await fixture();
   const entry = embedded(1);
   const events: string[] = [];
+  const convertedNumber = new Number(Infinity);
+  convertedNumber.valueOf = () => {
+    events.push("number valueOf");
+    return 4;
+  };
   entry.finding.extensions = {
     get converted() {
       events.push("getter");
@@ -342,6 +355,7 @@ test("serializes getters and toJSON once and preserves their emitted values in S
               return 7;
             },
             finite: [Number.MAX_VALUE, Number.MIN_VALUE, -0, 1e20],
+            boxed: [new Number(3), convertedNumber],
             omitted: undefined,
             array: [undefined, null, true, false, "Infinity"],
           };
@@ -362,6 +376,7 @@ test("serializes getters and toJSON once and preserves their emitted values in S
       converted: {
         measurement: 7,
         finite: [Number.MAX_VALUE, Number.MIN_VALUE, 0, 1e20],
+        boxed: [3, 4],
         array: [null, null, true, false, "Infinity"],
       },
     },
@@ -384,6 +399,7 @@ test("serializes getters and toJSON once and preserves their emitted values in S
     "getter",
     "toJSON",
     "output getter",
+    "number valueOf",
     "omitted toJSON",
   ]);
   expect(
