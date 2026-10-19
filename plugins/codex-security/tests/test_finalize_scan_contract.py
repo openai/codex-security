@@ -2525,17 +2525,29 @@ The extraction root is not enforced.
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_rejects_unsafe_deferred_paths(self) -> None:
-
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
-            with self.subTest(path=path):
+        for path in (
+            "",
+            "../../outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "/outside.ts",
+            "//server/share",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            "src/\u0000outside.ts",
+            "src/\u0001outside.ts",
+            "src/\toutside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "src/\u2028/../outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]
                 self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-                ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"coverage.*deferred"):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
@@ -2550,7 +2562,27 @@ The extraction root is not enforced.
             }
         ]
 
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+        for path in (
+            ".",
+            "./",
+            "././",
+            "src",
+            "src/parser.ts",
+            "./src/parser.ts",
+            "src/./parser.ts",
+            "src//parser.ts",
+            "src/",
+            "src:parser.ts",
+            "src/a:b.py",
+            "src/.hidden",
+            "src/na\u00efve file.ts",
+            "src/\u007fparser.ts",
+            "src/\u2028parser.ts",
+            "src/\u2029parser.ts",
+            " ",
+            "\u0085",
+            "\ufeff",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
