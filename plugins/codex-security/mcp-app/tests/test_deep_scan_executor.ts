@@ -1,6 +1,10 @@
+import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   createFakeCodexFixture,
+  deniedWorkerPermissionProfile,
   emptyWorkerPermissionProfile,
+  trustedParentSandbox,
+  trustedParentSandboxWithDenials,
 } from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
@@ -85,37 +89,8 @@ const fakeCodexFixture = createFakeCodexFixture.bind(
   temporaryDirectories,
 );
 const previousMarker = process.env.FAKE_CODEX_MARKER;
-const trustedParentSandbox = Object.freeze({
-  filesystemDenies: [],
-});
-const trustedParentSandboxWithDenials = Object.freeze({
-  filesystemDenies: [
-    "/repo/.env",
-    "/repo/**/.secret",
-    "/repo/**/*.pem",
-    "/repo/temp[1]",
-    "/repo/secret[1]",
-    "/repo/.env",
-  ],
-  literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
-  globScanMaxDepth: 3,
-});
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
-const deniedWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: {
-    ":root": "read",
-    "/repo/.env": "deny",
-    "/repo/**/.secret": "deny",
-    "/repo/**/*.pem": "deny",
-    "/repo/temp[1]": { ".": "deny" },
-    "/repo/secret[1]": { ".": "deny" },
-    "/": { "repo/temp[1]": "deny", "repo/secret[1]": "deny" },
-    glob_scan_max_depth: 3,
-  },
-  network: { enabled: false },
-};
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
@@ -1421,6 +1396,7 @@ async function testWorkerRuntimeSettings() {
         deniedWorkerPermissionProfile,
         true,
         { account: null, requiresOpenaiAuth: false },
+        process.platform === "win32" && configuration === "",
       );
       const python = path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
@@ -2018,6 +1994,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            if (
+              process.platform === "win32" &&
+              configuration === "" &&
+              index === 0
+            ) {
+              const acl = windowsAcl(workerLaunch.markerPath);
+              assert.ok(!acl.includes(";;;WD)"));
+              assertFlagPair(invocation.argv, "--cd", fixture.root);
+            }
             for (const name of [
               "LD_LIBRARY_PATH",
               "DYLD_LIBRARY_PATH",

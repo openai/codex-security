@@ -6,7 +6,8 @@ SARIF reports.
 
 ## Quick start
 
-Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com and an OpenAI API key
+Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com or GitHub Enterprise
+Cloud on `*.ghe.com`, and an OpenAI API key
 with access to the selected model. OpenAI is the default provider. See
 [Inference providers](#inference-providers) for Bedrock, OpenRouter, and Fireworks.
 
@@ -76,6 +77,42 @@ with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
 This setup is specific to the Linux runner. Local macOS scans use the built-in
 Seatbelt sandbox and do not need Bubblewrap. See the
 [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
+
+## Supported GitHub hosts and checkout URLs
+
+The Action supports GitHub.com and GitHub Enterprise Cloud on `*.ghe.com`.
+Checkout origins can use HTTPS, SCP-style SSH (`USER@HOST:OWNER/REPO.git`),
+or an `ssh://` URL, including an explicit port 22. Repository names and hostnames
+are compared without regard to case; a `.git` suffix and trailing slash are optional.
+
+On GitHub.com, `ssh://git@ssh.github.com:443/OWNER/REPO.git` is also supported.
+GitHub does not offer this SSH-over-443 endpoint for enterprises on `ghe.com`;
+see [GitHub's SSH-over-HTTPS guidance](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
+
+### GitHub Enterprise Cloud
+
+The workflows in this guide also support GitHub Enterprise Cloud with data
+residency at `https://SUBDOMAIN.ghe.com`. The Action reads `GITHUB_SERVER_URL`
+from the runner and requires the checkout origin to match that host and
+`GITHUB_REPOSITORY`. No additional Action input or GitHub token is needed.
+Use a reviewed Action commit containing this support.
+
+Keep `persist-credentials: false` and use the triggering repository and revision.
+HTTPS origins work with the checkout step above. For SSH origins, GitHub uses
+the enterprise subdomain as the username, such as
+`example-enterprise@example-enterprise.ghe.com:example/repo.git`.
+See [GitHub's SSH guidance](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/network-details-for-ghecom#using-ssh-with-ghecom).
+
+Report artifacts use the runner's Actions artifact service. The separate
+`github/codeql-action/upload-sarif` step uses the enterprise's code scanning
+service and requires the permissions and availability described below.
+Enterprise policies must permit the referenced actions. For Bedrock OIDC,
+configure AWS trust for the enterprise issuer at
+`https://token.actions.SUBDOMAIN.ghe.com`; see
+[GitHub's feature differences](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/feature-overview-for-github-enterprise-cloud-with-data-residency).
+
+GitHub Enterprise Server remains unsupported. The Linux x64 runtime and
+sandbox requirements apply on both supported GitHub Cloud hosts.
 
 ## Inference providers
 
