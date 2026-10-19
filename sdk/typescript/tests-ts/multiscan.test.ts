@@ -467,6 +467,181 @@ describe("multiscan", () => {
     ]);
   });
 
+  const interruptedUtf8Cases: [string, number, boolean][] = [
+    ["é", 1, false],
+    ["中", 1, false],
+    ["中", 2, false],
+    ["🧪", 1, false],
+    ["🧪", 2, false],
+    ["🧪", 3, false],
+    ["malformed prefix", 0, true],
+  ];
+  test.each(interruptedUtf8Cases)(
+    "recovery preserves interrupted %s after %d UTF-8 bytes (malformed prefix=%p)",
+    async (character, length, malformedPrefix) => {
+      const paths = await fixture();
+      const task = {
+        id: "complete",
+        repository: join(paths.root, "unused-source"),
+        revision: "a".repeat(40),
+        mode: "standard",
+      };
+      const outputDir = join(paths.output, "artifacts", task.id, "attempt-1");
+      await mkdir(outputDir, { recursive: true, mode: 0o700 });
+      const artifacts = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+        "report.md",
+      ].map((name) => join(outputDir, name));
+      await Promise.all(artifacts.map((path) => writeFile(path, "{}\n")));
+      const before = await Promise.all(artifacts.map((path) => readFile(path)));
+      await writeFile(
+        paths.input,
+        `id,repository,revision\n${task.id},${task.repository},${task.revision}\n`,
+      );
+      await writeFile(
+        join(paths.output, "manifest.json"),
+        JSON.stringify({ version: 2, tasks: [task] }, null, 2) + "\n",
+      );
+      let prefix = Buffer.from(
+        JSON.stringify({
+          ...task,
+          status: "completed",
+          attempt: 1,
+          outputDir,
+          error: "prefix marker é中🧪",
+        }) + "\n",
+      );
+      if (malformedPrefix) {
+        const offset = prefix.indexOf("prefix marker");
+        expect(offset).toBeGreaterThan(-1);
+        prefix = Buffer.concat([
+          prefix.subarray(0, offset),
+          Buffer.from([0xff, 0xfe]),
+          prefix.subarray(offset + "prefix marker".length),
+        ]);
+      }
+      const receipt = Buffer.from(
+        JSON.stringify({
+          ...task,
+          status: "failed",
+          attempt: 2,
+          error: character,
+        }) + "\n",
+      );
+      // The malformed prefix made the old offset retain this byte and add NULs.
+      const tail = malformedPrefix
+        ? Buffer.from([0xf0])
+        : receipt.subarray(
+            0,
+            receipt.lastIndexOf(Buffer.from(character)) + length,
+          );
+      const ledger = join(paths.output, "results.jsonl");
+      await writeFile(ledger, Buffer.concat([prefix, tail]));
+      const createSecurity = mock(
+        throwing("Completed task must not start a client"),
+      );
+      const recoverScan = mock(rejecting("Completed task must not be resumed"));
+      for (const _ of [1, 2]) {
+        expect(
+          await runMultiscan({
+            inputPath: paths.input,
+            outputDir: paths.output,
+            mode: "standard",
+            workers: 1,
+            maxAttempts: 1,
+            config: {},
+            createSecurity,
+            recoverScan,
+          }),
+        ).toEqual({
+          total: 1,
+          completed: 1,
+          failed: 0,
+          skipped: 1,
+          resultsPath: ledger,
+        });
+        expect(createSecurity).not.toHaveBeenCalled();
+        expect(recoverScan).not.toHaveBeenCalled();
+        expect(await readFile(ledger)).toEqual(prefix);
+        const backups = (await readdir(paths.output)).filter((name) =>
+          name.startsWith("results.jsonl.interrupted-"),
+        );
+        expect(backups).toHaveLength(1);
+        expect(await readFile(join(paths.output, backups[0]!))).toEqual(tail);
+        expect(
+          await Promise.all(artifacts.map((path) => readFile(path))),
+        ).toEqual(before);
+      }
+    },
+  );
+
+  test.each(["backup", "truncate"] as const)(
+    "recovery preserves interrupted receipt bytes when %s fails",
+    async (operation) => {
+      const { paths } = await repositoryFixture("interrupted-receipt");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run));
+      const initial = await runMultiscan(configured);
+      const original = await readFile(initial.resultsPath);
+      const tail = Buffer.concat([
+        Buffer.from('{"error":"'),
+        Buffer.from([0xc3]),
+      ]);
+      const damaged = Buffer.concat([original, tail]);
+      await writeFile(initial.resultsPath, damaged);
+      const failure = new Error(`Synthetic receipt ${operation} failure`);
+      const recoverScan = mock(async () => undefined);
+      const originalWriteFile = filesystem.writeFile;
+      const originalTruncate = filesystem.truncate;
+      const backupSpy = spyOn(filesystem, "writeFile").mockImplementation(
+        async (...args) => {
+          if (
+            operation === "backup" &&
+            String(args[0]).startsWith(`${initial.resultsPath}.interrupted-`)
+          )
+            throw failure;
+          return await originalWriteFile(...args);
+        },
+      );
+      const truncateSpy = spyOn(filesystem, "truncate").mockImplementation(
+        async (path, length) => {
+          if (path === initial.resultsPath && operation === "truncate")
+            throw failure;
+          return await originalTruncate(path, length);
+        },
+      );
+      try {
+        await expect(runMultiscan({ ...configured, recoverScan })).rejects.toBe(
+          failure,
+        );
+        expect(await readFile(initial.resultsPath)).toEqual(damaged);
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(recoverScan).not.toHaveBeenCalled();
+        const names = await readdir(paths.output);
+        expect(names).not.toContain(".lock");
+        const backups = names.filter((name) =>
+          name.startsWith("results.jsonl.interrupted-"),
+        );
+        if (operation === "backup") {
+          expect(backups).toHaveLength(0);
+          expect(truncateSpy).not.toHaveBeenCalled();
+        } else {
+          expect(backups).toHaveLength(1);
+          expect(await readFile(join(paths.output, backups[0]!))).toEqual(tail);
+          expect(truncateSpy).toHaveBeenCalledWith(
+            initial.resultsPath,
+            original.length,
+          );
+        }
+      } finally {
+        backupSpy.mockRestore();
+        truncateSpy.mockRestore();
+      }
+    },
+  );
+
   test("recovery skips untouched rows and saves an interrupted ledger tail before appending", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "tail");

@@ -994,27 +994,25 @@ async function readReceipts(
   path: string,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
-  let contents: string;
+  let contents: Buffer;
   try {
-    contents = await readFile(path, "utf8");
+    contents = await readFile(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
   }
-  const lines = contents.split("\n");
-  if (!contents.endsWith("\n")) {
-    const partial = lines.pop()!;
+  const end = contents.lastIndexOf(10) + 1;
+  if (contents.at(-1) !== 10) {
+    const partial = contents.subarray(end);
     if (preserveInterrupted) {
       await writeFile(`${path}.interrupted-${randomUUID()}`, partial, {
         flag: "wx",
         mode: 0o600,
       });
     }
-    await truncate(
-      path,
-      Buffer.byteLength(contents) - Buffer.byteLength(partial),
-    );
+    await truncate(path, end);
   }
+  const lines = contents.subarray(0, end).toString("utf8").split("\n");
   const receipts = new Map<string, MultiscanHistory>();
   for (const line of lines.filter(Boolean)) {
     const saved = JSON.parse(line);
