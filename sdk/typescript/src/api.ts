@@ -3193,14 +3193,15 @@ export class CodexSecurity {
         "A Codex Security operation is already in progress.",
       );
     }
-    const activeOperation = operation();
-    this.#activeOperation = activeOperation;
+    const activeOperation = Promise.withResolvers<void>();
+    this.#activeOperation = activeOperation.promise;
     try {
-      return await activeOperation;
+      return await operation();
     } finally {
-      if (this.#activeOperation === activeOperation) {
+      if (this.#activeOperation === activeOperation.promise) {
         this.#activeOperation = null;
       }
+      activeOperation.resolve();
     }
   }
 

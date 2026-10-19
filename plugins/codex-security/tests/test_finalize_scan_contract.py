@@ -199,6 +199,11 @@ The extraction root is not enforced.
         )
         return source_root
 
+    def sarif_result(self, finding: dict, source_root: Path) -> dict:
+        return FINALIZER.build_sarif(self.manifest, {"findings": [finding]}, source_root)["runs"][
+            0
+        ]["results"][0]
+
     def export_csv(self) -> csv.DictReader:
         self.findings["findings"] = [copy.deepcopy(self.finding)]
         self.write_sealed_scan()
@@ -3046,7 +3051,7 @@ The extraction root is not enforced.
     def test_sarif_emits_github_line_hash_when_source_is_available(self) -> None:
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         fingerprints = result["partialFingerprints"]
         self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
         self.assertEqual(fingerprints["primaryLocationLineHash"], "614150a715d5311d:1")
@@ -3061,7 +3066,7 @@ The extraction root is not enforced.
             mock.patch.object(FINALIZER, "_is_windows", return_value=True),
             mock.patch.object(FINALIZER, "_windows_scan_local_files", return_value=backend),
         ):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
 
         backend.open_read_fd.assert_called_once_with(
             source_root, "src/extract.py", "source file src/extract.py"
@@ -3081,14 +3086,14 @@ The extraction root is not enforced.
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
-            {"path": "src/control.py", "startLine": 1, "role": "root_control"},
+            {"path": "./src//control.py", "startLine": 1, "role": "root_control"},
         ]
 
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
 
         self.assertEqual(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "src/control.py",
+            "./src//control.py",
         )
         self.assertEqual(
             result["partialFingerprints"]["primaryLocationLineHash"], "41499a4b14756ba2:1"
@@ -3100,7 +3105,7 @@ The extraction root is not enforced.
         source_path.parent.mkdir(parents=True)
         source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_skips_symlink_source(self) -> None:
@@ -3114,7 +3119,7 @@ The extraction root is not enforced.
             )
             source_path.symlink_to(external_path)
             sarif_finding = self.sarif_finding("semantic-fingerprint")
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
@@ -3175,7 +3180,7 @@ The extraction root is not enforced.
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_streams_source(self) -> None:
@@ -3208,6 +3213,54 @@ The extraction root is not enforced.
         results = sarif["runs"][0]["results"]
         for result in results:
             self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
+
+    def test_sarif_keeps_captured_hash_when_source_root_changes(self) -> None:
+        read_hashes = FINALIZER._github_line_hashes_for_source
+        for change in ("disappear", "retarget"):
+            with self.subTest(change=change):
+                source_root = self.write_line_hash_source()
+                moved_root = source_root.with_name(f"moved-source-{change}")
+
+                def read_then_move(
+                    *args, source_root=source_root, moved_root=moved_root, change=change
+                ):
+                    hashes = read_hashes(*args)
+                    source_root.rename(moved_root)
+                    if change == "retarget":
+                        replacement = self.scan_dir / "replacement"
+                        (replacement / "src").mkdir(parents=True)
+                        (replacement / "src" / "extract.py").write_text(
+                            "replacement source\n" * 41, encoding="utf-8"
+                        )
+                        source_root.symlink_to(replacement, target_is_directory=True)
+                    return hashes
+
+                with mock.patch.object(
+                    FINALIZER, "_github_line_hashes_for_source", side_effect=read_then_move
+                ) as source_reads:
+                    result = self.sarif_result(
+                        self.sarif_finding("semantic-fingerprint"), source_root
+                    )
+
+                self.assertEqual(
+                    result["partialFingerprints"]["primaryLocationLineHash"], "614150a715d5311d:1"
+                )
+                self.assertEqual(source_reads.call_count, 1)
+
+    def test_sarif_does_not_retry_source_root_that_appears_after_capture(self) -> None:
+        source_root = self.scan_dir / "source"
+        sarif_rule = FINALIZER._sarif_rule
+
+        def create_source_then_render_rule(*args):
+            self.write_line_hash_source()
+            return sarif_rule(*args)
+
+        with mock.patch.object(
+            FINALIZER, "_sarif_rule", side_effect=create_source_then_render_rule
+        ):
+            result = self.sarif_result(self.sarif_finding("semantic-fingerprint"), source_root)
+
+        self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_caches_line_hashes_per_source_file(self) -> None:
         source_root = self.write_line_hash_source()
