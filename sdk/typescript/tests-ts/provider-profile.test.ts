@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join, sep } from "node:path";
@@ -347,34 +348,41 @@ console.log(JSON.stringify({ type: "item.completed", item: {
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
 process.exit(0);`,
   );
-  const configured = `${bin}${sep}.${sep}${executable}`;
-  const environment = {
-    ...(process.env["SystemRoot"] === undefined
-      ? {}
-      : { SystemRoot: process.env["SystemRoot"] }),
-    PATH: "",
-    CODEX_HOME: root,
-    CODEX_CLI_PATH: configured,
-    NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
-  };
-  const original = { ...environment };
-  const client = await createProfileCodex(
-    { env: environment },
-    "synthetic-profile",
-  );
-  for (const resumed of [false, true]) {
-    const thread = resumed
-      ? client.resumeThread("synthetic-thread")
-      : client.startThread();
-    const result = await thread.run("synthetic prompt");
-    expect(JSON.parse(result.finalResponse)).toEqual({
-      path: tools,
-      configured,
-      search: "synthetic bundled search",
-      resumed,
-    });
+  const aliases = [`${bin}${sep}.${sep}${executable}`];
+  if (process.platform !== "win32") {
+    const alias = join(root, "codex-alias");
+    await symlink(join(bin, executable), alias);
+    aliases.push(alias);
   }
-  expect(environment).toEqual(original);
+  for (const configured of aliases) {
+    const environment = {
+      ...(process.env["SystemRoot"] === undefined
+        ? {}
+        : { SystemRoot: process.env["SystemRoot"] }),
+      PATH: "",
+      CODEX_HOME: root,
+      CODEX_CLI_PATH: configured,
+      NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+    };
+    const original = { ...environment };
+    const client = await createProfileCodex(
+      { env: environment },
+      "synthetic-profile",
+    );
+    for (const resumed of [false, true]) {
+      const thread = resumed
+        ? client.resumeThread("synthetic-thread")
+        : client.startThread();
+      const result = await thread.run("synthetic prompt");
+      expect(JSON.parse(result.finalResponse)).toEqual({
+        path: tools,
+        configured,
+        search: "synthetic bundled search",
+        resumed,
+      });
+    }
+    expect(environment).toEqual(original);
+  }
 });
 
 test("private profiles retain providers for native required and inherited selection", async () => {

@@ -12,7 +12,11 @@ import {
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { regexes } from "zod";
-import { ContractValidationError, abortReason } from "./errors.js";
+import {
+  ContractValidationError,
+  abortReason,
+  errorMessage,
+} from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
   CoverageDocument,
@@ -59,6 +63,8 @@ export interface LoadedContract {
   coverage: CoverageDocument;
 }
 
+export class ContractSchemaError extends ContractValidationError {}
+
 type LoadContractOptions = {
   pluginRoot: string;
   expectedScanId?: string;
@@ -78,6 +84,10 @@ export async function loadContractWithScanDirectory(
   scanDirectory: string,
   options: LoadContractOptions,
 ): Promise<{ contract: LoadedContract; scanDirectory: string }> {
+  const validators = await loadContractValidators(
+    options.pluginRoot,
+    options.signal,
+  );
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
@@ -93,23 +103,10 @@ export async function loadContractWithScanDirectory(
   }
   throwIfAborted(options.signal);
 
-  // The plugin schemas are the immutable v0 contract. They are valid Draft
-  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
-  // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false }).addFormat(
-    "date-time",
-    { type: "string", validate: validRfc3339DateTime },
-  );
-  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
-    const schema = await readJson(
-      join(options.pluginRoot, "schemas", schemaName),
-      options.signal,
-    );
-    let validate: ReturnType<typeof ajv.compile>;
+  for (const { filename, schemaName, validate } of validators) {
     let payload: unknown;
     let valid: boolean;
     try {
-      validate = ajv.compile(schema);
       payload = payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
@@ -124,7 +121,7 @@ export async function loadContractWithScanDirectory(
         valid = validatePayload(payload);
       }
     } catch {
-      throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
@@ -199,6 +196,11 @@ function normalizePersistedFindings(payload: unknown): unknown {
     normalizePersistedFindingDetails(finding);
   }
   return compatible;
+}
+
+/** Match the producer's Python str.strip without changing saved text. */
+export function hasRequiredFindingText(value: string): boolean {
+  return !/^[\p{White_Space}\u001c-\u001f]*$/u.test(value);
 }
 
 function validateCanonicalContract(
@@ -292,8 +294,7 @@ function validateCanonicalContract(
         ? []
         : [["severity.scoringSystem", finding.severity.scoringSystem]]),
     ]) {
-      // Match the producer's Python str.strip without changing saved text.
-      if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(value ?? "")) {
+      if (!hasRequiredFindingText(value ?? "")) {
         throw new ContractValidationError(
           `${context}.${field}: expected a non-empty string.`,
         );
@@ -867,6 +868,41 @@ function validateParsedJson(value: unknown, context: string): void {
       validateParsedJson(item, `${context}[${JSON.stringify(key)}]`);
     }
   }
+}
+
+async function loadContractValidators(
+  pluginRoot: string,
+  signal?: AbortSignal,
+) {
+  // The plugin schemas are the immutable v0 contract. They are valid Draft
+  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
+  // optional strict-schema linter requires.
+  const ajv = new Ajv2020({ allErrors: false, strict: false });
+  ajv.addFormat("date-time", {
+    type: "string",
+    validate: validRfc3339DateTime,
+  });
+  const validators = [];
+  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
+    const schema = await readJson(
+      join(pluginRoot, "schemas", schemaName),
+      signal,
+    ).catch((error: unknown) => {
+      throwIfAborted(signal);
+      throw new ContractSchemaError(errorMessage(error), { cause: error });
+    });
+    try {
+      const validate = ajv.compile(schema);
+      if ("$async" in validate && validate.$async === true) {
+        throw new Error("asynchronous JSON Schema validation is unsupported");
+      }
+      validators.push({ filename, schemaName, validate });
+    } catch {
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
+    }
+    throwIfAborted(signal);
+  }
+  return validators;
 }
 
 async function sha256ScanFile(

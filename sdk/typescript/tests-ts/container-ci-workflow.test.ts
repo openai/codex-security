@@ -139,7 +139,7 @@ test.each([
 test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
   const gate = ci.jobs["required-test"]!;
   expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toBe("always()");
+  expect(gate.if).toStartWith("always() && (");
   const step = gate.steps!.find(
     (step) => step.name === "Require selected container coverage",
   )!;
