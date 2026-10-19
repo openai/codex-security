@@ -2058,7 +2058,10 @@ async function prepareOutputDirectory(
       }
     }
     if (existing === null) {
-      createdRoot = await createPrivateOutputDirectory(path);
+      createdRoot =
+        process.platform === "win32"
+          ? await createWindowsOutputDirectory(path, true)
+          : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
     return await validatePreparedOutputDir(
@@ -2080,15 +2083,6 @@ async function prepareOutputDirectory(
   }
 }
 
-/** Create missing output directories privately without changing existing ACLs. */
-export async function createPrivateOutputDirectory(
-  path: string,
-): Promise<string | undefined> {
-  return process.platform === "win32"
-    ? createWindowsOutputDirectory(path, true)
-    : mkdir(path, { recursive: true, mode: 0o700 });
-}
-
 async function createWindowsOutputDirectory(
   path: string,
   recursive: boolean,
@@ -2102,28 +2096,25 @@ async function createWindowsOutputDirectory(
       "windows.node",
     ),
   ) as { createPrivateWindowsDirectory(path: Buffer): number };
-  const create = async (
-    target: string,
-    parents: boolean,
-  ): Promise<string | undefined> => {
+  const create = async (target: string): Promise<string | undefined> => {
     const createOne = () =>
       native.createPrivateWindowsDirectory(
         Buffer.from(win32.toNamespacedPath(target), "utf16le"),
       );
     let error = createOne();
     let firstCreated: string | undefined;
-    if (parents && (error === 2 || error === 3) && dirname(target) !== target) {
-      firstCreated = await create(dirname(target), true);
+    if (recursive && (error === 2 || error === 3) && dirname(target) !== target) {
+      firstCreated = await create(dirname(target));
       error = createOne();
     }
     if (error === 0) return firstCreated ?? target;
-    if (parents && error === 183 && (await stat(target)).isDirectory())
+    if (recursive && error === 183 && (await stat(target)).isDirectory())
       return firstCreated;
     throw new OutputDirectoryError(
       `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
     );
   };
-  return create(path, recursive);
+  return create(path);
 }
 
 export async function validatePreparedOutputDir(
