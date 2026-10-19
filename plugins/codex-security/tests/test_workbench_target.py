@@ -810,6 +810,28 @@ def test_git_blob_samples_reject_git_failure(
     assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
 
 
+def test_git_blob_samples_work_with_git_before_2_38(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+    git_command = git_blob_samples.__globals__["git_command"]
+
+    def git_before_2_38(*args: Any, **kwargs: Any):
+        # Git before 2.38 rejects cat-file -z with a usage error.
+        if "-z" in args:
+            return subprocess.CompletedProcess(args, 129)
+        return git_command(*args, **kwargs)
+
+    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_before_2_38)
+
+    assert git_blob_samples(target, ["HEAD:README.md", "HEAD:missing"]) == [
+        (b"fixture\n", False),
+        None,
+    ]
+
+
 @pytest.mark.parametrize(
     ("log_encoding", "subject"),
     [

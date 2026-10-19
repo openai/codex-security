@@ -87,7 +87,10 @@ def git_blob_samples(
     if not object_names:
         return []
 
-    request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
+    # Git before 2.38 rejects -z, so only names with line breaks need it.
+    nul_input = any("\n" in name or "\r" in name for name in object_names)
+    separator = b"\0" if nul_input else b"\n"
+    request = separator.join(os.fsencode(name) for name in object_names) + separator
     read_fd, write_fd = os.pipe()
     with (
         ThreadPoolExecutor(max_workers=1) as reader,
@@ -106,7 +109,7 @@ def git_blob_samples(
                 target,
                 "cat-file",
                 "--batch",
-                "-z",
+                *(["-z"] if nul_input else []),
                 text=False,
                 input_data=request,
                 git_dir=git_dir,

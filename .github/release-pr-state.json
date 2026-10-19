@@ -1,14 +1,14 @@
 {
-  "baseVersion": "0.2.0",
-  "baseCommit": "4949af70fcfadff154f6e8fdf100faa5bf2f8169",
+  "baseVersion": "0.3.0",
+  "baseCommit": "5c5239dd8062a7d00916c4bc0d5aeaa3ed0c5477",
   "sections": {
     "highlights": {
-      "generatedHash": "e93f207d9fdc726ae4c467e0c8cd88ca89904316180bc1566903287b12e73570",
-      "humanOwned": false
+      "generatedHash": "ed7fb1027c60901424f054c5b4b1e7ee19485193f00d37e2ae74f3fb4ba6f2bb",
+      "humanOwned": true
     },
     "upgrades": {
-      "generatedHash": "f5f5a865a61bfbbe4a3844071fcf18bba7a8e21b1bba2abb2960a3e3969c5a7e",
-      "humanOwned": false
+      "generatedHash": "1b370c365d6e8307d660a71b96785ce8cd8d046a893dc4c3dacc37da4d85e27e",
+      "humanOwned": true
     }
   }
 }

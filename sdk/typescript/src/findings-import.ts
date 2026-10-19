@@ -3,7 +3,7 @@ import { deriveFindingIdentity, sha256Text as sha256 } from "./contract.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
-import { z } from "incur";
+import { z } from "zod";
 import Papa from "papaparse";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Finding, FindingsDocument } from "./models.js";
