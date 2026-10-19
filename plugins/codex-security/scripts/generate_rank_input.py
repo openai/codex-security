@@ -227,6 +227,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         "-z",
         "--diff-filter=ACMRDT",
         *diff_args,
+        "--",
         text=False,
     )
     result.check_returncode()

@@ -697,6 +697,22 @@ def test_make_diff_rank_input_combines_staged_and_unstaged_patch(tmp_path: Path)
     ]
 
 
+def test_make_diff_rank_input_accepts_base_that_matches_a_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "release").mkdir(parents=True)
+    initialize_repo(repo)
+    (repo / "release" / "build.py").write_text("build = 1", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "branch", "release")
+    (repo / "release" / "build.py").write_text("build = 2", encoding="utf-8")
+    output = tmp_path / "patch.jsonl"
+
+    run_repo_cli("make-diff-rank-input", repo, output, "--base", "release", "--mode", "local-patch")
+
+    assert [row["path"] for row in read_jsonl(output)] == ["release/build.py"]
+
+
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
 def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: str) -> None:
     repo = tmp_path / "repo"

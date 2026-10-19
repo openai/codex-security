@@ -18,6 +18,7 @@
 - use the SHA-256 empty tree for root commit diffs ([#1716](https://github.com/openai/codex-security/pull/1716))
 - read diff blobs with Git before 2.38 ([#1715](https://github.com/openai/codex-security/pull/1715))
 - bump the third-party group across 3 directories with 3 updates ([#1696](https://github.com/openai/codex-security/pull/1696))
+- separate diff revisions from paths in scan inputs ([#1694](https://github.com/openai/codex-security/pull/1694))
 
 <!-- release-section: highlights:end -->
 
