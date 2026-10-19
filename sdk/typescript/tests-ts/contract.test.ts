@@ -552,18 +552,58 @@ describe("canonical scan contract", () => {
     },
   );
 
-  test("rejects noncanonical remote backslashes in both readers", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["target"]["remote"] =
-      "https://example.test/synthetic/repo\\name";
-    await writeJson(manifestPath, manifest);
-    expect(pythonExport(scanDir).exitCode).not.toBe(0);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("canonical absolute URL");
-  });
+  test.each([
+    "https://example.test/synthetic/repo\\name",
+    ...["\t", "\n", "\r"].map(
+      (character) => `https://example.com${character}https://evil.example.net`,
+    ),
+    ...["\0", "\x1f", "\x7f", "\x85", "\x9f", "\u2028", "\u2029"].map(
+      (character) => `https://example.com/repo${character}name`,
+    ),
+  ])(
+    "rejects unsafe remote %j in sealed scans in both readers",
+    async (remote) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      manifest["scan"]["target"]["remote"] = remote;
+      await writeJson(manifestPath, manifest);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode).not.toBe(0);
+      expect(new TextDecoder().decode(exported.stderr)).toContain(
+        "canonical absolute URL",
+      );
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("canonical absolute URL");
+    },
+  );
+
+  test.each([
+    "HTTPS://EXAMPLE.COM/repo",
+    "https://example.com:443/repo",
+    "https://bücher.example/repo",
+    "https://example.com/repo%09name",
+    "https://example.com/repo%0Aname",
+    "https://example.com/repo%0Dname",
+  ])(
+    "preserves valid remote %j in sealed scans in both readers",
+    async (remote) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      manifest["scan"]["target"]["remote"] = remote;
+      await writeJson(manifestPath, manifest);
+      const bytes = await readFile(manifestPath);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(loaded.manifest.scan.target.remote).toBe(remote);
+      expect(await readFile(manifestPath)).toEqual(bytes);
+    },
+  );
 
   test("loads an empty legacy root cause without changing the artifact", async () => {
     const scanDir = await copyExample();

@@ -211,7 +211,11 @@ function validateCanonicalContract(
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
       remote,
     )?.[1];
-    if (remote.includes("\\") || authority === undefined) {
+    if (
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(remote) ||
+      remote.includes("\\") ||
+      authority === undefined
+    ) {
       throw new ContractValidationError(
         "scan.target.remote: expected a sanitized canonical absolute URL.",
       );
