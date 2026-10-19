@@ -233,6 +233,8 @@ test("cancellation rejects even when the host review does not settle", async () 
 test.each([
   "completed",
   "default-rubric",
+  "one-run",
+  "ten-runs",
   "host-error",
   "wrong-response",
   "disconnect",
@@ -281,14 +283,27 @@ test.each([
       throw new Error("Local scan execution is forbidden");
     };
     const result = main(
-      ["classify-severity", "--records"],
+      [
+        "classify-severity",
+        "--records",
+        ...(scenario === "one-run"
+          ? ["--runs", "1"]
+          : scenario === "ten-runs"
+            ? ["--runs=10"]
+            : []),
+      ],
       output,
       capture().stream,
       deps,
     );
     const params: ClassifySeverityRecordsInput = input();
     if (scenario === "default-rubric") delete params.rubric;
-    const completed = scenario === "completed" || scenario === "default-rubric";
+    const completed = [
+      "completed",
+      "default-rubric",
+      "one-run",
+      "ten-runs",
+    ].includes(scenario);
     stream.write(
       `${JSON.stringify({ jsonrpc: "2.0", id: "run-one", method: "run", params })}\n`,
     );
@@ -297,7 +312,15 @@ test.each([
     );
     expect(
       messages.filter((message) => message.method === "review.run"),
-    ).toHaveLength(completed ? 3 : 1);
+    ).toHaveLength(
+      completed
+        ? scenario === "one-run"
+          ? 1
+          : scenario === "ten-runs"
+            ? 10
+            : 3
+        : 1,
+    );
     const final = messages.at(-1);
     expect(final.id).toBe("run-one");
     if (completed)
@@ -348,6 +371,7 @@ test("empty records probe version 1 without host execution", async () => {
     }),
   ).toEqual({
     version: 1,
+    classificationRuns: 3,
     status: "completed",
     rubric: { revision: data.rubric.revision, sha256: data.rubric.sha256 },
     assessments: [],
@@ -390,7 +414,7 @@ test("canonical records use majority voting and highest severity for a three-way
   }
 });
 
-test.each([2, 3])(
+test.each([2, 3, 10])(
   "canonical review %s must succeed before returning any assessment",
   async (failedRun) => {
     for (const invalid of [false, true]) {
@@ -398,6 +422,7 @@ test.each([2, 3])(
       const data: ClassifySeverityRecordsInput = input();
       delete data.rubric;
       const result = await classifySeverityRecords(data, {
+        classificationRuns: Math.max(3, failedRun),
         reviewRunner: {
           async run(request) {
             if (++calls !== failedRun) return answer(request);
@@ -464,3 +489,41 @@ test("omitted canonical rubric uses the bundled policy and returns its exact bin
   });
   expect(data.rubric).toBeUndefined();
 });
+
+test.each([1, 2, 4, 10])(
+  "runs %i independent canonical reviews",
+  async (classificationRuns) => {
+    let calls = 0;
+    const result = await classifySeverityRecords(input(), {
+      classificationRuns,
+      reviewRunner: {
+        async run(request) {
+          calls++;
+          return answer(request);
+        },
+      },
+    });
+    expect(calls).toBe(classificationRuns);
+    expect(result.classificationRuns).toBe(classificationRuns);
+    expect(result.status).toBe("completed");
+  },
+);
+
+test.each([0, -1, 11, 1.5, NaN, Infinity])(
+  "rejects invalid canonical run count %s before host work",
+  async (classificationRuns) => {
+    let calls = 0;
+    await expect(
+      classifySeverityRecords(input(), {
+        classificationRuns,
+        reviewRunner: {
+          async run(request) {
+            calls++;
+            return answer(request);
+          },
+        },
+      }),
+    ).rejects.toThrow();
+    expect(calls).toBe(0);
+  },
+);

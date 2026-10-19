@@ -401,7 +401,19 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     { environment, codex: recordingClassifier().codex },
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
-  await query(environment, "DELETE FROM schema_migrations WHERE version = 43");
+  for (const table of [
+    "finding_severity_assessments",
+    "scan_severity_classifications",
+  ]) {
+    await query(
+      environment,
+      `ALTER TABLE ${table} DROP COLUMN classification_runs`,
+    );
+  }
+  await query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (43, 51)",
+  );
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -410,7 +422,7 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
       undefined,
       environment,
     ),
-  ).toEqual(classification);
+  ).toEqual({ ...classification, classificationRuns: undefined });
   expect(
     await query(
       environment,
@@ -754,7 +766,7 @@ test("migrates existing databases without changing findings and reads older stat
   await query(environment, "DROP TABLE scan_severity_classifications");
   await query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 43)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43, 51)",
   );
   expect(
     (
@@ -888,4 +900,87 @@ test("default rubric replaces legacy inherited assessments and respects custom p
     (await classifyScanDirectorySeverity(scanDirectory, options)).rubricSha256,
   ).toBe(result.rubricSha256);
   expect(calls).toHaveLength(6);
+});
+
+test("saved assessments bind their run count and invalidate changed or unrecorded counts", async () => {
+  const { environment, scanDirectory, scanId, findings } = await fixture();
+  const { codex, calls, control } = recordingClassifier();
+  for (const [classificationRuns, expectedCalls] of [
+    [3, 6],
+    [3, 0],
+    [1, 2],
+    [1, 0],
+    [10, 20],
+    [3, 6],
+  ]) {
+    calls.length = 0;
+    const result = await classifyScanDirectorySeverity(scanDirectory, {
+      environment,
+      codex,
+      classificationRuns,
+    });
+    expect(calls).toHaveLength(expectedCalls!);
+    expect(result.classificationRuns).toBe(classificationRuns);
+    const saved = await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      environment,
+    );
+    expect(saved?.classificationRuns).toBe(classificationRuns);
+  }
+  for (const table of [
+    "scan_severity_classifications",
+    "scan_severity_assessments",
+    "finding_severity_assessments",
+  ]) {
+    await query(environment, `UPDATE ${table} SET classification_runs = NULL`);
+  }
+  expect(
+    (
+      await readScanSeverityClassification(
+        scanDirectory,
+        scanId,
+        findings,
+        undefined,
+        environment,
+      )
+    )?.classificationRuns,
+  ).toBeUndefined();
+  calls.length = 0;
+  await classifyScanDirectorySeverity(scanDirectory, { environment, codex });
+  expect(calls).toHaveLength(6);
+  expect(
+    await query(
+      environment,
+      `SELECT classification_runs FROM scan_severity_classifications WHERE scan_id = '${scanId}'`,
+    ),
+  ).toEqual([{ classification_runs: 3 }]);
+  calls.length = 0;
+  control.failOn = findings[1]!.findingId;
+  await expect(
+    classifyScanDirectorySeverity(scanDirectory, {
+      environment,
+      codex,
+      classificationRuns: 1,
+    }),
+  ).rejects.toThrow("Interrupted model call");
+  await expect(
+    readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      environment,
+    ),
+  ).rejects.toThrow("incomplete");
+  calls.length = 0;
+  control.failOn = "";
+  await classifyScanDirectorySeverity(scanDirectory, {
+    environment,
+    codex,
+    classificationRuns: 1,
+  });
+  expect(calls).toEqual([findings[1]!.findingId]);
 });

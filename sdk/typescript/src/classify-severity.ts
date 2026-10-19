@@ -13,7 +13,8 @@ import {
   severityDecisionSchema as decisionSchema,
   severityReviewInstructions,
   parseSeverityDecision,
-  reviewSeverityThreeTimes,
+  reviewSeverity,
+  classificationRunsSchema,
 } from "./severity-review.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 
@@ -36,6 +37,8 @@ export interface ClassifySeverityOptions extends Pick<
 > {
   /** Classification policy override. Omit to use the built-in severity rubric. */
   rubricPath?: string;
+  /** Independent reviews per finding: integer 1–10, default 3. */
+  classificationRuns?: number;
   /** Supporting evidence, separate from classification policy. */
   knowledgeBasePaths?: readonly string[];
   /** @internal Test client for the shared read-only runtime. */
@@ -51,6 +54,8 @@ export interface SeverityAssessment extends z.infer<typeof decisionSchema> {
 export interface SeverityClassification {
   schemaVersion: 1;
   assessedAt: string;
+  /** Absent on legacy results whose review count was not recorded. */
+  classificationRuns?: number;
   rubricSha256: string | null;
   knowledgeBaseSha256: string | null;
   assessments: SeverityAssessment[];
@@ -75,6 +80,7 @@ const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 export const severityClassificationSchema = z.strictObject({
   schemaVersion: z.literal(1),
   assessedAt: z.string().datetime(),
+  classificationRuns: classificationRunsSchema.optional(),
   rubricSha256: digestSchema.nullable(),
   knowledgeBaseSha256: digestSchema.nullable(),
   assessments: z.array(
@@ -102,6 +108,9 @@ export async function classifySeverityInternal(
   checkpoint?: SeverityClassificationCheckpoint,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
+  const classificationRuns = classificationRunsSchema
+    .default(3)
+    .parse(options.classificationRuns);
   const ids = new Set<string>();
   for (const finding of findings) {
     if (!finding.findingId?.trim() || ids.has(finding.findingId)) {
@@ -120,6 +129,7 @@ export async function classifySeverityInternal(
     : null;
   const result: SeverityClassification = {
     schemaVersion: 1,
+    classificationRuns,
     assessedAt: new Date().toISOString(),
     rubricSha256: workflowDigest(rubric),
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
@@ -141,7 +151,7 @@ export async function classifySeverityInternal(
       severityReviewInstructions,
       JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
     ].join("\n\n");
-    const decision = await reviewSeverityThreeTimes(async () => {
+    const decision = await reviewSeverity(async () => {
       options.signal?.throwIfAborted();
       const response = await runReadOnlyCodex(
         prompt,
@@ -162,7 +172,7 @@ export async function classifySeverityInternal(
           { cause: error },
         );
       }
-    });
+    }, classificationRuns);
     options.signal?.throwIfAborted();
     const assessment: SeverityAssessment = {
       ...decision,

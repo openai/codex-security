@@ -40,6 +40,7 @@ export class SeverityStore {
           scanId,
           findingIds,
           assessedAt: result.assessedAt,
+          classificationRuns: result.classificationRuns,
           rubricSha256: result.rubricSha256,
           knowledgeBaseSha256: result.knowledgeBaseSha256,
         });
@@ -57,6 +58,7 @@ export class SeverityStore {
           finding,
           assessment: {
             ...assessment,
+            classificationRuns: result.classificationRuns,
             rubricSha256: result.rubricSha256,
             knowledgeBaseSha256: result.knowledgeBaseSha256,
           },
@@ -84,6 +86,8 @@ export class SeverityStore {
       {
         schemaVersion: 1,
         assessedAt: saved["assessedAt"] as string,
+        classificationRuns: (saved["classificationRuns"] ?? undefined) as
+          number | undefined,
         rubricSha256: saved["rubricSha256"] as string | null,
         knowledgeBaseSha256: saved["knowledgeBaseSha256"] as string | null,
       },
@@ -137,12 +141,15 @@ function matchingClassification(
     assessments: stored
       .filter(
         (row) =>
+          (row["classificationRuns"] ?? undefined) ===
+            result.classificationRuns &&
           row["rubricSha256"] === result.rubricSha256 &&
           row["knowledgeBaseSha256"] === result.knowledgeBaseSha256,
       )
       .map(
         ({
           assessedAt: _assessedAt,
+          classificationRuns: _runs,
           rubricSha256: _rubric,
           knowledgeBaseSha256: _knowledge,
           ...assessment

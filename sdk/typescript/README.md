@@ -607,8 +607,9 @@ and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/example
 
 Use `classify-severity` to assess saved findings with the built-in severity rubric
 or an explicit custom rubric, without changing their original severity or evidence.
-Each finding receives three independent reviews; the most common severity wins,
-with the highest severity breaking a three-way tie. The SDK exposes `classifySeverity()`,
+Each finding receives three independent reviews by default; the most common severity wins,
+with the highest severity breaking ties among the top vote counts.
+Use `--runs N` to request 1–10 reviews (default: 3). The SDK exposes `classifySeverity()`,
 `classifyScanSeverity()`, and `classifyScanDirectorySeverity()`. See
 [severity classification](docs/cli.md#classify-finding-severity) for selection,
 checkpointing, and publication behavior.

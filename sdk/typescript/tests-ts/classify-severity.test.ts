@@ -283,7 +283,7 @@ test("votes independently for each imported report and retains the winning answe
   ]);
 });
 
-test.each([2, 3])(
+test.each([2, 3, 10])(
   "does not return a partial vote when review %s fails or is invalid",
   async (failedRun) => {
     for (const invalid of [false, true]) {
@@ -292,9 +292,12 @@ test.each([2, 3])(
         if (invalid) return { ...assessed, findingId: "wrong-finding" };
         throw new Error("Review failed");
       });
-      await expect(classifySeverity([finding], { codex })).rejects.toThrow(
-        invalid ? "invalid assessment" : "Review failed",
-      );
+      await expect(
+        classifySeverity([finding], {
+          codex,
+          classificationRuns: Math.max(3, failedRun),
+        }),
+      ).rejects.toThrow(invalid ? "invalid assessment" : "Review failed");
       expect(calls).toHaveLength(failedRun);
     }
   },
@@ -315,5 +318,30 @@ test.each([1, 2, 3])(
       }),
     ).rejects.toThrow("Stopped");
     expect(calls).toHaveLength(canceledRun);
+  },
+);
+
+test.each([1, 2, 4, 10])(
+  "runs %i independent local reviews",
+  async (classificationRuns) => {
+    const { codex, calls } = fakeCodex(assessed);
+    const result = await classifySeverity([finding], {
+      codex,
+      classificationRuns,
+    });
+    expect(calls).toHaveLength(classificationRuns);
+    expect(result.classificationRuns).toBe(classificationRuns);
+    expect(result.assessments[0]!.level).toBe("medium");
+  },
+);
+
+test.each([0, -1, 11, 1.5, NaN, Infinity])(
+  "rejects invalid local run count %s before model work",
+  async (classificationRuns) => {
+    const { codex, calls } = fakeCodex(assessed);
+    await expect(
+      classifySeverity([finding], { codex, classificationRuns }),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
   },
 );

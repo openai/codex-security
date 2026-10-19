@@ -415,5 +415,14 @@
     "version": 50,
     "name": "persist authorized source excerpt scopes",
     "statements": ["ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"]
+  },
+  {
+    "version": 51,
+    "name": "record severity classification review counts",
+    "statements": [
+      "ALTER TABLE finding_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_classifications ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);"
+    ]
   }
 ]

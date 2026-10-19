@@ -5,7 +5,8 @@ import { z } from "zod";
 import { abortable } from "./targets.js";
 import {
   parseSeverityDecision,
-  reviewSeverityThreeTimes,
+  reviewSeverity,
+  classificationRunsSchema,
   severityDecisionSchema,
   severityReviewInstructions,
   type SeverityDecision,
@@ -83,6 +84,8 @@ export interface SeverityClassificationReviewRequest {
 }
 
 export interface ClassifySeverityRecordsOptions {
+  /** Independent reviews per record: integer 1–10, default 3. */
+  classificationRuns?: number;
   reviewRunner: {
     run(
       request: SeverityClassificationReviewRequest,
@@ -102,6 +105,7 @@ export type CanonicalSeverityAssessment = Omit<
 };
 
 interface RecordsResultBinding {
+  classificationRuns: number;
   version: 1;
   rubric: { revision: number; sha256: string };
 }
@@ -133,6 +137,9 @@ export async function classifySeverityRecords(
   options: ClassifySeverityRecordsOptions,
 ): Promise<ClassifySeverityRecordsResult> {
   options.signal?.throwIfAborted();
+  const classificationRuns = classificationRunsSchema
+    .default(3)
+    .parse(options.classificationRuns);
   const data = classifySeverityRecordsInputSchema.parse(structuredClone(input));
   const rubric = data.rubric ?? {
     revision: 1,
@@ -155,6 +162,7 @@ export async function classifySeverityRecords(
       );
   }
   const binding: RecordsResultBinding = {
+    classificationRuns,
     version: 1,
     rubric: { revision: rubric.revision, sha256: rubric.sha256 },
   };
@@ -163,8 +171,8 @@ export async function classifySeverityRecords(
     options.signal?.throwIfAborted();
     let code: "review_failed" | "invalid_assessment" = "review_failed";
     try {
-      const { findingId: _findingId, ...decision } =
-        await reviewSeverityThreeTimes(async () => {
+      const { findingId: _findingId, ...decision } = await reviewSeverity(
+        async () => {
           code = "review_failed";
           const response = await abortable(() => {
             options.signal?.throwIfAborted();
@@ -184,7 +192,9 @@ export async function classifySeverityRecords(
           options.signal?.throwIfAborted();
           code = "invalid_assessment";
           return parseSeverityDecision(response, record.id);
-        });
+        },
+        classificationRuns,
+      );
       options.signal?.throwIfAborted();
       assessments.push({
         ...decision,

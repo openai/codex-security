@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { classificationRunsSchema } from "./severity-review.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
@@ -45,7 +46,7 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify, stripVTControlCharacters } from "node:util";
+import { parseArgs, promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
@@ -1748,7 +1749,29 @@ export async function main(
     !argv.includes("-h") &&
     !argv.includes("--schema")
   ) {
-    if (argv.length !== 2 || (argv[0] === "scan" && argv[1] !== "--host")) {
+    let classificationRuns: number | undefined;
+    if (argv[0] === "classify-severity") {
+      try {
+        const { values } = parseArgs({
+          args: argv.slice(1),
+          options: {
+            records: { type: "boolean" },
+            runs: { type: "string" },
+          },
+        });
+        classificationRuns = classificationRunsSchema.parse(
+          values.runs === undefined ? 3 : Number(values.runs),
+        );
+      } catch {
+        errorOutput.write(
+          "codex-security: Use --records with only --runs (an integer from 1 to 10; default: 3).\n",
+        );
+        return 2;
+      }
+    } else if (
+      argv.length !== 2 ||
+      (argv[0] === "scan" && argv[1] !== "--host")
+    ) {
       errorOutput.write(
         argv[0] === "scan"
           ? "codex-security: --host must be used alone with scan.\n"
@@ -1772,10 +1795,10 @@ export async function main(
               dependencies.recordsInput ?? process.stdin,
               output,
               (value, options) =>
-                classifySeverityRecords(
-                  value as ClassifySeverityRecordsInput,
-                  options,
-                ),
+                classifySeverityRecords(value as ClassifySeverityRecordsInput, {
+                  ...options,
+                  classificationRuns,
+                }),
               controller.signal,
             )
           : await runProtocol(
@@ -3964,15 +3987,20 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "Use --rubric to override the built-in policy or --records alone for host-provided classification.",
+      hint: "Use --rubric to override the built-in policy or --records for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
+        runs: classificationRunsSchema
+          .default(3)
+          .describe(
+            "Number of independent classification runs (1–10; default: 3).",
+          ),
         records: z
           .boolean()
           .default(false)
           .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; use alone.",
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; accepts --runs.",
           ),
         reprocess: z
           .boolean()
@@ -4040,6 +4068,7 @@ export async function main(
             findingIds:
               options.findingId.length === 0 ? undefined : options.findingId,
             reprocess: options.reprocess,
+            classificationRuns: options.runs,
             model: options.model,
             reasoningEffort: options.effort,
           };

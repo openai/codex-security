@@ -75,6 +75,7 @@ test("classify-severity accepts external scan directories and uses the default r
     expect(directory).toBe(resolve(deps.currentDirectory(), "saved scan"));
     expect(options!.rubricPath).toBeUndefined();
     expect(options!.reprocess).toBe(false);
+    expect(options!.classificationRuns).toBe(3);
     expect(options!.findingIds).toBeUndefined();
     expect(surface).toBe("cli");
     return result;
@@ -190,3 +191,45 @@ test("publication forwards selected finding IDs only to Linear", async () => {
     ),
   ).toBe(2);
 });
+
+test.each([1, 2, 10])("forwards --runs %i", async (classificationRuns) => {
+  const deps = dependencies();
+  const classify = mock(async (_scan: string, options: any) => {
+    expect(options.classificationRuns).toBe(classificationRuns);
+    return result;
+  });
+  deps.classifyScanSeverity = classify;
+  expect(
+    await runCapturedCli(
+      main,
+      [
+        "classify-severity",
+        "--scan",
+        "latest",
+        "--runs",
+        String(classificationRuns),
+      ],
+      deps,
+    ),
+  ).toBe(0);
+  expect(classify).toHaveBeenCalledTimes(1);
+});
+
+test.each(["0", "-1", "11", "1.5", "NaN", "Infinity", "invalid"])(
+  "rejects --runs %s in either input mode",
+  async (value) => {
+    const deps = dependencies();
+    const classify = mock(async () => result);
+    deps.classifyScanSeverity = classify;
+    for (const mode of [["--scan", "latest"], ["--records"]]) {
+      expect(
+        await runCapturedCli(
+          main,
+          ["classify-severity", ...mode, "--runs", value],
+          deps,
+        ),
+      ).toBe(2);
+    }
+    expect(classify).toHaveBeenCalledTimes(0);
+  },
+);

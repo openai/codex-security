@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import {
-  reviewSeverityThreeTimes,
+  reviewSeverity,
   type SeverityDecision,
 } from "../src/severity-review.js";
 
@@ -29,9 +29,7 @@ test("three independent reviews vote by normalized severity, with deterministic 
           reviewTrigger: `Missing fact ${index + 1}`,
         }));
         let calls = 0;
-        const result = await reviewSeverityThreeTimes(
-          async () => answers[calls++]!,
-        );
+        const result = await reviewSeverity(async () => answers[calls++]!);
         const expected =
           first === second || first === third
             ? first
@@ -46,3 +44,34 @@ test("three independent reviews vote by normalized severity, with deterministic 
     }
   }
 });
+
+test.each([
+  [["low"], "low"],
+  [["low", "high"], "high"],
+  [["low", "low", "high", "high"], "high"],
+  [["critical", "low", "low", "high", "high", "informational"], "high"],
+  [[null, null, "low", "low"], "low"],
+  [
+    ["low", "low", "low", "low", "low", "high", "high", "high", "high", "high"],
+    "high",
+  ],
+] as [SeverityDecision["level"][], SeverityDecision["level"]][])(
+  "votes across %j",
+  async (votes, expected) => {
+    let calls = 0;
+    const result = await reviewSeverity(async () => {
+      const level = votes[calls++]!;
+      return {
+        findingId: "example",
+        decision: level === null ? "excluded" : "assessed",
+        level,
+        rubricLabel: level,
+        rationale: "Synthetic review",
+        confidence: null,
+        reviewTrigger: null,
+      };
+    }, votes.length);
+    expect(calls).toBe(votes.length);
+    expect(result.level).toBe(expected);
+  },
+);
