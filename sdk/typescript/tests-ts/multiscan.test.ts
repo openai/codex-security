@@ -750,14 +750,13 @@ describe("multiscan", () => {
         mode: "standard",
       };
       const outputDir = join(paths.output, "artifacts", task.id, "attempt-1");
-      await mkdir(outputDir, { recursive: true, mode: 0o700 });
+      await completedScan(outputDir);
       const artifacts = [
         "scan-manifest.json",
         "findings.json",
         "coverage.json",
         "report.md",
       ].map((name) => join(outputDir, name));
-      await Promise.all(artifacts.map((path) => writeFile(path, "{}\n")));
       const before = await Promise.all(artifacts.map((path) => readFile(path)));
       await writeFile(
         paths.input,
