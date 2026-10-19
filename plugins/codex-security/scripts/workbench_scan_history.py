@@ -202,6 +202,69 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
+SCAN_SUMMARY_QUERY = """
+SELECT
+    scans.*,
+    progress.reportable_findings_count,
+    progress.scope_file_count,
+    progress.review_items_completed,
+    progress.review_items_total,
+    progress.updated_at AS progress_updated_at,
+    (
+        SELECT COUNT(*)
+        FROM finding_occurrences AS occurrences
+        WHERE occurrences.scan_id = scans.id
+    ) AS finding_count
+FROM scans
+JOIN scan_progress AS progress ON progress.scan_id = scans.id
+"""
+
+
+def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "completedAt": row["completed_at"],
+        "continuationThreadId": row["continuation_thread_id"],
+        **stored_scan_cost_fields(row["cost_json"]),
+        "findingCount": row["finding_count"],
+        "handoffStatus": row["handoff_status"],
+        "mode": row["mode"],
+        "model": row["model"],
+        "name": row["name"],
+        "parentScanId": row["parent_scan_id"],
+        "progress": {
+            "candidates": {"reportable": row["reportable_findings_count"]},
+            "coverage": {
+                "closedRows": row["review_items_completed"],
+                "filesTotal": row["scope_file_count"],
+                "worklistRows": row["review_items_total"],
+            },
+            "phase": row["phase"],
+            "status": "canceled" if row["canceled_at"] else row["status"],
+            "updatedAt": row["progress_updated_at"],
+        },
+        "recipeAvailable": row["recipe_json"] is not None,
+        "reasoningEffort": row["reasoning_effort"],
+        "scanDir": row["scan_dir"],
+        "scanId": row["id"],
+        "scope": row["scope"],
+        "startedAt": row["started_at"],
+        "targetId": row["target_id"],
+        "targetPath": row["target_path"],
+        "targetRevision": row["target_revision"],
+        "targetSummary": row["target_summary"],
+        "updatedAt": max(
+            row["updated_at"],
+            row["progress_updated_at"],
+            key=lambda value: (timestamp_key(value), value),
+        ),
+        **(
+            {"warnings": json.loads(row["completion_warnings_json"])}
+            if row["completion_warnings_json"] != "[]"
+            else {}
+        ),
+    }
+
+
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
@@ -281,20 +344,7 @@ def list_scans(
         values.extend((limit + 1, args.offset))
     rows = connection.execute(
         f"""
-        SELECT
-            scans.*,
-            progress.reportable_findings_count,
-            progress.scope_file_count,
-            progress.review_items_completed,
-            progress.review_items_total,
-            progress.updated_at AS progress_updated_at,
-            (
-                SELECT COUNT(*)
-                FROM finding_occurrences AS occurrences
-                WHERE occurrences.scan_id = scans.id
-            ) AS finding_count
-        FROM scans
-        JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        {SCAN_SUMMARY_QUERY}
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
@@ -305,53 +355,7 @@ def list_scans(
         """,
         values,
     ).fetchall()
-    result = {
-        "scans": [
-            {
-                "completedAt": row["completed_at"],
-                "continuationThreadId": row["continuation_thread_id"],
-                **stored_scan_cost_fields(row["cost_json"]),
-                "findingCount": row["finding_count"],
-                "handoffStatus": row["handoff_status"],
-                "mode": row["mode"],
-                "model": row["model"],
-                "name": row["name"],
-                "parentScanId": row["parent_scan_id"],
-                "progress": {
-                    "candidates": {"reportable": row["reportable_findings_count"]},
-                    "coverage": {
-                        "closedRows": row["review_items_completed"],
-                        "filesTotal": row["scope_file_count"],
-                        "worklistRows": row["review_items_total"],
-                    },
-                    "phase": row["phase"],
-                    "status": "canceled" if row["canceled_at"] else row["status"],
-                    "updatedAt": row["progress_updated_at"],
-                },
-                "recipeAvailable": row["recipe_json"] is not None,
-                "reasoningEffort": row["reasoning_effort"],
-                "scanDir": row["scan_dir"],
-                "scanId": row["id"],
-                "scope": row["scope"],
-                "startedAt": row["started_at"],
-                "targetId": row["target_id"],
-                "targetPath": row["target_path"],
-                "targetRevision": row["target_revision"],
-                "targetSummary": row["target_summary"],
-                "updatedAt": max(
-                    row["updated_at"],
-                    row["progress_updated_at"],
-                    key=lambda value: (timestamp_key(value), value),
-                ),
-                **(
-                    {"warnings": json.loads(row["completion_warnings_json"])}
-                    if row["completion_warnings_json"] != "[]"
-                    else {}
-                ),
-            }
-            for row in rows[:limit]
-        ]
-    }
+    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
     if limit is not None:
         result.update(
             {
