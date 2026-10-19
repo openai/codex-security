@@ -2,7 +2,7 @@ import * as core from '@actions/core';
 import { readFile, realpath } from 'node:fs/promises';
 import { parseInputs, scanArguments, type Inputs } from './inputs.js';
 import { resolveTarget, type EventContext, type Target } from './targets.js';
-import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, type Runtime } from './runtime.js';
+import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, scanCredentials, API_KEY_ENVIRONMENT_VARIABLES, type Runtime } from './runtime.js';
 import { runProcess, safeLogLines } from './process.js';
 import { analyzeResults, type ScanResults } from './results.js';
 import { collectReports, uploadReports } from './artifacts.js';
@@ -64,8 +64,8 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
   core.setOutput('report-status', 'failed');
   core.setOutput('sarif-upload-ready', 'false');
   try {
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || '';
     inputs = parseInputs(name => core.getInput(name), process.env.GITHUB_WORKSPACE ?? '');
+    const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context();
     target = await resolveTarget(inputs, event);
     core.setOutput('scanned-sha', target.scannedSha);
@@ -79,7 +79,11 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
       finalSummary = 'The requested diff is empty. No scan ran and no model cost was incurred.';
       core.info(finalSummary);
     } else {
-      if (!inputs.dryRun && (!apiKey || /[\r\n\u0000]/.test(apiKey))) throw new Error('Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.');
+      if (!inputs.dryRun && credentials.provider !== 'amazon-bedrock' && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
+        throw new Error(credentials.provider === 'openai'
+          ? 'Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.'
+          : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
+      }
       tempRoot = await realpath(process.env.RUNNER_TEMP ?? '');
       if (!process.env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required.');
       core.info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
@@ -96,7 +100,8 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
       };
       log(`Target commit: ${target.scannedSha}.${target.diffBase ? ` Diff: ${target.diffBase}..${target.diffHead}.` : ''}`);
       if (inputs.paths.length) log(`Paths: ${inputs.paths.join(', ')}.`);
-      log(`Model: ${inputs.model}; estimated cost stop threshold: ${inputs.maxCost === undefined ? 'unset' : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      log(`Model: ${inputs.model || '(not specified)'}; estimated cost stop threshold: ${inputs.maxCost === undefined ? 'unset' : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      if (inputs.cyberAccessProgram) log(`Requested Cyber access program: ${inputs.cyberAccessProgram}.`);
       const scanLabel = inputs.dryRun ? 'CLI configuration validation' : 'Security scan';
       const scanStarted = performance.now();
       core.info(`Starting ${scanLabel.toLowerCase()}. CLI diagnostics: ${inputs.verbose ? 'streaming' : 'disabled (verbose: false)'}.`);
@@ -104,7 +109,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
       let execution;
       try {
         execution = await deps.runProcess(runtime.nodePath, [runtime.cliPath, ...args], {
-          cwd: target.repository, env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(apiKey),
+          cwd: target.repository, env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(credentials),
           // Stream stderr with terminal controls escaped; structured stdout is consumed below.
           log: inputs.verbose ? core.info : undefined,
         });
@@ -130,11 +135,11 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           catch { checkoutError = 'The source checkout changed during scanning. Results cannot establish a completed scan of the requested revision.'; }
         }
         const result = await analyzeResults({stdout: execution.stdout, resultsDirectory: runtime.resultsDirectory, scannedSha: target.scannedSha,
-          exitCode: execution.exitCode, executionFailed: interrupted || !!checkoutError, publishable: target.publishable && !interrupted && !checkoutError});
+          exitCode: execution.exitCode, executionFailed: interrupted || !!checkoutError, publishable: target.publishable});
         if (result.paths.jsonPath && !result.paths.sarifPath)
           core.warning('SARIF report is unavailable; scan results and other reports are still available.');
         if (checkoutError) result.errors.unshift(checkoutError);
-        if (interrupted) result.errors.unshift('Scan was interrupted or exceeded its execution limit. Available findings are provisional.');
+        if (interrupted) result.errors.unshift('Scan was interrupted or exceeded its execution limit.');
         let reportsValidated = false;
         try {
           const reports = await collectReports(result);
@@ -152,16 +157,13 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         }
         outputs(result, target, execution.exitCode);
         core.info(`Scan: ${result.scanStatus}; findings policy: ${result.policyStatus}; report: ${result.reportStatus}; SARIF upload ready: ${result.sarifUploadReady}.`);
-        core.info(`${result.scanStatus === 'completed' ? 'Findings' : 'Provisional findings'}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
+        core.info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
         core.info(`Estimated cost: ${result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
         finalSummary = resultSummary(result, inputs, target);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== 'failed' && (result.scanStatus === 'incomplete' ||
-          (result.scanStatus === 'completed' && result.policyStatus === 'passed'));
+        success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === 'incomplete')
-          core.warning('Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.');
       }
     }
   } catch (error) {

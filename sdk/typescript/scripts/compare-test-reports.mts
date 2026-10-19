@@ -12,12 +12,6 @@ type TestRecord = {
   attributes: SaxesTagNS["attributes"];
   status: TestStatus;
 };
-type TestReport = {
-  cases: Map<string, number>;
-  duration: number;
-  failed: boolean;
-};
-
 function matchingReports(pattern: string): string[] {
   // Python glob treats ** as one component and does not expand braces/extglobs.
   const directoriesOnly =
@@ -91,7 +85,7 @@ function seconds(value: string): number {
   return Number(number.replace(/inf(?:inity)?/iu, "Infinity"));
 }
 
-function readReport(path: string): TestReport {
+function readReport(path: string) {
   const parser = new SaxesParser({ xmlns: true, fileName: path });
   let root: SaxesTagNS | undefined;
   const stack: Array<TestRecord | undefined> = [];

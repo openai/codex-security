@@ -116,7 +116,7 @@ connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)',
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-    read_coverage=lambda _: {'completeness': 'complete'}, include_matching_inputs=True)
+    read_coverage=lambda _: {}, include_matching_inputs=True)
 print(json.dumps(comparison['matchingInputs']))
 `,
     join(tmpdir(), "codex-security-legacy-repositories"),
@@ -170,7 +170,7 @@ def save(value):
         connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
         now=lambda: '2026-01-01T00:00:00Z',
         require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+        read_coverage=lambda _: {'includePaths': ['src'],
                                  'excludePaths': [], 'explicitExclusions': []})
 def snapshot():
     return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
@@ -205,7 +205,14 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: {
+      new: 1,
+      persisting: 2,
+      reopened: 0,
+      resolved: 0,
+      not_observed: 1,
+      unknown: 0,
+    },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -368,7 +375,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "    'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),",
     "    'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],",
     "    'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],",
-    "    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,",
+    "    'batchedQueryCount': batched_queries,",
     "    'emptyLinks': empty, 'emptyQueryCount': len(queries),",
     "}))",
   ].join("\n");
@@ -390,6 +397,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
       ["scan-1", "scan-2"],
       ["scan-2", "scan-0"],
     ],
+    batchedQueryCount: 1,
     emptyLinks: [],
     emptyQueryCount: 0,
     unavailable: {
@@ -415,9 +423,6 @@ test("loads each scan once and scopes saved links to uncached history", async ()
       ],
     },
   });
-  expect(observed["batchedQueryCount"]).toBe(
-    observed["expectedBatchedQueryCount"],
-  );
 });
 
 test("reconciles cached statuses without losing grouped coverage or uncertainty", async () => {
@@ -467,7 +472,7 @@ payload = {
 }
 def cache():
     connection.execute('INSERT OR REPLACE INTO scan_comparisons VALUES (?, ?, ?)', ('before', 'after', json.dumps(payload)))
-coverage = {'completeness': 'complete', 'includePaths': ['src'],
+coverage = {'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
     return history.compare_scans(
@@ -515,7 +520,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    resolved: { summary: { new: 1, resolved: 0, not_observed: 1, unknown: 0 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [
@@ -606,13 +611,9 @@ batched_queries = len(queries)
 if limited:
     connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
 
-class LegacyConnection:
-    def execute(self, *args):
-        return connection.execute(*args)
-
 queries.clear()
 legacy_rows = list(history._rows_for_ids(
-    LegacyConnection(), 'SELECT id FROM finding_occurrences WHERE id IN ({placeholders})',
+    connection, 'SELECT id FROM finding_occurrences WHERE id IN (SELECT value FROM json_each(?))',
     (f'left-{index}' for index in range(1001))
 ))
 print(json.dumps({
@@ -621,7 +622,6 @@ print(json.dumps({
     'reverse': reverse, 'remaining': sorted(remaining), 'unchanged': unchanged,
     'restoredAfterUnlink': restored,
     'batchedCount': len(batched), 'batchedQueries': batched_queries,
-    'expectedBatchedQueries': 6 if limited else 3,
     'legacyCount': len(legacy_rows), 'legacyQueries': len(queries)
 }))
 `;
@@ -640,10 +640,10 @@ print(json.dumps({
     unchanged: true,
     restoredAfterUnlink: true,
     batchedCount: 10,
+    batchedQueries: 3,
     legacyCount: 1001,
-    legacyQueries: 2,
+    legacyQueries: 1,
   });
-  expect(observed["batchedQueries"]).toBe(observed["expectedBatchedQueries"]);
 });
 
 test("includes recurring stable identities in confirmed finding history", async () => {

@@ -80,3 +80,62 @@ class SarifProjectionTest(unittest.TestCase):
                 properties = FINALIZER._sarif_rule(finding["ruleId"], [finding])["properties"]
                 self.assertEqual(properties.get("security-severity"), expected)
                 self.assertEqual(properties["tags"], ["path-traversal", "security"])
+
+    def test_sarif_normalizes_long_cwe_identifiers_as_text(self) -> None:
+        for label, digits, tag in (
+            ("zero-padded", "0" * 5000 + "22", "external/cwe/cwe-022"),
+            ("all-zero", "0" * 5000, None),
+            ("significant digits", "9" * 5000, "external/cwe/cwe-" + "9" * 5000),
+        ):
+            with self.subTest(label=label):
+                cwe = f"CWE-{digits}"
+                finding = copy.deepcopy(self.finding)
+                finding["taxonomy"]["cwe"] = [cwe]
+                findings = {**self.findings, "findings": [finding]}
+                FINALIZER._validate_findings(self.manifest, findings)
+                FINALIZER._validate_current_findings(findings, PLUGIN_ROOT / "schemas")
+                FINALIZER.validate_against_schema(
+                    findings, PLUGIN_ROOT / "schemas" / "findings.schema.json"
+                )
+                run = FINALIZER.build_sarif(self.manifest, findings)["runs"][0]
+                rule = run["tool"]["driver"]["rules"][0]
+                self.assertEqual(
+                    rule["properties"]["tags"],
+                    ([tag] if tag is not None else []) + ["path-traversal", "security"],
+                )
+                self.assertIn(cwe, rule["fullDescription"]["text"])
+                self.assertIn(cwe, run["results"][0]["message"]["text"])
+                self.assertEqual(finding["taxonomy"]["cwe"], [cwe])
+
+    def test_sarif_preserves_cwe_tag_rules_and_original_spelling(self) -> None:
+        cwes = [
+            "CWE-1",
+            "cWe-022",
+            "CWE-00022",
+            "CWE-1234",
+            "CWE-0",
+            "CWE-000",
+            "CWE--22",
+            "CWE-+22",
+            " CWE-22",
+            "CWE-22 ",
+            "CWE-２２",
+            "CWE-٢٢",
+            "unknown",
+        ]
+        self.finding["taxonomy"]["cwe"] = cwes.copy()
+        run = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
+        rule = run["tool"]["driver"]["rules"][0]
+        self.assertEqual(
+            rule["properties"]["tags"],
+            [
+                "external/cwe/cwe-001",
+                "external/cwe/cwe-022",
+                "external/cwe/cwe-1234",
+                "path-traversal",
+                "security",
+            ],
+        )
+        self.assertIn(f"Weaknesses: {', '.join(sorted(cwes))}.", rule["fullDescription"]["text"])
+        self.assertIn(f"Weaknesses: {', '.join(cwes)}", run["results"][0]["message"]["text"])
+        self.assertEqual(self.finding["taxonomy"]["cwe"], cwes)

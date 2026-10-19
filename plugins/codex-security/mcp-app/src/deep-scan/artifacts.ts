@@ -2,14 +2,9 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { errorMessage } from "./errors.js";
-export interface DeepScanArtifacts {
-  scanDir: string;
-  deepRoot: string;
-  workersRoot: string;
-  dedupRoot: string;
-}
+export type DeepScanArtifacts = ReturnType<typeof createDeepScanArtifacts>;
 
-export function createDeepScanArtifacts(scanDir: string): DeepScanArtifacts {
+export function createDeepScanArtifacts(scanDir: string) {
   const deepRoot = join(scanDir, "artifacts", "deep_discovery");
   return {
     scanDir,

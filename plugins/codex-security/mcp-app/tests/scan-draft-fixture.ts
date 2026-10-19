@@ -8,7 +8,6 @@ export function workerDraft<Finding extends Record<string, unknown>>(
     scanId,
     findings,
     coverage: {
-      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -23,9 +22,9 @@ export function finding(id: string, repositoryPath: string) {
     identity: { anchor: id },
     title: "Unsafe request output " + id,
     summary: "A request-controlled value reaches an HTML response.",
-    severity: { level: "high" },
+    severity: { level: "high" as const },
     confidence: {
-      level: "high",
+      level: "high" as const,
       rationale: "The source establishes reachability.",
     },
     taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },

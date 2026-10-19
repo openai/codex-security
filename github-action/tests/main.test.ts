@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -9,8 +9,9 @@ import { DefaultArtifactClient } from '@actions/artifact';
 import { runAction } from '../src/main.js';
 import { INPUT_NAMES } from '../src/inputs.js';
 import { gitEnvironment } from '../src/targets.js';
-import type { Runtime } from '../src/runtime.js';
+import { runtimeEnvironment, type Runtime } from '../src/runtime.js';
 import type { ProcessResult } from '../src/process.js';
+import { copyCompletedScan } from './fixtures.js';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
@@ -78,12 +79,12 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     root: join(root, 'runtime'), home: join(root, 'runtime/home'), codexHome: join(root, 'runtime/codex'),
     stateDirectory: join(root, 'runtime/state'), resultsDirectory: join(root, 'results'),
     nodePath: '/never-executed/node', cliPath: '/never-executed/cli.js',
-    env: (key) => ({ OPENAI_API_KEY: key }),
+    env: (credentials) => runtimeEnvironment(runtime, credentials),
   };
   let setups = 0;
   let processes = 0;
   let cleanups = 0;
-  const configuration: { exitCode?: number; partial?: boolean; missingSarif?: boolean; mutateCheckout?: boolean; cleanupFails?: boolean; cliFailure?: boolean; scanProcess?: Partial<ProcessResult>; scanResult?: (value: any) => void; missingReport?: string; prepare?: () => void | Promise<void> } = {};
+  const configuration: { exitCode?: number; missingSarif?: boolean; mutateCheckout?: boolean; cleanupFails?: boolean; cliFailure?: boolean; scanProcess?: Partial<ProcessResult>; scanResult?: (value: any) => void; missingReport?: string; prepare?: () => void | Promise<void> } = {};
   let scanOutput = '';
   let summary = '';
   t.mock.method(core.summary, 'write', async () => {
@@ -95,7 +96,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   let capturedArgs: readonly string[] = [];
   let capturedEnvironment: NodeJS.ProcessEnv = {};
   async function reports(): Promise<void> {
-    await cp(new URL('./fixtures/completed-scan/', import.meta.url), runtime.resultsDirectory, { recursive: true });
+    await copyCompletedScan(runtime.resultsDirectory);
     const manifestPath = join(runtime.resultsDirectory, 'scan-manifest.json');
     const coveragePath = join(runtime.resultsDirectory, 'coverage.json');
     const sarifPath = join(runtime.resultsDirectory, 'exports/results.sarif');
@@ -110,18 +111,14 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
       sarif.runs[0].properties.codexSecurityTargetKind = 'git_diff';
     }
     if (process.env.INPUT_MODE === 'deep') coverage.mode = 'deep_repository';
-    if (configuration.partial) {
-      coverage.completeness = 'partial';
-      coverage.deferred = [{id: 'unreviewed-route', reason: 'Dependency <example> unavailable; validation deferred.'}];
-    }
     sarif.runs[0].versionControlProvenance[0].revisionId = scanSha;
-    await writeFile(coveragePath, JSON.stringify(coverage));
-    await writeFile(manifestPath, JSON.stringify(manifest));
     await writeFile(sarifPath, JSON.stringify(sarif));
     if (configuration.missingSarif) await rm(sarifPath);
     const value = {manifest, coverage, findings: JSON.parse(await readFile(join(runtime.resultsDirectory, 'findings.json'), 'utf8')),
       scanDir: runtime.resultsDirectory, sarifPath: configuration.missingSarif ? null : sarifPath, cost: {estimatedUsd: 0.125}};
     configuration.scanResult?.(value);
+    await writeFile(coveragePath, JSON.stringify(coverage));
+    await writeFile(manifestPath, JSON.stringify(manifest));
     scanOutput = JSON.stringify(value);
     if (configuration.missingReport) await rm(join(runtime.resultsDirectory, configuration.missingReport));
   }
@@ -161,8 +158,10 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
   };
 }
 
-test('PR severity failure retains complete SARIF outputs for always upload steps', async (t) => {
-  const app = await harness(t, 'pr'); app.setInput('fail-on-severity', 'high'); app.configure({ exitCode: 1 });
+test('PR severity failure retains SARIF outputs despite unrelated scope notes', async (t) => {
+  const app = await harness(t, 'pr'); app.setInput('fail-on-severity', 'high'); app.configure({ exitCode: 1, scanResult: value => {
+    value.coverage.deferred = [{reason: 'Dependency validation remains unavailable.'}];
+  }});
   app.setInput('model', 'gpt-5.6-luna'); app.setInput('effort', 'medium');
   app.setInput('annotations', ''); // Use the default, as in the README's PR workflow.
   const result = await app.run();
@@ -243,9 +242,94 @@ test('same-repository Dependabot PR scans with a supplied key', async (t) => {
   assert.equal(result.outputs['sarif-upload-ready'], 'true');
 });
 
+for (const mode of ['standard', 'deep']) {
+  test(`Bedrock ${mode} scans use captured AWS credentials without an OpenAI key`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('mode', mode);
+    delete process.env.OPENAI_API_KEY;
+    Object.assign(process.env, {AWS_ACCESS_KEY_ID:'synthetic-access-key', AWS_SECRET_ACCESS_KEY:'synthetic-secret-key',
+      AWS_SESSION_TOKEN:'synthetic-session-token', AWS_REGION:'us-east-2', GITHUB_TOKEN:'must-not-reach-scan'});
+    app.configure({prepare: () => { process.env.AWS_SESSION_TOKEN = 'changed-during-setup'; }});
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
+    assert.equal(result.outputs['sarif-upload-ready'], 'true');
+    assert.equal(result.args[result.args.indexOf('--provider') + 1], 'amazon-bedrock');
+    assert.equal(result.args[result.args.indexOf('--auth') + 1], 'auto');
+    assert.equal(result.environment.AWS_ACCESS_KEY_ID, 'synthetic-access-key');
+    assert.equal(result.environment.AWS_SECRET_ACCESS_KEY, 'synthetic-secret-key');
+    assert.equal(result.environment.AWS_SESSION_TOKEN, 'synthetic-session-token');
+    assert.equal(result.environment.AWS_REGION, 'us-east-2');
+    assert.equal(result.environment.OPENAI_API_KEY, undefined); assert.equal(result.environment.GITHUB_TOKEN, undefined);
+  });
+}
+
+for (const [provider, key] of [['openrouter', 'OPENROUTER_API_KEY'], ['fireworks', 'FIREWORKS_API_KEY']]) {
+  for (const mode of ['standard', 'deep']) test(`${provider} ${mode} scans use only the captured provider key`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', provider); app.setInput('model', 'synthetic/model'); app.setInput('mode', mode);
+    Object.assign(process.env, {OPENROUTER_API_KEY:'synthetic-openrouter', FIREWORKS_API_KEY:'synthetic-fireworks',
+      AWS_SESSION_TOKEN:'unrelated-aws', GITHUB_TOKEN:'unrelated-github'});
+    const expectedKey = process.env[key];
+    app.configure({prepare: () => { process.env[key] = 'changed-during-setup'; }});
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
+    assert.equal(result.args[result.args.indexOf('--provider') + 1], provider);
+    assert.equal(result.args[result.args.indexOf('--auth') + 1], 'api-key');
+    assert.equal(result.environment[key], expectedKey);
+    for (const other of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN'])
+      if (other !== key) assert.equal(result.environment[other], undefined);
+  });
+  test(`${provider} requires its own key and keeps dry-run credential-free`, async t => {
+    const app = await harness(t);
+    app.setInput('provider', provider); app.setInput('model', 'synthetic/model');
+    delete process.env[key];
+    const missing = await app.run();
+    assert.equal(missing.exitCode, 1); assert.equal(missing.setups, 0);
+    assert.ok(missing.summary.includes(key));
+    process.env[key] = 'synthetic-provider-key';
+    app.setInput('dry-run', 'true');
+    const dry = await app.run();
+    assert.equal(dry.exitCode, 0); assert.equal(dry.outputs['skip-reason'], 'dry-run');
+    assert.equal(dry.environment[key], undefined); assert.equal(dry.environment.OPENAI_API_KEY, undefined);
+  });
+}
+
+test('Bedrock PR scans retain diff scope and severity failure outputs', async t => {
+  const app = await harness(t, 'pr');
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('fail-on-severity', 'high');
+  process.env.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-bedrock-bearer';
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.ok(result.args.includes('--diff')); assert.ok(result.args.includes('--head'));
+  assert.equal(result.environment.AWS_BEARER_TOKEN_BEDROCK, 'synthetic-bedrock-bearer');
+  assert.equal(result.environment.OPENAI_API_KEY, undefined);
+});
+
+test('Bedrock dry-run forwards no credentials and remains a skipped scan', async t => {
+  const app = await harness(t);
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model'); app.setInput('dry-run', 'true');
+  process.env.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-bedrock-bearer';
+  const result = await app.run();
+  assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'skipped');
+  assert.equal(result.outputs['skip-reason'], 'dry-run');
+  assert.equal(result.environment.AWS_BEARER_TOKEN_BEDROCK, undefined); assert.equal(result.environment.OPENAI_API_KEY, undefined);
+});
+
+test('Bedrock authentication errors remain scan failures', async t => {
+  const app = await harness(t);
+  app.setInput('provider', 'amazon-bedrock'); app.setInput('model', 'openai.synthetic-model');
+  delete process.env.OPENAI_API_KEY;
+  app.configure({exitCode:2, cliFailure:true});
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.processes, 1);
+  assert.equal(result.outputs['scan-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
+});
+
 for (const scenario of ['schedule', 'pr'] as const) {
   test(`missing API key fails a ${scenario === 'pr' ? 'Dependabot PR' : 'scheduled scan'} with setup guidance`, async (t) => {
     const app = await harness(t, scenario); delete process.env.OPENAI_API_KEY;
+    process.env.AWS_BEARER_TOKEN_BEDROCK = 'synthetic-bedrock-bearer';
     if (scenario === 'pr') process.env.GITHUB_ACTOR = 'dependabot[bot]';
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
@@ -305,112 +389,84 @@ test('configuration diagnostics preserve values and cannot inject runner command
   assert.doesNotMatch(logs, /\[REDACTED\]/);
 });
 
-test('partial scan warns with provisional findings and no SARIF upload eligibility', async (t) => {
-  const app = await harness(t); app.configure({ exitCode: 2, partial: true, missingSarif: true }); app.setInput('verbose', 'false');
+test('scope exclusions and deferred notes do not fail completed scans or make findings provisional', async (t) => {
+  const app = await harness(t);
+  app.configure({scanResult: value => {
+    value.coverage.explicitExclusions = [{pattern: 'assets/', reason: 'Static assets outside review scope.'}];
+    value.coverage.deferred = [{id: 'unreviewed-route', reason: 'Dependency <example> unavailable; validation deferred.'}];
+  }});
+  app.setInput('verbose', 'false');
   const result = await app.run();
-  assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'incomplete');
-  assert.equal(result.outputs['exit-code'], '2');
-  assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
+  assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['exit-code'], '0');
+  assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
   assert.equal(result.outputs['high-count'], '1'); assert.ok(result.outputs['json-path']);
-  assert.match(result.logs, /Provisional findings:/);
-  assert.match(result.logs, /::warning::Scan coverage is partial\..*findings policy was not evaluated/);
-  assert.doesNotMatch(result.logs, /::error::/);
-  assert.match(result.summary, /\*\*Scan coverage is partial\. Available findings are provisional\.\*\*/);
-  assert.match(result.summary, /Deferred work: Dependency &lt;example&gt; unavailable; validation deferred\./);
-  assert.match(result.logs, /Report diagnostic: Deferred work: Dependency <example> unavailable; validation deferred\./);
-  assert.doesNotMatch(result.logs, /Synthetic live CLI progress/);
+  assert.match(result.logs, /Findings:.*high: 1/);
+  assert.doesNotMatch(result.logs, /Provisional|Scan coverage is partial|::error::/);
+  assert.doesNotMatch(result.summary, /provisional|not evaluated|not-evaluated/i);
+  const coverage = JSON.parse(await readFile(result.outputs['coverage-path'], 'utf8'));
+  assert.equal(coverage.deferred[0].reason, 'Dependency <example> unavailable; validation deferred.');
 });
 
-test('partial scan reasons cannot emit legacy runner commands', async (t) => {
+test('execution failure diagnostics cannot emit legacy runner commands', async (t) => {
   const app = await harness(t);
-  app.configure({exitCode: 2, partial: true, scanResult: value => {
-    value.coverage.deferred[0].reason = 'Synthetic diagnostic: ##[stop-commands]token';
+  app.configure({exitCode: 2, scanResult: value => {
+    value.warnings = ['Synthetic diagnostic: ##[stop-commands]token'];
   }});
   const result = await app.run();
-  assert.equal(result.exitCode, 0);
+  assert.equal(result.exitCode, 1);
   assert.match(result.logs, /Synthetic diagnostic: ##\\\[stop-commands\]token/);
   assert.doesNotMatch(result.logs, /##\[stop-commands\]/);
   assert.match(result.summary, /Synthetic diagnostic: ##&#91;stop-commands&#93;token/);
 });
 
-test('partial scans retain reports without evaluating the configured findings threshold', async (t) => {
-  const app = await harness(t);
-  app.configure({exitCode: 2, partial: true}); app.setInput('fail-on-severity', 'high'); app.setInput('upload-artifacts', 'true');
-  let uploadedFiles: string[] = [];
-  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
-    uploadedFiles = files.map(file => basename(file));
-    return {id: 1, size: 1};
-  });
+test('exit 2 fails the step even when finalized reports were retained', async (t) => {
+  const app = await harness(t); app.configure({exitCode: 2});
+  app.setInput('annotations', 'true');
   const result = await app.run();
-  assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'incomplete');
+  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
+  assert.equal(result.outputs['exit-code'], '2');
   assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-  assert.equal(result.outputs['high-count'], '1');
-  assert.ok(uploadedFiles.includes('findings.json')); assert.ok(uploadedFiles.includes('coverage.json'));
-  assert.match(result.logs, /::warning::Scan coverage is partial\..*findings policy was not evaluated/);
-  assert.doesNotMatch(result.logs, /::error::/);
+  assert.equal(result.outputs['high-count'], '1'); assert.ok(result.outputs['json-path']);
+  assert.match(result.summary, /absence of findings is inconclusive/);
+  assert.doesNotMatch(result.logs, /Provisional/);
 });
 
 for (const [name, scanProcess] of [
   ['timeout', {timedOut: true}], ['interruption', {interrupted: true}],
   ['signal', {signal: 'SIGTERM' as const}], ['terminated exit', {exitCode: 143}],
-  ['policy exit', {exitCode: 1}], ['malformed output', {stdout: 'not JSON'}],
+  ['malformed output', {stdout: 'not JSON'}],
 ] as const) {
-  test(`partial report cannot hide scan ${name}`, async (t) => {
-    const app = await harness(t); app.configure({exitCode: 2, partial: true, scanProcess});
+  test(`retained reports cannot hide scan ${name}`, async (t) => {
+    const app = await harness(t); app.configure({scanProcess});
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
     assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-    assert.doesNotMatch(result.logs, /::warning::Scan coverage is partial/);
   });
 }
 
 for (const [name, scanResult] of [
-  ['unknown coverage', (value: any) => { value.coverage.completeness = 'unknown'; }],
   ['failed manifest', (value: any) => { value.manifest.scan.status = 'failed'; }],
   ['target-change warning', (value: any) => { value.warnings = ['Synthetic target changed during scanning.']; }],
 ] as const) {
-  test(`${name} cannot become a warning-only partial scan`, async (t) => {
-    const app = await harness(t); app.configure({exitCode: 2, partial: true, scanResult});
+  test(`${name} cannot become a successful scan`, async (t) => {
+    const app = await harness(t); app.configure({scanResult});
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
     assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   });
 }
 
-test('CLI failure remains fatal even with partial reports on disk', async (t) => {
-  const app = await harness(t); app.configure({exitCode: 2, partial: true, cliFailure: true});
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
-  assert.equal(result.outputs['json-path'], '');
-  assert.match(result.summary, /Synthetic API authentication failure/);
-});
-
 for (const missingReport of ['scan-manifest.json', 'findings.json', 'coverage.json']) {
-  test(`partial scan fails when required ${missingReport} is missing without artifact upload`, async (t) => {
-    const app = await harness(t); app.configure({exitCode: 2, partial: true, missingReport});
+  test(`completed scan fails when required ${missingReport} is missing without artifact upload`, async (t) => {
+    const app = await harness(t); app.configure({missingReport});
     app.setInput('upload-artifacts', 'false');
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
     assert.equal(result.outputs['json-path'], ''); assert.equal(result.outputs['sarif-upload-ready'], 'false');
     assert.match(result.logs, /required reporting failed/);
-    assert.doesNotMatch(result.logs, /::warning::Scan coverage is partial/);
   });
 }
-
-test('partial scan does not hide requested artifact upload failure', async (t) => {
-  const app = await harness(t); app.configure({exitCode: 2, partial: true}); app.setInput('upload-artifacts', 'true');
-  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async () => { throw new Error('Synthetic upload failure'); });
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
-  assert.match(result.summary, /Synthetic upload failure/);
-});
-
-test('partial scan does not hide runtime cleanup failure', async (t) => {
-  const app = await harness(t); app.configure({exitCode: 2, partial: true, cleanupFails: true});
-  const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
-  assert.match(result.summary, /Runtime cleanup failed/);
-});
 
 test('wrong checkout fails before setup or scanner execution', async (t) => {
   const app = await harness(t); process.env.GITHUB_SHA = '0'.repeat(40); const result = await app.run();
@@ -533,7 +589,7 @@ test('CLI authentication failure leaves findings unavailable instead of reportin
   assert.doesNotMatch(result.logs, /Findings meet the configured failure threshold/);
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '');
   assert.match(result.summary, /\*\*Findings:\*\* unavailable/);
-  assert.match(result.logs, /Provisional findings: unavailable/);
+  assert.match(result.logs, /Findings: unavailable/);
 });
 
 test('malformed findings keep count outputs empty', async (t) => {
@@ -550,14 +606,12 @@ test('valid empty findings publish zero counts', async (t) => {
   for (const level of ['critical', 'high', 'medium', 'low', 'informational']) assert.equal(result.outputs[`${level}-count`], '0');
 });
 
-for (const partial of [false, true]) {
-  test(`changed checkout during a committed diff scan fails with ${partial ? 'partial' : 'complete'} coverage`, async (t) => {
-    const app = await harness(t, 'pr');
-    app.configure({mutateCheckout: true, partial, exitCode: partial ? 2 : 0});
-    const result = await app.run();
-    assert.equal(result.exitCode, 1);
-    assert.equal(result.outputs['scan-status'], 'failed');
-    assert.equal(result.outputs['sarif-upload-ready'], 'false');
-    assert.match(result.summary, /source checkout changed/);
-  });
-}
+test('changed checkout during a committed diff scan fails', async (t) => {
+  const app = await harness(t, 'pr');
+  app.configure({mutateCheckout: true});
+  const result = await app.run();
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.outputs['scan-status'], 'failed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'false');
+  assert.match(result.summary, /source checkout changed/);
+});

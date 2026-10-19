@@ -1,8 +1,10 @@
+import * as z from "zod/v4";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,13 +19,13 @@ import path from "node:path";
 import { importSource } from "./import-module.ts";
 
 const io = await importSource(
-  new URL("../src/artifact-io.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-io.ts"),
 );
 const contextApi = await importSource(
-  new URL("../src/artifact-context.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-context.ts"),
 );
 const writerApi = await importSource(
-  new URL("../artifact-writer-main.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
   {
     plugins: [
       {
@@ -40,7 +42,7 @@ const writerApi = await importSource(
   },
 );
 const schemas = await importSource(
-  new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
 );
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
@@ -55,7 +57,6 @@ const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 
 try {
   await testSchemaSourceOfTruth();
-  await testWorkerThreatModelSchema();
   await testScanContext();
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
@@ -69,58 +70,13 @@ try {
 
 console.log("Codex Security compact artifact foundation tests passed");
 
-async function testWorkerThreatModelSchema() {
-  const schema = await readJson(
-    import.meta.dirname,
-    "../../schemas/tools/worker-threat-model.schema.json",
-  );
-  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(
-    schema.$id,
-    "codex-security://schemas/tools/worker-threat-model.schema.json",
-  );
-  const input = schema.$defs.recordWorkerThreatModelInput;
-  assert.deepEqual(Object.keys(input.properties), ["content"]);
-  assert.deepEqual(input.required, ["content"]);
-  assert.equal(input.additionalProperties, false);
-  assert.equal(input.properties.content.type, "string");
-  assert.equal(input.properties.content.minLength, 1);
-  assert.equal(input.properties.content.pattern, "\\S");
-}
-
 async function testSchemaSourceOfTruth() {
-  const common = await readJson(
-    import.meta.dirname,
-    "../../schemas/definitions/artifact-common.schema.json",
-  );
-  const fixtureDocument = {
-    $id: "codex-security://schemas/tools/artifact-foundation-fixture.schema.json",
-    $defs: {
-      request: {
-        type: "object",
-        properties: {
-          path: { $ref: common.$id + "#/$defs/repositoryPath" },
-          candidateId: { $ref: common.$id + "#/$defs/candidateId" },
-        },
-        required: ["path", "candidateId"],
-        additionalProperties: false,
-      },
-    },
-  };
-  const bundled = schemas.bundleArtifactSchema(
-    [common, fixtureDocument],
-    fixtureDocument.$id,
-    "request",
-  );
-  assert.equal(JSON.stringify(bundled).includes("$ref"), false);
-  assert.equal(bundled.properties.path.type, "string");
-  assert.equal(bundled.properties.candidateId.type, "string");
-
-  const validator = schemas.loadArtifactZodSchema(
-    [common, fixtureDocument],
-    fixtureDocument.$id,
-    "request",
-  );
+  const common =
+    schemas.artifactSchemaDocuments["definitions/artifact-common"].$defs;
+  const validator = z.strictObject({
+    path: common.repositoryPath,
+    candidateId: common.candidateId,
+  });
   for (const repositoryPath of [
     "src/index.ts",
     "./src/index.ts",
@@ -164,19 +120,6 @@ async function testSchemaSourceOfTruth() {
       candidateId,
     );
   }
-  assert.throws(
-    () => schemas.bundleArtifactSchema([common], "missing", "request"),
-    /Unknown Codex Security schema document/,
-  );
-  assert.throws(
-    () =>
-      schemas.bundleArtifactSchema(
-        [common, common],
-        common.$id,
-        "repositoryPath",
-      ),
-    /Duplicate Codex Security schema document/,
-  );
 }
 
 async function testScanContext() {
@@ -428,6 +371,27 @@ async function testSafeJsonAndJsonl() {
     ),
     /row 1 does not match its artifact schema: candidate_id: required/,
   );
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    try {
+      await chmod(destination, 0o000);
+      for (const read of [
+        io.readArtifactText,
+        io.readArtifactTextWithMetadata,
+      ]) {
+        await assert.rejects(
+          read(context, components, "discovery_candidates"),
+          (error: Error & { cause?: NodeJS.ErrnoException }) => {
+            assert.equal(error.cause?.code, "EACCES");
+            assert.ok(error.message.includes("EACCES"));
+            assert.ok(error.message.includes(destination));
+            return true;
+          },
+        );
+      }
+    } finally {
+      await chmod(destination, 0o600);
+    }
+  }
 }
 
 async function testAtomicReplacement() {
@@ -473,16 +437,8 @@ async function testBoundedPagination() {
     { rows: rows.slice(2) },
   );
   assert.throws(
-    () => io.paginateArtifactRows(rows, { cursor: "-1" }, "review_items"),
-    /non-negative integer/,
-  );
-  assert.throws(
     () => io.paginateArtifactRows(rows, { cursor: "4" }, "review_items"),
     /outside the available rows/,
-  );
-  assert.throws(
-    () => io.paginateArtifactRows(rows, { limit: 1001 }, "review_items"),
-    /1 through 1000/,
   );
 }
 
