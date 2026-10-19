@@ -837,10 +837,24 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
-On Windows, an older sandboxed run can leave invalid ACLs on a credential-home
-ancestor. Preserve that state, then select a new private `CODEX_SECURITY_STATE_DIR`
-outside the old state and repository. Sign in again if needed; the new directory
-has separate scan history.
+On Windows, credential-home checks require trusted ownership and permissions
+through every ancestor, including the volume root. Codex Security can repair
+the credential home and its descendants; it does not change ancestor ownership
+or ACLs. An error identifies the rejected ancestor and its underlying ACL
+problem. A volume root owned by `Everyone` (`S-1-1-0`) is unsupported, even when
+the credential home itself is private.
+
+Preserve existing state, then choose a private `CODEX_SECURITY_STATE_DIR` outside
+the rejected ancestor and the repository, with a full ancestor chain that passes
+the same checks. If the volume root is rejected, another directory on that
+volume cannot resolve it; use a separately provisioned volume with trusted
+ancestry. Temporary bootstrap homes also need trusted ancestry: set `TEMP` and
+`TMP` to a private directory on that volume before launching the CLI. Do not
+change the system volume's owner or ACL to make a scan run. If no suitable
+location is available, this layout cannot provision credentials safely under
+the current checks. Sign in again if needed; a new state directory has separate
+scan history and does not migrate credentials or reports from the old state
+directory.
 
 ### Progress and cost
 
