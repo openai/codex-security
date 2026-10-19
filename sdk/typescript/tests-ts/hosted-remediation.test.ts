@@ -58,7 +58,10 @@ function runResponse(input: HostedRemediationInput, response: unknown) {
 test.each(["patch", "verify"] as const)(
   "%s reuses skill context, explicit instructions, and the requested sandbox",
   async (operation) => {
-    const input = await fixture(operation);
+    const input = {
+      ...(await fixture(operation)),
+      reasoningEffort: "provider-specific-effort",
+    };
     const run = mock<RemediationExecutor["run"]>(async (request, options) => {
       expect(request).toMatchObject({
         operation,

@@ -40,6 +40,8 @@ const result = await runHostedRemediation(
 ```
 
 Both instruction fields are optional and are distinct from finding data.
+Reasoning effort is passed through unchanged so the selected model and provider
+determine which values they support.
 Verification remains read-only even when validation instructions request setup:
 a required check that cannot run without repository changes is a proof gap,
 not permission to edit. Generation's ordinary skill checks and standalone
@@ -86,12 +88,12 @@ finding closed. Retrying persistence must not resubmit execution.
 
 ## JSON-RPC launcher
 
-The SDK exports `runHostedRemediationProtocol`. An installed bundle can run it
+The SDK exports `runHostedRemediationProtocol`. An installed npm package can run it
 without adding any public CLI flag:
 
 ```sh
-/runtime/bin/node --input-type=module -e '
-import { runHostedRemediationProtocol } from "file:///runtime/cli/dist/index.js";
+node --input-type=module -e '
+import { runHostedRemediationProtocol } from "@openai/codex-security";
 process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);
 '
 ```
@@ -108,7 +110,7 @@ errors; a mismatched HEAD includes `error.data.reason: "revision_mismatch"`.
 Run the deterministic installed-package smoke check without model credentials:
 
 ```sh
-node scripts/smoke-hosted-remediation.mjs /runtime/cli /runtime/bin/node
+node scripts/smoke-hosted-remediation.mjs /path/to/node_modules/@openai/codex-security
 ```
 
 It uses a fake executor over real pipes, prepares a synthetic candidate, and

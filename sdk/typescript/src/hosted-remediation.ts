@@ -28,7 +28,7 @@ export const HostedRemediationInputSchema = z.strictObject({
   instructions: z.string().optional(),
   validationInstructions: z.string().optional(),
   model: z.string().min(1),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]),
+  reasoningEffort: z.string(),
   identity: z.strictObject({
     runId: z.string().min(1),
     attemptId: z.string().min(1),
