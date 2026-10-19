@@ -388,7 +388,38 @@ describe("scan publication preparation", () => {
     expect(description).not.toContain("/blob/");
   });
 
-  test("preserves unsafe evidence snippets without generating escaping source links", async () => {
+  test.each([
+    "../outside.py",
+    "src/../outside.py",
+    "/outside.py",
+    "src\\outside.py",
+    "C:/outside.py",
+  ])("rejects publication with an unsafe evidence path %s", async (path) => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    findings.findings[0]!.codeEvidence = [
+      {
+        id: "unsafe-path",
+        label: "Unsafe path",
+        path,
+        startLine: 41,
+        code: "preserved_snippet()",
+        explanation:
+          "An unsafe path cannot be published as canonical evidence.",
+      },
+    ];
+    await writeJson(findingsPath, findings);
+    await reseal(scanDirectory);
+
+    await expect(
+      prepareScanPublication(scanDirectory, publicationOptions(scanDirectory)),
+    ).rejects.toThrow(
+      "findings.findings[0].codeEvidence[0].path: expected a safe repository-relative POSIX path.",
+    );
+  });
+
+  test("preserves evidence snippets for valid paths without safe source links", async () => {
     const scanDirectory = await copyExample();
     const manifestPath = join(scanDirectory, "scan-manifest.json");
     const manifest = await readJson<ScanManifest>(manifestPath);
@@ -400,20 +431,15 @@ describe("scan publication preparation", () => {
     const findingsPath = join(scanDirectory, "findings.json");
     const findings = await readJson<FindingsDocument>(findingsPath);
     const paths = [
-      "../outside.py",
-      "src/../outside.py",
       "src/./outside.py",
       "src//outside.py",
-      "/outside.py",
-      "src\\outside.py",
-      "C:/outside.py",
       "src/%2e%2e/outside.py",
       "src/%2foutside.py",
       "src/%5coutside.py",
     ];
     findings.findings[0]!.codeEvidence = paths.map((path, index) => ({
-      id: `unsafe-path-${index}`,
-      label: `Unsafe path ${index}`,
+      id: `unlinked-path-${index}`,
+      label: `Unlinked path ${index}`,
       path,
       startLine: 41,
       role: "source",

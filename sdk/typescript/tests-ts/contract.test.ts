@@ -885,6 +885,79 @@ describe("canonical scan contract", () => {
     },
   );
 
+  test("preserves accepted paths in sealed deferred coverage", async () => {
+    const paths = [
+      ".",
+      "./",
+      "././",
+      "src",
+      "src/parser.ts",
+      "./src/parser.ts",
+      "src/./parser.ts",
+      "src//parser.ts",
+      "src/",
+      "src:parser.ts",
+      "src/a:b.py",
+      "src/.hidden",
+      "src/na\u00efve file.ts",
+      "src/\u007fparser.ts",
+      "src/\u2028parser.ts",
+      "src/\u2029parser.ts",
+      " ",
+      "\u0085",
+      "\ufeff",
+    ];
+    const scanDir = await copyExample();
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson(coveragePath);
+    coverage["deferred"] = [
+      { id: "review", reason: "Review is incomplete.", paths },
+    ];
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+    const sealedBytes = await readFile(coveragePath);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toMatchObject({
+      coverage: { deferred: [{ paths }] },
+    });
+    expect(await readFile(coveragePath)).toEqual(sealedBytes);
+  });
+
+  test("rejects unsafe paths in sealed deferred coverage", async () => {
+    for (const path of [
+      "",
+      "../../outside.ts",
+      "src/../outside.ts",
+      "src/..",
+      "/outside.ts",
+      "//server/share",
+      "C:/outside.ts",
+      "c:outside.ts",
+      "src\\outside.ts",
+      "src/\u0000outside.ts",
+      "src/\u0001outside.ts",
+      "src/\toutside.ts",
+      "src/outside.ts\n",
+      "src/\routside.ts",
+      "src/\u2028/../outside.ts",
+    ]) {
+      const scanDir = await copyExample();
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = await readJson(coveragePath);
+      coverage["deferred"] = [
+        { id: "review", reason: "Review is incomplete.", paths: [path] },
+      ];
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(/coverage.*deferred/);
+    }
+  });
+
   test.each([-1, 0])(
     "agrees with Python on a finding end-line offset of %i",
     async (offset) => {
@@ -1022,6 +1095,65 @@ describe("canonical scan contract", () => {
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toThrow("unreadable JSON document");
   });
+
+  test.each([
+    ["src/handler.py", true],
+    ["src/a:b.py", true],
+    ["report:summary.py", true],
+    ["src/name with spaces.py", true],
+    ["src/日本語.py", true],
+    ["./src//handler.py", true],
+    ["src/line\u2028separator.py", true],
+    ["../outside.py", false],
+    ["src/../../outside.py", false],
+    ["/outside.py", false],
+    ["C:/outside.py", false],
+    ["C:outside.py", false],
+    ["src\\outside.py", false],
+    [".", false],
+    ["src/\u0000outside.py", false],
+    ["src/name\t.py", false],
+  ] as const)(
+    "validates canonical code-evidence path %j",
+    async (path, valid) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      findings["findings"][0]["codeEvidence"] = [
+        {
+          id: "source",
+          label: "Source",
+          path,
+          startLine: 1,
+          code: "source()",
+          explanation: "Synthetic repository evidence.",
+        },
+      ];
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const saved = await readFile(findingsPath);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const exported = pythonExport(scanDir);
+      const stderr = new TextDecoder().decode(exported.stderr);
+
+      if (valid) {
+        const contract = await loaded;
+        expect(contract.findings.findings[0]?.codeEvidence?.[0]?.path).toBe(
+          path,
+        );
+        expect(exported.exitCode, stderr).toBe(0);
+      } else {
+        await expect(loaded).rejects.toThrow(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+        expect(exported.exitCode).not.toBe(0);
+        expect(stderr).toContain(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+      }
+      expect(await readFile(findingsPath)).toEqual(saved);
+    },
+  );
 
   test("rejects schema-valid but canonically invalid contract data", async () => {
     const cases: Array<
