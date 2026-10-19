@@ -42,6 +42,7 @@ const distModules = [
   "feedback",
   "finding-catalogue",
   "findings-import",
+  "git-remote",
   "github",
   "index",
   "import-scan",
