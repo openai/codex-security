@@ -2021,8 +2021,8 @@ async function prepareOutputDirectory(
     const created = await mkdtemp(
       join(temporaryRoot, `codex-security-${safePrefix(repositoryName)}-`),
     );
-    if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
     try {
+      if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
       return await validatePreparedOutputDir(created, validateLocation);
     } catch (error) {
       await rmdir(created).catch(() => undefined);

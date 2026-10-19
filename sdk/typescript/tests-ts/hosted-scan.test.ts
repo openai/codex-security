@@ -380,6 +380,66 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+test.each(["missing", "file"] as const)(
+  "hosted preparation preserves cancellation for a %s repository",
+  async (kind) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, kind);
+    if (kind === "file") writeSource(root, kind, "owned fixture\n");
+    const input: HostedScanInput = {
+      version: 2,
+      repository,
+      revision: "a".repeat(40),
+      outputDirectory: join(root, "output"),
+      stateDirectory: join(root, "state"),
+      model: "synthetic-model",
+      reasoningEffort: "high",
+      identity: {
+        runId: "run-1",
+        attemptId: "attempt-1",
+        buildId: "fixture-build",
+      },
+    };
+    const executor = noExecution();
+    for (const timing of ["before", "during"] as const) {
+      const controller = new AbortController();
+      const reason = new Error(`Host canceled ${timing} preparation`);
+      if (timing === "before") controller.abort(reason);
+      const pending = runHostedScan(input, {
+        executor,
+        signal: controller.signal,
+      });
+      if (timing === "during") queueMicrotask(() => controller.abort(reason));
+      await expect(pending).rejects.toBe(reason);
+    }
+    for (const options of [{}, { signal: new AbortController().signal }]) {
+      await expect(
+        runHostedScan(input, { executor, ...options }),
+      ).rejects.toMatchObject({
+        name: "InvalidTargetError",
+        message: `Repository is not a directory: ${repository}`,
+      });
+    }
+    const signal = AbortSignal.abort(new Error("Host canceled preparation"));
+    await expect(
+      runHostedScan({ ...input, revision: "invalid" }, { executor, signal }),
+    ).rejects.toMatchObject({ name: "ZodError" });
+    await expect(
+      runHostedScan(
+        { ...input, scope: { paths: ["../outside"] } },
+        { executor, signal },
+      ),
+    ).rejects.toMatchObject({
+      name: "HostedScanPreparationError",
+      reason: "scope_syntax",
+    });
+    expect(executor.run).not.toHaveBeenCalled();
+    for (const directory of [input.outputDirectory, input.stateDirectory]) {
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  },
+);
+
 test("preparation verifies revision and rejects missing or escaping paths before execution", async () => {
   const input = await fixture();
   const executor = noExecution();

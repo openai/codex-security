@@ -16,6 +16,13 @@ codex-security info --json
 `info --json` reports package, plugin, runtime, and model details.
 `scans` and `findings` default to their `list` subcommands.
 
+To retrieve GitHub code scanning alerts without an MCP server, use
+[`import github`](#import-alerts-from-the-cli). To save an existing CSV or JSON
+findings file in local scan history, use
+[`scan import`](#import-findings-as-a-saved-scan). These are separate workflows:
+GitHub import returns upstream alerts for validation; file import saves findings
+without running security analysis.
+
 ## Authentication
 
 Sign in with ChatGPT, or supply an API key for CI:
@@ -415,6 +422,82 @@ stderr-only failures, including when `--full-output` is selected.
 Diagnostics stay on stderr. Each command's `--schema --format json` describes
 its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
+
+### Understand scan scope and follow-up work
+
+A completed scan means the requested workflow finished. It does not mean every
+file or possible vulnerability was examined. A scan can finish with intentional
+exclusions, deferred review work, or unanswered questions.
+
+To investigate a particular run, use its scan ID explicitly:
+
+```bash
+codex-security scans show SCAN_ID --json
+codex-security scans logs SCAN_ID
+```
+
+Replace `SCAN_ID` with the ID from the completion or failure summary. A scan can
+fail after registration but before writing its artifacts; investigate those
+failures through its history record and any available logs. When artifacts were
+retained, use the saved results directory returned by `scans show` to inspect
+whichever of these files are present:
+
+| File                 | What to check                                                                                                                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scan-manifest.json` | `scan.status`, the target snapshot, and any recorded `scan.scope` limitations.                                                                                                                                   |
+| `report.md`          | Scope, reviewed surfaces, and open questions or follow-up work.                                                                                                                                                  |
+| `coverage.json`      | `includePaths` and `excludePaths` for scope boundaries; `explicitExclusions` for recorded exclusion reasons; `surfaces` for reviewed areas; `deferred` for unfinished review work; and optional `openQuestions`. |
+
+Deferred items can identify affected `paths` or `surfaceIds`. Surface
+`receiptRefs` link to retained evidence under `artifacts/` when available.
+Deep Scan summaries retain coverage from accepted worker reviews, including
+worker-specific deferred work. Check those details as well as the final findings.
+
+These records describe what the scan recorded, not an exhaustive file-by-file
+audit. A retained source inventory, when present, lists inputs rather than
+proving that each file was reviewed. An absent path in a surface summary does not
+establish whether it was read, and the scan ID cannot reconstruct evidence that
+was never saved.
+Session logs can help explain failures and tool activity, but do not prove
+complete review either.
+
+For a local plugin scan, ask Codex to open the saved scan and explain its scope,
+exclusions, deferred work, and follow-up questions. CLI history can also locate
+that scan when it uses the same Codex home and state directory on the machine
+where the scan ran. A scan ID alone does not download another machine's or
+Cloud's artifacts. Preserve the saved results directory with the ID.
+
+Choose the next step from the recorded reason:
+
+- **The run completed and its scope matches your intent:** analyze the findings.
+  Record any remaining limitations; an exclusion or follow-up note alone is not
+  an execution failure.
+- **An important path or security question remains unreviewed:** run a focused
+  scan with `--path`, adding relevant context with `--knowledge-base` or specific
+  instructions with `--scan-prompt-file`. Address missing access or context first.
+  Repeating the same scan does not guarantee that an omission will be resolved.
+- **The run failed or was canceled:** inspect its logs and address the cause.
+  Use `scans rerun SCAN_ID` when the scan has a saved launch recipe; otherwise,
+  start a new scan with the intended scope, including for plugin scans without
+  a recipe. Retained findings can still be reviewed, but absence of findings
+  from a stopped run is inconclusive.
+- **A Deep Scan was interrupted and is still recorded as `running`:** it may
+  support [resume](#resuming-an-interrupted-deep-scan) with the original checkout,
+  artifacts, and session. Completed, failed, and canceled scans cannot resume.
+
+For example, after identifying an omitted API directory:
+
+```bash
+codex-security scan . --path services/api --knowledge-base architecture.md
+```
+
+Replace the path and context file with those for your repository. A new scan
+reviews the current checkout; it does not amend the original saved report.
+
+Older reports may still contain `coverage.completeness: "partial"` or
+`"unknown"`. Read their scope and follow-up details to understand the limitation.
+Current reports omit that field, and current commands do not use legacy
+completeness values to determine scan status or exit codes.
 
 ### Project files
 
