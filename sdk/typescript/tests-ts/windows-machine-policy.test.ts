@@ -61,7 +61,19 @@ describe("runtime directories and plugin Python boundary", () => {
             "-Command",
             statements.join("; "),
           ],
-          environment,
+          {
+            ...Object.fromEntries(
+              Object.entries(environment).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            PSModulePath: join(
+              systemDirectory,
+              "WindowsPowerShell",
+              "v1.0",
+              "Modules",
+            ),
+          },
         );
       const state = dirname(home);
       const auth = join(home, "auth.json");
