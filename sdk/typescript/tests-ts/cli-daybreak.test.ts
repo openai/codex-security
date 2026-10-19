@@ -2,17 +2,21 @@ import { expect, test } from "bun:test";
 import { appServerCyberAccessProgram } from "../src/cli-daybreak.js";
 import type { JsonObject } from "../src/config.js";
 
-const featureResponse = (enabled = true): JsonObject => ({
-  data: [{ name: "cli_daybreak", enabled }],
+const featureResponse = (enabled = true, apiKeyGate = true): JsonObject => ({
+  data: [
+    { name: "cli_daybreak", enabled },
+    { name: "api_key_cyber_access_programs", enabled: apiKeyGate },
+  ],
   nextCursor: null,
 });
 
 function withFeature(
   request: Parameters<typeof appServerCyberAccessProgram>[4],
+  apiKeyGate = true,
 ): Parameters<typeof appServerCyberAccessProgram>[4] {
   return async (method, params) =>
     method === "experimentalFeature/list"
-      ? featureResponse()
+      ? featureResponse(true, apiKeyGate)
       : request(method, params);
 }
 
@@ -81,24 +85,100 @@ test.each([
         "selected-model",
         "openai",
         "selected-thread",
-        withFeature(async (method): Promise<JsonObject> =>
-          method === "account/read"
-            ? { account: { type: account } }
-            : {
-                data: [
-                  {
-                    model: "selected-model",
-                    ...(programs === undefined
-                      ? {}
-                      : { availableAccessPrograms: { cyber: [...programs] } }),
-                  },
-                ],
-              },
+        withFeature(
+          async (method): Promise<JsonObject> =>
+            method === "account/read"
+              ? { account: { type: account } }
+              : {
+                  data: [
+                    {
+                      model: "selected-model",
+                      ...(programs === undefined
+                        ? {}
+                        : {
+                            availableAccessPrograms: { cyber: [...programs] },
+                          }),
+                    },
+                  ],
+                },
+          apiKeyGate,
         ),
       ),
     ).toBe(expected);
   },
 );
+
+test.each([
+  [undefined, false, undefined],
+  [true, false, undefined],
+  [false, true, "standard"],
+] as const)(
+  "uses the effective API-key gate when raw=%p and effective=%p",
+  async (raw, effective, expected) => {
+    const program = await appServerCyberAccessProgram(
+      {
+        features:
+          raw === undefined ? {} : { api_key_cyber_access_programs: raw },
+      },
+      "selected-model",
+      "openai",
+      "selected-thread",
+      withFeature(
+        async (method): Promise<JsonObject> =>
+          method === "account/read"
+            ? { account: { type: "apiKey" } }
+            : {
+                data: [
+                  {
+                    model: "selected-model",
+                    availableAccessPrograms: { cyber: ["standard"] },
+                  },
+                ],
+              },
+        effective,
+      ),
+    );
+    expect(program).toBe(expected);
+  },
+);
+
+test("reads the API-key gate on a later native feature page", async () => {
+  const featureRequests: JsonObject[] = [];
+  const program = await appServerCyberAccessProgram(
+    { features: { api_key_cyber_access_programs: true } },
+    "selected-model",
+    "openai",
+    "selected-thread",
+    async (method, params): Promise<JsonObject> => {
+      if (method === "experimentalFeature/list") {
+        featureRequests.push(params);
+        return params["cursor"] === "api-key-page"
+          ? {
+              data: [{ name: "api_key_cyber_access_programs", enabled: false }],
+              nextCursor: null,
+            }
+          : {
+              data: [{ name: "cli_daybreak", enabled: true }],
+              nextCursor: "api-key-page",
+            };
+      }
+      if (method === "account/read") return { account: { type: "apiKey" } };
+      return {
+        data: [
+          {
+            model: "selected-model",
+            availableAccessPrograms: { cyber: ["standard"] },
+          },
+        ],
+      };
+    },
+  );
+  expect(program).toBeUndefined();
+  expect(featureRequests).toEqual([
+    { threadId: "selected-thread" },
+    { threadId: "selected-thread", cursor: "api-key-page" },
+  ]);
+});
 
 test.each(["openai", "custom"])(
   "honors a managed feature disable for provider %s across native feature pages",

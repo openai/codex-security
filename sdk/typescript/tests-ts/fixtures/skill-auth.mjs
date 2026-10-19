@@ -39,7 +39,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({
       id: request.id,
       result: {
-        data: [{ name: "cli_daybreak", enabled: true }],
+        data: [
+          { name: "cli_daybreak", enabled: true },
+          { name: "api_key_cyber_access_programs", enabled: true },
+        ],
         nextCursor: null,
       },
     });

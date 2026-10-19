@@ -38,7 +38,10 @@ if (process.env.SYNTHETIC_SKILL_COMMAND === "validate") {
       send({
         id: request.id,
         result: {
-          data: [{ name: "cli_daybreak", enabled: true }],
+          data: [
+            { name: "cli_daybreak", enabled: true },
+            { name: "api_key_cyber_access_programs", enabled: true },
+          ],
           nextCursor: null,
         },
       });

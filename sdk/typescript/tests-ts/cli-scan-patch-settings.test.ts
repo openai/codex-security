@@ -36,7 +36,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       features,
     }, layers: [] } });
   } else if (request.method === "experimentalFeature/list") {
-    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: receipt.features.cli_daybreak }], nextCursor: null } });
+    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: receipt.features.cli_daybreak }, { name: "api_key_cyber_access_programs", enabled: receipt.features.api_key_cyber_access_programs !== false }], nextCursor: null } });
   } else if (request.method === "account/read") {
     send({ id: request.id, result: { account: { type: "apiKey" } } });
   } else if (request.method === "model/list") {

@@ -1651,7 +1651,7 @@ lines.on("line", (line) => {
     send({ id: request.id, result: { config: {} } });
   } else if (request.method === "experimentalFeature/list") {
     assert.deepEqual(request.params, { threadId: "parent" });
-    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: true }], nextCursor: null } });
+    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: true }, { name: "api_key_cyber_access_programs", enabled: true }], nextCursor: null } });
   } else if (request.method === "thread/start") {
     assert.equal(initialized, true);
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
@@ -1827,7 +1827,7 @@ lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") send({ id: 1, result: {} });
   if (request.method === "config/read") send({ id: request.id, result: { config: {} } });
-  if (request.method === "experimentalFeature/list") send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: true }], nextCursor: null } });
+  if (request.method === "experimentalFeature/list") send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: true }, { name: "api_key_cyber_access_programs", enabled: true }], nextCursor: null } });
   if (request.method === "thread/start") send({ id: 2, result: { thread: { id: "parent" } } });
   if (request.method === "command/exec") send({ id: request.id, result: { exitCode: 0 } });
   if (request.method === "turn/start") process.stdout.write(${JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n")}, () => process.exit(0));
