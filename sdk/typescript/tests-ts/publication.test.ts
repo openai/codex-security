@@ -563,6 +563,135 @@ describe("scan publication preparation", () => {
     expect(await readFile(findingsPath, "utf8")).toBe(saved);
   });
 
+  test("preserves embedded root-cause evidence across historical aliases", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const finding = findings.findings[0]!;
+    const canonical = {
+      id: "shared",
+      label: "Canonical source",
+      path: "src/canonical.py",
+      startLine: 12,
+      code: "canonical_source()",
+      explanation: "Canonical explanation.",
+    };
+    finding.codeEvidence = [canonical, canonical];
+    finding.code_evidence = [{ id: "top-level", code: "top_level_legacy()" }];
+    finding.rootCause = {
+      summary: "Canonical root summary.",
+      codeEvidence: [
+        { id: "shared", code: "embedded_canonical()" },
+        { code: "anonymous_first()" },
+        { code: "anonymous_second()" },
+        { code: "anonymous_first()" },
+        null,
+        "not an evidence object",
+        {},
+        { code: false },
+        { code: " \t " },
+      ],
+      code_evidence: [
+        { id: "canonical-alias", code: "embedded_canonical_alias()" },
+      ],
+    };
+    finding.root_cause = {
+      codeEvidence: [
+        { id: "shared", code: "embedded_canonical()" },
+        { id: "shared", code: "embedded_legacy()" },
+      ],
+      code_evidence: [{ id: "legacy-alias", code: "embedded_legacy_alias()" }],
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDirectory);
+    const saved = await readFile(findingsPath, "utf8");
+
+    const { description } = (
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
+    ).issues[0]!;
+
+    const snippets = [
+      "canonical_source()",
+      "top_level_legacy()",
+      "embedded_canonical()",
+      "anonymous_first()",
+      "anonymous_second()",
+      "embedded_canonical_alias()",
+      "embedded_legacy()",
+      "embedded_legacy_alias()",
+    ];
+    for (const snippet of snippets) expect(description).toContain(snippet);
+    for (let index = 1; index < snippets.length; index++)
+      expect(description.lastIndexOf(snippets[index - 1]!)).toBeLessThan(
+        description.indexOf(snippets[index]!),
+      );
+    expect(description.split("canonical_source()")).toHaveLength(3);
+    expect(description.split("embedded_canonical()")).toHaveLength(2);
+    expect(description.split("anonymous_first()")).toHaveLength(2);
+    expect(await readFile(findingsPath, "utf8")).toBe(saved);
+  });
+
+  test("preserves nested historical evidence coordinates and source-link rules", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    findings.findings[0]!.code_evidence = [
+      {
+        id: "nested-range",
+        code: "nested_range()",
+        path: "src/shadow.py",
+        startLine: 1,
+        endLine: 2,
+        location: { path: "src/nested.py", startLine: 12, endLine: 15 },
+      },
+      {
+        id: "reversed-range",
+        code: "reversed_range()",
+        location: { path: "src/reversed.py", startLine: 48, endLine: 47 },
+      },
+      {
+        id: "path-only",
+        code: "nested_path_only()",
+        location: { path: "src/path-only.py", startLine: true, endLine: 42 },
+      },
+      {
+        id: "unsafe-path",
+        code: "unsafe_path()",
+        location: { path: "../outside.py", startLine: 10 },
+      },
+    ];
+    await writeJson(findingsPath, findings);
+    const manifestPath = join(scanDirectory, "scan-manifest.json");
+    const manifest = await readJson<ScanManifest>(manifestPath);
+    manifest.scan.target.kind = "git_revision";
+    manifest.scan.target.revision = "0123456789abcdef0123456789abcdef01234567";
+    delete manifest.scan.target.snapshotDigest;
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDirectory);
+    const saved = await readFile(findingsPath, "utf8");
+
+    const { description } = (
+      await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      )
+    ).issues[0]!;
+
+    expect(description).toContain("src/nested.py:12-15");
+    expect(description).toContain("src/nested.py#L12-L15)");
+    expect(description).not.toContain("src/shadow.py");
+    expect(description).toContain("src/reversed.py#L48)");
+    expect(description).not.toContain("#L48-L47");
+    expect(description).toContain("`src/path-only.py`");
+    expect(description).not.toContain("[`src/path-only.py");
+    expect(description).toContain("`../outside.py:10`");
+    expect(description).not.toContain("/../outside.py#");
+    expect(await readFile(findingsPath, "utf8")).toBe(saved);
+  });
+
   test("does not turn non-HTTPS repository remotes into source links", async () => {
     const scanDirectory = await copyExample();
     const manifestPath = join(scanDirectory, "scan-manifest.json");

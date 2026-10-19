@@ -1,4 +1,5 @@
 import { findingEntry } from "./value.js";
+import { isRecord } from "./record.js";
 import {
   loadContractWithScanDirectory,
   type LoadedContract,
@@ -358,7 +359,7 @@ function publicationRootCause(finding: Finding) {
 }
 
 type PublicationCodeEvidence = Partial<FindingCodeEvidence> &
-  Pick<FindingCodeEvidence, "id" | "code">;
+  Pick<FindingCodeEvidence, "code">;
 
 function publicationCodeEvidence(finding: Finding): PublicationCodeEvidence[] {
   const evidence: PublicationCodeEvidence[] = [...(finding.codeEvidence ?? [])];
@@ -366,27 +367,56 @@ function publicationCodeEvidence(finding: Finding): PublicationCodeEvidence[] {
   for (const item of finding.code_evidence ?? []) {
     if (ids.has(item.id)) continue;
     ids.add(item.id);
-    const entry: PublicationCodeEvidence = { id: item.id, code: item.code };
-    for (const key of [
-      "label",
-      "path",
-      "language",
-      "role",
-      "explanation",
-    ] as const) {
-      const value = item[key];
-      if (typeof value === "string" && value.length > 0) entry[key] = value;
+    evidence.push(publicationEvidenceEntry(item, item.code));
+  }
+  const snippets = new Set(
+    evidence.map((item) => JSON.stringify([item.id ?? "", item.code])),
+  );
+  for (const rootCause of [finding.rootCause, finding.root_cause]) {
+    if (!isRecord(rootCause)) continue;
+    for (const key of ["codeEvidence", "code_evidence"]) {
+      const embedded = rootCause[key];
+      if (!Array.isArray(embedded)) continue;
+      for (const item of embedded) {
+        if (!isRecord(item)) continue;
+        const code = item["code"];
+        if (typeof code !== "string" || !code.trim()) continue;
+        const identity = JSON.stringify([item["id"] ?? "", code]);
+        if (snippets.has(identity)) continue;
+        snippets.add(identity);
+        evidence.push(publicationEvidenceEntry(item, code));
+      }
     }
-    const start = item["startLine"];
-    if (typeof start === "number" && Number.isInteger(start) && start > 0) {
-      entry.startLine = start;
-      const end = item["endLine"];
-      if (typeof end === "number" && Number.isInteger(end) && end >= start)
-        entry.endLine = end;
-    }
-    evidence.push(entry);
   }
   return evidence;
+}
+
+function publicationEvidenceEntry(
+  item: Record<string, unknown>,
+  code: string,
+): PublicationCodeEvidence {
+  const entry: PublicationCodeEvidence = { code };
+  for (const key of [
+    "id",
+    "label",
+    "language",
+    "role",
+    "explanation",
+  ] as const) {
+    const value = item[key];
+    if (typeof value === "string" && value.length > 0) entry[key] = value;
+  }
+  const location = isRecord(item["location"]) ? item["location"] : item;
+  const path = location["path"];
+  if (typeof path === "string" && path.length > 0) entry.path = path;
+  const start = location["startLine"];
+  if (typeof start === "number" && Number.isInteger(start) && start > 0) {
+    entry.startLine = start;
+    const end = location["endLine"];
+    if (typeof end === "number" && Number.isInteger(end) && end >= start)
+      entry.endLine = end;
+  }
+  return entry;
 }
 
 function humanizeRole(role: string): string {
