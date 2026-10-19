@@ -34,6 +34,7 @@
 - reject remote targets the SDK reader refuses to load ([#1569](https://github.com/openai/codex-security/pull/1569))
 - validate deferred source paths ([#1573](https://github.com/openai/codex-security/pull/1573))
 - validate code evidence paths ([#1567](https://github.com/openai/codex-security/pull/1567))
+- bump taiki-e/install-action from 2.87.27 to 2.87.28 ([#1742](https://github.com/openai/codex-security/pull/1742))
 
 <!-- release-section: highlights:end -->
 
