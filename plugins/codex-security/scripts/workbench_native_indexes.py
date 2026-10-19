@@ -206,7 +206,7 @@ def list_repositories(
 ) -> dict[str, Any]:
     scans = scan_history.list_scans(connection)["scans"]
     scans_by_id = {scan["scanId"]: scan for scan in scans}
-    scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
+    scan_count_by_target = Counter(scan["targetId"] for scan in scans)
 
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
@@ -229,7 +229,7 @@ def list_repositories(
             "displayName": target["display_name"],
             "latestScan": latest_scan_by_target.get(target_id),
             "openFindingsCount": open_findings_by_target.get(target_id, 0),
-            "scanCount": scan_count_by_target.get(target_id, 0),
+            "scanCount": scan_count_by_target[target_id],
             "targetId": target_id,
             "targetPath": target["current_path"],
         }

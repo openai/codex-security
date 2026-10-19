@@ -206,24 +206,19 @@ describe("CLI workbench", () => {
         unsavedAlias,
         process.platform === "win32" ? "junction" : "dir",
       );
-      for (const [requested, first, exact, includeUnscanned] of [
-        [repository, alias, repository, false],
-        [alias, repository, alias, false],
-        [unsavedAlias, alias, repository, false],
-        [unsavedAlias, alias, repository, true],
+      for (const [requested, first, exact] of [
+        [repository, alias, repository],
+        [alias, repository, alias],
+        [unsavedAlias, alias, repository],
       ] as const) {
         const repositories = [
           { targetId: "alias-target", targetPath: first, scanCount: 1 },
           { targetId: "exact-target", targetPath: exact, scanCount: 1 },
-          ...(includeUnscanned
-            ? [
-                {
-                  targetId: "unscanned-target",
-                  targetPath: requested,
-                  scanCount: 0,
-                },
-              ]
-            : []),
+          {
+            targetId: "unscanned-target",
+            targetPath: unsavedAlias,
+            scanCount: 0,
+          },
         ];
         for (const args of [[], [requested!]]) {
           const calls: Array<readonly string[]> = [];
