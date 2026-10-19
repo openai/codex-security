@@ -19,6 +19,7 @@
 - read diff blobs with Git before 2.38 ([#1715](https://github.com/openai/codex-security/pull/1715))
 - bump the third-party group across 3 directories with 3 updates ([#1696](https://github.com/openai/codex-security/pull/1696))
 - separate diff revisions from paths in scan inputs ([#1694](https://github.com/openai/codex-security/pull/1694))
+- bump ruff from 0.16.10 to 0.17.0 in /plugins/codex-security ([#1695](https://github.com/openai/codex-security/pull/1695))
 
 <!-- release-section: highlights:end -->
 
