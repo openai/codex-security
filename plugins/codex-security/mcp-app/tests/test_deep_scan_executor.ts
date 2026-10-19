@@ -35,6 +35,7 @@ import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
+import { testExecutorExecutablePinning } from "./deep_scan_executable_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
@@ -125,6 +126,12 @@ try {
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
   await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
+  await testExecutorExecutablePinning({
+    CodexSdkWorkerExecutor,
+    fakeCodexFixture,
+    parentSandbox: trustedParentSandbox,
+    resolveCodexPath,
+  });
   if (process.platform !== "win32") {
     await testDeepScanContextSnapshots({
       CodexSdkWorkerExecutor,
