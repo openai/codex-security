@@ -315,6 +315,19 @@ function validateCanonicalContract(
         );
       }
     }
+    for (const [evidenceIndex, evidence] of (
+      finding.codeEvidence ?? []
+    ).entries()) {
+      const evidenceContext = `${context}.codeEvidence[${evidenceIndex}].path`;
+      try {
+        safeRelativePath(evidence.path, evidenceContext);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${evidenceContext}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
+    }
 
     const { findingId, occurrenceId, fingerprints } = deriveFindingIdentity(
       manifest.scan.id,

@@ -33,6 +33,7 @@
 - adopt the registered target kind when sealing a scan draft ([#828](https://github.com/openai/codex-security/pull/828))
 - reject remote targets the SDK reader refuses to load ([#1569](https://github.com/openai/codex-security/pull/1569))
 - validate deferred source paths ([#1573](https://github.com/openai/codex-security/pull/1573))
+- validate code evidence paths ([#1567](https://github.com/openai/codex-security/pull/1567))
 
 <!-- release-section: highlights:end -->
 

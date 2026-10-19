@@ -1096,6 +1096,65 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("unreadable JSON document");
   });
 
+  test.each([
+    ["src/handler.py", true],
+    ["src/a:b.py", true],
+    ["report:summary.py", true],
+    ["src/name with spaces.py", true],
+    ["src/日本語.py", true],
+    ["./src//handler.py", true],
+    ["src/line\u2028separator.py", true],
+    ["../outside.py", false],
+    ["src/../../outside.py", false],
+    ["/outside.py", false],
+    ["C:/outside.py", false],
+    ["C:outside.py", false],
+    ["src\\outside.py", false],
+    [".", false],
+    ["src/\u0000outside.py", false],
+    ["src/name\t.py", false],
+  ] as const)(
+    "validates canonical code-evidence path %j",
+    async (path, valid) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      findings["findings"][0]["codeEvidence"] = [
+        {
+          id: "source",
+          label: "Source",
+          path,
+          startLine: 1,
+          code: "source()",
+          explanation: "Synthetic repository evidence.",
+        },
+      ];
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const saved = await readFile(findingsPath);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const exported = pythonExport(scanDir);
+      const stderr = new TextDecoder().decode(exported.stderr);
+
+      if (valid) {
+        const contract = await loaded;
+        expect(contract.findings.findings[0]?.codeEvidence?.[0]?.path).toBe(
+          path,
+        );
+        expect(exported.exitCode, stderr).toBe(0);
+      } else {
+        await expect(loaded).rejects.toThrow(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+        expect(exported.exitCode).not.toBe(0);
+        expect(stderr).toContain(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+      }
+      expect(await readFile(findingsPath)).toEqual(saved);
+    },
+  );
+
   test("rejects schema-valid but canonically invalid contract data", async () => {
     const cases: Array<
       [

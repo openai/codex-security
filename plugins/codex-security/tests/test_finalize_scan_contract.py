@@ -2524,6 +2524,23 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
+        for path in ("src/a:b.py", "report:summary.py"):
+            with self.subTest(path=path):
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Synthetic repository evidence.",
+                    }
+                ]
+                self.write_scan()
+                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+
     def test_rejects_unsafe_deferred_paths(self) -> None:
         for path in (
             "",
