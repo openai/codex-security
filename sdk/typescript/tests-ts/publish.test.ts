@@ -3641,17 +3641,25 @@ describe("connected Linear publication", () => {
     const name = "atomically installs whole concurrent publication receipts";
     if (runTestInSubprocess(import.meta.path, name)) return;
     const fixture = await receiptFixture(preparedPublication(2));
-    const gate = Promise.withResolvers<void>();
+    const gates = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    const firstReplacementSettled = Promise.withResolvers<void>();
     const ready = Promise.withResolvers<void>();
     const replace = filesystem.rename;
     let waiting = 0;
     const renamed = spyOn(filesystem, "rename").mockImplementation(
       async (from, to) => {
-        if (String(from).endsWith(".json.tmp")) {
-          if (++waiting === 2) ready.resolve();
-          await gate.promise;
+        if (!String(from).endsWith(".json.tmp")) return await replace(from, to);
+        const gate = gates[waiting++]!;
+        if (waiting === 2) ready.resolve();
+        await gate.promise;
+        try {
+          await replace(from, to);
+        } finally {
+          if (gate === gates[0]) firstReplacementSettled.resolve();
         }
-        await replace(from, to);
       },
     );
     const pending = Promise.all(
@@ -3695,7 +3703,10 @@ describe("connected Linear publication", () => {
           return await readFile(path, "utf8");
         }),
       );
-      gate.resolve();
+      gates[0]!.resolve();
+      await firstReplacementSettled.promise;
+      expect(archives).toContain(await readFile(fixture.latest, "utf8"));
+      gates[1]!.resolve();
       const results = await pending;
       expect(results).toContainEqual(
         JSON.parse(await readFile(fixture.latest, "utf8")),
@@ -3717,7 +3728,7 @@ describe("connected Linear publication", () => {
         ),
       ).toEqual(archives);
     } finally {
-      gate.resolve();
+      for (const gate of gates) gate.resolve();
       await pending.catch(() => undefined);
       renamed.mockRestore();
     }
