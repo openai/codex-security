@@ -1678,6 +1678,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             configuration: {
               ...parsedConfiguration,
               ...inheritedTelemetry,
+              default_permissions: "codex_security_policy",
+              permissions: {
+                codex_security_policy: {
+                  extends: ":read-only",
+                  filesystem: {
+                    ":root": "read",
+                    [codexHome]: { ".": "deny" },
+                  },
+                  network: { enabled: false },
+                },
+              },
               ...(skills === undefined
                 ? {}
                 : {
