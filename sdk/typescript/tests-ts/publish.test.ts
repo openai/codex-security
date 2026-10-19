@@ -40,7 +40,6 @@ import type {
 } from "../src/publication.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
   async (_prepared, issues) => {
