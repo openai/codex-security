@@ -155,10 +155,7 @@ The extraction root is not enforced.
                 "targetId": "target_sha256_example",
                 "displayName": "example/repo",
                 "revision": "deadbeef",
-                "snapshotDigest": (
-                    "codex-security-snapshot/v1:sha256:"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                ),
+                "snapshotDigest": "codex-security-snapshot/v1:sha256:" + "0" * 64,
             },
             "allowedTargetKinds": ["git_worktree"],
             "scope": {"includePaths": ["src/"], "excludePaths": []},
