@@ -23,6 +23,7 @@
 - preserve generated-note command failures ([#1729](https://github.com/openai/codex-security/pull/1729))
 - drop deleted revisions and field codes from DOCX ([#1714](https://github.com/openai/codex-security/pull/1714))
 - URL-encode generated schema references ([#981](https://github.com/openai/codex-security/pull/981))
+- detect Windows Yarn global installs in update notices ([#1692](https://github.com/openai/codex-security/pull/1692))
 
 <!-- release-section: highlights:end -->
 
