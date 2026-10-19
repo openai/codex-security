@@ -87,7 +87,10 @@ def git_blob_samples(
     if not object_names:
         return []
 
-    request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
+    # Git before 2.38 rejects -z, so only names with line breaks need it.
+    nul_input = any("\n" in name or "\r" in name for name in object_names)
+    separator = b"\0" if nul_input else b"\n"
+    request = separator.join(os.fsencode(name) for name in object_names) + separator
     read_fd, write_fd = os.pipe()
     with (
         ThreadPoolExecutor(max_workers=1) as reader,
@@ -106,7 +109,7 @@ def git_blob_samples(
                 target,
                 "cat-file",
                 "--batch",
-                "-z",
+                *(["-z"] if nul_input else []),
                 text=False,
                 input_data=request,
                 git_dir=git_dir,
@@ -701,7 +704,10 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 junctions[identity] = path
             continue
         paths.append(path)
-        if not stat.S_ISDIR(metadata.st_mode):
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
@@ -820,7 +826,10 @@ def source_directory_snapshot_paths(
 
 
 def directory_content_digest(
-    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+    target: Path,
+    *,
+    excluded: tuple[Path, ...] = (),
+    include_ignored: bool = False,
 ) -> str:
     def raise_walk_error(error: OSError) -> None:
         raise error

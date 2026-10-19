@@ -1,6 +1,9 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { runWorkbench as runWorkbenchCommand } from "./server.js";
+import {
+  PLUGIN_ROOT,
+  runWorkbench as runWorkbenchCommand,
+} from "./src/workbench-client.js";
 import { resolvePythonCommand } from "./src/python_command.js";
 import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import { resolveDeepWorkerParentSandbox } from "./src/deep-scan/parent-sandbox.js";
@@ -34,8 +37,7 @@ export async function runCliDeepScan(): Promise<void> {
       permissionProfile: unknown;
     };
     scanId = input.scanId;
-    const pluginRoot =
-      process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
+    const pluginRoot = PLUGIN_ROOT;
     process.chdir(pluginRoot);
     const store = new WorkbenchDeepScanStore(runWorkbench);
     const parentSandbox = resolveDeepWorkerParentSandbox({

@@ -42,6 +42,7 @@ import {
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -260,7 +261,13 @@ describe("CLI", () => {
             minLength: 1,
           },
           provider: {
-            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+            enum: [
+              "openai",
+              "openrouter",
+              "fireworks",
+              "cheaperinference",
+              "amazon-bedrock",
+            ],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
@@ -2220,8 +2227,47 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test("shows known dashboard tokens when the model has no price entry", async () => {
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    const deps = dependencies({ environment: { NO_COLOR: "1" } });
+    const createSecurity = deps.createSecurity;
+    deps.createSecurity = (config) => {
+      const client = createSecurity(config);
+      const run = client.run.bind(client);
+      client.run = async (repository, options) => {
+        options?.onUsage?.({
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 10,
+          reasoning_output_tokens: 0,
+          total_tokens: 110,
+        });
+        return run(repository, options);
+      };
+      return client;
+    };
+    expect(
+      await runCli(
+        [
+          "scan",
+          "/synthetic/repository",
+          "--model",
+          "synthetic-unpriced-model",
+          "--show-cost",
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const text = stripVTControlCharacters(stderr.text()).replace(/\s+/gu, " ");
+    expect(text).toContain(
+      "100 uncached input, 0 cache reads, 0 cache writes, 10 output, 110 total",
+    );
+    expect(text).toContain("unavailable (model pricing or usage missing)");
+  });
+
   test.each([false, true])(
-    "shows durable Deep progress without changing stdout or TUI layout (interactive=%j)",
+    "shows durable Deep progress without changing stdout or TUI layout (interactive=%p)",
     async (interactive) => {
       const { stdout, stderr, runCli } = createCliTest(main, {
         stderr: interactive,
@@ -2591,6 +2637,13 @@ describe("CLI", () => {
       "accounts/fireworks/models/gpt-oss-120b",
       "accounts/fireworks/models/llama-v3p3-70b-instruct",
       FIREWORKS_CODEX_PROVIDER,
+    ],
+    [
+      "Cheaper Inference",
+      "cheaperinference",
+      "gpt-5.4",
+      "claude-sonnet-5",
+      CHEAPERINFERENCE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes scans through %s",
@@ -3138,11 +3191,6 @@ describe("CLI", () => {
         options?.onOutputDirReady?.("/tmp/scan");
         options?.onScanStarted?.();
         options?.onWorkerStatus?.({
-          kind: "preflight",
-          delegation: "available",
-          configuredSlots: 8,
-        });
-        options?.onWorkerStatus?.({
           kind: "dispatch",
           phase: "validation",
           planned: 6,
@@ -3172,9 +3220,6 @@ describe("CLI", () => {
     );
     expect(stderr.text()).toContain("codex-security: debug: scan.started");
     expect(stderr.text()).toContain(
-      'codex-security: debug: worker.preflight delegation="available" configured_slots=8',
-    );
-    expect(stderr.text()).toContain(
       'codex-security: debug: worker.phase phase="validation" planned=6 started=3',
     );
     expect(stderr.text()).toContain(
@@ -3184,7 +3229,7 @@ describe("CLI", () => {
       'codex-security: debug: cost.updated model="gpt-5.6-sol"',
     );
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.completed coverage="complete" findings=1',
+      "codex-security: debug: scan.completed findings=1",
     );
     expect(stderr.text()).toContain(
       "codex-security: debug: runtime.cleanup.started",
@@ -4161,7 +4206,6 @@ describe("CLI", () => {
         `  REPORT    ${result.reportPath}`,
         "",
         "  FINDINGS  1 (1 high)",
-        "  COVERAGE  complete",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",
@@ -4261,7 +4305,7 @@ describe("CLI", () => {
     }
   });
 
-  test("reports a changed target before incomplete coverage in full-output errors", async () => {
+  test("reports a changed target even with legacy coverage in full-output errors", async () => {
     const warning =
       "Completed findings no longer describe the selected source tree.";
     const message =
@@ -4363,40 +4407,26 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("warning:");
   });
 
-  test("prints trusted cyber access guidance without failing or corrupting JSON scans", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    const deps = scanDependencies(
-      warningResult(
-        "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
-      ),
-    );
-
-    expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
+  test.each([
+    [
+      "prints trusted cyber access guidance without failing or corrupting JSON scans",
+      "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
       "codex-security: warning: Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber.",
-    );
-    expect(stderr.text()).toContain("Apply at https://chatgpt.com/cyber.");
-  });
-
-  test("prints unverified trusted cyber access guidance without corrupting JSON scans", async () => {
+      "Apply at https://chatgpt.com/cyber.",
+    ],
+    [
+      "prints unverified trusted cyber access guidance without corrupting JSON scans",
+      "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
+      "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
+      "Check your access or apply at https://chatgpt.com/cyber.",
+    ],
+  ] as const)("%s", async (_name, warning, message, guidance) => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
-    const deps = scanDependencies(
-      warningResult(
-        "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
-      ),
-    );
-
+    const deps = scanDependencies(warningResult(warning));
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
-    );
-    expect(stderr.text()).toContain(
-      "Check your access or apply at https://chatgpt.com/cyber.",
-    );
+    expect(stderr.text()).toContain(message);
+    expect(stderr.text()).toContain(guidance);
   });
 
   test("prints organizational trusted cyber access guidance without corrupting JSON scans", async () => {
@@ -4474,20 +4504,12 @@ describe("CLI", () => {
         ["scan", "--json"],
         dependencies({
           workerStatuses: [
-            {
-              kind: "preflight",
-              delegation: "available",
-              configuredSlots: 8,
-            },
             { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
           ],
         }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "Preflight: worker delegation supported (up to 8 worker slots).",
-    );
     expect(stderr.text()).toContain(
       "Worker capacity changed during ranking; started 3 of 6 planned workers. Continuing scan.",
     );
@@ -4627,7 +4649,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "FINDINGS  4 (1 critical, 2 high, 1 informational)",
     );
-    expect(stderr.text()).toContain("COVERAGE  complete");
+
     expect(stderr.text()).toContain("ELAPSED   1s");
     expect(stderr.text()).toContain(
       "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
@@ -4802,11 +4824,6 @@ describe("CLI", () => {
         dependencies({
           workerStatuses: [
             {
-              kind: "preflight",
-              delegation: "unavailable",
-              configuredSlots: 8,
-            },
-            {
               kind: "dispatch",
               phase: "file_review",
               planned: 6,
@@ -4817,13 +4834,10 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(stderr.text()).toContain(
-      "Preflight: worker delegation unavailable; continuing without delegated workers.",
-    );
-    expect(stderr.text()).toContain(
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("FINDINGS  0\n  COVERAGE  complete");
+    expect(stderr.text()).toContain("FINDINGS  0\n");
   });
 
   test("validates a dry run without starting a scan", async () => {
@@ -5001,259 +5015,105 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   });
 
-  test("does not pass a policy when coverage is incomplete", async () => {
-    for (const completeness of ["partial", "unknown"] as const) {
+  test.each([undefined, "partial", "unknown"] as const)(
+    "evaluates findings independently of legacy coverage %s",
+    async (completeness) => {
       const result = fakeResult(["high"], completeness);
-      const { stdout, stderr, runCli } = createCliTest(main);
+      result.coverage.deferred.push({
+        id: "review-note",
+        reason: "Optional runtime reproduction was unavailable.",
+      });
+      for (const [threshold, expected] of [
+        [undefined, 0],
+        ["critical", 0],
+        ["high", 1],
+      ] as const) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "scan",
+              "--json",
+              "--full-output",
+              ...(threshold === undefined
+                ? []
+                : ["--fail-on-severity", threshold]),
+            ],
+            dependencies({ result }),
+          ),
+        ).toBe(expected);
+        const envelope = JSON.parse(stdout.text());
+        expect(envelope.ok).toBe(true);
+        expect(envelope.data.coverage.deferred).toEqual(
+          result.coverage.deferred,
+        );
+        expect(envelope).not.toHaveProperty("error");
+        expect(stderr.text()).not.toContain(
+          "Cannot evaluate the failure policy",
+        );
+      }
+    },
+  );
 
+  test.each(["failed", "canceled", "interrupted"] as const)(
+    "does not accept a %s manifest as a completed scan",
+    async (status) => {
+      const result = fakeResult(["high"]);
+      result.manifest.scan.status = status;
+      const { stdout, runCli } = createCliTest(main);
       expect(
         await runCli(
-          ["scan", "--json", "--fail-on-severity", "critical"],
+          ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
           dependencies({ result }),
         ),
       ).toBe(2);
-      expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-      expect(stderr.text()).toContain(
-        `Cannot evaluate the failure policy: coverage is ${completeness}`,
-      );
-    }
-  });
-
-  test("does not report an incomplete scan as successful without a policy", async () => {
-    for (const completeness of ["partial", "unknown"] as const) {
-      const result = fakeResult(["high"], completeness);
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(
-        2,
-      );
-      expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-      expect(stderr.text()).toContain(
-        `Scan coverage is ${completeness}; results may be incomplete.`,
-      );
-    }
-  });
-
-  test.each(["partial", "unknown"] as const)(
-    "marks %s coverage as a full-output error and keeps the scan results",
-    async (completeness) => {
-      const result = fakeResult(["high"], completeness);
-      for (const format of [
-        ["--json"],
-        ["--format", "json"],
-        ["--format", "jsonl"],
-      ]) {
-        for (const policy of [false, true]) {
-          const stdout = capture();
-          const stderr = capture();
-          expect(
-            await main(
-              [
-                "scan",
-                ".",
-                ...format,
-                "--full-output",
-                ...(policy ? ["--fail-on-severity", "critical"] : []),
-              ],
-              stdout.stream,
-              stderr.stream,
-              dependencies({ result }),
-            ),
-          ).toBe(2);
-          const envelope = JSON.parse(stdout.text());
-          const message = policy
-            ? `Cannot evaluate the failure policy: coverage is ${completeness}.`
-            : `Scan coverage is ${completeness}; results may be incomplete.`;
-          expect(envelope).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED", message },
-            data: JSON.parse(JSON.stringify(result.toJSON())),
-            meta: { command: "scan" },
-          });
-          expect(stderr.text()).toContain(message);
-          if (format.includes("jsonl"))
-            expect(stdout.text().trim().split("\n")).toHaveLength(1);
-        }
-      }
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        ok: false,
+        error: { code: "SCAN_FAILED" },
+        data: { manifest: { scan: { status } }, findings: result.findings },
+      });
     },
   );
 
   test.each(["rerun", "resume"] as const)(
-    "reports incomplete %s coverage in the full-output error envelope",
+    "%s retains findings and scope notes in a successful full-output result",
     async (command) => {
-      for (const completeness of ["partial", "unknown"] as const) {
-        for (const format of ["json", "jsonl"]) {
-          const result = fakeResult(["high"], completeness);
-          const stdout = capture();
-          const stderr = capture();
-          const recipe = {
-            repository: "/original/repository",
-            target: { kind: "repository", paths: [] },
-            mode: command === "resume" ? "deep" : "standard",
-            config: {},
-          };
-          expect(
-            await main(
-              [
-                "scans",
-                command,
-                "scan-original",
-                "--format",
-                format,
-                "--full-output",
-              ],
-              stdout.stream,
-              stderr.stream,
-              dependencies({
-                result,
-                onWorkbench: (args): JsonObject =>
-                  args[0] === "get-cli-scan-resume"
-                    ? {
-                        scanId: "scan-original",
-                        scanDir: "/tmp/saved-scan",
-                        recipe,
-                      }
-                    : args[0] === "get-scan-recipe"
-                      ? { recipe }
-                      : {},
-              }),
-            ),
-          ).toBe(2);
-          const message = `Scan coverage is ${completeness}; results may be incomplete.`;
-          expect(JSON.parse(stdout.text())).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED", message },
-            data: JSON.parse(JSON.stringify(result.toJSON())),
-          });
-          expect(stderr.text()).toContain(message);
-          if (format === "jsonl")
-            expect(stdout.text().trim().split("\n")).toHaveLength(1);
-        }
-      }
-    },
-  );
-
-  test.each(["rerun", "resume"] as const)(
-    "matches the %s full-output error schema to filtered data",
-    async (command) => {
-      const schemaOutput = capture();
-      expect(
-        await main(
-          ["scans", command, "--schema", "--format", "json"],
-          schemaOutput.stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
-      const schema = JSON.parse(schemaOutput.text()).output.anyOf.find(
-        (variant: { properties?: { ok?: { const?: boolean } } }) =>
-          variant.properties?.ok?.const === false,
-      );
-      expect(schema.properties.data).toEqual({});
-      expect(schema.required).toEqual(["ok", "error", "meta"]);
-
-      const result = fakeResult(["high"], "partial");
+      const result = fakeResult(["high"]);
+      result.coverage.deferred.push({
+        id: "runtime-note",
+        reason: "Optional runtime reproduction was unavailable.",
+      });
+      const { stdout, runCli } = createCliTest(main);
       const recipe = {
         repository: "/original/repository",
         target: { kind: "repository", paths: [] },
         mode: command === "resume" ? "deep" : "standard",
         config: {},
       };
-      for (const format of ["json", "jsonl"]) {
-        for (const [filter, expected] of [
-          ["cost", null],
-          ["sarifPath", null],
-          ["warnings", undefined],
-          ["threadId", result.threadId],
-          [
-            "findings",
-            {
-              findings: JSON.parse(JSON.stringify(result.toJSON()["findings"])),
-            },
-          ],
-        ] as const) {
-          const output = capture();
-          expect(
-            await main(
-              [
-                "scans",
-                command,
-                "scan-original",
-                "--format",
-                format,
-                "--full-output",
-                "--filter-output",
-                filter,
-              ],
-              output.stream,
-              capture().stream,
-              dependencies({
-                result,
-                onWorkbench: () => ({
-                  scanId: "scan-original",
-                  scanDir: "/tmp/saved-scan",
-                  recipe,
-                }),
-              }),
-            ),
-          ).toBe(2);
-          const envelope = JSON.parse(output.text());
-          expect(envelope).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED" },
-            meta: expect.any(Object),
-          });
-          if (expected === undefined)
-            expect(envelope).not.toHaveProperty("data");
-          else expect(envelope.data).toEqual(expected);
-        }
-      }
+      expect(
+        await runCli(
+          ["scans", command, "scan-original", "--json", "--full-output"],
+          dependencies({
+            result,
+            onWorkbench: (args): JsonObject =>
+              args[0] === "get-cli-scan-resume"
+                ? {
+                    scanId: "scan-original",
+                    scanDir: "/tmp/saved-scan",
+                    recipe,
+                  }
+                : args[0] === "get-scan-recipe"
+                  ? { recipe }
+                  : {},
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        ok: true,
+        data: { findings: result.findings, coverage: result.coverage },
+      });
     },
   );
-
-  test("preserves full-output token controls and the completed findings-policy envelope", async () => {
-    const partial = fakeResult(["high"], "partial");
-    const page = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--token-limit", "1"],
-        page.stream,
-        capture().stream,
-        dependencies({ result: partial }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(page.text())).toMatchObject({
-      ok: false,
-      error: { code: "SCAN_FAILED" },
-      data: expect.any(String),
-      meta: { nextOffset: 1 },
-    });
-    const count = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--token-count"],
-        count.stream,
-        capture().stream,
-        dependencies({ result: partial }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(count.text())).toBeNumber();
-    const complete = fakeResult(["high"]);
-    const blocked = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
-        blocked.stream,
-        capture().stream,
-        dependencies({ result: complete }),
-      ),
-    ).toBe(1);
-    expect(JSON.parse(blocked.text())).toMatchObject({
-      ok: true,
-      data: JSON.parse(JSON.stringify(complete.toJSON())),
-    });
-    expect(JSON.parse(blocked.text())).not.toHaveProperty("error");
-  });
 
   test("reports SDK errors without a stack trace", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);

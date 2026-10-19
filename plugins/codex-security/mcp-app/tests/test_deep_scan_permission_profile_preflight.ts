@@ -1,3 +1,4 @@
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import { readJson, readJsonLines } from "./support/json.ts";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 interface PreflightFixture {
@@ -680,26 +681,50 @@ async function testUnexpectedTerminationRemainsRetryable() {
 }
 
 async function testStdioFailuresRemainRetryable() {
-  for (const stream of ["stdin", "stdout"] as const) {
+  for (const stream of ["stdin", "stdout", "write callback"] as const) {
     await withFakeCodex(
       { hangAt: "initialize" },
       async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
         const running = preflight(codexPath, cwd);
         await waitForFile(readyPath);
         assert.equal(children.length, 1);
-        children[0][stream]!.destroy(
-          new Error("SECRET_REPOSITORY_PATH=/repo/private"),
-        );
-        await assert.rejects(
-          running,
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes(JSON.stringify(codexPath)) &&
-            error.message.includes(
-              "could not exchange app-server JSON-RPC over stdio",
-            ) &&
-            error.message.includes("SECRET_REPOSITORY_PATH"),
-        );
+        const stdin = children[0].stdin!;
+        const originalWrite = stdin.write;
+        try {
+          if (stream === "write callback") {
+            stdin.write = ((
+              _message: unknown,
+              callback: (error: Error) => void,
+            ) => {
+              queueMicrotask(() =>
+                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
+              );
+              return false;
+            }) as typeof stdin.write;
+            children[0].stdout!.emit(
+              "data",
+              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
+            );
+          } else {
+            children[0][stream]!.destroy(
+              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
+            );
+          }
+          await assert.rejects(
+            running,
+            (
+              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
+            ) =>
+              error?.name === "Error" &&
+              error.message.includes(JSON.stringify(codexPath)) &&
+              error.message.includes(
+                "could not exchange app-server JSON-RPC over stdio",
+              ) &&
+              error.message.includes("SECRET_REPOSITORY_PATH"),
+          );
+        } finally {
+          stdin.write = originalWrite;
+        }
         await assertPreflightStopped(children, terminatedPath);
       },
     );
@@ -1102,7 +1127,6 @@ if (scenario.inheritStdio) {
   writeFileSync(scenario.descendantPidPath, String(descendant.pid));
   descendant.unref();
 }
-let buffer = "";
 let catalogIndex = 0;
 if (scenario.ignoreTermination) setInterval(() => {}, 1_000);
 
@@ -1110,20 +1134,8 @@ process.on("SIGTERM", () => {
   writeFileSync(scenario.terminatedPath, "SIGTERM");
   if (!scenario.ignoreTermination) process.exit(0);
 });
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  while (true) {
-    const newline = buffer.indexOf("\\n");
-    if (newline < 0) return;
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (!line) continue;
-    const message = JSON.parse(line);
-    appendFileSync(scenario.callsPath, JSON.stringify(message) + "\\n");
-    handle(message);
-  }
-});
+${jsonLineInputSource(`    appendFileSync(scenario.callsPath, JSON.stringify(message) + "\\n");
+    handle(message);`)}
 process.stdin.on("end", () => {
   writeFileSync(scenario.terminatedPath, "stdin-end");
   if (!scenario.ignoreTermination) process.exit(0);

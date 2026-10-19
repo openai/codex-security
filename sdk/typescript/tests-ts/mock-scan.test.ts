@@ -47,6 +47,7 @@ async function fixture() {
     {
       environment,
       runWorkbench,
+      resolvePluginPython: async () => python!,
       prepareRuntime: rejecting("Mock scan initialized Codex"),
       matchFindings: rejecting("Mock scan called model matching"),
     },
@@ -82,7 +83,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       },
     ]);
     expect(first.findings.findings).toHaveLength(12);
-    expect(first.coverage.completeness).toBe("complete");
+    expect(first.coverage).not.toHaveProperty("completeness");
     expect(first.manifest.scan.status).toBe("completed");
     expect(first.manifest.scan.sealedAt).toBeTruthy();
     expect(first.turnResult["mock"]).toBe(true);
@@ -285,7 +286,6 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.refs({ base: "HEAD~1" }),
     });
     expect(diff.manifest.scan.target.kind).toBe("git_diff");
-    expect(diff.coverage.completeness).toBe("complete");
     expect(diff.coverage.mode).toBe("branch_diff");
     await writeFile(
       join(repository, "example.ts"),
@@ -296,7 +296,6 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.workingTree({}),
     });
     expect(workingTree.manifest.scan.target.kind).toBe("git_diff");
-    expect(workingTree.coverage.completeness).toBe("complete");
     expect(workingTree.coverage.mode).toBe("working_tree");
   } finally {
     await client.close();

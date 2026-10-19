@@ -64,24 +64,7 @@ export class DiffTarget {
     this.kind = options.kind;
     this.base = options.base;
     this.head = options.head;
-    if (this.kind !== "refs" && this.kind !== "working_tree") {
-      throw new InvalidTargetError(
-        `Unsupported diff target kind: ${String(this.kind)}`,
-      );
-    }
-    if (!isNonEmptyString(this.base)) {
-      throw new InvalidTargetError("The diff base ref must be non-empty.");
-    }
-    if (this.kind === "refs" && !isNonEmptyString(this.head)) {
-      throw new InvalidTargetError(
-        "Git diff refs must include a non-empty head ref.",
-      );
-    }
-    if (this.kind === "working_tree" && this.head !== undefined) {
-      throw new InvalidTargetError(
-        "Working-tree targets cannot specify a head ref.",
-      );
-    }
+    requireValidDiffTarget(this);
     Object.freeze(this);
   }
 
@@ -99,6 +82,30 @@ export class DiffTarget {
     base = "HEAD",
   }: { base?: string } = {}): DiffTarget {
     return new DiffTarget({ kind: "working_tree", base });
+  }
+}
+
+function requireValidDiffTarget(target: DiffTargetOptions): void {
+  if (target.kind !== "refs" && target.kind !== "working_tree") {
+    throw new InvalidTargetError(
+      `Unsupported diff target kind: ${String(target.kind)}`,
+    );
+  }
+  if (typeof target.base !== "string" || target.base.length === 0) {
+    throw new InvalidTargetError("The diff base ref must be non-empty.");
+  }
+  if (
+    target.kind === "refs" &&
+    (typeof target.head !== "string" || target.head.length === 0)
+  ) {
+    throw new InvalidTargetError(
+      "Git diff refs must include a non-empty head ref.",
+    );
+  }
+  if (target.kind === "working_tree" && target.head !== undefined) {
+    throw new InvalidTargetError(
+      "Working-tree targets cannot specify a head ref.",
+    );
   }
 }
 
@@ -515,27 +522,7 @@ export async function normalizeTarget(
   }
 
   if (target instanceof DiffTarget) {
-    if (target.kind !== "refs" && target.kind !== "working_tree") {
-      throw new InvalidTargetError(
-        `Unsupported diff target kind: ${String(target.kind)}`,
-      );
-    }
-    if (typeof target.base !== "string" || target.base.length === 0) {
-      throw new InvalidTargetError("The diff base ref must be non-empty.");
-    }
-    if (
-      target.kind === "refs" &&
-      (typeof target.head !== "string" || target.head.length === 0)
-    ) {
-      throw new InvalidTargetError(
-        "Git diff refs must include a non-empty head ref.",
-      );
-    }
-    if (target.kind === "working_tree" && target.head !== undefined) {
-      throw new InvalidTargetError(
-        "Working-tree targets cannot specify a head ref.",
-      );
-    }
+    requireValidDiffTarget(target);
     await requireGitRepository(root, signal);
     const base = await resolveGitRef(root, target.base, signal);
     const kind = target.kind === "refs" ? "refs" : "working_tree";

@@ -67,6 +67,9 @@ describe("CLI help", () => {
     for (const command of ["login", "policy .", "scan .", "findings"]) {
       expect(text).toContain(`  codex-security ${command}`);
     }
+    expect(text.indexOf("codex-security policy .")).toBeLessThan(
+      text.indexOf("codex-security scan ."),
+    );
     expect(text).toContain("<command> --help");
   });
 
@@ -134,6 +137,15 @@ describe("CLI help", () => {
       expect(JSON.parse(schema.text())).toEqual(expect.any(Object));
     },
   );
+
+  test("documents optional validation context and structured output", async () => {
+    const text = await help(["validate", "--help"]);
+    expect(option(text, "--context")).toContain("<text>");
+    expect(option(text, "--context-file")).toContain("<file>");
+    expect(option(text, "--knowledge-base")).toContain("<path>");
+    expect(option(text, "--knowledge-base")).toMatch(/repeat/iu);
+    expect(option(text, "--output-schema")).toContain("<file>");
+  });
 
   test("documents raw export formats without promising output transforms", async () => {
     const text = await help(["export", "--help"]);

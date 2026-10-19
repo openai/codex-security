@@ -34,17 +34,16 @@ which must be on your `PATH`. If `cs` already resolves to another tool, use
 `codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
 `npx @openai/codex-security` without a global installation.
 
-From your repository directory, optionally draft security guidance before your
-first scan:
+From your repository, optionally [draft a `SECURITY.md`](#generate-securitymd)
+that explains what counts as a security issue in your project:
 
 ```bash
 cs policy .
 ```
 
-The command saves a draft outside the checkout. Review the proposed diff and
-notes, edit the draft as needed, then copy it to the displayed `Policy target`
-so future scans use it. Generating the draft alone does not install it.
-Skip this step to keep an existing policy or scan without one.
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
 Run your scan from the repository directory:
 
@@ -119,18 +118,41 @@ try {
 The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
+## Read existing Cloud findings
+
+When Codex Security Cloud is available to your account, the Security plugin's
+`$cloud-findings` skill can read findings, reports, recorded assignment and
+verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
+optional connection; local scans work without it.
+
+See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+for authentication requirements and a read-only example.
+
 ## Generate SECURITY.md
 
-Draft security guidance for a repository or one of its components:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path`
+to select a component:
 
 ```bash
 cs policy .
 cs policy . --path services/api --knowledge-base architecture.md
 ```
 
-The command saves a draft outside the checkout. Review it before installing it
-as guidance for future scans. See the [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy)
-for supporting documents and SDK usage.
+The command saves its draft outside the repository and leaves existing files
+unchanged. Review the diff and notes, edit the draft, then copy only `SECURITY.md`
+to the displayed **Policy target**. Keep the saved architecture and threat-model
+documents outside the repository.
+
+Scans already use root and component `SECURITY.md` files. Keep your current policy
+if it needs no changes. When updating it, preserve its vulnerability-reporting
+instructions. If the command says the policy is already up to date, no copy is
+needed.
+
+Files at `.github/SECURITY.md` or `docs/SECURITY.md` often contain reporting
+instructions. Preserve them when drafting a policy; those locations do not
+automatically provide repository-wide scan guidance. See the
+[policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy) for policy
+locations, unanswered questions, saved artifacts, and SDK usage.
 
 ## Save and export threat models
 
@@ -189,9 +211,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
 
-Findings are report-only by default. Partial scans with valid results produce a
-warning; scanner and required reporting errors fail the job. Severity thresholds
-apply to complete scans.
+Findings are report-only by default. Set a severity threshold to fail on reported
+findings at or above it. Scanner and required reporting errors fail the job;
+intentional file exclusions and investigation notes do not.
 See the [Action setup and input reference](github-action/README.md) for PR scans,
 severity thresholds, and report uploads.
 
@@ -213,11 +235,11 @@ scan artifacts remain available.
 
 ## Other providers
 
-Scans support OpenAI, Amazon Bedrock, OpenRouter, and Fireworks AI. Bedrock uses
+Scans support OpenAI, Amazon Bedrock, OpenRouter, Fireworks AI, and Cheaper Inference. Bedrock uses
 AWS credentials and does not require a separate OpenAI login. See
 [Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model access.
 
-For OpenRouter and Fireworks AI, set the provider's API key and choose a supported
+For OpenRouter, Fireworks AI, and Cheaper Inference, set the provider's API key and choose a supported
 model. See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
 for examples.
 

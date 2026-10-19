@@ -334,7 +334,7 @@ try {
     [
       ...npm.args,
       "install",
-      "--prefer-offline",
+      "--prefer-online",
       "--include=optional",
       "--ignore-scripts",
       "--package-lock=false",
@@ -399,6 +399,9 @@ try {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
+      }
+      if (typeof sdk.CodexSecurity.prototype.patch !== "function") {
+        throw new Error("The installed CodexSecurity client does not expose patch().");
       }
       if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") {
         throw new Error("The installed package does not export generatePolicy.");
@@ -797,6 +800,39 @@ try {
     ],
     { cwd: consumer },
   );
+  run(
+    process.execPath,
+    [join(packageRoot, "scripts", "smoke-hosted-package.mjs"), installedRoot],
+    { cwd: consumer },
+  );
+  const selectedPlugin = join(consumer, "compatibility-selected-plugin");
+  await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
+    recursive: true,
+  });
+  const selectedHelper = join(selectedPlugin, "mcp", "helpers.mjs");
+  const loader = await readFile(selectedHelper, "utf8");
+  // Selected plugins can provide the CLI helpers without the SDK admission export.
+  const olderLoader = loader.replace(
+    "export default runtimeModule.exports;",
+    "",
+  );
+  assert.notEqual(olderLoader, loader);
+  await writeFile(selectedHelper, olderLoader);
+  run(
+    process.execPath,
+    [
+      join(
+        packageRoot,
+        "scripts",
+        "fixtures",
+        "package-plugin-compatibility.mjs",
+      ),
+      installedRoot,
+      consumer,
+      selectedPlugin,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   run(
@@ -809,7 +845,7 @@ try {
   );
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

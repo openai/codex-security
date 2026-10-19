@@ -296,6 +296,7 @@ describe("plugin runtime preparation", () => {
       "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
+      "CHEAPER_INFERENCE_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
       "AWS_ACCESS_KEY_ID",
       "AWS_SECRET_ACCESS_KEY",
@@ -491,18 +492,20 @@ describe("plugin runtime preparation", () => {
       expect(inventory.status).toBe(2);
       expect(inventory.stderr).toContain("NTFS alternate data streams");
 
-      const rankInput = runNodePython(python!, [
+      const scopes = join(root, "scopes.json");
+      await writeFile(scopes, JSON.stringify(["source.ts:synthetic-stream"]));
+      const scopeInput = runNodePython(python!, [
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
+        "make-repo-scope-input",
         "--repo",
         repository,
-        "--scope",
-        "source.ts:synthetic-stream",
+        "--scopes-file",
+        scopes,
         "--out",
-        join(root, "rank-input.jsonl"),
+        join(root, "scope-input.jsonl"),
       ]);
-      expect(rankInput.status).toBe(1);
-      expect(rankInput.stderr).toContain("NTFS alternate data stream");
+      expect(scopeInput.status).toBe(1);
+      expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
   );
 
@@ -952,16 +955,7 @@ describe("plugin runtime preparation", () => {
     expect(installerCalls).toBe(1);
   });
 
-  test.each([
-    "shell",
-    "shell with root",
-    "node",
-    "node with root",
-    "direct node",
-    "direct node with root",
-    "direct node with flags",
-    "direct node unprefixed",
-  ])(
+  test.each(["shell", "shell with root", "node", "node with root"])(
     "keeps %s MCP roots isolated outside the credential home",
     async (interpreter) => {
       const root = await temporaryDirectory();
@@ -973,39 +967,17 @@ describe("plugin runtime preparation", () => {
       await mkdir(work);
       await mkdir(join(selected, "mcp"));
       await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
-      const directNode = interpreter.startsWith("direct node");
       const declaredRoot = interpreter.endsWith("with root");
-      const nodeOptions =
-        interpreter === "direct node with flags"
-          ? ["--enable-source-maps"]
-          : [];
-      const nodeCommand = declaredRoot
-        ? (
-            await promisify(execFile)("node", ["-p", "process.execPath"], {
-              encoding: "utf8",
-            })
-          ).stdout.trim()
-        : process.platform === "win32"
-          ? "node.exe"
-          : "node";
-      const nodeEntry =
-        interpreter === "direct node unprefixed"
-          ? "mcp/server.mjs"
-          : "./mcp/server.mjs";
       const argumentsAfterEntry = [
         "--stdio",
         "synthetic ! % & argument",
-        nodeEntry,
+        "./mcp/server.mjs",
       ];
       const mcp = {
         mcpServers: {
           "codex-security": {
-            command: directNode
-              ? nodeCommand
-              : "./scripts/launch_codex_security_mcp",
-            args: directNode
-              ? [...nodeOptions, nodeEntry, ...argumentsAfterEntry]
-              : argumentsAfterEntry,
+            command: "./scripts/launch_codex_security_mcp",
+            args: argumentsAfterEntry,
             cwd: ".",
             env_vars: [
               "CODEX_HOME",
@@ -1035,12 +1007,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-${directNode ? "if (import.meta.main ?? true) {" : ""}
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (request.id === undefined) continue;
   const result = request.method === "initialize"
-    ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-legacy", version: "1" } }
+    ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
       ? { tools: [{ name: "probe", description: pluginRoot + "\\n" + JSON.stringify({ args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] }), inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
@@ -1048,7 +1019,6 @@ for await (const line of createInterface({ input: process.stdin })) {
       : {};
   console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
 }
-${directNode ? "}" : ""}
 `;
       await writeFile(join(selected, "mcp", "server.mjs"), serverProgram);
       if (interpreter.startsWith("node")) {
@@ -1133,9 +1103,7 @@ ${directNode ? "}" : ""}
       ).toEqual(mcp);
       for (const [path, contents] of originals) {
         expect(await readFile(join(selected, path))).toEqual(contents);
-        if (
-          directNode ? path.startsWith("scripts/") : path.startsWith("mcp/")
-        ) {
+        if (path.startsWith("mcp/")) {
           expect(await readFile(join(installed.installedRoot, path))).toEqual(
             installedOriginals.get(path)!,
           );
@@ -1207,7 +1175,7 @@ ${directNode ? "}" : ""}
       ) => {
         expect(structuredClone(server)).toMatchObject({
           pluginId: "codex-security@codex-security-sdk",
-          serverInfo: { name: "synthetic-legacy", version },
+          serverInfo: { name: "synthetic-launcher", version },
           tools: { probe: { description: expect.any(String) } },
         });
         expect(server.tools.probe.description).toStartWith(
@@ -1218,16 +1186,10 @@ ${directNode ? "}" : ""}
         );
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
-          process.platform === "win32" && !directNode
+          process.platform === "win32"
             ? parse(await realpath(pluginRoot)).root
             : await realpath(installed.installedRoot),
         );
-        if (directNode) {
-          expect(details.execArgv).toEqual(nodeOptions);
-          expect(details.entry).toBe(
-            join(await realpath(pluginRoot), "mcp", "server.mjs"),
-          );
-        }
       };
       for (const [index, pluginRoot] of [selected, second].entries()) {
         await assertServer(
@@ -2013,7 +1975,7 @@ ${directNode ? "}" : ""}
   });
 
   describe("installed plugin reuse", () => {
-    async function fixture(legacy: false | "shell" | "node" = false) {
+    async function fixture(launcher = false) {
       const root = await temporaryDirectory();
       const selected = await plugin(root);
       const home = join(root, "home");
@@ -2023,34 +1985,20 @@ ${directNode ? "}" : ""}
       const record = join(marketplace, "installed-plugin.json");
       const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
       const calls: string[][] = [];
-      if (legacy) {
+      if (launcher) {
         await writeFile(
           join(selected, ".mcp.json"),
           JSON.stringify({
             mcpServers: {
               "codex-security": {
-                command:
-                  legacy === "node"
-                    ? "node"
-                    : "./scripts/launch_codex_security_mcp",
-                args: [
-                  ...(legacy === "node" ? ["./mcp/server.mjs"] : []),
-                  "--stdio",
-                  "synthetic argument",
-                ],
+                command: "./scripts/launch_codex_security_mcp",
+                args: ["--stdio", "synthetic argument"],
                 cwd: ".",
                 env_vars: ["CODEX_HOME"],
               },
             },
           }),
         );
-        if (legacy === "node") {
-          await mkdir(join(selected, "mcp"));
-          await writeFile(
-            join(selected, "mcp", "server.mjs"),
-            "// synthetic server\n",
-          );
-        }
         for (const launcher of [
           "launch_codex_security_mcp",
           "launch_codex_security_mcp.cmd",
@@ -2087,9 +2035,9 @@ ${directNode ? "}" : ""}
       return { selected, home, staged, installed, record, calls, bootstrap };
     }
 
-    test("reuses root-independent legacy launchers and refreshes source changes", async () => {
+    test("reuses root-independent launchers and refreshes source changes", async () => {
       const { selected, staged, installed, calls, bootstrap } =
-        await fixture("shell");
+        await fixture(true);
       const second = join(dirname(selected), "second plugin");
       await cp(selected, second, { recursive: true });
       expect((await bootstrap(second)).installedRoot).toBe(installed);
@@ -2171,32 +2119,6 @@ ${directNode ? "}" : ""}
       expect(changed.mcpServers["codex-security"].args).toEqual(
         sourceMcp.mcpServers["codex-security"].args,
       );
-    });
-
-    test("reuses the root-independent direct Node server across clients", async () => {
-      const { selected, staged, installed, calls, bootstrap } =
-        await fixture("node");
-      const second = join(dirname(selected), "second plugin");
-      await cp(selected, second, { recursive: true });
-      expect((await bootstrap(second)).installedRoot).toBe(installed);
-      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
-      let installs = 1;
-      for (const cache of [staged, installed]) {
-        const shim = join(cache, "mcp", "codex_security_sdk_bridge.mjs");
-        const contents = await readFile(shim);
-        await rm(shim);
-        await bootstrap();
-        expect(calls.filter((args) => args[1] === "add")).toHaveLength(
-          ++installs,
-        );
-        expect(await readFile(shim)).toEqual(contents);
-        await writeFile(shim, "synthetic changed bridge");
-        await bootstrap();
-        expect(calls.filter((args) => args[1] === "add")).toHaveLength(
-          ++installs,
-        );
-        expect(await readFile(shim)).toEqual(contents);
-      }
     });
 
     test("preserves generated installed files during reuse", async () => {
@@ -2462,7 +2384,7 @@ ${directNode ? "}" : ""}
         ),
         "utf8",
       ),
-    ).toContain('"inspect-linear-publication"');
+    ).toContain('"finding-issues"');
   });
 
   test("rejects plugin installs without the selected path and version", async () => {
@@ -5111,230 +5033,6 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
-  test("expands a tilde CODEX_HOME when discovering preflight configuration", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const codexHome = join(home, ".codex");
-    const repository = join(root, "repository");
-    const configPath = join(codexHome, "config.toml");
-    await mkdir(codexHome, { recursive: true });
-    await mkdir(repository);
-    await writeFile(configPath, "[agents]\nmax_threads = 8\n");
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const result = runNodePython(
-      python!,
-      [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-        "--profile",
-        "security_scan",
-        "--cwd",
-        repository,
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
-        "--multi-agent-runtime-owner",
-        "native",
-        "--multi-agent-runtime-version",
-        "v1",
-        "--multi-agent-runtime-provenance",
-        "app-server",
-      ],
-      {
-        env: {
-          ...process.env,
-          HOME: home,
-          USERPROFILE: home,
-          CODEX_HOME: "~/.codex",
-        },
-      },
-    );
-
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-    const payload = JSON.parse(result.stdout) as {
-      user_config_path: string;
-      config_paths: string[];
-      results: { capability: string; actual: number; source: string }[];
-    };
-    expect(payload.user_config_path).toBe(configPath);
-    expect(payload.config_paths).toEqual([
-      process.platform === "win32"
-        ? join(
-            process.env["ProgramData"] ?? "C:\\ProgramData",
-            "OpenAI",
-            "Codex",
-            "config.toml",
-          )
-        : join("/", "etc", "codex", "config.toml"),
-      configPath,
-    ]);
-    expect(
-      payload.results.find(
-        (result) => result.capability === "usable_worker_slots_6",
-      ),
-    ).toMatchObject({ actual: 8, source: configPath });
-  });
-
-  test.skipIf(process.platform !== "win32")(
-    "loads machine-wide Windows settings during preflight discovery",
-    async () => {
-      const root = await temporaryDirectory();
-      const codexHome = join(root, "codex-home");
-      const programData = join(root, "ProgramData");
-      const systemConfig = join(programData, "OpenAI", "Codex", "config.toml");
-      const repository = join(root, "repository");
-      await mkdir(dirname(systemConfig), { recursive: true });
-      await mkdir(codexHome);
-      await mkdir(repository);
-      await writeFile(systemConfig, "[agents]\nmax_threads = 8\n");
-
-      const python =
-        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-      const result = runNodePython(
-        python!,
-        [
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-          "--profile",
-          "security_scan",
-          "--cwd",
-          repository,
-          "--runtime-check",
-          "delegation_available=true",
-          "--multi-agent-runtime-owner",
-          "native",
-          "--multi-agent-runtime-version",
-          "v1",
-          "--multi-agent-runtime-provenance",
-          "app-server",
-        ],
-        {
-          env: {
-            ...process.env,
-            CODEX_HOME: codexHome,
-            ProgramData: programData,
-          },
-        },
-      );
-
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe("");
-      const payload = JSON.parse(result.stdout) as {
-        config_paths: string[];
-        results: { capability: string; actual: number; source: string }[];
-      };
-      expect(payload.config_paths).toEqual([
-        systemConfig,
-        join(codexHome, "config.toml"),
-      ]);
-      expect(
-        payload.results.find(
-          (result) => result.capability === "usable_worker_slots_6",
-        ),
-      ).toMatchObject({ actual: 8, source: systemConfig });
-    },
-  );
-
-  test("continues when optional preflight capabilities are unknown", async () => {
-    const root = await temporaryDirectory();
-    const config = join(root, "config.toml");
-    await writeFile(config, "");
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-
-    for (const profile of [
-      "security_diff_scan",
-      "security_scan",
-      "deep_security_scan",
-    ]) {
-      const result = runNodePython(
-        python!,
-        [
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-          "--profile",
-          profile,
-          "--config",
-          config,
-          "--cwd",
-          root,
-        ],
-        { env: process.env },
-      );
-
-      expect(result.status, result.stderr).toBe(0);
-      const payload = JSON.parse(result.stdout) as {
-        status: string;
-        results: { capability: string; severity: string }[];
-        unknown: { capability: string; severity: string }[];
-      };
-      expect(payload.status).toBe("ready");
-      if (profile === "deep_security_scan") {
-        expect(payload.results).toEqual([]);
-        expect(payload.unknown).toEqual([]);
-        continue;
-      }
-      expect(payload.unknown.length).toBeGreaterThan(0);
-      expect(
-        payload.unknown.every(({ severity }) => severity !== "block"),
-      ).toBe(true);
-    }
-  });
-
-  test("keeps required preflight capabilities blocking", async () => {
-    const root = await temporaryDirectory();
-    const config = join(root, "config.toml");
-    const registry = join(root, "capabilities.toml");
-    await writeFile(config, "");
-    await writeFile(
-      registry,
-      [
-        "version = 1",
-        "[capabilities.required]",
-        'kind = "runtime"',
-        'check = "required_available"',
-        "[profiles.required]",
-        'description = "Required runtime capability"',
-        "[[profiles.required.requirements]]",
-        'capability = "required"',
-        'severity = "block"',
-        'reason = "Required runtime capability"',
-      ].join("\n"),
-    );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-
-    for (const [value, status, exitCode] of [
-      [undefined, "incomplete", 2],
-      ["false", "blocked", 1],
-      ["true", "ready", 0],
-    ] as const) {
-      const result = runNodePython(
-        python!,
-        [
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-          "--registry",
-          registry,
-          "--profile",
-          "required",
-          "--config",
-          config,
-          "--cwd",
-          root,
-          ...(value === undefined
-            ? []
-            : ["--runtime-check", `required_available=${value}`]),
-        ],
-        { env: process.env },
-      );
-
-      expect(result.status, result.stderr).toBe(exitCode);
-      expect(JSON.parse(result.stdout)).toMatchObject({ status });
-    }
-  });
-
   testPosix.each(["absolute", "relative"])(
     "shares literal CODEX_HOME paths with plugin storage (%s)",
     async (kind) => {
@@ -5387,7 +5085,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "--message=\0high\ud800.low\udfff.pair😀",
         "path-\udcff",
       ],
-      ["inspect-linear-publication", "--input-file", "-"],
+      ["finding-issues"],
     ].map((args) => ({ args })),
   )(
     "runs custom workbench $args without output limits, credentials, or generated bytecode",
@@ -6357,14 +6055,18 @@ describe("runtime directories and plugin Python boundary", () => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
 
+      const scopes = join(root, "scopes.json");
+      await writeFile(scopes, JSON.stringify(["."]));
       const result = spawnSync(
         python!,
         [
           "-B",
           join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-          "make-repo-rank-input",
+          "make-repo-scope-input",
           "--repo",
           repository,
+          "--scopes-file",
+          scopes,
           "--out",
           output,
         ],

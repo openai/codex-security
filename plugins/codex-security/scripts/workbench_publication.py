@@ -1,10 +1,11 @@
-"""Validate, record, and export findings from completed scans."""
+"""Validate, record, and export findings from sealed scans."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -26,88 +27,50 @@ from finalize_scan_contract import (
     write_export_output,
     write_sarif_projection,
 )
+from validate_scan_contract import validate_contract
 
 
-def linear_publication_input(
-    payload: dict[str, Any],
-    *,
-    recording: bool,
-) -> tuple[dict[str, Any], dict[str, str], list[dict[str, str]]]:
-    required = {"scanId", "scanDirectory", "destination", "findings"}
-    if recording:
-        required.add("publications")
-    if set(payload) != required:
-        raise SystemExit("Linear publication input contains unexpected or missing fields.")
-
-    scan_id = payload["scanId"]
-    scan_directory = payload["scanDirectory"]
-    destination = payload["destination"]
-    findings = payload["findings"]
-    if not isinstance(scan_id, str) or not isinstance(scan_directory, str):
-        raise SystemExit("Linear publication input must identify the exact completed scan.")
-    if (
-        not isinstance(destination, dict)
-        or not {"type", "teamId"}.issubset(destination)
-        or not set(destination).issubset({"type", "teamId", "projectId"})
-        or destination.get("type") != "linear"
-        or not isinstance(destination.get("teamId"), str)
-        or not destination["teamId"].strip()
-        or (
-            "projectId" in destination
-            and (
-                not isinstance(destination["projectId"], str)
-                or not destination["projectId"].strip()
-            )
-        )
-    ):
-        raise SystemExit(
-            "Linear publication input must identify the exact team and optional project."
-        )
-    if not isinstance(findings, list):
-        raise SystemExit("Linear publication input must include the planned scan findings.")
-
-    seen_finding_ids: set[str] = set()
-    seen_occurrence_ids: set[str] = set()
-    for finding in findings:
-        if (
-            not isinstance(finding, dict)
-            or set(finding) != {"findingId", "occurrenceId"}
-            or not isinstance(finding.get("findingId"), str)
-            or not finding["findingId"].strip()
-            or not isinstance(finding.get("occurrenceId"), str)
-            or not finding["occurrenceId"].strip()
-        ):
-            raise SystemExit("Linear publication input contains an invalid finding identity.")
-        if (
-            finding["findingId"] in seen_finding_ids
-            or finding["occurrenceId"] in seen_occurrence_ids
-        ):
-            raise SystemExit("Linear publication input repeats a finding or occurrence.")
-        seen_finding_ids.add(finding["findingId"])
-        seen_occurrence_ids.add(finding["occurrenceId"])
-
-    return payload, destination, findings
+def destination_key(destination: Any) -> str:
+    if not isinstance(destination, dict):
+        raise SystemExit("Finding issues require an exact tracker destination.")
+    kind = destination.get("type")
+    if kind == "linear":
+        required, optional = {"type", "teamId"}, {"projectId"}
+        parts = [kind, destination.get("teamId"), destination.get("projectId")]
+    elif kind == "jira":
+        required, optional = {"type", "cloudId", "projectId"}, set()
+        parts = [kind, destination.get("cloudId"), destination.get("projectId")]
+    elif kind in {"github-issue", "github-advisory"}:
+        required, optional = {"type", "hostname", "repository"}, set()
+        parts = [kind, destination.get("hostname"), destination.get("repository")]
+    else:
+        raise SystemExit("Unsupported finding issue destination.")
+    if not required.issubset(destination) or not set(destination).issubset(required | optional):
+        raise SystemExit("Finding issues require the exact provider destination fields.")
+    if any(not isinstance(value, str) or not value.strip() for value in destination.values()):
+        raise SystemExit("Finding issue destination fields must be nonempty strings.")
+    return json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
 
 
-def verify_linear_publication_scan(
+def verify_publication_history(
     db: Any,
     connection: sqlite3.Connection,
-    payload: dict[str, Any],
-    findings: list[dict[str, str]],
-) -> sqlite3.Row:
+    scan_id: str,
+    scan_directory: str,
+    findings: list[dict[str, Any]],
+) -> None:
     try:
-        scan = db.require_scan(connection, payload["scanId"])
+        scan = db.require_scan(connection, scan_id)
     except SystemExit as exc:
         raise SystemExit(
             "The completed scan is not present in the local Codex Security scan-history database. "
             "Use the state directory where the scan was completed."
         ) from exc
-    if scan["id"] != payload["scanId"]:
-        raise SystemExit("Linear publication must use the exact completed scan identifier.")
+    if scan["id"] != scan_id:
+        raise SystemExit("Publication must use the exact completed scan identifier.")
     if scan["status"] != "complete":
         raise SystemExit("Only completed scans can publish findings to Linear.")
-
-    requested_directory = db.require_canonical_scan_directory(Path(payload["scanDirectory"]))
+    requested_directory = db.require_canonical_scan_directory(Path(scan_directory))
     recorded_directory = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     if os.path.normcase(requested_directory) != os.path.normcase(recorded_directory):
         raise SystemExit(
@@ -115,219 +78,217 @@ def verify_linear_publication_scan(
         )
     if "seal_manifest_digest" in scan.keys():
         db.require_recorded_manifest_digest(scan, recorded_directory)
-
     stored_findings = {
         row["id"]: row["finding_id"]
         for row in connection.execute(
-            "SELECT id, finding_id FROM finding_occurrences WHERE scan_id = ?",
-            (scan["id"],),
+            "SELECT id, finding_id FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
         )
     }
-    for finding in findings:
-        if stored_findings.get(finding["occurrenceId"]) != finding["findingId"]:
-            raise SystemExit(
-                "A selected finding or occurrence does not belong to the completed scan "
-                "in local Codex Security scan history."
-            )
-    if len(stored_findings) != len(findings):
+    expected = {finding["occurrenceId"]: finding["findingId"] for finding in findings}
+    if stored_findings != expected:
         raise SystemExit(
             "The completed scan findings do not exactly match local Codex Security scan history."
         )
-    return scan
 
 
-def inspect_linear_publication(
-    db: Any,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(payload, recording=False)
-    database_uri = f"file:{quote(str(db.database_path()), safe='')}?mode=ro"
-    with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("BEGIN")
-        scan = verify_linear_publication_scan(db, connection, payload, findings)
-        recorded: dict[str, dict[str, str]] = {}
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
-        ).fetchone():
-            for row in connection.execute(
-                """
-                SELECT finding_id, occurrence_id, external_id, external_url
-                FROM finding_publications
-                WHERE scan_id = ? AND destination_type = ? AND team_id = ? AND project_id IS ?
-                ORDER BY created_at, external_id
-                """,
-                (
-                    scan["id"],
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                ),
-            ):
-                recorded.setdefault(
-                    row["occurrence_id"],
-                    {
-                        "findingId": row["finding_id"],
-                        "occurrenceId": row["occurrence_id"],
-                        "issueIdentifier": row["external_id"],
-                        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                    },
-                )
-        return {
-            "scanId": scan["id"],
-            "destination": destination,
-            "findingCount": len(findings),
-            "recorded": [
-                recorded[finding["occurrenceId"]]
-                for finding in findings
-                if finding["occurrenceId"] in recorded
-            ],
-        }
+def issue_receipt(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "scanId": row["scan_id"],
+        "findingId": row["finding_id"],
+        "occurrenceId": row["occurrence_id"],
+        "issueIdentifier": row["external_id"],
+        "operation": row["operation"],
+        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
+        **({"readback": json.loads(row["readback_json"])} if row["readback_json"] else {}),
+    }
 
 
-def prepare_linear_publication(
-    db: Any,
+def inspect_issue_receipts(
     connection: sqlite3.Connection,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(payload, recording=False)
-    connection.execute("BEGIN IMMEDIATE")
-    with connection:
-        scan = verify_linear_publication_scan(db, connection, payload, findings)
-        result = {
-            "scanId": scan["id"],
-            "destination": destination,
-            "findingCount": len(findings),
-        }
-    return result
+    destination: dict[str, str],
+    key: str,
+    finding_ids: list[str],
+) -> list[dict[str, Any]]:
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    selection = json.dumps(finding_ids)
+    if "finding_issue_receipts" in tables:
+        rows = connection.execute(
+            "SELECT * FROM finding_issue_receipts WHERE destination_key = ? "
+            "AND finding_id IN (SELECT value FROM json_each(?)) ORDER BY id",
+            (key, selection),
+        )
+    elif "finding_publications" in tables and destination["type"] == "linear":
+        rows = connection.execute(
+            "SELECT *, 'create' AS operation, NULL AS readback_json FROM finding_publications "
+            "WHERE destination_type = 'linear' AND team_id = ? AND project_id IS ? "
+            "AND finding_id IN (SELECT value FROM json_each(?)) ORDER BY id",
+            (destination["teamId"], destination.get("projectId"), selection),
+        )
+    else:
+        return []
+    return [issue_receipt(row) for row in rows]
 
 
-def record_linear_publications(
-    db: Any,
-    connection: sqlite3.Connection,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(payload, recording=True)
-    publications = payload["publications"]
-    if not isinstance(publications, list):
-        raise SystemExit("Linear publication results must be an array.")
-    planned = {finding["findingId"]: finding["occurrenceId"] for finding in findings}
-    current: dict[str, dict[str, str]] = {}
-    external_ids: set[str] = set()
-    for publication in publications:
-        if (
-            not isinstance(publication, dict)
-            or not {"findingId", "occurrenceId", "issueIdentifier"}.issubset(publication)
-            or not set(publication).issubset(
-                {"findingId", "occurrenceId", "issueIdentifier", "url"}
-            )
-            or not isinstance(publication.get("findingId"), str)
-            or not isinstance(publication.get("occurrenceId"), str)
-            or not isinstance(publication.get("issueIdentifier"), str)
-            or not publication["issueIdentifier"].strip()
-            or (
-                "url" in publication
-                and (not isinstance(publication["url"], str) or not publication["url"].strip())
-            )
+def validate_issue_receipts(receipts: Any, selected: dict[str, str]) -> list[dict[str, Any]]:
+    if not isinstance(receipts, list):
+        raise SystemExit("Finding issue receipts must be an array.")
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            raise SystemExit("Each finding issue receipt must be an object.")
+        if any(
+            not isinstance(receipt.get(field), str) or not receipt[field].strip()
+            for field in ("findingId", "occurrenceId", "issueIdentifier")
         ):
-            raise SystemExit("Linear publication results contain an invalid issue association.")
-        finding_id = publication["findingId"]
-        issue_identifier = publication["issueIdentifier"]
-        if planned.get(finding_id) != publication["occurrenceId"]:
+            raise SystemExit("A finding issue receipt is missing its source or issue identity.")
+        if selected.get(receipt["findingId"]) != receipt["occurrenceId"]:
             raise SystemExit(
-                "A created Linear issue does not match its planned finding and occurrence."
+                "A finding issue receipt does not belong to the selected sealed findings."
             )
-        if finding_id in current or issue_identifier in external_ids:
-            raise SystemExit("Linear publication results repeat a finding or issue identifier.")
-        current[finding_id] = publication
-        external_ids.add(issue_identifier)
-
-    connection.execute("BEGIN IMMEDIATE")
-    with connection:
-        scan = verify_linear_publication_scan(db, connection, payload, findings)
-        timestamp = db.now()
-        for publication in publications:
-            conflicting = connection.execute(
-                """
-                SELECT occurrence_id, external_url
-                FROM finding_publications
-                WHERE destination_type = ? AND team_id = ? AND project_id IS ?
-                    AND external_id = ?
-                """,
-                (
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                    publication["issueIdentifier"],
-                ),
-            ).fetchone()
+        if receipt.get("operation") not in {"create", "update", "reuse"}:
+            raise SystemExit("A finding issue receipt requires create, update, or reuse.")
+        if "url" in receipt and (not isinstance(receipt["url"], str) or not receipt["url"].strip()):
+            raise SystemExit("A finding issue URL must be a nonempty string when supplied.")
+        if "readback" in receipt:
+            readback = receipt["readback"]
             if (
-                conflicting is not None
-                and conflicting["occurrence_id"] != publication["occurrenceId"]
+                not isinstance(readback, dict)
+                or readback.get("status") not in {"verified", "failed"}
+                or ("error" in readback and not isinstance(readback["error"], str))
             ):
+                raise SystemExit("A finding issue readback requires verified or failed status.")
+    return receipts
+
+
+def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or payload.get("action") not in {
+        "inspect",
+        "prepare",
+        "record",
+    }:
+        raise SystemExit("Finding issues require inspect, prepare, or record action.")
+    if not isinstance(payload.get("scanDirectory"), str):
+        raise SystemExit("Finding issues require a sealed scan directory.")
+    require_history = payload.get("requireHistory", False)
+    if not isinstance(require_history, bool):
+        raise SystemExit("requireHistory must be a boolean.")
+    key = destination_key(payload.get("destination"))
+    try:
+        validated = validate_contract(Path(payload["scanDirectory"]))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise SystemExit(f"Finding issue source validation failed: {exc}") from exc
+    scan_id = validated["manifest"]["scan"]["id"]
+    if "expectedScanId" in payload and payload["expectedScanId"] != scan_id:
+        raise SystemExit("Scan artifacts do not match the selected scan identifier.")
+    findings = validated["findings"]["findings"]
+    available = {finding["findingId"]: finding["occurrenceId"] for finding in findings}
+    finding_ids = payload.get("findingIds", list(available))
+    if not isinstance(finding_ids, list) or any(
+        not isinstance(finding_id, str) or finding_id not in available for finding_id in finding_ids
+    ):
+        raise SystemExit("Selected finding IDs must belong to the sealed scan.")
+    selected = {finding_id: available[finding_id] for finding_id in finding_ids}
+    receipts = (
+        validate_issue_receipts(payload.get("receipts"), selected)
+        if payload["action"] == "record"
+        else []
+    )
+    result = {
+        "scanId": scan_id,
+        "destination": payload["destination"],
+        "findingCount": len(selected),
+        "storeExists": True,
+        "receipts": [],
+    }
+    path = db.database_path()
+    if payload["action"] == "inspect" or require_history:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            if require_history:
                 raise SystemExit(
-                    "This Linear issue is already associated with a different finding."
+                    "Cannot publish findings because the local Codex Security scan-history database "
+                    "does not exist. Use the state directory where this scan was completed."
+                ) from None
+            result["storeExists"] = False
+            return result
+        except PermissionError:
+            pass  # Let SQLite report the open failure used by the host's state fallback.
+    if payload["action"] == "inspect":
+        database_uri = f"file:{quote(str(path), safe='')}?mode=ro"
+        try:
+            connection = sqlite3.connect(database_uri, uri=True, timeout=5)
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "unable to open database file":
+                exc._codex_security_state_unavailable = True
+            raise
+        connection.row_factory = sqlite3.Row
+    else:
+        connection = db.connect()
+    with closing(connection):
+        connection.execute("BEGIN" if payload["action"] == "inspect" else "BEGIN IMMEDIATE")
+        with connection:
+            if require_history:
+                verify_publication_history(db, connection, scan_id, validated["scanDir"], findings)
+            if payload["action"] == "inspect":
+                result["receipts"] = inspect_issue_receipts(
+                    connection, payload["destination"], key, list(selected)
                 )
-            if (
-                conflicting is not None
-                and "url" in publication
-                and conflicting["external_url"] != publication["url"]
-            ):
-                raise SystemExit("This Linear issue is already associated with a different URL.")
-
-            connection.execute(
-                """
-                INSERT INTO finding_publications (
-                    scan_id, finding_id, occurrence_id, destination_type,
-                    team_id, project_id, external_id, external_url, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """,
-                (
-                    scan["id"],
-                    publication["findingId"],
-                    publication["occurrenceId"],
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                    publication["issueIdentifier"],
-                    publication.get("url"),
-                    timestamp,
-                ),
-            )
-
-        created = []
-        for finding in findings:
-            publication = current.get(finding["findingId"])
-            if publication is None:
-                continue
-            row = connection.execute(
-                """
-                SELECT finding_id, occurrence_id, external_id, external_url
-                FROM finding_publications
-                WHERE scan_id = ? AND occurrence_id = ? AND destination_type = ?
-                    AND team_id = ? AND project_id IS ? AND external_id = ?
-                """,
-                (
-                    scan["id"],
-                    publication["occurrenceId"],
-                    destination["type"],
-                    destination["teamId"],
-                    destination.get("projectId"),
-                    publication["issueIdentifier"],
-                ),
-            ).fetchone()
-            if row is None:
-                raise SystemExit("A created Linear issue could not be read from scan history.")
-            created.append(
-                {
-                    "findingId": row["finding_id"],
-                    "occurrenceId": row["occurrence_id"],
-                    "issueIdentifier": row["external_id"],
-                    **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                }
-            )
-        result = {"scanId": scan["id"], "destination": destination, "created": created}
+            elif payload["action"] == "record":
+                timestamp = db.now()
+                for receipt in receipts:
+                    conflicting = connection.execute(
+                        "SELECT 1 FROM finding_issue_receipts "
+                        "WHERE destination_key = ? AND external_id = ? AND finding_id != ? LIMIT 1",
+                        (key, receipt["issueIdentifier"], receipt["findingId"]),
+                    ).fetchone()
+                    if conflicting is not None:
+                        raise SystemExit(
+                            "The issue identifier is already associated with another finding "
+                            "in this destination."
+                        )
+                    readback = (
+                        json.dumps(receipt["readback"], ensure_ascii=False)
+                        if "readback" in receipt
+                        else None
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO finding_issue_receipts (
+                            scan_id, finding_id, occurrence_id, destination_key,
+                            external_id, external_url, operation, readback_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (occurrence_id, destination_key, external_id, operation)
+                        DO UPDATE SET
+                            external_url = COALESCE(external_url, excluded.external_url),
+                            readback_json = COALESCE(excluded.readback_json, readback_json),
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            scan_id,
+                            receipt["findingId"],
+                            receipt["occurrenceId"],
+                            key,
+                            receipt["issueIdentifier"],
+                            receipt.get("url"),
+                            receipt["operation"],
+                            readback,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM finding_issue_receipts WHERE occurrence_id = ? "
+                        "AND destination_key = ? AND external_id = ? AND operation = ?",
+                        (
+                            receipt["occurrenceId"],
+                            key,
+                            receipt["issueIdentifier"],
+                            receipt["operation"],
+                        ),
+                    ).fetchone()
+                    result["receipts"].append(issue_receipt(row))
     return result
 
 

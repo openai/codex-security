@@ -34,6 +34,11 @@ For CI's full archive inspection, pass the exact `.tgz` path printed by
 These checks include native Node contracts for SDK completion, cancellation,
 close cleanup, and CLI terminal sanitization. They use the installed package,
 controlled model output, and the real workbench without live model credentials.
+The installed-package checks also verify hosted SDK exports, input validation,
+and the `scan --host` protocol without preparing a repository or requiring Git.
+The hosted-scan tests cover real repository scans, scope, artifact seals, and
+executor receipts. To rerun just the installed-package check, use
+`node scripts/smoke-hosted-package.mjs /absolute/path/to/node_modules/@openai/codex-security`.
 
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
@@ -62,6 +67,17 @@ Run this command from the repository root before starting the automation.
 Refresh the artifact after changing native source or toolchain. The standalone
 plugin supports a host-only build; that does not satisfy the SDK's universal
 packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
+
+## Python test dependencies
+
+Use Python 3.10 or later. From the repository root, install the Python test and lint dependencies with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
+```
+
+This replaces `pip install -e 'plugins/codex-security[test]'`. Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
+The requirements file is the single list of pinned Python test dependencies. Ruff and pytest settings remain in `plugins/codex-security/pyproject.toml`; the Ruff dependency and its `required-version` setting must agree.
 
 ## Writing tests
 

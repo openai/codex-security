@@ -20,55 +20,7 @@ import {
   windowsLoopbackPath,
 } from "./windows-helper-location.js";
 
-interface Assessment {
-  [key: string]: unknown;
-  schemaVersion: number;
-  patch: {
-    repository: string;
-    sourceType: string;
-    base: string;
-    head: string;
-    changedFiles: string[];
-    sha256: string;
-  };
-  recommendation: string;
-  workflowLabel: string;
-  impact: { rating: string; rationale: string };
-  regressionLikelihood: { rating: string; rationale: string };
-  regressionProtection: {
-    rating: string;
-    rationale: string;
-    exactHeadChecksPassed: boolean;
-  };
-  recoverability: { rating: string; rationale: string };
-  confidence: { rating: string; rationale: string };
-  applicability: { status: string; rationale: string };
-  statusQuoRisk: { rating: string; rationale: string };
-  autoMergeExclusions: string[];
-  affectedRuntimeRoots: string[];
-  materialBoundaries: Array<{
-    id: string;
-    invariant: string;
-    runtimeRoot: string;
-    counterexample: string;
-    legitimateControl: string;
-    result: string;
-  }>;
-  validation: Array<{
-    name: string;
-    status: string;
-    protects: string;
-  }>;
-  unknowns: Array<{
-    summary: string;
-    decisionCritical: boolean;
-  }>;
-  evidencePlan: Array<{
-    question: string;
-    action: string;
-    outcomes: Record<string, string>;
-  }>;
-}
+type Assessment = ReturnType<typeof assessment> & Record<string, unknown>;
 
 const schemaPath = join(
   PLUGIN_ROOT,
@@ -85,7 +37,7 @@ afterEach(async () => {
   );
 });
 
-function assessment(): Assessment {
+function assessment() {
   return {
     schemaVersion: 1,
     patch: {
@@ -118,7 +70,7 @@ function assessment(): Assessment {
       rating: "moderate",
       rationale: "The defect remains.",
     },
-    autoMergeExclusions: [],
+    autoMergeExclusions: [] as string[],
     affectedRuntimeRoots: ["service.request"],
     materialBoundaries: [
       {
@@ -138,8 +90,12 @@ function assessment(): Assessment {
         protects: "Changed behavior through the production caller.",
       },
     ],
-    unknowns: [],
-    evidencePlan: [],
+    unknowns: [] as { summary: string; decisionCritical: boolean }[],
+    evidencePlan: [] as {
+      question: string;
+      action: string;
+      outcomes: Record<string, string>;
+    }[],
   };
 }
 
@@ -255,7 +211,7 @@ describe("patch risk assessment contract", () => {
     delete (missingRequired as Record<string, unknown>)["patch"];
     invalidAssessments.push(missingRequired);
 
-    const additionalProperty = assessment();
+    const additionalProperty: Assessment = assessment();
     additionalProperty["unexpected"] = true;
     invalidAssessments.push(additionalProperty);
 

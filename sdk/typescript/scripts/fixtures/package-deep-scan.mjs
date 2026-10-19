@@ -29,6 +29,7 @@ const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
+let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
   await cp(installedPlugin, detachedPlugin, { recursive: true });
@@ -59,8 +60,13 @@ try {
       ? "package-codex.exe"
       : "package-deep-codex.mjs",
   );
-  if (process.platform === "win32")
+  if (process.platform === "win32") {
     await copyFile(process.execPath, executable);
+    const { installFixtureSpawn } = await import(
+      pathToFileURL(join(root, "package-deep-spawn.mjs")).href
+    );
+    restoreSpawn = installFixtureSpawn(executable);
+  }
   await chmod(executable, 0o700);
   if (process.platform === "win32") {
     // The direct SDK engine launches its preflight from this process too.
@@ -68,8 +74,19 @@ try {
     await import(pathToFileURL(join(root, "package-deep-spawn.mjs")).href);
   }
 
-  await runInstalledSdk(installedPlugin, executable);
-  await runDetachedPlugin(detachedPlugin, executable);
+  const checks = await Promise.allSettled([
+    runInstalledSdk(installedPlugin, executable).then(() =>
+      console.log("Validated installed SDK direct Deep Scan and worker retry."),
+    ),
+    runDetachedPlugin(detachedPlugin, executable).then(() =>
+      console.log("Validated detached plugin restart and finalization."),
+    ),
+  ]);
+  const failures = checks.flatMap((check) =>
+    check.status === "rejected" ? [check.reason] : [],
+  );
+  if (failures.length > 0)
+    throw new AggregateError(failures, "Deep Scan package checks failed.");
   console.log(
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
   );
@@ -83,6 +100,7 @@ try {
   }
   throw error;
 } finally {
+  restoreSpawn?.();
   await rm(root, {
     recursive: true,
     force: true,
@@ -380,6 +398,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       environment: f.env,
       prepareRuntime: async () => ({
         codexHome: f.home,
+        deepScanConfigPath: join(f.home, "deep-scan-config.toml"),
         environment: f.env,
         credentialsAvailable: true,
         plugin: {

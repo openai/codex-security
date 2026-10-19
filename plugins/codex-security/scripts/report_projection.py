@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import Counter
 from typing import Any
@@ -28,7 +29,7 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
+    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
         part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
@@ -42,6 +43,20 @@ def _strings(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [text for item in value if (text := _text(item, ""))]
+
+
+def _path_label(value: str) -> str:
+    if "," in value or value != " ".join(value.split()) or any(ord(c) < 32 for c in value):
+        return json.dumps(value)
+    return value
+
+
+def _path_text(value: str) -> str:
+    label = _path_label(value)
+    if label != value:
+        marker = _code_fence(label, minimum=1)
+        return f"{marker}{label}{marker}"
+    return re.sub(r"([\\`*_\[\]<>])", r"\\\1", value)
 
 
 def _cell(value: Any) -> str:
@@ -386,17 +401,20 @@ def _root_cause_code_evidence(
 def _code_evidence_location(item: dict[str, Any]) -> str:
     location = item.get("location")
     if isinstance(location, str):
-        return location
+        return " ".join(location.split())
     if isinstance(location, dict):
         item = location
     path = item.get("path")
     start = item.get("startLine")
-    end = item.get("endLine", start)
+    end = item.get("endLine")
     if not isinstance(path, str) or not path:
         return ""
-    if not isinstance(start, int):
+    path = _path_label(path)
+    if not isinstance(start, int) or isinstance(start, bool) or start < 1:
         return path
-    return f"{path}:{start}" if end == start else f"{path}:{start}-{end}"
+    if not isinstance(end, int) or isinstance(end, bool) or end <= start:
+        return f"{path}:{start}"
+    return f"{path}:{start}-{end}"
 
 
 def _code_fence(code: str, minimum: int = 3) -> str:
@@ -408,7 +426,7 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for index, item in enumerate(evidence):
         label = _text(item.get("label"), f"Code evidence {index + 1}")
-        location = " ".join(_code_evidence_location(item).split())
+        location = _code_evidence_location(item)
         explanation = _text(item.get("explanation"), "")
         language = item.get("language") if isinstance(item.get("language"), str) else ""
         language = language if re.fullmatch(r"[A-Za-z0-9_+.-]*", language) else ""
@@ -437,7 +455,7 @@ def _locations(finding: dict[str, Any]) -> str:
         start = location["startLine"]
         end = location.get("endLine", start)
         suffix = f":{start}" if end == start else f":{start}-{end}"
-        rendered.append(f"{location['path']}{suffix}")
+        rendered.append(f"{_path_text(location['path'])}{suffix}")
     return ", ".join(rendered)
 
 
@@ -541,7 +559,7 @@ def _finding_header(number: int, finding: dict[str, Any]) -> list[str]:
         f"| Confidence rationale | {_cell(finding['confidence']['rationale'])} |",
         f"| Category | {_cell(finding['taxonomy']['category'])} |",
         f"| CWE | {_cell(cwes)} |",
-        f"| Affected lines | {_cell(_locations(finding))} |",
+        "| Affected lines | " + _locations(finding).replace("|", "\\|") + " |",
     ]
 
 
@@ -615,9 +633,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     validation_code_evidence = _section_code_evidence(finding, validation)
     dataflow_code_evidence = _section_code_evidence(finding, attack_path, *dataflow_sections)
     reachability_code_evidence = _section_code_evidence(finding, reachability)
-    dataflow_summary = _text(
-        dataflow.get("summary"),
-        f"The canonical finding records the affected path at {_locations(finding)}, but no expanded source-to-sink narrative was recorded.",
+    dataflow_summary = _text(dataflow.get("summary"), "") or (
+        f"The canonical finding records the affected path at {_locations(finding)}, "
+        "but no expanded source-to-sink narrative was recorded."
     )
     reachability_summary = _text(reachability.get("summary"), "") or _text(
         attack_path.get("summary"),
@@ -769,8 +787,12 @@ def build_report_markdown(
     deep_presentation = uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
-    include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
-    exclude_paths = _strings(coverage.get("excludePaths", scope.get("excludePaths", [])))
+    include_paths = [
+        _path_text(path) for path in coverage.get("includePaths", scope.get("includePaths", []))
+    ]
+    exclude_paths = [
+        _path_text(path) for path in coverage.get("excludePaths", scope.get("excludePaths", []))
+    ]
     limitations = _strings(scope.get("limitations"))
     explicit_exclusions = coverage.get("explicitExclusions", [])
     lines = [
@@ -825,7 +847,6 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
-            f"| Coverage | {coverage['completeness']} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
             "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
@@ -907,33 +928,6 @@ def build_report_markdown(
             else:
                 lines.extend(["", *_finding_section(number, finding)])
     else:
-        deferred = coverage.get("deferred", [])
-        no_source_review = (
-            coverage.get("completeness") == "partial"
-            and isinstance(deferred, list)
-            and any(
-                isinstance(item, dict)
-                and item.get("reason")
-                == "The configured discovery time limit elapsed before any source review completed."
-                for item in deferred
-            )
-        )
-        budget_exhausted = (
-            coverage.get("completeness") == "partial"
-            and isinstance(deferred, list)
-            and any(
-                isinstance(item, dict)
-                and isinstance(item.get("reason"), str)
-                and (
-                    item["reason"]
-                    == "Validation was deferred because the scan reached its cost limit."
-                    or item["reason"].startswith(
-                        "Validation was deferred because the scan reached its cost limit: "
-                    )
-                )
-                for item in deferred
-            )
-        )
         stopped = manifest.get("scan", {}).get("status") in {
             "failed",
             "canceled",
@@ -947,18 +941,7 @@ def build_report_markdown(
                     "No findings were retained before the scan stopped. "
                     "The scan did not complete. No vulnerability conclusion can be drawn."
                     if stopped
-                    else (
-                        "No source review completed before the configured time limit. "
-                        "No vulnerability conclusion can be drawn."
-                        if no_source_review
-                        else (
-                            "No findings were validated before the scan reached its cost limit. "
-                            "Review the deferred candidates in Open Questions And Follow Up."
-                            if budget_exhausted
-                            else "No reportable findings survived the canonical discovery, validation, "
-                            "and reportability gates."
-                        )
-                    )
+                    else "No findings were reported."
                 ),
             ]
         )

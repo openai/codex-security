@@ -1,3 +1,4 @@
+import { readSubprocess } from "./support/shell.js";
 import { parseJsonLines } from "./support/json.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,9 +17,10 @@ function bundledFunction(runtime: string, name: string): string {
 
 test("advertises distinct Standard worker and Deep reducer contracts", async () => {
   const runtime = await loadBundledRuntime();
-  const method = /  compactArtifactServer\(request\) \{[\s\S]*?\n  \}/u.exec(
-    runtime,
-  )?.[0];
+  const method =
+    /  compactArtifactServer\(request, includePathsFile\) \{[\s\S]*?\n  \}/u.exec(
+      runtime,
+    )?.[0];
   expect(method).toBeDefined();
   const pathImport = /\(0, (import_node_path\d+)\.join\)/u.exec(method!)?.[1];
   expect(pathImport).toBeDefined();
@@ -80,11 +82,7 @@ test("advertises distinct Standard worker and Deep reducer contracts", async () 
         stderr: "pipe",
         timeout: 30_000,
       });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
+      const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(0);
       const response = parseJsonLines<{ id?: number; result?: unknown }>(
         stdout,

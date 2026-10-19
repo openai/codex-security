@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
 import {
   chmod,
+  cp,
+  readdir,
   mkdir,
   readFile,
   symlink,
@@ -23,6 +25,7 @@ const inventory = await importSource(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  await testPrepareDoesNotWritePluginBytecode();
   if (!["win32", "darwin"].includes(process.platform))
     await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
@@ -128,6 +131,28 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   );
 }
 
+async function testPrepareDoesNotWritePluginBytecode() {
+  const fixture = await createFixture("plugin bytecode");
+  const pluginRoot = path.join(fixture.root, "plugin");
+  const scripts = path.join(pluginRoot, "scripts");
+  await cp(path.resolve(import.meta.dirname, "../../scripts"), scripts, {
+    recursive: true,
+    filter: (file) => path.basename(file) !== "__pycache__",
+  });
+  await fixture.writeRepositoryFile("example.py", "value = 1\n");
+  const result = await inventory.prepareCodexSecurityReviewItems({
+    ...fixture.scan,
+    pluginRoot,
+  });
+  assert.equal(result.reviewItemsTotal, 1);
+  assert.equal(
+    (await readdir(scripts, { recursive: true })).some((file) =>
+      file.endsWith(".pyc"),
+    ),
+    false,
+  );
+}
+
 async function testNonUtf8InventoryPaths() {
   const fixture = await createFixture("non-UTF-8 repository names");
   const rawPath = Buffer.concat([
@@ -137,14 +162,18 @@ async function testNonUtf8InventoryPaths() {
   ]);
   await writeFile(rawPath, "raw path\n");
   await fixture.writeRepositoryFile("name-�.ts", "Unicode path\n");
-  await assert.rejects(
-    inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    /not valid for encoding utf-8/,
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    {
+      reviewItemsTotal: 2,
+    },
   );
   assert.ok((await readFile(fixture.scanInventory)).includes(0xff));
-  await assert.rejects(
-    inventory.listCodexSecurityReviewItems(fixture.scan),
-    /not valid for encoding utf-8/,
+  assert.deepEqual(
+    (await inventory.listCodexSecurityReviewItems(fixture.scan)).items
+      .map((item: { path: string }) => item.path)
+      .sort(),
+    ["./name-\udcff.ts", "./name-�.ts"],
   );
   await unlink(rawPath);
   assert.deepEqual(

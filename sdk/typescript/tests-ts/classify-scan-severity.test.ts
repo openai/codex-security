@@ -90,10 +90,7 @@ async function fixture(scanId?: string) {
   };
 }
 
-function classifier(
-  finding: Finding,
-  excluded = false,
-): NonNullable<ClassifySeverityOptions["codex"]> {
+function classifier(finding: Finding, excluded = false) {
   return jsonCodex(() => ({
     findingId: finding.findingId,
     decision: excluded ? "excluded" : "assessed",
@@ -211,21 +208,15 @@ await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environm
 function recordingClassifier() {
   const calls: string[] = [];
   const control = { failOn: "", excluded: false };
-  const codex: NonNullable<ClassifySeverityOptions["codex"]> = {
-    startThread: (thread) => ({
-      run: async (prompt, turn) => {
-        const { finding } = JSON.parse(prompt.split("\n\n").at(-1)!) as {
-          finding: Finding;
-        };
-        calls.push(finding.findingId);
-        if (finding.findingId === control.failOn)
-          throw new Error("Interrupted model call");
-        return classifier(finding, control.excluded)
-          .startThread(thread)
-          .run(prompt, turn);
-      },
-    }),
-  };
+  const codex = codexWithRun(async (prompt: string) => {
+    const { finding } = JSON.parse(prompt.split("\n\n").at(-1)!) as {
+      finding: Finding;
+    };
+    calls.push(finding.findingId);
+    if (finding.findingId === control.failOn)
+      throw new Error("Interrupted model call");
+    return classifier(finding, control.excluded).startThread().run();
+  });
   return { codex, calls, control };
 }
 

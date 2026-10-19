@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { z } from "incur";
+import { z } from "zod";
 import { parse as parseToml } from "smol-toml";
 import { loadContract, sha256Text as sha256 } from "./contract.js";
 import {
@@ -124,7 +124,6 @@ export async function publishFindingsCsvToCloud(
     schemaVersion: "1.0",
     scanId,
     mode: "repository",
-    completeness: "unknown",
     inventoryStrategy: "custom",
     includePaths: ["."],
     excludePaths: [],

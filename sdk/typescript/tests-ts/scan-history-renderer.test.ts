@@ -3,6 +3,93 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("counts singleton sides when the other side is grouped", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { persisting: 2 },
+        findings: [
+          {
+            title: "Merged group",
+            severity: "high",
+            status: "persisting",
+            path: "merged.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+            afterOccurrenceId: "after-one",
+          },
+          {
+            title: "Expanded group",
+            severity: "high",
+            status: "persisting",
+            path: "expanded.ts",
+            beforeOccurrenceId: "before-one",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 1");
+    expect(text).toContain("1 → 2");
+  });
+
+  test("shows zero findings on the absent side of grouped comparisons", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { resolved: 2, new: 2 },
+        findings: [
+          {
+            title: "Resolved group",
+            severity: "high",
+            status: "resolved",
+            path: "before.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+          },
+          {
+            title: "Added group",
+            severity: "medium",
+            status: "new",
+            path: "after.ts",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 0");
+    expect(text).toContain("0 → 2");
+  });
+
+  test("orders severity totals from critical to informational", () => {
+    const text = renderScanHistory(
+      {
+        scanId: "synthetic-scan",
+        targetPath: "/synthetic/repository",
+        progress: { status: "complete" },
+        findings: [],
+        severityCounts: {
+          low: 4,
+          informational: 5,
+          medium: 3,
+          critical: 1,
+          high: 2,
+        },
+      },
+      "show",
+      { color: false },
+    );
+    expect(text).toMatch(
+      /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
+    );
+  });
+
   test.each([
     [
       "spaced Chinese",
@@ -79,8 +166,6 @@ describe("scan history renderer", () => {
           repository: "/demo/juice-shop",
           beforeScanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          comparable: true,
-          coverage: { afterCompleteness: "complete" },
           summary: {
             new: 1,
             persisting: 2,
@@ -201,26 +286,30 @@ describe("scan history renderer", () => {
         ([, value]) => value,
       ),
     ).toEqual(["/demo/threat-model.md", "routes/login.ts"]);
-    for (const coverage of ["partial", "unknown", "complete"]) {
-      const comparison = renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: coverage },
-          summary: {},
-          findings: [],
-        },
-        "compare",
-        { color: false },
-      );
-      if (coverage === "complete") {
-        expect(comparison).not.toContain("Follow-up coverage");
-      } else {
-        expect(comparison).toContain(
-          `⚠ Follow-up coverage is ${coverage}; resolved findings cannot be confirmed.`,
-        );
-      }
-    }
+  });
+
+  test("shows absent findings without claiming they were fixed", () => {
+    const output = renderScanHistory(
+      {
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { not_observed: 1 },
+        findings: [
+          {
+            status: "not_observed",
+            severity: "high",
+            title: "Missing authorization",
+            path: "src/handler.ts",
+            reason:
+              "Not observed in the later scan; remediation has not been verified.",
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(output).toContain("Not observed");
+    expect(output).not.toContain("Resolved");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {
@@ -404,7 +493,6 @@ describe("scan history renderer", () => {
       {
         beforeScanId: "before",
         afterScanId: "after",
-        coverage: { afterCompleteness: "complete" },
         summary: {},
         findings: [],
         related: [relation],

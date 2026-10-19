@@ -139,6 +139,8 @@ assert.equal(overrideProbeCount, 0);
 const executableFixtureRoot = await mkdtemp(
   path.join(tmpdir(), "codex-security-python-command-"),
 );
+const python =
+  process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
 const previousPython = process.env.PYTHON;
 const previousResolvedPython = process.env.CODEX_SECURITY_PYTHON_COMMAND;
 try {
@@ -162,25 +164,30 @@ try {
     "/custom/python",
   );
   const input = "λ😀\n".repeat(250_000);
-  assert.equal(
-    await runPythonWithInput(
-      await resolvePythonCommand(),
-      ["-e", "process.stdin.pipe(process.stdout)"],
-      Buffer.from(input),
-      "Fixture helper",
-    ),
-    input,
-  );
+  for (const flags of [[], ["-I"]]) {
+    assert.equal(
+      await runPythonWithInput(
+        python,
+        [
+          ...flags,
+          "-c",
+          "import sys\nassert sys.dont_write_bytecode\nsys.stdout.buffer.write(sys.stdin.buffer.read())",
+        ],
+        Buffer.from(input),
+        "Fixture helper",
+      ),
+      input,
+    );
+  }
   delete process.env.CODEX_SECURITY_PYTHON_COMMAND;
   assert.equal(await resolvePythonCommand(), fileCandidate);
   const diagnostic = "--provider-error EACCES: λ😀\npermission denied";
   await assert.rejects(
     runPythonWithInput(
-      process.execPath,
+      python,
       [
-        "-e",
-        "process.stdin.resume(); process.stdin.on('end', () => { const text = Buffer.from(process.argv[1]); process.stderr.write(text.subarray(0, 26)); setTimeout(() => { process.stderr.write(text.subarray(26)); process.exitCode = 2; }, 1); });",
-        "--",
+        "-c",
+        "import sys\nsys.stdin.buffer.read()\nsys.stderr.buffer.write(sys.argv[1].encode('utf-8'))\nsys.exit(2)",
         diagnostic,
       ],
       "",
@@ -190,11 +197,10 @@ try {
   );
   await assert.rejects(
     runPythonWithInput(
-      process.execPath,
+      python,
       [
-        "-e",
-        "process.stderr.write(process.argv[1]); process.exit(1);",
-        "--",
+        "-c",
+        "import sys\nsys.stderr.buffer.write(sys.argv[1].encode('utf-8'))\nsys.exit(1)",
         diagnostic,
       ],
       input,
@@ -203,12 +209,7 @@ try {
     (error: Error) => error.message === diagnostic,
   );
   await assert.rejects(
-    runPythonWithInput(
-      process.execPath,
-      ["-e", "process.exit(0)"],
-      input,
-      "Fixture helper",
-    ),
+    runPythonWithInput(python, ["-c", "pass"], input, "Fixture helper"),
     (error: NodeJS.ErrnoException) => typeof error.code === "string",
   );
   await assert.rejects(

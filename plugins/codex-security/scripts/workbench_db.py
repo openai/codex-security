@@ -64,6 +64,7 @@ from workbench_constants import (
     DELIVERED_ACTION_LEASE_SECONDS,
     DIFF_TARGET_KINDS,
     EMPTY_GIT_TREE,
+    EMPTY_GIT_TREES,
     FINDING_ABSOLUTE_PATH_BYTES,
     FINDING_LEVEL_BYTES,
     FINDING_LOCATION_PATH_BYTES,
@@ -337,7 +338,7 @@ def require_diff_target(
             None,
         )
         if parent_line is None:
-            parent = EMPTY_GIT_TREE
+            parent = EMPTY_GIT_TREES[git_output(target, "rev-parse", "--show-object-format")]
         else:
             parent = resolve_git_commit(
                 target,
@@ -441,6 +442,20 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
+    # Older scans did not record path kinds. Retain their lexical scope semantics
+    # rather than infer the original target from a possibly changed checkout.
+    if scan["recipe_json"] is None:
+        return []
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    return recipe.get("scopeFilePaths", [])
+
+
+def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
+    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     target_contract = {
@@ -462,6 +477,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         "scope": {
             "requiredExcludePaths": [],
             "requestedPath": scan["scope"],
+            "filePaths": requested_scan_file_paths(scan),
             **(
                 {"requiredIncludePaths": requested_scan_paths(scan)}
                 if scan["mode"] != "diff"
@@ -785,10 +801,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 scope,
                 args.mode,
                 user_context_argument(args),
-                diff_target["kind"] if diff_target else None,
-                diff_target["baseRevision"] if diff_target else None,
-                diff_target["headRevision"] if diff_target else None,
-                diff_target.get("contentDigest") if diff_target else None,
+                *scan_diff_identity(diff_target or None),
                 timestamp,
                 workspace["id"],
             ),
@@ -1150,7 +1163,41 @@ def complete_scan(
             cost_json,
             prepare_only=prepare_only,
             thread_id=getattr(args, "thread_id", None),
+            turn_id=getattr(args, "turn_id", None),
         )
+
+
+def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    with scan_completion_lock(scan_id):
+        scan = require_scan(connection, scan_id)
+        stored = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
+        usage = stored.get("usage", {})
+        completion = usage.get("completion")
+        if scan["status"] != "complete" or not completion:
+            raise SystemExit("The scan has no pending completion usage.")
+        if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
+            raise SystemExit("The scan usage belongs to a different completion turn.")
+        if not completion["finalized"]:
+            usage = scan_usage.collect_scan_usage(
+                connection,
+                scan,
+                thread_id=args.thread_id,
+                completed_turn_id=args.turn_id,
+            )
+            if usage["coverage"] == "unavailable":
+                return scan_context(connection, scan_id)
+            if args.turn_status != "completed":
+                if usage["coverage"] == "complete":
+                    usage["coverage"] = "partial"
+                usage["warnings"] = [*usage.get("warnings", []), f"scan_turn_{args.turn_status}"]
+            usage["completion"] = {**completion, "finalized": True}
+            cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
+                )
+        return scan_context(connection, scan_id)
 
 
 def complete_budget_exhausted_scan(
@@ -1328,12 +1375,11 @@ def budget_exhausted_draft(
         manifest = {
             "scan": {
                 "target": target,
-                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+                "scope": {"limitations": [warning]},
             }
         }
         findings = {"findings": []}
         coverage = {
-            "completeness": "partial",
             "inventoryStrategy": (
                 "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
             ),
@@ -1419,7 +1465,7 @@ def budget_exhausted_draft(
                 "reason": "Validation was deferred because the scan reached its cost limit.",
             }
         )
-    coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     for name, payload in (
         ("findings.json", findings),
         ("coverage.json", coverage),
@@ -1443,6 +1489,7 @@ def complete_scan_locked(
     *,
     prepare_only: bool = False,
     thread_id: str | None = None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1540,17 +1587,33 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                recover_unsealed=scan["mode"] != "deep",
+                allow_missing_writeups=True,
                 draft_documents=draft_documents,
+                finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
+        if prepared.warnings:
+            # Save the explanation before publication removes the broken reference,
+            # so a retry after failed publication retains it.
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                    (json.dumps(warnings), scan_id),
+                )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
         )
     except ContractError as exc:
-        if wrote or (
+        # Only a coordinator-selected parent is fenced for output-write replay.
+        selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
+            connection, scan_id
+        )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
+        if (wrote and not selected_deep_parent) or (
             scan["mode"] == "deep"
+            and not wrote
             and not already_sealed
             and not isinstance(exc, RecoverableContractError)
         ):
@@ -1583,6 +1646,18 @@ def complete_scan_locked(
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
+        if thread_id is not None and turn_id is not None:
+            measured_usage["completion"] = {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "finalized": False,
+            }
+            if measured_usage["coverage"] == "complete":
+                measured_usage["coverage"] = "partial"
+            measured_usage["warnings"] = [
+                *measured_usage.get("warnings", []),
+                "turn_in_progress",
+            ]
         cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
@@ -1642,14 +1717,7 @@ def complete_scan_locked(
     return context
 
 
-def register_cli_scan(
-    connection: sqlite3.Connection,
-    args: argparse.Namespace,
-    *,
-    before_archive: Callable[[], None] | None = None,
-) -> dict[str, Any]:
-    repository = require_target(args.repository)
-    require_scannable_target(repository)
+def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Path:
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
     if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
         raise SystemExit(
@@ -1659,7 +1727,21 @@ def register_cli_scan(
         scan_dir.iterdir(), None
     ) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+    return scan_dir
 
+
+def register_cli_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    repository = require_target(args.repository)
+    require_scannable_target(repository)
+    scan_dir = None
+    if not args.archive_existing or args.archived_scan_dir is not None:
+        # Preserve early output rejection when this call will not move the directory.
+        scan_dir = require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
     if args.registration_json_stdin:
@@ -1672,6 +1754,10 @@ def register_cli_scan(
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
+    # Capture host-observed kinds once; resumes and publication use the saved recipe.
+    recipe.pop("scopeFilePaths", None)
+    if file_paths := [path for path in paths if (repository / path).is_file()]:
+        recipe["scopeFilePaths"] = file_paths
     scope = paths[0] if len(paths) == 1 else "."
     diff_target = None
     if requested_target["kind"] in {"refs", "working_tree"}:
@@ -1710,6 +1796,10 @@ def register_cli_scan(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if scan_dir is None:
+            # Host archiving temporarily removes the output directory. Wait for
+            # the existing writer before inspecting its replacement.
+            scan_dir = require_cli_scan_directory(repository, args)
         with archive_scan(
             connection,
             args,
@@ -2082,12 +2172,7 @@ def request_finding_remediation_action(
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["pending_action"] is not None:
             if (
                 current["pending_action"] == args.action
@@ -2155,12 +2240,7 @@ def claim_finding_remediation_resend(
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["pending_action"] is None:
             raise SystemExit("This remediation attempt does not have a pending host request.")
         if current["pending_action_claim_token"] == action_token:
@@ -2170,7 +2250,6 @@ def claim_finding_remediation_resend(
             return result
         delivered_at = current["pending_action_delivered_at"]
         if delivered_at is not None:
-            claimed_token = action_token
             updated = connection.execute(
                 """
                 UPDATE finding_remediation_attempts
@@ -2193,7 +2272,6 @@ def claim_finding_remediation_resend(
                 "This remediation worker is still within its execution lease. Retry later."
             )
         else:
-            claimed_token = action_token
             updated = connection.execute(
                 """
                 UPDATE finding_remediation_attempts
@@ -2219,7 +2297,7 @@ def claim_finding_remediation_resend(
         if updated.rowcount != 1:
             raise SystemExit(unavailable)
     result = scan_context(connection, occurrence["scan_id"])
-    result["actionToken"] = claimed_token
+    result["actionToken"] = action_token
     return result
 
 
@@ -2279,12 +2357,7 @@ def set_finding_remediation(
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["version"] != args.expected_version:
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
@@ -2778,13 +2851,10 @@ def scan_result(
         "status": "canceled" if scan["canceled_at"] else scan["status"],
         "updatedAt": progress["updated_at"],
     }
+    review_updated_at = ""
     if independent_reviews is not None:
-        progress_result["independentReviews"] = {
-            "active": independent_reviews["active"],
-            "completed": independent_reviews["completed"],
-            "maximum": independent_reviews["maximum"],
-            "consolidating": independent_reviews["consolidating"],
-        }
+        review_updated_at = str(independent_reviews.pop("updatedAt"))
+        progress_result["independentReviews"] = independent_reviews
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
@@ -2829,7 +2899,7 @@ def scan_result(
         "updatedAt": max(
             scan["updated_at"],
             progress["updated_at"],
-            str(independent_reviews["updatedAt"]) if independent_reviews is not None else "",
+            review_updated_at,
             finding_management_updated_at(connection, scan["id"]) or "",
         ),
         "userContext": scan["user_context"],
@@ -3133,8 +3203,7 @@ def finding_remediation_result(
     row = connection.execute(
         """
         SELECT remediation.request_id, remediation.state, remediation.version,
-            remediation.base_revision, remediation.base_content_digest,
-            remediation.applied_content_digest, remediation.pending_action,
+            remediation.base_revision, remediation.pending_action,
             remediation.pending_action_claimed_at, remediation.pending_action_claim_token,
             remediation.pending_action_delivered_at,
             remediation.patch_path, remediation.patch_digest, remediation.summary,
@@ -3338,10 +3407,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
-    if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(
-            _WORKBENCH_PUBLICATION_CONTEXT, read_json_object(Path(args.input_file))
-        )
+    if args.command == "finding-issues":
+        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3365,6 +3432,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "register-cli-scan": partial(register_cli_scan, before_archive=before_archive),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
+            "finalize-scan-usage": finalize_scan_usage,
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
             "list-findings": list_findings,
@@ -3394,21 +3462,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "attach-scan-continuation-thread": partial(
                 handoff.attach_scan_continuation_thread, command_context
             ),
-            "prepare-linear-publication": partial(
-                publication.prepare_linear_publication, _WORKBENCH_PUBLICATION_CONTEXT
-            ),
-            "record-linear-publications": partial(
-                publication.record_linear_publications, _WORKBENCH_PUBLICATION_CONTEXT
-            ),
             "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
         }
         if handler := handlers.get(args.command):
-            payload = (
-                read_json_object(Path(args.input_file))
-                if args.command in {"prepare-linear-publication", "record-linear-publications"}
-                else args
-            )
-            result = handler(connection, payload)
+            result = handler(connection, args)
         elif args.command == "get-workspace":
             result = workspace_state(
                 connection,

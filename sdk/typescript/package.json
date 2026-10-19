@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -28,7 +28,8 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./schemas/project-config.schema.json": "./schemas/project-config.schema.json"
+    "./schemas/project-config.schema.json": "./schemas/project-config.schema.json",
+    "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json"
   },
   "bin": {
     "codex-security": "./bin/codex-security.mjs",
@@ -43,7 +44,9 @@
     "README.md",
     "docs/cli.md",
     "docs/findings-service.md",
-    "docs/dedupe-records.md"
+    "docs/dedupe-records.md",
+    "docs/hosted-scans.md",
+    "docs/validate-records.md"
   ],
   "publishConfig": {
     "access": "public",
@@ -74,22 +77,24 @@
     "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
-    "@inquirer/prompts": "8.7.2",
-    "@linear/sdk": "97.0.0",
+    "@inquirer/prompts": "8.7.3",
+    "@linear/sdk": "97.1.0",
     "@octokit/core": "7.0.8",
-    "@openai/codex": "0.162.1",
-    "@openai/codex-sdk": "0.162.1",
+    "@openai/codex": "0.163.0",
+    "@openai/codex-sdk": "0.163.0",
     "ajv": "8.20.0",
     "fflate": "0.8.3",
     "incur": "0.7.0",
-    "ink": "7.1.1",
+    "ink": "8.0.0",
     "js-tiktoken": "1.0.21",
     "papaparse": "5.7.0",
-    "pdfjs-dist": "6.3.289",
+    "pdfjs-dist": "6.4.299",
     "react": "19.3.0",
+    "saxes": "6.0.0",
     "semver": "7.8.5",
-    "smol-toml": "1.9.0",
+    "smol-toml": "1.9.1",
     "string-width": "8.3.0",
+    "strip-ansi": "7.2.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
     "zod": "4.6.5"
@@ -97,7 +102,7 @@
   "devDependencies": {
     "@stryker-mutator/core": "10.0.0",
     "@types/bun": "1.4.2",
-    "@types/node": "26.6.4",
+    "@types/node": "26.6.5",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.3.0",
     "@types/semver": "7.8.0",
@@ -108,8 +113,7 @@
     "json-schema-to-typescript": "16.0.0",
     "json5": "2.2.3",
     "minimatch": "10.2.6",
-    "prettier": "3.9.9",
-    "saxes": "6.0.0",
+    "prettier": "3.9.10",
     "typescript": "7.0.2"
   }
 }

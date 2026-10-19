@@ -1,3 +1,7 @@
+import type { z } from "zod";
+import type { candidateSchemaV1 } from "../deep-scan/artifact-contracts.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { discoveryLocationRoles } from "../discovery-location-roles.js";
 import { isRecord as object } from "../record.js";
 import { decodeUtf8 } from "./utf8";
 import { createHash, randomBytes } from "node:crypto";
@@ -22,41 +26,15 @@ import {
 } from "./resolve-security-md";
 import { pathText, widePath } from "../../../native/windows-files.mjs";
 
-const roles = [
-  "entrypoint",
-  "entrypoint/wrapper",
-  "source",
-  "root_control",
-  "sink",
-  "concrete_implementation",
-  "evidence",
-];
-const fields = new Set([
-  "candidate_id",
-  "cwe_ids",
-  "locations",
-  "summary",
-  "evidence",
-  "context",
-  "instance",
-]);
-const locationFields = new Set(["path", "start_line", "end_line", "role"]);
+const roles: readonly string[] = discoveryLocationRoles;
+const { discoveryCandidate, rawDiscoveryLocation } =
+  artifactSchemaDocuments["definitions/discovery-candidate"].$defs;
+const fields = new Set(Object.keys(discoveryCandidate.shape));
+const locationFields = new Set(Object.keys(rawDiscoveryLocation.shape));
 const jsonFields = [...fields, ...locationFields].sort();
 type Row = Record<string, unknown>;
-interface Location {
-  path: string;
-  start_line: number;
-  end_line: number;
-  role: string;
-}
-interface Candidate {
-  cwe_ids: string[];
-  locations: Location[];
-  summary: string;
-  evidence: string;
-  context?: string;
-  instance?: string;
-}
+type Candidate = Omit<z.infer<typeof candidateSchemaV1>, "candidate_id">;
+type Location = Candidate["locations"][number];
 
 function compare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -148,9 +126,67 @@ function readScope(
   allowMissing: boolean,
   sources?: ReadonlyMap<string, CandidateSource>,
 ): Set<string> {
-  const contents = decodeUtf8(readFile(path));
+  const bytes = readFile(path);
+  const contents = windows ? decodeUtf8(bytes) : decodePosixBytes(bytes);
+  const lines = contents.split("\n");
+  const listedRows = new Set(lines);
+  const isScopeFile = (value: string): boolean => {
+    try {
+      relativeFile(value, root, sources);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const carriageRows = new Map<string, [boolean, boolean]>();
+  if (!windows) {
+    for (const line of lines) {
+      if (line.endsWith("\r") && line !== "\r") {
+        carriageRows.set(line, [
+          isScopeFile(line),
+          isScopeFile(line.slice(0, -1)),
+        ]);
+      }
+    }
+  }
+  const crlfEvidence = lines.slice(0, -1).some((line) => {
+    if (line === "\r") return true;
+    const paths = carriageRows.get(line);
+    return paths !== undefined && paths[1] && !paths[0];
+  });
+  const literalEvidence = [...carriageRows.values()].some(
+    ([literal, stripped]) => literal && !stripped,
+  );
   const scope = new Set<string>();
-  for (const [index, line] of contents.split(/\r?\n/u).entries()) {
+  for (const [index, row] of lines.entries()) {
+    let line = row;
+    const finalLiteral = index === lines.length - 1;
+    if (!finalLiteral && (windows || line === "\r")) {
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+    } else if (!finalLiteral && line.endsWith("\r")) {
+      const [literal, stripped] = carriageRows.get(line)!;
+      const trimmed = line.slice(0, -1);
+      if (allowMissing && literal && !stripped && !listedRows.has(trimmed)) {
+        throw new Error(
+          `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
+        );
+      }
+      if (stripped && !literal) {
+        line = trimmed;
+      } else if (stripped && literal) {
+        if (!listedRows.has(trimmed)) {
+          if (crlfEvidence && !literalEvidence) {
+            line = trimmed;
+          } else if (!literalEvidence || crlfEvidence) {
+            throw new Error(
+              `in-scope file row ${index + 1}: ambiguous carriage-return paths`,
+            );
+          }
+        }
+      } else if (!literal && crlfEvidence) {
+        line = trimmed;
+      }
+    }
     if (line === "") continue;
     try {
       scope.add(relativeFile(line, root, sources)[0]);
@@ -259,7 +295,7 @@ function normalizeLocations(
       path: name,
       start_line: start,
       end_line: end,
-      role: item.role,
+      role: item.role as Location["role"],
     };
     normalized.set(stableJson(location), location);
   }

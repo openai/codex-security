@@ -23,6 +23,7 @@ const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   reopened: { color: 31, icon: "↻" },
   new: { color: 31, icon: "+" },
   persisting: { color: 33, icon: "●" },
+  not_observed: { color: 36, icon: "○" },
   not_rescanned: { color: 36, icon: "○" },
   unknown: { color: 35, icon: "?" },
 };
@@ -121,7 +122,7 @@ export function renderScanHistory(
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
       before?.length || after?.length
-        ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
+        ? `  ${accent("·")}  ${before?.length ?? (entry["beforeOccurrenceId"] ? 1 : 0)} → ${after?.length ?? (entry["afterOccurrenceId"] ? 1 : 0)}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
     const related = entry["related"] as JsonObject[] | undefined;
@@ -286,6 +287,11 @@ export function renderScanHistory(
       lines.push(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
+          .sort(
+            ([left], [right]) =>
+              Object.keys(SEVERITY_COLORS).indexOf(left.toUpperCase()) -
+              Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
+          )
           .map(([severity, count]) => {
             const label = severity.toUpperCase();
             return paint(
@@ -403,12 +409,6 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
-    if (coverage !== "complete") {
-      lines.push(
-        `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
-      );
-    }
     const findings = (result["findings"] as JsonObject[]).map((entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===

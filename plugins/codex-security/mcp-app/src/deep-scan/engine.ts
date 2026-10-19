@@ -40,6 +40,8 @@ export function startDeepScanEngine(options: {
           repoRoot: run.targetPath,
           scanId: run.scanId,
           scope: run.scope,
+          includePaths: run.includePaths,
+          filePaths: run.filePaths,
           pythonCommand: options.pythonCommand,
         },
       }),
@@ -47,7 +49,7 @@ export function startDeepScanEngine(options: {
       log: options.log,
       handoffClaimToken,
       threadId,
-      onComplete: async (draft, signal) => {
+      onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
           runWorkbench,
@@ -66,6 +68,7 @@ export function startDeepScanEngine(options: {
           },
           runWorkbench,
           signal,
+          publication,
         );
       },
       onStopped: async (stopped) => {
