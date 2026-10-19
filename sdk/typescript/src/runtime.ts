@@ -2103,7 +2103,11 @@ async function createWindowsOutputDirectory(
       );
     let error = createOne();
     let firstCreated: string | undefined;
-    if (recursive && (error === 2 || error === 3) && dirname(target) !== target) {
+    if (
+      recursive &&
+      (error === 2 || error === 3) &&
+      dirname(target) !== target
+    ) {
       firstCreated = await create(dirname(target));
       error = createOne();
     }

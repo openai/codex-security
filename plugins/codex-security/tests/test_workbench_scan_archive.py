@@ -259,6 +259,7 @@ def test_archive_cannot_move_the_active_workbench_database(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1
 
 
+@pytest.mark.cross_platform
 def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
