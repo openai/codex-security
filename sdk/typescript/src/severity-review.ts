@@ -58,3 +58,22 @@ export function parseSeverityDecision(
     );
   }
 }
+
+/** Run independent reviews and retain the first complete answer for the winning level. */
+export async function reviewSeverityThreeTimes(
+  review: () => Promise<SeverityDecision>,
+): Promise<SeverityDecision> {
+  const decisions = [await review(), await review(), await review()] as const;
+  // Exclusion is a distinct vote; any assessed severity wins a three-way tie.
+  const levels = [...SCAN_SEVERITIES, null];
+  const count = (level: SeverityDecision["level"]) =>
+    decisions.filter((decision) => decision.level === level).length;
+  return decisions.reduce((winner, decision) => {
+    const difference = count(decision.level) - count(winner.level);
+    return difference > 0 ||
+      (difference === 0 &&
+        levels.indexOf(decision.level) < levels.indexOf(winner.level))
+      ? decision
+      : winner;
+  });
+}

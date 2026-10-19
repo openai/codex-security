@@ -53,7 +53,13 @@ function fakeCodex(response: unknown) {
       return {
         async run(prompt, turn) {
           calls.push({ prompt, thread, turn });
-          return { finalResponse: modelResponseText(response) };
+          return {
+            finalResponse: modelResponseText(
+              typeof response === "function"
+                ? response(calls.length)
+                : response,
+            ),
+          };
         },
       };
     },
@@ -104,7 +110,9 @@ test("supplies complete evidence and separate policy/context to a restricted str
   });
   expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
   expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(calls).toHaveLength(1);
+  expect(calls).toHaveLength(3);
+  expect(new Set(calls.map((call) => call.thread)).size).toBe(3);
+  expect(new Set(calls.map((call) => call.prompt)).size).toBe(1);
   expect(calls[0]!.prompt).toContain(String(finding["evidence"]));
   expect(calls[0]!.prompt).toContain("The counters contain no customer data.");
   expect(calls[0]!.thread).toMatchObject({
@@ -230,3 +238,79 @@ test("cancellation and invalid inputs cannot produce a successful classification
   );
   expect((await classifySeverity([])).assessments).toEqual([]);
 });
+
+test("votes independently for each imported report and retains the winning answer", async () => {
+  const rubricPath = await document("Classify using the supplied evidence.");
+  const second = { ...finding, findingId: "second-finding" };
+  const responses = [
+    { ...assessed, level: "low", rationale: "First low answer" },
+    { ...assessed, level: "high" },
+    { ...assessed, level: "low", rationale: "Second low answer" },
+    ...["medium", "critical", "high"].map((level) => ({
+      ...assessed,
+      findingId: second.findingId,
+      level,
+    })),
+  ];
+  const { codex, calls } = fakeCodex((call: number) => responses[call - 1]);
+  const result = await classifySeverity([finding, second], {
+    rubricPath,
+    codex,
+  });
+  expect(calls).toHaveLength(6);
+  expect(result.assessments).toMatchObject([
+    { level: "low", rationale: "First low answer" },
+    { level: "critical", findingId: second.findingId },
+  ]);
+  expect(
+    calls.map(
+      ({ prompt }) =>
+        JSON.parse(prompt.split("\n\n").at(-1)!).finding.findingId,
+    ),
+  ).toEqual([
+    finding.findingId,
+    finding.findingId,
+    finding.findingId,
+    second.findingId,
+    second.findingId,
+    second.findingId,
+  ]);
+});
+
+test.each([2, 3])(
+  "does not return a partial vote when review %s fails or is invalid",
+  async (failedRun) => {
+    const rubricPath = await document("Apply the supplied policy.");
+    for (const invalid of [false, true]) {
+      const { codex, calls } = fakeCodex((call: number) => {
+        if (call !== failedRun) return assessed;
+        if (invalid) return { ...assessed, findingId: "wrong-finding" };
+        throw new Error("Review failed");
+      });
+      await expect(
+        classifySeverity([finding], { rubricPath, codex }),
+      ).rejects.toThrow(invalid ? "invalid assessment" : "Review failed");
+      expect(calls).toHaveLength(failedRun);
+    }
+  },
+);
+
+test.each([1, 2, 3])(
+  "cancellation after review %s stops classification",
+  async (canceledRun) => {
+    const rubricPath = await document("Apply the supplied policy.");
+    const controller = new AbortController();
+    const { codex, calls } = fakeCodex((call: number) => {
+      if (call === canceledRun) controller.abort(new Error("Stopped"));
+      return assessed;
+    });
+    await expect(
+      classifySeverity([finding], {
+        rubricPath,
+        codex,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("Stopped");
+    expect(calls).toHaveLength(canceledRun);
+  },
+);

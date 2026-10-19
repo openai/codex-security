@@ -207,13 +207,17 @@ await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environm
 
 function recordingClassifier() {
   const calls: string[] = [];
-  const control = { failOn: "", excluded: false };
+  const control = { failOn: "", failOnRun: 1, excluded: false };
   const codex = codexWithRun(async (prompt: string) => {
     const { finding } = JSON.parse(prompt.split("\n\n").at(-1)!) as {
       finding: Finding;
     };
     calls.push(finding.findingId);
-    if (finding.findingId === control.failOn)
+    if (
+      finding.findingId === control.failOn &&
+      calls.filter((id) => id === finding.findingId).length ===
+        control.failOnRun
+    )
       throw new Error("Interrupted model call");
     return classifier(finding, control.excluded).startThread().run();
   });
@@ -225,6 +229,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   const { codex, calls, control } = recordingClassifier();
   const options = { environment, rubricPath, codex };
   control.failOn = findings[1]!.findingId;
+  control.failOnRun = 3;
   await expect(
     classifyScanDirectorySeverity(scanDirectory, options),
   ).rejects.toThrow("Interrupted model call");
@@ -242,7 +247,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   control.failOn = "";
   calls.length = 0;
   const complete = await classifyScanDirectorySeverity(scanDirectory, options);
-  expect(calls).toEqual([findings[1]!.findingId]);
+  expect(calls).toEqual(Array(3).fill(findings[1]!.findingId));
   expect(complete.assessments).toHaveLength(2);
   const { scanId: _scanId, ...assessment } = complete;
   expect(
@@ -277,7 +282,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     reprocess: true,
   };
   const revised = await classifyScanDirectorySeverity(scanDirectory, selected);
-  expect(calls).toEqual([findings[0]!.findingId]);
+  expect(calls).toEqual(Array(3).fill(findings[0]!.findingId));
   expect(revised.assessments[0]!.decision).toBe("excluded");
   const revisedRows = await query(
     environment,
@@ -303,6 +308,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   ).toHaveLength(1);
 
   control.failOn = findings[0]!.findingId;
+  control.failOnRun = 2;
   await expect(
     classifyScanDirectorySeverity(scanDirectory, selected),
   ).rejects.toThrow("Interrupted model call");
@@ -442,17 +448,17 @@ test("changed rubric, context, or evidence invalidates matching checkpoints", as
   calls.length = 0;
   await writeFile(rubricPath, "Assign Medium to bounded metadata reads.");
   await classifyScanDirectorySeverity(scanDirectory, options);
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(6);
   const context = join(root, "context.md");
   await writeFile(context, "The system contains operational counters.");
   calls.length = 0;
   const withContext = { ...options, knowledgeBasePaths: [context] };
   await classifyScanDirectorySeverity(scanDirectory, withContext);
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(6);
   calls.length = 0;
   await writeFile(context, "The counters include protected metadata.");
   await classifyScanDirectorySeverity(scanDirectory, withContext);
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(6);
 
   const findingPath = join(scanDirectory, "findings.json");
   const document = JSON.parse(
@@ -474,7 +480,7 @@ test("changed rubric, context, or evidence invalidates matching checkpoints", as
   ).rejects.toThrow("does not match");
   calls.length = 0;
   await classifyScanDirectorySeverity(scanDirectory, withContext);
-  expect(calls).toEqual([findings[0]!.findingId]);
+  expect(calls).toEqual(Array(3).fill(findings[0]!.findingId));
   expect(
     await query(environment, "SELECT * FROM findings ORDER BY id"),
   ).toEqual(originalFindings);
@@ -786,7 +792,7 @@ test("classifying another scan preserves both recurring-finding assessments", as
   };
   await classifyScanDirectorySeverity(first.scanDirectory, options);
   await classifyScanDirectorySeverity(second.scanDirectory, options);
-  expect(calls).toHaveLength(4);
+  expect(calls).toHaveLength(12);
   calls.length = 0;
   for (const scan of [first, second, first, second]) {
     expect(

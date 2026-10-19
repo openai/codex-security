@@ -4,6 +4,7 @@ import { z } from "zod";
 import { abortable } from "./targets.js";
 import {
   parseSeverityDecision,
+  reviewSeverityThreeTimes,
   severityDecisionSchema,
   severityReviewInstructions,
   type SeverityDecision,
@@ -153,23 +154,37 @@ export async function classifySeverityRecords(
   const assessments: CanonicalSeverityAssessment[] = [];
   for (const record of data.records) {
     options.signal?.throwIfAborted();
-    let response: unknown;
+    let code: "review_failed" | "invalid_assessment" = "review_failed";
     try {
-      response = await abortable(() => {
-        options.signal?.throwIfAborted();
-        return options.reviewRunner.run(
-          {
-            requestId: randomUUID(),
-            stage: "severity-classification",
-            model: data.model,
-            effort: data.effort,
-            trustedInstructions: severityReviewInstructions,
-            prompt: `{"rubric":${JSON.stringify([data.rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
-            schema: z.toJSONSchema(severityDecisionSchema),
-          },
-          { signal: options.signal },
-        );
-      }, options.signal);
+      const { findingId: _findingId, ...decision } =
+        await reviewSeverityThreeTimes(async () => {
+          code = "review_failed";
+          const response = await abortable(() => {
+            options.signal?.throwIfAborted();
+            return options.reviewRunner.run(
+              {
+                requestId: randomUUID(),
+                stage: "severity-classification",
+                model: data.model,
+                effort: data.effort,
+                trustedInstructions: severityReviewInstructions,
+                prompt: `{"rubric":${JSON.stringify([data.rubric.markdown])},"knowledgeBase":null,"finding":${record.findingJson}}`,
+                schema: z.toJSONSchema(severityDecisionSchema),
+              },
+              { signal: options.signal },
+            );
+          }, options.signal);
+          options.signal?.throwIfAborted();
+          code = "invalid_assessment";
+          return parseSeverityDecision(response, record.id);
+        });
+      options.signal?.throwIfAborted();
+      assessments.push({
+        ...decision,
+        id: record.id,
+        revision: record.revision,
+        inputSha256: record.inputSha256,
+      });
     } catch (error) {
       options.signal?.throwIfAborted();
       return {
@@ -178,34 +193,13 @@ export async function classifySeverityRecords(
         assessments: [],
         error: {
           recordId: record.id,
-          code: "review_failed",
+          code,
           message:
-            error instanceof Error ? error.message : "Host review failed.",
-        },
-      };
-    }
-    options.signal?.throwIfAborted();
-    try {
-      const { findingId: _findingId, ...decision } = parseSeverityDecision(
-        response,
-        record.id,
-      );
-      assessments.push({
-        ...decision,
-        id: record.id,
-        revision: record.revision,
-        inputSha256: record.inputSha256,
-      });
-    } catch (error) {
-      return {
-        ...binding,
-        status: "unresolved",
-        assessments: [],
-        error: {
-          recordId: record.id,
-          code: "invalid_assessment",
-          message:
-            error instanceof Error ? error.message : "Invalid assessment.",
+            error instanceof Error
+              ? error.message
+              : code === "review_failed"
+                ? "Host review failed."
+                : "Invalid assessment.",
         },
       };
     }

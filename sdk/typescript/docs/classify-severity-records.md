@@ -45,8 +45,8 @@ numeric evidence that JavaScript cannot represent exactly.
 
 ## Host execution contract
 
-For each record the CLI emits `method: "review.run"`, with a unique request ID
-and params containing `requestId`, `stage: "severity-classification"`, explicit
+For each record the CLI emits three sequential `method: "review.run"` requests,
+each with a unique request ID and params containing `requestId`, `stage: "severity-classification"`, explicit
 `model` and `effort`, `trustedInstructions`, untrusted report/rubric `prompt`, and
 an output JSON `schema`. The host must authorize the requested model and effort,
 create a fresh independent review context, preserve the instruction/data boundary,
@@ -61,7 +61,15 @@ object. Do not wrap the assessment in a string or an array. An assessment contai
 `rubricLabel`, `rationale`, separate `confidence`, and nullable `reviewTrigger`.
 Excluded assessments require null level and label; assessed ones require both.
 
-The host owns model budgets, transport limits, timeouts, and session cancellation.
+The three reviews receive identical inputs and do not see earlier answers. The
+most common normalized severity wins; if all three differ, the highest wins
+(`critical` > `high` > `medium` > `low` > `informational`). Exclusion is a separate
+vote: two exclusions win, while any assessed severity wins a three-way tie with an
+exclusion. The first answer matching the winner supplies all assessment fields.
+
+The host owns model budgets, usage accounting, transport limits, timeouts, and
+session cancellation. Account for every review request, including work preceding
+a later failure; classification results do not aggregate or report token usage.
 Use the transport's `cancel` notification with the active run ID and also stop
 any remote execution. EOF or a broken pipe means disconnection, not successful
 completion. No review is retried automatically, including after an ambiguous
@@ -76,9 +84,9 @@ The original report and severity are never rewritten.
 
 Invalid or mismatched model output and host failures return `status: "unresolved"`,
 an empty `assessments` array, and an error with `recordId` and stable code
-`invalid_assessment` or `review_failed`. Earlier assessments in that invocation
-are discarded. Invalid input, protocol errors, and cancellation use JSON-RPC error
-responses. Exit codes are 0 for completion, 1 for unresolved review, and 2 for
+`invalid_assessment` or `review_failed`. All three reviews must succeed; partial
+votes and earlier assessments in that invocation are discarded. Invalid input,
+protocol errors, and cancellation use JSON-RPC error responses. Exit codes are 0 for completion, 1 for unresolved review, and 2 for
 input/protocol failure (130/143 for SIGINT/SIGTERM).
 
 Prefer one canonical record per workflow invocation when the host needs independent

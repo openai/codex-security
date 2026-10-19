@@ -13,6 +13,7 @@ import {
   severityDecisionSchema as decisionSchema,
   severityReviewInstructions,
   parseSeverityDecision,
+  reviewSeverityThreeTimes,
 } from "./severity-review.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 
@@ -157,32 +158,34 @@ export async function classifySeverityInternal(
         reviewTrigger: finding.severity?.changeConditions?.trim() || null,
       };
     } else {
-      const response = await runReadOnlyCodex(
-        [
-          severityReviewInstructions,
-          JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
-        ].join("\n\n"),
-        z.toJSONSchema(decisionSchema),
-        options,
-        {
-          surface,
-          command: "classify-severity",
-          threadSource: CODEX_SECURITY_THREAD_SOURCES.severityClassification,
-        },
-      );
-      options.signal?.throwIfAborted();
-      try {
-        decision = parseSeverityDecision(
-          JSON.parse(response),
-          finding.findingId,
+      const prompt = [
+        severityReviewInstructions,
+        JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
+      ].join("\n\n");
+      decision = await reviewSeverityThreeTimes(async () => {
+        options.signal?.throwIfAborted();
+        const response = await runReadOnlyCodex(
+          prompt,
+          z.toJSONSchema(decisionSchema),
+          options,
+          {
+            surface,
+            command: "classify-severity",
+            threadSource: CODEX_SECURITY_THREAD_SOURCES.severityClassification,
+          },
         );
-      } catch (error) {
-        throw new CodexSecurityError(
-          "Severity classification returned an invalid assessment.",
-          { cause: error },
-        );
-      }
+        options.signal?.throwIfAborted();
+        try {
+          return parseSeverityDecision(JSON.parse(response), finding.findingId);
+        } catch (error) {
+          throw new CodexSecurityError(
+            "Severity classification returned an invalid assessment.",
+            { cause: error },
+          );
+        }
+      });
     }
+    options.signal?.throwIfAborted();
     const assessment: SeverityAssessment = {
       ...decision,
       occurrenceId: finding.occurrenceId ?? null,

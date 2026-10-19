@@ -76,7 +76,9 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
     ],
   });
   expect(original).toEqual(before);
-  expect(requests).toHaveLength(1);
+  expect(requests).toHaveLength(3);
+  expect(new Set(requests.map(({ requestId }) => requestId)).size).toBe(3);
+  expect(new Set(requests.map(({ prompt }) => prompt)).size).toBe(1);
   expect(result.assessments[0]).not.toHaveProperty("findingId");
 });
 
@@ -143,7 +145,7 @@ test.each([
       async run(request) {
         calls++;
         const result: Record<string, unknown> = answer(request);
-        if (calls === 1) return result;
+        if (calls <= 3) return result;
         if (scenario === "host-failure")
           throw new Error("Host could not complete review");
         if (scenario === "wrong-id") result["findingId"] = "canonical-one";
@@ -164,7 +166,7 @@ test.each([
         scenario === "host-failure" ? "review_failed" : "invalid_assessment",
     },
   });
-  expect(calls).toBe(2);
+  expect(calls).toBe(4);
 });
 
 test("exclusion is distinct from low severity", async () => {
@@ -285,7 +287,7 @@ test.each([
     );
     expect(
       messages.filter((message) => message.method === "review.run"),
-    ).toHaveLength(1);
+    ).toHaveLength(scenario === "completed" ? 3 : 1);
     const final = messages.at(-1);
     expect(final.id).toBe("run-one");
     if (scenario === "completed")
@@ -359,3 +361,69 @@ test("immediate SDK cancellation never starts a queued host review", async () =>
   await expect(result).rejects.toThrow("Stopped before review");
   expect(calls).toBe(0);
 });
+
+test("canonical records use majority voting and highest severity for a three-way tie", async () => {
+  for (const [levels, expected] of [
+    [["low", "high", "low"], "low"],
+    [["medium", "critical", "high"], "critical"],
+  ] as const) {
+    let calls = 0;
+    const result = await classifySeverityRecords(input(), {
+      reviewRunner: {
+        async run(request) {
+          return { ...answer(request), level: levels[calls++] };
+        },
+      },
+    });
+    expect(calls).toBe(3);
+    expect(result.assessments[0]?.level).toBe(expected);
+  }
+});
+
+test.each([2, 3])(
+  "canonical review %s must succeed before returning any assessment",
+  async (failedRun) => {
+    for (const invalid of [false, true]) {
+      let calls = 0;
+      const result = await classifySeverityRecords(input(), {
+        reviewRunner: {
+          async run(request) {
+            if (++calls !== failedRun) return answer(request);
+            if (invalid)
+              return { ...answer(request), findingId: "wrong-finding" };
+            throw new Error("Host review failed");
+          },
+        },
+      });
+      expect(result).toMatchObject({
+        status: "unresolved",
+        assessments: [],
+        error: {
+          recordId: "canonical-one",
+          code: invalid ? "invalid_assessment" : "review_failed",
+        },
+      });
+      expect(calls).toBe(failedRun);
+    }
+  },
+);
+
+test.each([2, 3])(
+  "canonical cancellation during review %s never returns a partial vote",
+  async (canceledRun) => {
+    const controller = new AbortController();
+    let calls = 0;
+    await expect(
+      classifySeverityRecords(input(), {
+        signal: controller.signal,
+        reviewRunner: {
+          async run(request) {
+            if (++calls === canceledRun) controller.abort(new Error("Stopped"));
+            return answer(request);
+          },
+        },
+      }),
+    ).rejects.toThrow("Stopped");
+    expect(calls).toBe(canceledRun);
+  },
+);

@@ -1211,9 +1211,16 @@ report snapshots and delegates model execution to the host.
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
 Omitting `--rubric` inherits original severity without model calls. Rubrics and
 repeatable `--knowledge-base` context accept text, PDF, DOCX, and directories.
-Each finding is classified in a separate read-only turn using its report and
-supplied context, without tools or source inspection. `--model` and `--effort`
-override Codex's configured model and the default medium effort.
+Each finding is classified three times in independent read-only turns using the
+same report, rubric, and supplied context, without tools or source inspection.
+The most common normalized severity wins; if all three differ, the highest wins
+(`critical` > `high` > `medium` > `low` > `informational`). Exclusion is a separate
+vote: two exclusions win, but an assessed severity wins a three-way tie with an
+exclusion. The first answer matching the winner supplies its label, rationale,
+confidence, and review trigger. All three reviews must succeed; failures or invalid
+answers fail that finding without saving a partial vote. This uses three model
+calls per uncached finding. Codex retains usage for each independent turn.
+`--model` and `--effort` override Codex's configured model and the default medium effort.
 
 Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
 the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
@@ -1223,8 +1230,8 @@ Finding/occurrence IDs and input hashes bind each assessment to its evidence.
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, and context hashes; failed/canceled runs keep completed
 work. Use `--reprocess` to replace assessments, including when changing only model
-or effort. A successful run also writes `severity-classification.json`, but
-publication reads the database. Original findings and sealed artifacts remain
+or effort, or to replace assessments cached before three-review voting. A successful
+run also writes `severity-classification.json`, but publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
 Repeat `--finding-id ID` for a subset from the selected scan. Dedupe's
