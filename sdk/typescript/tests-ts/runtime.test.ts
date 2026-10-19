@@ -3842,8 +3842,9 @@ describe("runtime directories and plugin Python boundary", () => {
         const result = await outcome;
         if (kind === "unsafe") {
           expect(result.error).toMatchObject({
-            message:
+            message: expect.stringContaining(
               "Windows credential-home ancestor allows another identity to replace the directory",
+            ),
           });
           expect(attempts).toBe(1);
         } else {
@@ -3880,6 +3881,52 @@ describe("runtime directories and plugin Python boundary", () => {
       "Windows credential-home ancestor allows another identity to replace the directory",
     );
   });
+
+  test.each(["parent", "volume root"] as const)(
+    "identifies an Everyone-owned %s in streamed Windows ACL descriptors",
+    async (location) => {
+      const { home } = await credentialHome(false);
+      const sid = "S-1-5-21-111-222-333-1001";
+      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const ancestors = credentialAncestors(home, directory);
+      const rejected = location === "parent" ? dirname(home) : parse(home).root;
+      ancestors[location === "parent" ? 0 : ancestors.length - 1] =
+        `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
+
+      const failure = await inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
+        ],
+      }).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        `ancestor could not be trusted: ${rejected}.`,
+      );
+      expect((failure as Error).message).toContain(
+        "Windows credential ACL owner is not a trusted principal: S-1-1-0",
+      );
+      expect((failure as Error).cause).toMatchObject({
+        message:
+          "Windows credential ACL owner is not a trusted principal: S-1-1-0",
+      });
+      if (location === "volume root") {
+        expect((failure as Error).message).toContain(
+          "volume root is unsupported",
+        );
+        expect((failure as Error).message).toContain(
+          "another directory on the same volume will not resolve this",
+        );
+      } else {
+        expect((failure as Error).message).toContain(
+          "Choose a location outside this ancestor",
+        );
+        expect((failure as Error).message).not.toContain("volume root");
+      }
+    },
+  );
 
   test("rejects incomplete combined Windows credential ACL inspections", async () => {
     const { home } = await credentialHome(false);
