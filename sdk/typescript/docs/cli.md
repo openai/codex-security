@@ -364,11 +364,15 @@ SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
 explicit unsupported binary files are rejected. Bulk scans share this context
 with every repository.
 
-Output directories must be empty and outside the scanned directory and enclosing
-Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`).
+Use `--output-dir DIR` to choose where a scan saves its results. The directory
+must be empty and outside the scanned directory and enclosing Git worktree. On
+macOS/Linux, existing directories must be private (`chmod 700`).
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
-SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
+
+Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
+optional export fails, the scan can still complete. Use the
+[export command](#export-findings) to write or retry SARIF from the saved results.
 
 Completed scans exit with `0` by default. Configure `--fail-on-severity high`
 to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
@@ -644,6 +648,29 @@ From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
 Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
 planning and authentication choices.
 
+### Set investigation time
+
+```bash
+codex-security scan . --max-time 15
+codex-security scan . --diff origin/main --max-time 15
+codex-security scan . --mode deep --max-time 90
+```
+
+`--max-time` accepts positive fractional **minutes**. Standard scans have no
+time allowance by default. When selected, it is advisory: spend the available
+time on useful investigation and validation, finish early if no worthwhile work
+remains, and stop starting investigations at the deadline. Reporting can run
+longer. This is not a hard timeout or a minimum runtime. The allowance covers
+repository, path, diff, and working-tree scans; standalone custom validation and
+post-scan instructions are outside it. Existing `--max-cost` and cancellation
+behavior are unchanged.
+
+The SDK setting is `maxTimeMinutes`; project files use `scan.max_time_minutes`.
+Each launched scan or rerun gets its own allowance after setup, and reconnects
+do not reset it. Standard scans still do not support resume. For batch and
+component scans, the project setting applies separately to each scan attempt,
+not to planning, result matching, or the total campaign.
+
 ### Configure deep scans
 
 ```ts
@@ -654,19 +681,27 @@ await security.run("/path/to/repository", {
   stopAfterNoNew: 3,
   stopAfterConsecutiveErrors: 2,
   maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
+  maxTimeMinutes: 90,
 });
 ```
 
 For `scan --mode deep`, `--workers` controls discovery concurrency and
 `--subagents` controls subagents per worker. `--stop-after-no-new`,
-`--max-discovery-runs`, and `--max-time-hours` stop discovery by novelty, count,
+`--max-discovery-runs`, and `--max-time` stop discovery by novelty, count,
 or duration. At the deadline, discovery stops; the scan then combines and returns
 completed findings.
 
 Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
-that `subagents` can be zero. Time accepts positive fractional hours up to 96.
+that `subagents` can be zero. Discovery time accepts positive fractional minutes;
+its default and maximum remain 5760 minutes (96 hours). Unlike Standard's
+advisory allowance, this existing Deep discovery limit is enforced. Resuming a
+Deep scan keeps its original deadline; rerunning starts a new scan.
+`--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
+legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
+hours. Explicit settings override lower-priority configuration across units.
+At the winning source, conflicting minute/hour durations are errors; equivalent
+durations are accepted.
 `stopAfterConsecutiveErrors` is an SDK/project-file setting, with no CLI flag.
 `--codex` does not configure deep-scan settings. See
 [Deep settings and limits](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#deep-settings-and-limits).
@@ -964,6 +999,10 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+Completed results are skipped only when their saved contract and seal are valid
+and the manifest records a completed scan. Damaged or unsuccessful results get a
+new attempt, including with `--recover`, while the old artifacts remain available.
+Missing or invalid plugin schemas stop resume without starting another scan.
 Changes to project configuration, extracted knowledge-base text, staged document
 filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
 require a new output directory. Version 1 manifests also require a new directory
@@ -1491,31 +1530,80 @@ Progress callback failures do not stop matching.
 
 ## Exports and CI
 
-`export` reads saved results without Codex or credentials. It defaults to the
-current repository's latest completed scan. Choose either a positional result
-directory or `--scan ID`. Findings require sealed results and support
-`--export-format csv|json|sarif` (default SARIF). `--source-root PATH` adds SARIF
-source-line fingerprints.
+Export saved findings and threat models without rerunning a scan or signing in.
+
+### Export findings
+
+To save a completed scan's findings as SARIF, run:
+
+```bash
+codex-security export /path/to/scan-results --output results.sarif
+```
+
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+The command writes `results.sarif` in the current directory. The output directory
+must already exist.
+
+SARIF is the default format, and `./results.sarif` is the default output path.
+Use `--export-format json` or `--export-format csv` to choose another format.
+To select a saved scan by its ID and export JSON, run:
 
 ```bash
 codex-security export --scan SCAN_ID --export-format json --output findings.json
-codex-security export --artifact threat-model --output docs/threatmodel.md
-codex-security export /path/to/policy-results --artifact threat-model --output -
 ```
 
-Threat-model exports use Markdown and default to `./threatmodel.md`. Standard,
-Deep, Diff, and policy workflows retain models when available; component/bulk
-runs save one per child. Explicit results may expose a model before completion
-or after later failure. Missing models return an error rather than generating
-or substituting one. Historical models in sealed scans need a matching manifest
-digest.
+Replace `SCAN_ID` with the ID printed by `scan`. If you omit both the results
+directory and `--scan`, `export` uses the current repository's latest completed
+scan.
+
+JSON preserves the saved findings. CSV marks them open, omits local triage state,
+and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
+leading apostrophes; import removes the escape. Use JSON to recover ambiguous
+apostrophes from older CSV exports.
+
+For SARIF, `--source-root` adds source-line fingerprints that help tools match
+findings across scans. Before changing the scanned files or applying patches,
+run the export from the scanned repository's root:
+
+```bash
+codex-security export /path/to/scan-results --source-root . --output results.sarif
+```
+
+The `.` selects the current directory as the source root. Its source files must
+be unchanged since the scan. `--source-root` is supported only for SARIF.
+
+If export fails, it exits with `2`. Fix the reported error and rerun the export;
+the saved scan remains available, so you don't need to run another scan.
+
+### Export a threat model
+
+To save a scan's threat model as Markdown, run:
+
+```bash
+codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+```
+
+Threat-model exports default to `./threatmodel.md`. Standard, Deep, Diff, and
+policy workflows retain models when available; component/bulk runs save one per
+child. With an explicit results directory, you can export a saved threat model
+even if the workflow has not completed or later failed. Missing models return
+an error rather than generating or substituting one. Historical models in sealed
+scans need a matching manifest digest.
+
+To print a policy workflow's saved threat model, pass its results directory and
+`--output -`:
+
+```bash
+codex-security export /path/to/policy-results --artifact threat-model --output -
+```
 
 `--output -` emits only artifact content, with diagnostics on stderr. Markdown
 and CSV stdout cannot combine with JSON command output. Exporting into a checkout
 does not make the model scan input; pass it with `--knowledge-base`.
 
-`ScanResult.threatModel` and `threatModelPath` expose the retained model and
-document, or null. Export still works if the document could not be written.
+### Export with the SDK
+
+Use `exportArtifact()` to export saved results from TypeScript:
 
 ```ts
 import { exportArtifact } from "@openai/codex-security";
@@ -1532,12 +1620,12 @@ Use `artifact: "findings"` with `format: "csv" | "json" | "sarif"` for findings.
 `output: "-"` streams stdout and returns null path/provenance. `pythonPath`
 selects an interpreter; `signal` cancels.
 
-JSON preserves sealed findings. CSV marks them open, omits local triage state,
-and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
-leading apostrophes; import removes the escape. Use JSON to recover ambiguous
-apostrophes from older CSV exports.
+`ScanResult.threatModel` and `threatModelPath` expose the retained model and
+document, or null. Export still works if the document could not be written.
 
-For CI, place output outside the checkout and set a severity threshold:
+### Use exports in CI
+
+Save each scan's results outside the checkout and set a severity threshold:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
@@ -1552,6 +1640,21 @@ codex-security scan . --diff origin/main \
 | `1`           | Severity policy violation.                                               |
 | `2`           | Invalid input, runtime error, target change, or required-output failure. |
 | `130` / `143` | Interrupt / termination.                                                 |
+
+If the scan exits with `2`, `130`, or `143`, skip export and upload. After a scan
+exits with `0` or `1`, use these steps:
+
+1. Export from that run's results directory. Using the explicit directory keeps
+   concurrent scans from changing which results are selected:
+
+   ```bash
+   codex-security export "$SCAN_ROOT/results" --source-root . \
+     --output "$SCAN_ROOT/results.sarif"
+   ```
+
+2. If export succeeds, upload the SARIF file.
+3. If the scan exited with `1`, keep the CI job failed so the severity threshold
+   remains enforced.
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
 `--json`. Use `validate --output-schema FILE` for a schema-checked JSON assessment.
@@ -1771,6 +1874,8 @@ Both candidate IDs remain in the output, including the unresolved claim.
 `--scan latest` uses the current repository's latest completed scan. Patching
 supports JSON for saved findings, literal text, and files. Each finding gets a
 saved Codex desktop task. `--model` and `--effort` control the model.
+Saved-scan patching and fix verification use the complete sealed finding evidence
+and exclude findings that are currently closed in triage.
 
 `--validation-prompt-file PATH` supplies setup, authorized targets, expected
 results, and cleanup for dynamic validation. It works with saved findings,
@@ -1851,8 +1956,11 @@ Use `--llms` for the command manifest, `scan --schema --format json` for its
 schema, and `completions bash|zsh|fish` for shell completions. Scan output supports
 `--format toon|json|yaml|jsonl` and `--full-output`.
 
-`skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
-MCP exposes only read-only `info`, because the transport cannot cancel scans.
+`skills add` syncs generated CLI command guidance; it does not install the full
+Codex Security plugin. `mcp add` registers the CLI as an MCP server, exposing
+only read-only `info` because the transport cannot cancel scans. For the plugin's
+scan, triage, patch, and verification workflows, see the
+[agent workflow guide](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md).
 
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).

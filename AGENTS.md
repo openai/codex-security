@@ -11,9 +11,12 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 - Keep credential access, storage, and configuration protections, unsafe-path
   checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
-- Accept reasoning-effort values as strings and pass them through unchanged.
-  Do not add wrapper-owned enums or allowlists; let the selected model/provider
-  determine which values it supports.
+- Pass Codex-owned settings through existing SDK configuration interfaces.
+  Accept reasoning-effort values as strings and pass them through unchanged.
+  Do not maintain wrapper-owned model or reasoning-effort enums or allowlists;
+  let Codex and the selected model/provider validate supplied values. Use
+  upstream capability discovery for suggested choices. Preserve credential
+  protections, worker permissions, and per-scan configuration isolation.
 - Mention another `openai/` repository in comments or pull request descriptions
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.

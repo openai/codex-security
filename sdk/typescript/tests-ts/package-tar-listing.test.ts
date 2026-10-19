@@ -249,6 +249,44 @@ function installPackage(
   );
 }
 
+function checkPackage(
+  root: string,
+  archivePath: string,
+  contractPath: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<{ status: number; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      commandPath("node"),
+      [
+        fileURLToPath(new URL("../scripts/check-package.mjs", import.meta.url)),
+        archivePath,
+        contractPath,
+      ],
+      {
+        cwd: root,
+        env: environment,
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+      },
+      (error, _stdout, stderr) => {
+        if (error === null) {
+          resolve({ status: 0, stderr });
+        } else if (
+          typeof error.code === "number" &&
+          !error.killed &&
+          !error.signal
+        ) {
+          resolve({ status: error.code, stderr });
+        } else {
+          reject(error);
+        }
+      },
+    );
+  });
+}
+
 describe("npm package tar listings", () => {
   test("accepts regular entries with Unix or Windows line endings", () => {
     const file = "-rw-r--r-- package/package.json";
@@ -690,22 +728,11 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect({
         status: checked.status,
@@ -854,22 +881,11 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const checked = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect({
         status: checked.status,

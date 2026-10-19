@@ -40,6 +40,7 @@ const distModules = [
   "provider-profile",
   "scan-modes",
   "scan-settings",
+  "scan-time-budget",
   "errors",
   "feedback",
   "finding-catalogue",

@@ -11,6 +11,10 @@ the nested [QA guide](qa/README.md) explain the sample and its expected findings
 The [threat model](SECURITY.md) describes the app's assets, trust boundaries, and
 intended security properties. It also stays outside the standalone scanner input.
 
+To scan the sample and verify a patch, follow the
+[scan, inspect, patch, and verify walkthrough](walkthrough.md). It uses a standalone
+copy of the app and keeps illustrative evidence separate from your actual results.
+
 ## Start
 
 From the repository root:
