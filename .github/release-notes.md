@@ -29,6 +29,7 @@
 - import schema APIs directly from Zod ([#1726](https://github.com/openai/codex-security/pull/1726))
 - normalize CWE identifiers without integer conversion ([#1723](https://github.com/openai/codex-security/pull/1723))
 - remove the empty editable Python distribution ([#1724](https://github.com/openai/codex-security/pull/1724))
+- delete whole characters when editing patch instructions ([#1549](https://github.com/openai/codex-security/pull/1549))
 
 <!-- release-section: highlights:end -->
 
