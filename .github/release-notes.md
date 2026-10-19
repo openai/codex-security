@@ -22,6 +22,7 @@
 - bump ruff from 0.16.10 to 0.17.0 in /plugins/codex-security ([#1695](https://github.com/openai/codex-security/pull/1695))
 - preserve generated-note command failures ([#1729](https://github.com/openai/codex-security/pull/1729))
 - drop deleted revisions and field codes from DOCX ([#1714](https://github.com/openai/codex-security/pull/1714))
+- URL-encode generated schema references ([#981](https://github.com/openai/codex-security/pull/981))
 
 <!-- release-section: highlights:end -->
 
