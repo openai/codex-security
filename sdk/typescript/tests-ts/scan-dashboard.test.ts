@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test, mock, jest } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
+import { tokenUsage } from "../src/cost-model.js";
 
 afterEach(() => jest.useRealTimers());
 
@@ -57,6 +58,81 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("clears an unavailable price while retaining current tokens and restores a later estimate", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, {
+      model: { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
+      showCost: true,
+    });
+    const cost = fakeResult([], "complete", {
+      input_tokens: 1_000_000,
+      output_tokens: 0,
+    }).cost!;
+    dashboard.start();
+    try {
+      dashboard.setCost(cost);
+      expect(lastFrame(stderr)).toContain("$4.00");
+      dashboard.setUsage(
+        tokenUsage({ input_tokens: 3_000_000, output_tokens: 0 })!,
+      );
+      expect(lastFrame(stderr)).toContain("3,000,000 total");
+      expect(lastFrame(stderr)).toMatch(/COST\s+unavailable/);
+      expect(lastFrame(stderr)).not.toContain("$4.00");
+      dashboard.setCost(cost);
+      expect(lastFrame(stderr)).toContain("$4.00");
+      expect(lastFrame(stderr)).not.toMatch(/COST\s+unavailable/);
+    } finally {
+      dashboard.stop();
+    }
+  });
+
+  test("does not present a known component subtotal as the complete cost", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, {
+      presentation: "components",
+      showCost: true,
+    });
+    const receipts: ComponentReceipt[] = [1, 2].map((id) => ({
+      id: `component-${id}`,
+      name: `Component ${id}`,
+      paths: [`src/${id}`],
+      status: "started",
+      outputDir: `/synthetic/results/${id}`,
+    }));
+    const cost = fakeResult([], "complete", {
+      input_tokens: 1_000_000,
+      output_tokens: 0,
+    }).cost!;
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    try {
+      dashboard.setComponents(receipts);
+      for (const receipt of receipts) {
+        dashboard.recordComponentEvent({
+          componentId: receipt.id,
+          type: "cost",
+          value: cost,
+        });
+      }
+      expect(frame().match(/COST\s+([^\n]+)/)?.[1]).toContain("$8.00");
+      dashboard.recordComponentEvent({
+        componentId: "component-2",
+        type: "usage",
+        value: tokenUsage({ input_tokens: 2_000_000, output_tokens: 0 })!,
+      });
+      expect(frame()).toMatch(/COST\s+unavailable/);
+      dashboard.recordComponentEvent({
+        componentId: "component-2",
+        type: "cost",
+        value: cost,
+      });
+      expect(frame().match(/COST\s+([^\n]+)/)?.[1]).toContain("$8.00");
+    } finally {
+      dashboard.stop();
+    }
+  });
+
   test("flushes queued activity before stopping without rendering afterward", () => {
     const stderr = capture(true);
     const pending: (() => void)[] = [];

@@ -242,6 +242,25 @@ If a runtime aliases the ambient TOML file, only explicit overrides are written
 back; unrelated sections and inherited defaults remain untouched. Isolated runtime
 files still receive a complete snapshot.
 
+Optional discovery model settings are available in the legacy user
+`$CODEX_HOME/codex-security/config.toml` file (`~/.codex` when `CODEX_HOME` is unset):
+
+```toml
+[deep_scan]
+discovery_model = "your-discovery-model"
+discovery_reasoning_effort = "high"
+```
+
+Each omitted setting inherits the parent scan's choice. Setup and reducer workers
+keep the parent settings. Discovery choices are saved when the scan starts and
+retained when workers resume or the scan is rerun. SDK callers can set
+`discoveryModel` and `discoveryReasoningEffort` directly; each optional string
+overrides its legacy TOML value. These settings have no new CLI flags or
+project-file keys. Supplying all six orchestration settings forms a complete
+configuration that does not read legacy TOML; include any desired discovery
+overrides explicitly. Saved recipes preserve the original choices without reading
+today's legacy configuration.
+
 A valid deep block can stay inactive in standard mode. Explicit deep CLI options
 still require deep mode. Deep diff scans and custom validation remain unsupported.
 Counts retain their existing bounds; zero subagents is valid, and discovery time

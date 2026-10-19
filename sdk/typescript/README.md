@@ -350,6 +350,15 @@ within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
 
+Set the optional SDK fields `discoveryModel` and `discoveryReasoningEffort` to
+override each discovery worker setting independently. They take precedence over
+the legacy `[deep_scan]` TOML settings `discovery_model` and
+`discovery_reasoning_effort`. If neither source sets a choice, it inherits the
+parent scan's setting. Setup and reducer workers keep the parent settings.
+Supplying all six orchestration settings skips legacy TOML, so include any desired discovery
+overrides explicitly. Saved recipes preserve these choices for both resume and
+rerun.
+
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onCost` for cost updates.

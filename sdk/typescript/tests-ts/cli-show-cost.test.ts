@@ -159,3 +159,45 @@ test.each(
   expect(outputs[1]).toBe(outputs[0]);
   expect(outputs[2]).toBe(outputs[0]);
 });
+
+test.each(["direct", "deferred"])(
+  "clears stale prices and restores a paired update delivered %s",
+  async (delivery) => {
+    const { stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    const largerUsage = {
+      ...observedUsage,
+      input_tokens: 2_250,
+      total_tokens: 2_280,
+    };
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options = {}) => {
+        options.onScanStarted?.();
+        options.onCost?.(result.cost!);
+        await options.onUsage?.(largerUsage);
+        options.onScanStarted?.();
+        let running = stderr.text().trim().split("\n").at(-1)!;
+        expect(running).toContain("2,280 total");
+        expect(running).not.toContain("$0.00488");
+        for (let repeat = 0; repeat < 2; repeat += 1) {
+          // Reusing the same cost object must still count as a paired update.
+          if (delivery === "direct") {
+            const observed = options.onUsage?.(observedUsage);
+            options.onCost?.(result.cost!);
+            await observed;
+          } else {
+            await Promise.all([
+              Promise.resolve().then(() => options.onUsage?.(observedUsage)),
+              Promise.resolve().then(() => options.onCost?.(result.cost!)),
+            ]);
+          }
+          options.onScanStarted?.();
+          running = stderr.text().trim().split("\n").at(-1)!;
+          expect(running).toContain("1,280 total");
+          expect(running).toContain("$0.00488");
+        }
+        return result;
+      });
+    expect(await runCli(["scan", ".", "--show-cost"], deps)).toBe(0);
+  },
+);

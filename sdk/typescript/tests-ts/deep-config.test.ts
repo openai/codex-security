@@ -76,6 +76,112 @@ test("normalizes legacy auto and preserves explicit zero while merging", async (
   });
 });
 
+test.each<{
+  name: string;
+  contents: string;
+  discovery: Record<string, string>;
+}>([
+  { name: "neither", contents: "", discovery: {} },
+  {
+    name: "model only",
+    contents: 'discovery_model = " fixture-discovery "\n',
+    discovery: { discovery_model: "fixture-discovery" },
+  },
+  {
+    name: "effort only",
+    contents: 'discovery_reasoning_effort = " future-effort "\n',
+    discovery: { discovery_reasoning_effort: "future-effort" },
+  },
+  {
+    name: "both",
+    contents:
+      'discovery_model = "fixture-discovery"\ndiscovery_reasoning_effort = "high"\n',
+    discovery: {
+      discovery_model: "fixture-discovery",
+      discovery_reasoning_effort: "high",
+    },
+  },
+])(
+  "snapshots optional discovery settings: $name",
+  async ({ contents, discovery }) => {
+    const input = await fixture(`[deep_scan]\nworkers = 2\n${contents}`);
+    const resolved = await resolveDeepScanConfig({}, input.source);
+    await writeFile(
+      input.source,
+      '[deep_scan]\ndiscovery_model = "later-model"\n',
+    );
+    const destination = join(input.root, "runtime", "deep-scan.toml");
+    await writeDeepScanConfig(destination, resolved);
+    expect(parseToml(await readFile(destination, "utf8"))["deep_scan"]).toEqual(
+      {
+        workers: 2,
+        subagents: 3,
+        stop_after_no_new: 4,
+        stop_after_consecutive_errors: 3,
+        max_discovery_runs: 40,
+        max_time_hours: 96,
+        ...discovery,
+      },
+    );
+    await writeFile(input.source, "invalid TOML [");
+    const replay = await resolveDeepScanConfig(resolved.settings, input.source);
+    expect(replay.settings).toEqual(resolved.settings);
+    const replayDestination = join(input.root, "replay", "deep-scan.toml");
+    await writeDeepScanConfig(replayDestination, replay);
+    expect(
+      parseToml(await readFile(replayDestination, "utf8"))["deep_scan"],
+    ).toEqual(parseToml(await readFile(destination, "utf8"))["deep_scan"]);
+  },
+);
+
+test("SDK discovery overrides merge independently with legacy settings", async () => {
+  const input = await fixture(
+    '[deep_scan]\ndiscovery_model = "legacy-model"\ndiscovery_reasoning_effort = "high"\n',
+  );
+  const model = await resolveDeepScanConfig(
+    { discoveryModel: "sdk-model" },
+    input.source,
+  );
+  expect(model.settings).toMatchObject({
+    discoveryModel: "sdk-model",
+    discoveryReasoningEffort: "high",
+  });
+  const effort = await resolveDeepScanConfig(
+    { discoveryReasoningEffort: "low" },
+    input.source,
+  );
+  expect(effort.settings).toMatchObject({
+    discoveryModel: "legacy-model",
+    discoveryReasoningEffort: "low",
+  });
+  const complete = await resolveDeepScanConfig(
+    { ...DEFAULT_DEEP_SCAN_SETTINGS, discoveryModel: "sdk-model" },
+    input.source,
+  );
+  expect(complete.settings.discoveryModel).toBe("sdk-model");
+  expect(complete.settings).not.toHaveProperty("discoveryReasoningEffort");
+});
+
+test("independent scans retain their own discovery configuration", async () => {
+  const inputs = await Promise.all(
+    ["first-model", "second-model"].map((model) =>
+      fixture(`[deep_scan]\ndiscovery_model = "${model}"\n`),
+    ),
+  );
+  const snapshots = await Promise.all(
+    inputs.map(async (input) => {
+      const resolved = await resolveDeepScanConfig({}, input.source);
+      const destination = join(input.root, "runtime", "deep-scan.toml");
+      await writeDeepScanConfig(destination, resolved);
+      return parseToml(await readFile(destination, "utf8"))["deep_scan"];
+    }),
+  );
+  expect(snapshots).toMatchObject([
+    { discovery_model: "first-model" },
+    { discovery_model: "second-model" },
+  ]);
+});
+
 test("validates legacy values after matching explicit overrides", async () => {
   const input = await fixture('[deep_scan]\nworkers = "invalid"\n');
   await expect(resolveDeepScanConfig({}, input.source)).rejects.toThrow(
@@ -98,7 +204,7 @@ test.each(["same path", "directory link"])(
   "updating ambient overrides through the %s does not pin inherited defaults",
   async (kind) => {
     const input = await fixture(
-      "[deep_scan]\nworkers = 7\n[other]\nkeep = true\n",
+      '[deep_scan]\nworkers = 7\ndiscovery_model = "fixture-discovery"\n[other]\nkeep = true\n',
     );
     let destination = input.source;
     if (kind === "directory link") {
@@ -111,7 +217,7 @@ test.each(["same path", "directory link"])(
       await resolveDeepScanConfig({ workers: 8 }, input.source),
     );
     expect(parseToml(await readFile(input.source, "utf8"))).toEqual({
-      deep_scan: { workers: 8 },
+      deep_scan: { workers: 8, discovery_model: "fixture-discovery" },
       other: { keep: true },
     });
   },
@@ -139,6 +245,12 @@ test.each([
   ["[deep_scan]\nstop_after_consecutive_errors = 0\n", "integer"],
   ["[deep_scan]\nmax_time_hours = 97\n", "no greater than 96"],
   ["[deep_scan]\nworkres = 2\n", "Unknown"],
+  ['[deep_scan]\ndiscovery_model = ""\n', "non-empty string"],
+  ['[deep_scan]\ndiscovery_model = "  "\n', "non-empty string"],
+  ["[deep_scan]\ndiscovery_model = false\n", "non-empty string"],
+  ['[deep_scan]\ndiscovery_reasoning_effort = ""\n', "non-empty string"],
+  ['[deep_scan]\ndiscovery_reasoning_effort = "  "\n', "non-empty string"],
+  ["[deep_scan]\ndiscovery_reasoning_effort = 12\n", "non-empty string"],
   ["[deep_scan\n", "Cannot read"],
 ])("rejects invalid ambient settings: %s", async (contents, message) => {
   const input = await fixture(contents);
@@ -168,6 +280,20 @@ test("complete saved settings do not read a changed or invalid legacy file", asy
   expect(await readFile(input.source, "utf8")).toBe("not valid TOML [");
 });
 
+test("complete saved settings do not adopt new ambient discovery overrides", async () => {
+  const input = await fixture(
+    '[deep_scan]\ndiscovery_model = "later-model"\ndiscovery_reasoning_effort = "high"\n',
+  );
+  const destination = join(input.root, "runtime", "deep-scan.toml");
+  await writeDeepScanConfig(
+    destination,
+    await resolveDeepScanConfig(DEFAULT_DEEP_SCAN_SETTINGS, input.source),
+  );
+  const snapshot = parseToml(await readFile(destination, "utf8"))["deep_scan"];
+  expect(snapshot).not.toHaveProperty("discovery_model");
+  expect(snapshot).not.toHaveProperty("discovery_reasoning_effort");
+});
+
 test.each(["same path", "directory link"])(
   "complete settings preserve ambient sections through the %s",
   async (destinationKind) => {
@@ -178,7 +304,7 @@ test.each(["same path", "directory link"])(
     );
     await writeFile(
       input.source,
-      "[deep_scan]\nworkers = 9\n[other]\nenabled = false\n",
+      '[deep_scan]\nworkers = 9\ndiscovery_model = "fixture-discovery"\n[other]\nenabled = false\n',
     );
     let destination = input.source;
     if (destinationKind === "directory link") {
@@ -195,6 +321,7 @@ test.each(["same path", "directory link"])(
         stop_after_consecutive_errors: 3,
         max_discovery_runs: 40,
         max_time_hours: 96,
+        discovery_model: "fixture-discovery",
       },
       other: { enabled: false },
     });

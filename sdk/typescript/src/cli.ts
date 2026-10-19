@@ -75,7 +75,6 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
-  type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
@@ -311,6 +310,7 @@ import {
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
+  type ResolvedDeepScanOptions,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -8212,6 +8212,7 @@ async function executeScan(
   let deepProgress: DeepScanProgress | null = null;
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
+  let costUpdates = 0;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
@@ -8490,15 +8491,17 @@ async function executeScan(
           dashboard.setUsage(usage);
           return;
         }
-        const priorCost = runningCost;
+        const priorCostUpdates = costUpdates;
         // The tracker queues usage before cost; let the paired cost update render once.
         await Promise.resolve();
-        if (runningCost !== priorCost) return;
+        if (costUpdates !== priorCostUpdates) return;
+        runningCost = null;
         progress?.stopTimer();
         progress?.stage(`Tokens: ${formatTokenUsage(usage)}.`);
         progress?.startTimer(runningMessage());
       },
       onCost: (cost, limit = maxCostUsd) => {
+        costUpdates += 1;
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
         }
@@ -9354,7 +9357,7 @@ async function readDeepScanStop(
         dispatchedCount: number;
         completionSequence: number;
         noNewStreak: number;
-        config: Required<DeepScanOptions>;
+        config: ResolvedDeepScanOptions;
         createdAt: string;
         completedAt: string;
       }

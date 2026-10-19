@@ -91,6 +91,7 @@ EXPECTED_MIGRATIONS = [
     (47, "snapshot deep scan discovery context"),
     (48, "share finding issue receipts across trackers"),
     (49, "index finding issue receipt ownership"),
+    (50, "persist deep scan discovery model settings"),
 ]
 
 
@@ -1193,6 +1194,54 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     )
 
 
+def test_discovery_model_migration_preserves_running_scan_settings() -> None:
+    connection, apply_migrations = create_historical_database(50)
+    with closing(connection):
+        timestamp = "2026-09-01T00:00:00Z"
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("legacy-workspace", timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO scans (
+                id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+                model, reasoning_effort, status, phase, started_at, created_at, updated_at
+            ) VALUES (?, ?, '/legacy/target', 'legacy-revision', '.', 'deep',
+                '/legacy/scan', 'gpt-6-astra', 'xhigh', 'running', 'discovery', ?, ?, ?)
+            """,
+            ("legacy-scan", "legacy-workspace", timestamp, timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO deep_scan_runs (
+                scan_id, schema_version, workflow_version, status, phase,
+                workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
+                max_discovery_runs, discovery_user_context_json, created_at, updated_at
+            ) VALUES (?, 1, 'deep-scan-mcp/v1', 'running', 'discovery',
+                4, 0, 4, 3, 40, '"Focus on parsing"', ?, ?)
+            """,
+            ("legacy-scan", timestamp, timestamp),
+        )
+        connection.commit()
+        existing = dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone())
+
+        apply_migrations(connection)
+        apply_migrations(connection)
+
+        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == {
+            **existing,
+            "discovery_model": None,
+            "discovery_reasoning_effort": None,
+        }
+        assert tuple(
+            connection.execute("SELECT model, reasoning_effort FROM scans").fetchone()
+        ) == (
+            "gpt-6-astra",
+            "xhigh",
+        )
+
+
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     connection, apply_migrations = create_historical_database(29)
 
@@ -1380,6 +1429,8 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             "stop_after_consecutive_errors",
             "consecutive_errors",
             "max_time_hours",
+            "discovery_model",
+            "discovery_reasoning_effort",
         }
         assert {
             row[1] for row in connection.execute("PRAGMA table_info(finding_remediation_attempts)")
@@ -1508,6 +1559,20 @@ def test_workbench_repairs_recorded_deep_scan_migration(
         assert "max_time_hours" in {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         }
+        connection.execute(
+            """
+            INSERT INTO deep_scan_runs (
+                scan_id, schema_version, workflow_version, status, phase,
+                workers, subagents, stop_after_no_new, max_discovery_runs,
+                discovery_model, discovery_reasoning_effort, created_at, updated_at
+            ) VALUES (?, 1, 'deep-scan-mcp/v1', 'running', 'discovery',
+                4, 0, 4, 40, 'fixture-model', 'custom-effort', 'created', 'updated')
+            """,
+            (scan_id,),
+        )
+        assert connection.execute(
+            "SELECT discovery_model, discovery_reasoning_effort FROM deep_scan_runs"
+        ).fetchone() == ("fixture-model", "custom-effort")
         assert {
             row[0]
             for row in connection.execute(

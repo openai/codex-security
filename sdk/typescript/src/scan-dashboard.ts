@@ -555,6 +555,7 @@ export class ScanDashboard {
   }
 
   public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#cost = null;
     this.#tokens = formatTokenUsage(usage);
     this.#refresh();
   }
@@ -952,9 +953,12 @@ export class ScanDashboard {
     const costs = this.#components.flatMap(({ dashboard }) =>
       dashboard.#cost === null ? [] : [dashboard.#cost],
     );
+    const unavailable = this.#components.some(
+      ({ dashboard }) => dashboard.#tokens !== null && dashboard.#cost === null,
+    );
     return wrapActivity(
       "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      `${unavailable ? "unavailable" : costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
       this.#width(),
     );
   }
@@ -1002,7 +1006,9 @@ export class ScanDashboard {
     const cost =
       this.#cost === null
         ? this.#options.maxCostUsd === undefined
-          ? "waiting for usage"
+          ? this.#tokens === null
+            ? "waiting for usage"
+            : "unavailable"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
     return wrapActivity("  COST     ", cost, this.#width());

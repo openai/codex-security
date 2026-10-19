@@ -8,18 +8,29 @@ import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   DEFAULT_SCAN_MODE,
+  DEEP_SCAN_DISCOVERY_SETTINGS,
   DEEP_SCAN_SETTINGS,
   DeepScanSettingsSchema,
   type DeepScanOptions,
+  type ResolvedDeepScanOptions,
 } from "./scan-settings.js";
 import type { ScanMode } from "./scan-modes.js";
 
+const allSettings = [...DEEP_SCAN_SETTINGS, ...DEEP_SCAN_DISCOVERY_SETTINGS];
+const discoveryKeys = new Set<string>(
+  DEEP_SCAN_DISCOVERY_SETTINGS.map(([, key]) => key),
+);
+
+type DeepScanSource = "default" | "legacy" | "override";
 export type DeepScanSources = Record<
-  keyof DeepScanOptions,
-  "default" | "legacy" | "override"
->;
+  (typeof DEEP_SCAN_SETTINGS)[number][0],
+  DeepScanSource
+> &
+  Partial<
+    Record<(typeof DEEP_SCAN_DISCOVERY_SETTINGS)[number][0], DeepScanSource>
+  >;
 export interface ResolvedDeepScanConfig {
-  settings: Required<DeepScanOptions>;
+  settings: ResolvedDeepScanOptions;
   sources: DeepScanSources;
   source: string;
   document: TomlTable;
@@ -30,13 +41,15 @@ export function deepScanOptions(
   options: DeepScanOptions & { mode?: ScanMode },
 ): DeepScanOptions {
   const selected: DeepScanOptions = {};
-  for (const [name] of DEEP_SCAN_SETTINGS) {
+  for (const [name] of allSettings) {
     const value = options[name];
     if (value === undefined) continue;
     if ((options.mode ?? DEFAULT_SCAN_MODE) !== "deep") {
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
-    selected[name] = requireDeepScanValue(name, value, name);
+    Object.assign(selected, {
+      [name]: requireDeepScanValue(name, value, name),
+    });
   }
   return selected;
 }
@@ -45,7 +58,7 @@ function requireDeepScanValue(
   name: keyof DeepScanOptions,
   value: unknown,
   label: string,
-): number {
+): number | string {
   const parsed = DeepScanSettingsSchema.shape[name].unwrap().safeParse(value);
   if (!parsed.success) {
     throw new CodexSecurityError(
@@ -77,7 +90,7 @@ export async function resolveDeepScanConfig(
     );
   }
   const configured = (existing ?? {}) as TomlTable;
-  const keys = new Set<string>(DEEP_SCAN_SETTINGS.map(([, key]) => key));
+  const keys = new Set<string>(allSettings.map(([, key]) => key));
   const unknown = Object.keys(configured).filter((key) => !keys.has(key));
   if (unknown.length > 0) {
     throw new CodexSecurityError(
@@ -86,7 +99,7 @@ export async function resolveDeepScanConfig(
   }
   const settings = {
     ...DEFAULT_DEEP_SCAN_SETTINGS,
-  } as Required<DeepScanOptions>;
+  } as ResolvedDeepScanOptions;
   const sources = {} as DeepScanSources;
   for (const [name, key] of DEEP_SCAN_SETTINGS) {
     let value = Object.hasOwn(configured, key)
@@ -101,11 +114,25 @@ export async function resolveDeepScanConfig(
         : Object.hasOwn(configured, key)
           ? "legacy"
           : "default";
-    settings[name] = requireDeepScanValue(
-      name,
-      value,
-      sources[name] === "legacy" ? `${key} in ${source}` : name,
-    );
+    Object.assign(settings, {
+      [name]: requireDeepScanValue(
+        name,
+        value,
+        sources[name] === "legacy" ? `${key} in ${source}` : name,
+      ),
+    });
+  }
+  for (const [name, key] of DEEP_SCAN_DISCOVERY_SETTINGS) {
+    const value = explicit[name] ?? configured[key];
+    if (value === undefined) continue;
+    sources[name] = explicit[name] === undefined ? "legacy" : "override";
+    Object.assign(settings, {
+      [name]: requireDeepScanValue(
+        name,
+        value,
+        sources[name] === "legacy" ? `${key} in ${source}` : name,
+      ),
+    });
   }
   return {
     settings,
@@ -143,11 +170,15 @@ export async function writeDeepScanConfig(
     deep_scan: {
       ...(retainAmbientSettings
         ? (document["deep_scan"] as TomlTable | undefined)
-        : {}),
+        : Object.fromEntries(
+            Object.entries(document["deep_scan"] ?? {}).filter(
+              ([key]) => sameFile && discoveryKeys.has(key),
+            ),
+          )),
       ...Object.fromEntries(
-        DEEP_SCAN_SETTINGS.filter(([name]) => settings[name] !== undefined).map(
-          ([name, key]) => [key, settings[name]],
-        ),
+        allSettings
+          .filter(([name]) => settings[name] !== undefined)
+          .map(([name, key]) => [key, settings[name]]),
       ),
     },
   } as JsonObject);

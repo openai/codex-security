@@ -282,7 +282,7 @@ export function resolveScanSettings(
       overrides.target,
     ) ?? "repository";
   const configuredDeep = file?.scan?.deep;
-  const deep: DeepScanOptions = {};
+  const deep: DeepScanOptions = { ...explicitDeep };
   if (mode === "deep") {
     for (const [name, , field] of DEEP_SCAN_SETTINGS) {
       const value = choose(

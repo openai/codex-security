@@ -87,6 +87,9 @@ function createSessionUsage() {
     startedAt: null as number | null,
     inheritedUsage: null as ScanTokenUsage | null,
     replaying: false,
+    model: null as string | null,
+    modelUsageOffset: null as ScanTokenUsage | null,
+    completedModelUsage: new Map<string, ScanTokenUsage>(),
     usage: null as ScanTokenUsage | null,
     responseUsage: null as ScanTokenUsage | null,
     responseIds: new Set<string>(),
@@ -195,8 +198,8 @@ export class ScanCostTracker {
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
-    this.#reportUsage(tokenUsage(fallbackUsage));
-    this.#reportCost(cost);
+    const reportedUsage = this.#reportUsage(tokenUsage(fallbackUsage));
+    this.#reportCost(cost, reportedUsage);
     return this.#snapshot;
   }
 
@@ -268,6 +271,7 @@ export class ScanCostTracker {
     }
 
     const usages = new Map(this.#receipts);
+    const sessions = new Map<string, SessionUsage>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -282,6 +286,7 @@ export class ScanCostTracker {
         await readSessionUsage(path, session, repository);
         this.#sessions.set(path, session);
       }
+      sessions.set(threadId, session);
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
         worker = this.#workers.get(threadId);
@@ -319,21 +324,114 @@ export class ScanCostTracker {
             receipt.cache_write_input_tokens === 0))
       ) {
         usages.set(threadId, session.usage);
+      } else if (receipt != null && session.usage !== null) {
+        // A final SDK receipt can advance the total while omitting cache-write
+        // and reasoning detail. Keep counters already observed in the rollout.
+        usages.set(threadId, {
+          ...receipt,
+          cache_write_input_tokens: Math.max(
+            receipt.cache_write_input_tokens,
+            session.usage.cache_write_input_tokens,
+          ),
+          reasoning_output_tokens: Math.max(
+            receipt.reasoning_output_tokens,
+            session.usage.reasoning_output_tokens,
+          ),
+        });
       }
     }
     let usage: ScanTokenUsage | null = null;
-    for (const value of usages.values()) {
+    const modelUsages = new Map<string, ScanTokenUsage>();
+    for (const [threadId, value] of usages) {
       if (value === null) {
         this.#snapshot = { usage: null, cost: null };
         return;
       }
       usage = addTokenUsage(usage, value);
+      const session = sessions.get(threadId);
+      for (const [model, completed] of session?.completedModelUsage ?? []) {
+        modelUsages.set(
+          model,
+          addTokenUsage(modelUsages.get(model) ?? null, completed),
+        );
+      }
+      const current =
+        session?.modelUsageOffset == null
+          ? value
+          : subtractTokenUsage(value, session.modelUsageOffset);
+      if (current === null) {
+        throw new Error(
+          "Could not attribute scan token usage to its observed model.",
+        );
+      }
+      const model = session?.model ?? this.#options.model;
+      modelUsages.set(
+        model,
+        addTokenUsage(modelUsages.get(model) ?? null, current),
+      );
     }
     if (usage === null) return;
-    const cost = estimateScanCost(this.#options.model, usage);
+    // Zero-token control sessions do not contribute a model or price to a scan.
+    if (usage.total_tokens > 0) {
+      for (const [model, value] of modelUsages) {
+        if (value.total_tokens === 0) modelUsages.delete(model);
+      }
+    }
+    const costs: ScanCost[] = [];
+    for (const [model, value] of modelUsages) {
+      const cost = estimateScanCost(model, value);
+      if (cost === null) {
+        this.#snapshot = { usage, cost: null };
+        if (this.#lastCost !== null) {
+          this.#lastCost = null;
+          this.#lastUsage = null;
+        }
+        this.#reportUsage(usage);
+        if (this.#options.maxCostUsd !== undefined) {
+          throw new Error(
+            `Could not verify the scan cost limit for observed model: ${model}.`,
+          );
+        }
+        return;
+      }
+      costs.push(cost);
+    }
+    const cost =
+      costs.length === 1
+        ? costs[0]!
+        : {
+            model: costs
+              .map(({ model }) => model)
+              .sort()
+              .join(", "),
+            inputTokens: usage.input_tokens,
+            cachedInputTokens: usage.cached_input_tokens,
+            cacheWriteInputTokens: usage.cache_write_input_tokens,
+            ...(usage.cache_write_input_tokens_reported === false
+              ? { cacheWriteInputTokensReported: false }
+              : {}),
+            outputTokens: usage.output_tokens,
+            estimatedUsd: costs.reduce(
+              (sum, value) => sum + value.estimatedUsd,
+              0,
+            ),
+            estimatedUsdRange: {
+              min: costs.reduce(
+                (sum, value) => sum + value.estimatedUsdRange!.min,
+                0,
+              ),
+              max: costs.some((value) => value.estimatedUsdRange!.max === null)
+                ? null
+                : costs.reduce(
+                    (sum, value) => sum + value.estimatedUsdRange!.max!,
+                    0,
+                  ),
+              context: "unknown" as const,
+            },
+          };
     this.#snapshot = { usage, cost };
-    this.#reportUsage(usage);
-    this.#reportCost(cost);
+    const reportedUsage = this.#reportUsage(usage);
+    this.#reportCost(cost, reportedUsage);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -375,20 +473,22 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null): void {
+  #reportCost(cost: ScanCost | null, reportedUsage = false): void {
     if (cost === null) return;
     const signature = JSON.stringify(cost);
-    if (signature === this.#lastCost) return;
+    // Usage without a paired cost update means its pricing is unavailable.
+    if (signature === this.#lastCost && !reportedUsage) return;
     this.#lastCost = signature;
     this.#options.onCost?.(cost);
   }
 
-  #reportUsage(usage: ScanTokenUsage | null): void {
-    if (usage === null) return;
+  #reportUsage(usage: ScanTokenUsage | null): boolean {
+    if (usage === null) return false;
     const signature = JSON.stringify(usage);
-    if (signature === this.#lastUsage) return;
+    if (signature === this.#lastUsage) return false;
     this.#lastUsage = signature;
     this.#options.onUsage?.(usage);
+    return this.#options.onUsage !== undefined;
   }
 }
 
@@ -504,6 +604,36 @@ function readSessionEvent(
     return;
   }
   session.events?.push(event);
+  if (
+    event["type"] === "turn_context" &&
+    typeof payload["model"] === "string"
+  ) {
+    const model = payload["model"];
+    // A resumed thread can change models. Keep its previous charges separate
+    // from the later increments in the thread's cumulative usage.
+    if (
+      session.model !== null &&
+      session.model !== model &&
+      session.usage !== null
+    ) {
+      const completed =
+        session.modelUsageOffset === null
+          ? session.usage
+          : subtractTokenUsage(session.usage, session.modelUsageOffset);
+      if (completed !== null) {
+        session.completedModelUsage.set(
+          session.model,
+          addTokenUsage(
+            session.completedModelUsage.get(session.model) ?? null,
+            completed,
+          ),
+        );
+      }
+      session.modelUsageOffset = session.usage;
+    }
+    session.model = model;
+    return;
+  }
   if (event["type"] === "token_usage_record") {
     const responseId = payload["response_id"];
     if (

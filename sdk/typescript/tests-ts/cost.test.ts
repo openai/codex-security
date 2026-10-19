@@ -514,6 +514,291 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test.each([1_000, 2_000])(
+    "invalidates a prior estimate when an unpriced rollout reports %p tokens",
+    async (inputTokens) => {
+      const home = await codexHome();
+      const updates: string[] = [];
+      const tracker = costTracker(home, {
+        onUsage: () => updates.push("usage"),
+        onCost: () => updates.push("cost"),
+      });
+      tracker.recordUsage(
+        { input_tokens: 1_000, output_tokens: 0 },
+        "worker-thread",
+      );
+      tracker.start("scan-thread");
+      try {
+        expect((await tracker.refresh()).cost).not.toBeNull();
+        expect(updates.splice(0)).toEqual(["usage", "cost"]);
+        await writeSession(
+          home,
+          "worker-thread",
+          {
+            input_tokens: inputTokens,
+            output_tokens: 0,
+          },
+          { model: "synthetic-unpriced-model" },
+        );
+        expect((await tracker.refresh()).cost).toBeNull();
+        expect(updates.splice(0)).toEqual(["usage"]);
+        await tracker.refresh();
+        expect(updates).toEqual([]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("pairs changed usage with its still-valid unchanged price", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const path = await writeSession(home, "scan-thread", usage);
+    const updates: string[] = [];
+    const tracker = costTracker(home, {
+      onUsage: () => updates.push("usage"),
+      onCost: () => updates.push("cost"),
+    });
+    tracker.start("scan-thread");
+    try {
+      const original = await tracker.refresh();
+      expect(updates.splice(0)).toEqual(["usage", "cost"]);
+      await appendFile(
+        path,
+        jsonLines([
+          legacyUsageRecord({ ...usage, reasoning_output_tokens: 5 }),
+        ]) + "\n",
+      );
+      expect((await tracker.refresh()).cost).toEqual(original.cost);
+      expect(updates.splice(0)).toEqual(["usage", "cost"]);
+      await tracker.refresh();
+      expect(updates).toEqual([]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test.each([
+    ["gpt-5.6-luna", "gpt-5.6-sol", 4.0004, 8.0004, true],
+    ["gpt-5.6-sol", "gpt-5.6-luna", 0.208, 0.408, false],
+  ] as const)(
+    "prices %s parent and reducer separately from %s discovery, including resumed usage",
+    async (
+      parentModel,
+      discoveryModel,
+      initialCost,
+      resumedCost,
+      exceedsBudget,
+    ) => {
+      const home = await codexHome();
+      const parentUsage = { input_tokens: 1_000, output_tokens: 0 };
+      await writeSession(home, "scan-thread", parentUsage, {
+        model: parentModel,
+      });
+      await writeSession(home, "reducer-thread", parentUsage, {
+        parent: "scan-thread",
+        model: parentModel,
+      });
+      const discoveryUsage = { input_tokens: 1_000_000, output_tokens: 0 };
+      const worker = await writeSession(
+        home,
+        "discovery-thread",
+        discoveryUsage,
+        {
+          parent: "scan-thread",
+          model: discoveryModel,
+        },
+      );
+      const budget = new AbortController();
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: parentModel,
+        maxCostUsd: 1,
+        onCost: ({ estimatedUsd }) => {
+          if (estimatedUsd > 1) budget.abort();
+        },
+      });
+      tracker.start("scan-thread");
+      try {
+        const initial = await tracker.refresh();
+        expect(initial.cost?.estimatedUsd).toBeCloseTo(initialCost, 10);
+        expect(initial.cost?.model).toBe("gpt-5.6-luna, gpt-5.6-sol");
+        expect(initial.cost?.pricing).toBeUndefined();
+        expect(budget.signal.aborted).toBe(exceedsBudget);
+        const resumedUsage = { input_tokens: 2_000_000, output_tokens: 0 };
+        const response = nativeUsageRecord(
+          "discovery-thread",
+          "resumed-response",
+          discoveryUsage,
+          resumedUsage,
+        );
+        await appendFile(
+          worker,
+          jsonLines([
+            { type: "turn_context", payload: { model: discoveryModel } },
+            response,
+            response,
+            legacyUsageRecord(discoveryUsage),
+          ]) + "\n",
+        );
+        const resumed = await tracker.refresh();
+        expect(resumed.cost?.estimatedUsd).toBeCloseTo(resumedCost, 10);
+        expect(resumed.usage).toMatchObject({
+          input_tokens: 2_002_000,
+          output_tokens: 0,
+        });
+        expect(budget.signal.aborted).toBe(exceedsBudget);
+        expect((await tracker.stop(parentUsage)).cost).toEqual(resumed.cost);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("retains earlier model charges when a resumed session changes models", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+    const path = await writeSession(home, "scan-thread", usage, {
+      model: "gpt-5.6-luna",
+    });
+    const tracker = costTracker(home);
+    tracker.start("scan-thread");
+    try {
+      expect((await tracker.refresh()).cost).toEqual(
+        estimateScanCost("gpt-5.6-luna", usage),
+      );
+      await appendFile(
+        path,
+        jsonLines([
+          { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+          nativeUsageRecord("scan-thread", "second-turn", usage, {
+            input_tokens: 2_000_000,
+            output_tokens: 0,
+          }),
+        ]) + "\n",
+      );
+      expect((await tracker.refresh()).cost?.estimatedUsd).toBe(4.2);
+      await appendFile(
+        path,
+        jsonLines([
+          { type: "turn_context", payload: { model: "gpt-5.6-luna" } },
+          legacyUsageRecord({ input_tokens: 3_000_000, output_tokens: 0 }),
+        ]) + "\n",
+      );
+      const snapshot = await tracker.stop({
+        input_tokens: 3_000_000,
+        output_tokens: 0,
+      });
+      expect(snapshot.cost?.estimatedUsd).toBe(4.4);
+      expect(snapshot.cost?.inputTokens).toBe(3_000_000);
+      expect(snapshot.cost?.pricing).toBeUndefined();
+      expect(snapshot.cost?.estimatedUsdRange?.min).toBe(4.4);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("keeps earlier-model detail when the final SDK receipt advances beyond its rollout", async () => {
+    const home = await codexHome();
+    const original = {
+      input_tokens: 1_000,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 12,
+      output_tokens: 10,
+      reasoning_output_tokens: 5,
+    };
+    const path = await writeSession(home, "scan-thread", original, {
+      model: "gpt-5.6-luna",
+    });
+    await appendFile(
+      path,
+      jsonLines([
+        { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+        legacyUsageRecord({
+          ...original,
+          input_tokens: 1_020,
+          output_tokens: 12,
+        }),
+      ]) + "\n",
+    );
+    const tracker = costTracker(home, { maxCostUsd: 1 });
+    tracker.start("scan-thread");
+    const snapshot = await tracker.stop({
+      input_tokens: 1_100,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 0,
+      output_tokens: 15,
+    });
+    expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.000709, 12);
+    expect(snapshot.usage).toMatchObject({
+      input_tokens: 1_100,
+      cached_input_tokens: 20,
+      cache_write_input_tokens: 12,
+      output_tokens: 15,
+      reasoning_output_tokens: 5,
+    });
+  });
+
+  test("ignores inherited parent model context when pricing a fork", async () => {
+    const home = await codexHome();
+    const path = await writeSession(
+      home,
+      childUuid7Thread,
+      {},
+      { parent: scanThreadId },
+    );
+    const rollout = ownershipRollout([lowerUuid7Turn]);
+    rollout.splice(2, 0, {
+      type: "turn_context",
+      payload: { model: "gpt-5.6-sol" },
+    });
+    rollout.splice(rollout.length - 1, 0, {
+      type: "turn_context",
+      payload: { model: "gpt-5.6-luna" },
+    });
+    await writeFile(path, jsonLines(rollout) + "\n");
+    const tracker = costTracker(home);
+    tracker.start(scanThreadId);
+    expect((await tracker.stop()).cost).toEqual(
+      estimateScanCost("gpt-5.6-luna", ownedSdkUsage),
+    );
+  });
+
+  test.each([undefined, 1])(
+    "keeps unknown worker pricing unavailable with cost limit %p",
+    async (maxCostUsd) => {
+      const home = await codexHome();
+      await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 100, output_tokens: 10 },
+        {
+          parent: "scan-thread",
+          model: "synthetic-unpriced-model",
+        },
+      );
+      const errors: unknown[] = [];
+      const usages: unknown[] = [];
+      const tracker = costTracker(home, {
+        maxCostUsd,
+        onUsage: (usage) => usages.push(usage),
+        onError: (error) => errors.push(error),
+      });
+      tracker.start("scan-thread");
+      if (maxCostUsd === undefined) {
+        expect((await tracker.stop()).cost).toBeNull();
+        expect(errors).toEqual([]);
+      } else {
+        await waitFor(() => errors.length > 0);
+        expect(errors[0]).toBeInstanceOf(Error);
+        expect(String(errors[0])).toContain("synthetic-unpriced-model");
+        await expect(tracker.stop()).rejects.toThrow("scan cost limit");
+      }
+      expect(usages).toHaveLength(1);
+      expect(usages[0]).toMatchObject({ input_tokens: 100, output_tokens: 10 });
+    },
+  );
+
   test("keeps receipt cache-write detail when an equal legacy counter omits it", async () => {
     const home = await codexHome();
     const usage = {

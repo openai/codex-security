@@ -52,6 +52,65 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
+  test.each([
+    null,
+    {
+      model: "gpt-5.6-luna, gpt-5.6-sol",
+      inputTokens: 1_100_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0,
+      estimatedUsd: 0.6,
+    },
+  ])(
+    "preserves an observed multi-model cost, including unavailable pricing: %p",
+    (cost) => {
+      const result = new ScanResult({
+        manifest,
+        findings,
+        coverage,
+        scanDir: "/scan",
+        threadId: "thread",
+        turnResult: {
+          model: "gpt-5.6-sol",
+          usage: { input_tokens: 1_100_000, output_tokens: 0 },
+        },
+        observedCost: cost,
+      });
+      expect(result.cost).toBe(cost);
+      expect(result.toJSON()["cost"]).toEqual(cost);
+      expect(
+        new ScanResult({ ...result, observedCost: result.cost }).cost,
+      ).toBe(cost);
+    },
+  );
+
+  test("recomputes the cost when a copied result replaces its turn metadata", () => {
+    const original = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult: {
+        model: "gpt-5.6-sol",
+        usage: { input_tokens: 1_000_000, output_tokens: 0 },
+      },
+    });
+    expect(original.cost?.estimatedUsd).toBe(4);
+    const repriced = new ScanResult({
+      ...original,
+      turnResult: { ...original.turnResult, model: "gpt-5.6-luna" },
+    });
+    expect(repriced.cost?.estimatedUsd).toBe(0.2);
+    const unpriced = new ScanResult({
+      ...original,
+      turnResult: { ...original.turnResult, model: "synthetic-unpriced-model" },
+    });
+    expect(unpriced.cost).toBeNull();
+    expect(original.cost?.estimatedUsd).toBe(4);
+  });
+
   test("rejects an unknown threshold with or without findings", () => {
     for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
       const result = fakeResult(levels);

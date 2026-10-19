@@ -16,6 +16,9 @@ const responseObject = <T extends z.ZodRawShape>(shape: T) =>
     return value;
   });
 const optionalString = optionalValue(requiredString);
+const optionalConfiguredString = requiredString
+  .refine((value) => value.trim().length > 0)
+  .nullish();
 
 export const workerSchema = responseObject({
   id: requiredString,
@@ -50,13 +53,25 @@ export const configSchema = z
     stopAfterConsecutiveErrors: positiveInteger.nullish(),
     maxDiscoveryRuns: positiveInteger,
     maxTimeHours: z.number().positive().max(96).optional(),
+    discoveryModel: optionalConfiguredString,
+    discoveryReasoningEffort: optionalConfiguredString,
   })
-  .transform(({ stopAfterConsecutiveErrors, maxTimeHours, ...config }) => ({
-    ...config,
-    stopAfterConsecutiveErrors:
-      stopAfterConsecutiveErrors ?? config.stopAfterNoNew,
-    ...(maxTimeHours === undefined ? {} : { maxTimeHours }),
-  }));
+  .transform(
+    ({
+      stopAfterConsecutiveErrors,
+      maxTimeHours,
+      discoveryModel,
+      discoveryReasoningEffort,
+      ...config
+    }) => ({
+      ...config,
+      stopAfterConsecutiveErrors:
+        stopAfterConsecutiveErrors ?? config.stopAfterNoNew,
+      ...(maxTimeHours === undefined ? {} : { maxTimeHours }),
+      ...(discoveryModel == null ? {} : { discoveryModel }),
+      ...(discoveryReasoningEffort == null ? {} : { discoveryReasoningEffort }),
+    }),
+  );
 
 // Check the config object before status, then its fields before the run fields.
 export const runSchema = z

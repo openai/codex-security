@@ -19,6 +19,7 @@ await testTerminalProtocol();
 testRunErrorParsing();
 testLegacyResponseNormalization();
 testConfiguredMaximumDurationParsing();
+testDiscoveryModelSettingsParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
 await testHeartbeatBypassesBlockedWriteQueue();
@@ -969,6 +970,33 @@ function testConfiguredMaximumDurationParsing() {
   }
   const legacyState = parseDeepScan(stateResult(randomUUID()));
   assert.equal(Object.hasOwn(legacyState.config, "maxTimeHours"), false);
+}
+
+function testDiscoveryModelSettingsParsing() {
+  for (const field of ["discoveryModel", "discoveryReasoningEffort"] as const) {
+    for (const value of [undefined, null, "custom-value", " custom-value "]) {
+      const state = parseDeepScan(
+        stateResult(randomUUID(), {
+          deepScan: { config: { [field]: value } },
+        }),
+      );
+      assert.equal(state.config[field], value ?? undefined);
+      assert.equal(Object.hasOwn(state.config, field), value != null);
+    }
+    for (const value of ["", " ", false, 12, [], {}]) {
+      assert.throws(
+        () =>
+          parseDeepScan(
+            stateResult(randomUUID(), {
+              deepScan: { config: { [field]: value } },
+            }),
+          ),
+        {
+          message: `Codex Security workbench returned invalid deepScan.config.${field}.`,
+        },
+      );
+    }
+  }
 }
 
 function testRunErrorParsing() {

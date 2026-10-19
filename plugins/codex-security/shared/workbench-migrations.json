@@ -410,5 +410,13 @@
     "statements": [
       "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
     ]
+  },
+  {
+    "version": 50,
+    "name": "persist deep scan discovery model settings",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_model TEXT;",
+      "ALTER TABLE deep_scan_runs ADD COLUMN discovery_reasoning_effort TEXT;"
+    ]
   }
 ]
