@@ -2537,8 +2537,7 @@ The extraction root is not enforced.
                         "explanation": "Synthetic repository evidence.",
                     }
                 ]
-                self.write_scan()
-                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                _, findings, _ = self.write_sealed_scan()
                 self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
 
     def test_rejects_unsafe_deferred_paths(self) -> None:
