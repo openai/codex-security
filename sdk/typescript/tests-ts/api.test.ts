@@ -1487,58 +1487,214 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("removes ambient API keys from explicitly selected ChatGPT scans", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const createCodex = mock((_options: CodexOptions) => {
-      throw new Error("ChatGPT scan reached");
-    });
-    let pythonEnvironment: Record<string, string | undefined> | undefined;
-    const onAuthentication =
-      mock<(authentication: ScanAuthentication) => void>();
-    const client = TestClient.withDependencies({
-      environment: {
-        OPENAI_API_KEY: "synthetic-openai-key",
-        Codex_Api_Key: "synthetic-codex-key",
-      },
-      prepareRuntime: runtimePreparer(codexHome, () => ({
-        environment: {
-          CODEX_HOME: codexHome,
-          OpenAi_Api_Key: "synthetic-forwarded-openai-key",
-          codex_api_key: "synthetic-forwarded-codex-key",
+  test.each(["openai", "synthetic.gateway"])(
+    "removes ambient API keys from explicitly selected %s ChatGPT scans",
+    async (provider) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const createCodex = mock((_options: CodexOptions) => {
+        throw new Error("ChatGPT scan reached");
+      });
+      let pythonEnvironment: Record<string, string | undefined> | undefined;
+      const onAuthentication =
+        mock<(authentication: ScanAuthentication) => void>();
+      const client = new TestClient(
+        {
+          codexOverrides: {
+            model_provider: provider,
+            model_providers: {
+              [provider]: {
+                requires_openai_auth: true,
+                env_http_headers: {
+                  "X-OpenAI": "OPENAI_API_KEY",
+                  "X-Codex": "Codex_Api_Key",
+                },
+              },
+            },
+          },
         },
-      })),
-      resolvePluginPython: async (options) => {
-        pythonEnvironment = options?.environment;
-        return "/managed/python";
-      },
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      createCodex,
-    });
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-openai-key",
+            Codex_Api_Key: "synthetic-codex-key",
+          },
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            environment: {
+              CODEX_HOME: codexHome,
+              OpenAi_Api_Key: "synthetic-forwarded-openai-key",
+              codex_api_key: "synthetic-forwarded-codex-key",
+            },
+          })),
+          resolvePluginPython: async (options) => {
+            pythonEnvironment = options?.environment;
+            return "/managed/python";
+          },
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex,
+        },
+      );
 
-    await expect(
-      client.run(repository, {
-        auth: "chatgpt",
-        onAuthentication,
-      }),
-    ).rejects.toThrow("ChatGPT scan reached");
-    expect(onAuthentication.mock.lastCall?.[0]).toEqual({
-      method: "stored_credentials",
-      verified: false,
-    });
-    for (const environment of [
-      pythonEnvironment,
-      createCodex.mock.lastCall?.[0]?.env,
-    ]) {
-      expect(environment).toBeDefined();
+      await expect(
+        client.run(repository, {
+          auth: "chatgpt",
+          onAuthentication,
+        }),
+      ).rejects.toThrow("ChatGPT scan reached");
+      expect(onAuthentication.mock.lastCall?.[0]).toEqual({
+        method: "stored_credentials",
+        verified: false,
+      });
+      for (const environment of [
+        pythonEnvironment,
+        createCodex.mock.lastCall?.[0]?.env,
+      ]) {
+        expect(environment).toBeDefined();
+        expect(
+          Object.keys(environment!).some((name) =>
+            ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+          ),
+        ).toBe(false);
+      }
+      await client.close();
+    },
+  );
+
+  test.each([
+    ["auto", "root"],
+    ["api-key", "root"],
+    ["auto", "profile"],
+    ["api-key", "profile"],
+  ] as const)(
+    "uses a native provider's selected env_key with %s authentication from %s",
+    async (auth, selection) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const createCodex = mock(completedCodex(root));
+      const onAuthentication = mock<(selected: ScanAuthentication) => void>();
+      const provider = {
+        model: "synthetic-deployment",
+        model_provider: "synthetic.gateway",
+        model_providers: {
+          "synthetic.gateway": {
+            name: "Synthetic gateway",
+            base_url: "https://provider.example.test/openai/v1",
+            wire_api: "responses",
+            env_key: "SYNTHETIC_PROVIDER_KEY",
+          },
+        },
+      };
+      const environment = {
+        SYNTHETIC_PROVIDER_KEY: " synthetic-selected-key ",
+        ...(selection === "profile"
+          ? { OPENAI_API_KEY: "synthetic-unrelated-openai-key" }
+          : {}),
+      };
+      const client = new TestClient(
+        {
+          codexOverrides:
+            selection === "root"
+              ? provider
+              : {
+                  model_provider: "openai",
+                  profile: "selected",
+                  profiles: { selected: provider },
+                },
+        },
+        {
+          environment,
+          prepareRuntime: unauthenticatedRuntime(codexHome, () => environment),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          resolveCodexCommand: () =>
+            fail("custom provider must not sign in to OpenAI"),
+          createCodex,
+        },
+      );
+      const authentication: ScanAuthentication = {
+        method: "api_key",
+        source: "SYNTHETIC_PROVIDER_KEY",
+        verified: false,
+      };
       expect(
-        Object.keys(environment!).some((name) =>
-          ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-        ),
-      ).toBe(false);
-    }
+        (await client.preflight(repository, { auth })).authentication,
+      ).toEqual(authentication);
+      await expect(
+        client.run(repository, { auth, onAuthentication }),
+      ).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(onAuthentication.mock.lastCall?.[0]).toEqual(authentication);
+      expect(createCodex.mock.lastCall?.[0]?.apiKey).toBeUndefined();
+      expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
+        SYNTHETIC_PROVIDER_KEY: environment.SYNTHETIC_PROVIDER_KEY,
+      });
+      expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
+        "OPENAI_API_KEY",
+      );
+      expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
+        "CODEX_API_KEY",
+      );
+      await client.close();
+    },
+  );
+
+  test("ignores native built-in provider tables during credential selection", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const createCodex = mock(completedCodex(root));
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "openai",
+          model_providers: { openai: { env_key: "SYNTHETIC_UNUSED_KEY" } },
+        },
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-openai-key",
+          SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
+        },
+        prepareRuntime: unauthenticatedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex,
+      },
+    );
+    expect(
+      (await client.preflight(repository, { auth: "api-key" })).authentication,
+    ).toEqual({ method: "api_key", source: "OPENAI_API_KEY", verified: false });
+    await client.run(repository, { auth: "api-key" });
+    expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("synthetic-openai-key");
     await client.close();
   });
+
+  test.each([undefined, "   "])(
+    "requires the selected native provider key instead of an unrelated key (%s)",
+    async (key) => {
+      const { repository } = await runtimeDirectories();
+      const { client, prepareRuntime } = localClient(
+        {
+          codexOverrides: {
+            model_provider: "synthetic.gateway",
+            model_providers: {
+              "synthetic.gateway": { env_key: "SYNTHETIC_PROVIDER_KEY" },
+            },
+          },
+        },
+        {
+          OPENAI_API_KEY: "synthetic-unrelated-openai-key",
+          SYNTHETIC_PROVIDER_KEY: key,
+        },
+      );
+      for (const operation of ["preflight", "run"] as const) {
+        await expect(
+          client[operation](repository, { auth: "api-key" }),
+        ).rejects.toThrow(
+          "API-key authentication requires SYNTHETIC_PROVIDER_KEY.",
+        );
+      }
+      expect(prepareRuntime).not.toHaveBeenCalled();
+      await client.close();
+    },
+  );
 
   test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
@@ -1581,7 +1737,20 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(EXTERNAL_PROVIDER_CASES)(
+  test.each(
+    EXTERNAL_PROVIDER_CASES.flatMap(
+      ([name, provider, apiKey, model, config]) => [
+        [name, provider, apiKey, model, config] as const,
+        [
+          `${name} with a native env_key`,
+          provider,
+          "SYNTHETIC_PROVIDER_KEY",
+          model,
+          { ...config, env_key: "SYNTHETIC_PROVIDER_KEY" },
+        ] as const,
+      ],
+    ),
+  )(
     "preflights %s with auto authentication without credentials or runtime startup",
     async (_name, provider, apiKey, model, providerConfig) => {
       const { repository } = await repositoryDirectories();
@@ -4514,10 +4683,15 @@ describe("CodexSecurity orchestration", () => {
       undefined,
     ],
     ["managed provider selection retains matching", "managed", undefined],
+    ["native provider credentials retain matching", "native", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
       const limited = failure === "budget" || failure === "budget-context";
+      const nativeProvider = failure === "native";
+      const providerName = nativeProvider ? "openrouter" : "synthetic.provider";
+      const closedHistory =
+        failure === "dismissed" || failure === "managed" || nativeProvider;
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const current = {
         findingId: "csf_852f90d6e1177502ff113d4a",
@@ -4550,16 +4724,21 @@ describe("CodexSecurity orchestration", () => {
       const providerConfig = {
         features: { shell_tool: false, unified_exec: false, view_image: false },
         windows: { sandbox: "unelevated" },
-        model_provider: "synthetic.provider",
+        model_provider: providerName,
         model_providers: {
-          "synthetic.provider": {
+          [providerName]: {
             name: "Synthetic provider",
             base_url: "https://provider.example.test/v1",
             wire_api: "responses",
             env_http_headers: {
               "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
+              ...(nativeProvider
+                ? { "X-Native-Context": "OPENAI_API_KEY" }
+                : {}),
             },
-            auth: { command: "synthetic-auth" },
+            ...(nativeProvider
+              ? { env_key: "CODEX_API_KEY" }
+              : { auth: { command: "synthetic-auth" } }),
           },
           ...(failure === "managed"
             ? { "synthetic.managed": managedProvider }
@@ -4657,6 +4836,14 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
+          ...(nativeProvider
+            ? {
+                environment: {
+                  CODEX_API_KEY: " synthetic-native-key ",
+                  OPENAI_API_KEY: " synthetic-native-header ",
+                },
+              }
+            : {}),
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: {
               SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
@@ -4697,7 +4884,7 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
-              if (failure === "dismissed" || failure === "managed") {
+              if (closedHistory) {
                 return {
                   findings: args.includes("--status")
                     ? matched
@@ -4720,6 +4907,14 @@ describe("CodexSecurity orchestration", () => {
             return mockWorkbench(args, input);
           },
           async matchFindings(input, options, runtimeOptions) {
+            if (nativeProvider) {
+              expect(options?.environment?.["CODEX_API_KEY"]).toBe(
+                " synthetic-native-key ",
+              );
+              expect(options?.environment?.["OPENAI_API_KEY"]).toBe(
+                " synthetic-native-header ",
+              );
+            }
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
             if (failure !== "managed")
               expect(options?.config?.codexOverrides).toMatchObject({
@@ -4836,6 +5031,7 @@ describe("CodexSecurity orchestration", () => {
 
       try {
         const result = await client.run(repository, {
+          ...(nativeProvider ? { auth: "api-key" as const } : {}),
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
           onWarning: (message) => warnings.push(message),
@@ -4849,7 +5045,7 @@ describe("CodexSecurity orchestration", () => {
         ).toEqual(
           failure === "budget"
             ? ["another-open-finding"]
-            : failure === "dismissed" || failure === "managed"
+            : closedHistory
               ? []
               : undefined,
         );
@@ -4871,7 +5067,7 @@ describe("CodexSecurity orchestration", () => {
         expect(
           commands.some(([command]) => command === "list-global-findings"),
         ).toBe(true);
-        if (failure === "dismissed" || failure === "managed") {
+        if (closedHistory) {
           expect(JSON.parse(savedComparisonInput!)).toMatchObject({
             matches: [
               {

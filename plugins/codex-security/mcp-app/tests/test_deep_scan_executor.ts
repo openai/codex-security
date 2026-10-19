@@ -1386,6 +1386,7 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
+    "SYNTHETIC_ALTERNATE_KEY",
     "SYNTHETIC_HEADER_VALUE",
     "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
@@ -1399,6 +1400,7 @@ async function testWorkerRuntimeSettings() {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
     delete process.env.SYNTHETIC_GATEWAY_KEY;
+    delete process.env.SYNTHETIC_ALTERNATE_KEY;
     delete process.env.SYNTHETIC_HEADER_VALUE;
     delete process.env.CODEX_SQLITE_HOME;
     for (const [configuration, expected] of cases) {
@@ -1590,6 +1592,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
           };
           const provider = index === 0 ? undefined : "synthetic.gateway";
+          const providerEnvKey =
+            index === 2 ? "SYNTHETIC_ALTERNATE_KEY" : "SYNTHETIC_GATEWAY_KEY";
+          const providerHeaderKey =
+            index === 2
+              ? "CODEX_API_KEY"
+              : index === 3
+                ? "OPENAI_API_KEY"
+                : "SYNTHETIC_HEADER_VALUE";
           const providerConfig =
             index === 0
               ? undefined
@@ -1597,8 +1607,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   name: `Synthetic gateway ${index}`,
                   base_url: `https://gateway-${index}.example.test/v1`,
                   wire_api: "responses",
-                  env_key: "SYNTHETIC_GATEWAY_KEY",
-                  env_http_headers: { "X-Synthetic": "SYNTHETIC_HEADER_VALUE" },
+                  env_key: providerEnvKey,
+                  env_http_headers: { "X-Synthetic": providerHeaderKey },
                   ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
                   experimental_bearer_token: `synthetic-bearer-${index}`,
                   auth: {
@@ -1637,8 +1647,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               index === 0
                 ? undefined
                 : {
-                    SYNTHETIC_GATEWAY_KEY: providerKeys[index],
-                    SYNTHETIC_HEADER_VALUE: providerHeaders[index],
+                    [providerEnvKey]: providerKeys[index],
+                    [providerHeaderKey]: providerHeaders[index],
                     CODEX_SQLITE_HOME: path.join(
                       fixture.root,
                       `native-state-${index}`,
@@ -2006,21 +2016,29 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
+            for (const name of [
+              "SYNTHETIC_GATEWAY_KEY",
+              "SYNTHETIC_ALTERNATE_KEY",
+              "SYNTHETIC_HEADER_VALUE",
+              "CODEX_API_KEY",
+              "OPENAI_API_KEY",
+            ]) {
+              const expected = workerConfigurations[index].environment?.[name];
+              assert.equal(workerLaunch.environment![name], expected);
+              assert.equal(invocation.providerCredentials[name], expected);
+            }
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
               path.join(fixture.root, `state-${index}`),
             );
-            assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.mcpNodePath, nodePaths[index]);
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
-            assert.equal(invocation.providerHeader, providerHeaders[index]);
-
-            assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
               workerLaunch.environment!.CODEX_SQLITE_HOME,
               workerConfigurations[index].environment?.CODEX_SQLITE_HOME,
             );
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
+            assert.equal(process.env.SYNTHETIC_ALTERNATE_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
               ...workerConfigurations[index].authentication,
@@ -2256,14 +2274,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 `state-${workerConfigurations.indexOf(selectedProvider)}`,
               ),
             );
-            assert.equal(
-              preflight.providerKey,
-              selectedProvider.environment?.SYNTHETIC_GATEWAY_KEY,
-            );
-            assert.equal(
-              preflight.providerHeader,
-              selectedProvider.environment?.SYNTHETIC_HEADER_VALUE,
-            );
+            for (const name of [
+              "SYNTHETIC_GATEWAY_KEY",
+              "SYNTHETIC_ALTERNATE_KEY",
+              "SYNTHETIC_HEADER_VALUE",
+              "CODEX_API_KEY",
+              "OPENAI_API_KEY",
+            ]) {
+              assert.equal(
+                preflight.providerCredentials[name],
+                selectedProvider.environment?.[name],
+              );
+            }
             assertConfigOverrides(preflight.argv, {
               openai_base_url: selectedProvider.endpoint,
               model_instructions_file: selectedProvider.instructionsFile,

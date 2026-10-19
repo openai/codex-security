@@ -1246,7 +1246,12 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["command", "environment", "permissions"] as const)(
+  test.each([
+    "command",
+    "environment",
+    "native-environment",
+    "permissions",
+  ] as const)(
     "automatic matching keeps concurrent %s configurations isolated",
     async (mode) => {
       const home = await temporaryDirectory(
@@ -1261,8 +1266,18 @@ describe("semantic scan comparison", () => {
         http_headers: {
           "X-Synthetic-Secret": `synthetic-concurrent-header-${index}`,
         },
-        ...(mode === "environment"
-          ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+        ...(mode === "environment" || mode === "native-environment"
+          ? {
+              env_key:
+                mode === "environment"
+                  ? "SYNTHETIC_PROVIDER_KEY"
+                  : index === 0
+                    ? "CODEX_API_KEY"
+                    : "OPENAI_API_KEY",
+              env_http_headers: {
+                "X-Synthetic": index === 0 ? "OPENAI_API_KEY" : "CODEX_API_KEY",
+              },
+            }
           : {
               auth: {
                 command: `synthetic-auth-${index}`,
@@ -1330,6 +1345,12 @@ describe("semantic scan comparison", () => {
                 CODEX_SECURITY_SCAN_ID: scanId,
                 OPENAI_API_KEY: "synthetic-ambient-key",
                 SYNTHETIC_PROVIDER_KEY: `synthetic-provider-${index}`,
+                ...(mode === "native-environment"
+                  ? {
+                      OPENAI_API_KEY: ` synthetic-openai-${index} `,
+                      CODEX_API_KEY: ` synthetic-codex-${index} `,
+                    }
+                  : {}),
               },
               async workbench(args) {
                 return args[0] === "list-unmatched-scan-pairs"
@@ -1376,8 +1397,15 @@ describe("semantic scan comparison", () => {
             code: "ENOENT",
           });
           expect(options?.config).not.toHaveProperty("permissions");
-          if (mode !== "environment") {
-            expect(options?.apiKey).toBeUndefined();
+          expect(options?.apiKey).toBeUndefined();
+          if (mode === "native-environment") {
+            expect(options?.env?.["OPENAI_API_KEY"]).toBe(
+              ` synthetic-openai-${index} `,
+            );
+            expect(options?.env?.["CODEX_API_KEY"]).toBe(
+              ` synthetic-codex-${index} `,
+            );
+          } else if (mode !== "environment") {
             expect(options?.env).not.toHaveProperty("OPENAI_API_KEY");
           } else {
             expect(options?.env?.["SYNTHETIC_PROVIDER_KEY"]).toBe(

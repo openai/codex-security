@@ -7,6 +7,7 @@ import {
   DEFAULT_DEPENDENCIES,
   scanAuthentication,
   selectedScanEnvironment,
+  selectedProviderEnvironment,
   type CodexSecuritySurface,
   type ScanOptions,
 } from "./api.js";
@@ -20,6 +21,7 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   scanModelProvider,
+  scanProviderEnvironmentKey,
   type CodexSecurityConfig,
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
@@ -139,8 +141,22 @@ export async function runComponentScans(
     const source = environment ?? process.env;
     const configuration = await mergedCodexConfig(options.config ?? {});
     const provider = scanModelProvider(configuration);
-    scanAuthentication(source, auth, provider, hasCommandAuth(configuration));
-    environment = selectedScanEnvironment(source, auth, provider);
+    const authentication = scanAuthentication(
+      source,
+      auth,
+      provider,
+      hasCommandAuth(configuration),
+      false,
+      scanProviderEnvironmentKey(configuration),
+    );
+    environment = {
+      ...selectedScanEnvironment(source, auth, provider),
+      ...selectedProviderEnvironment(
+        configuration,
+        selectedScanEnvironment(source, auth),
+        authentication,
+      ),
+    };
   }
   const repository = await normalizeRepository(
     options.repository,

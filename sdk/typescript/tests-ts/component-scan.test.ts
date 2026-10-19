@@ -1677,6 +1677,105 @@ test.each([
   },
 );
 
+test.each(
+  ["root", "profile"].flatMap((selection) =>
+    ["gateway", "openrouter"].flatMap((provider) =>
+      ["SYNTHETIC_PROVIDER_KEY", "CODEX_API_KEY", "OPENAI_API_KEY"].map(
+        (key) => ({ selection, provider, key }),
+      ),
+    ),
+  ),
+)(
+  "component planning and matching preserve $selection $provider credentials from $key",
+  async ({ selection, provider, key }) => {
+    const paths = await fixture();
+    const header =
+      key === "OPENAI_API_KEY" ? "CODEX_API_KEY" : "OPENAI_API_KEY";
+    const environment = {
+      [key]: " synthetic-provider-key ",
+      [header]: " synthetic-provider-header ",
+    };
+    const plan = mock(async (_repository, options) => {
+      expect(options.environment).toEqual(environment);
+      return { components };
+    });
+    const match = mock(async (_input, options) => {
+      expect(options.environment).toEqual(environment);
+      return noMatches;
+    });
+    const config = {
+      codexOverrides: {
+        model_providers: {
+          [provider]: {
+            env_key: key,
+            env_http_headers: { "X-Synthetic": header },
+          },
+        },
+        ...(selection === "profile"
+          ? {
+              profile: "selected",
+              profiles: { selected: { model_provider: provider } },
+            }
+          : { model_provider: provider }),
+      },
+    };
+    const options = {
+      components: undefined,
+      auto: true,
+      config,
+      scanOptions: { auth: "api-key" as const },
+      planComponents: plan,
+      matchFindings: match,
+    };
+    const result = await scan(paths, { ...options, environment });
+    expect(result.completed).toBe(components.length);
+    expect(plan).toHaveBeenCalledTimes(1);
+    expect(match).toHaveBeenCalledTimes(components.length - 1);
+    plan.mockClear();
+    await expect(
+      scan(paths, {
+        ...options,
+        environment: { SYNTHETIC_UNRELATED_KEY: "synthetic-unrelated" },
+      }),
+    ).rejects.toThrow(key);
+    expect(plan).not.toHaveBeenCalled();
+  },
+);
+
+test("component planning retains explicit ChatGPT selection with configured headers", async () => {
+  const paths = await fixture();
+  const plan = mock(async (_repository, options) => {
+    expect(options.environment).toEqual({});
+    return { components };
+  });
+  await scan(paths, {
+    components: undefined,
+    auto: true,
+    planOnly: true,
+    config: {
+      codexOverrides: {
+        model_provider: "synthetic.gateway",
+        model_providers: {
+          "synthetic.gateway": {
+            requires_openai_auth: true,
+            env_http_headers: {
+              "X-OpenAI": "OPENAI_API_KEY",
+              "X-Codex": "CODEX_API_KEY",
+            },
+          },
+        },
+      },
+    },
+    environment: {
+      OPENAI_API_KEY: "synthetic-openai",
+      CODEX_API_KEY: "synthetic-codex",
+    },
+    scanOptions: { auth: "chatgpt" },
+    planComponents: plan,
+  });
+  expect(plan).toHaveBeenCalledTimes(1);
+});
+
 test("default scan clients use the component scan environment", async () => {
   const paths = await fixture();
   const summary = await scan(paths, {

@@ -147,6 +147,8 @@ import {
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvironmentKey,
+  scanProviderConfiguration,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -1333,15 +1335,7 @@ export async function runCodexSkillCommand(
       ) as JsonObject;
       const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
-      // Native Codex ignores configured tables for these built-in providers.
-      const providerConfiguration =
-        typeof provider === "string" &&
-        !["openai", "ollama", "lmstudio"].includes(provider)
-          ? (
-              config["model_providers"] as
-                Record<string, JsonObject> | undefined
-            )?.[provider]
-          : undefined;
+      const providerConfiguration = scanProviderConfiguration(config, provider);
       const providerEnvKey =
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
@@ -8138,6 +8132,8 @@ async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
     provider: unknown;
+    providerEnvKey?: string;
+    commandAuth?: boolean;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
@@ -8148,6 +8144,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     isExternalModelProvider(provider) ||
+    options.providerEnvKey !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
@@ -8155,6 +8152,9 @@ async function chooseInteractiveAuthentication(
     dependencies.environment,
     auth,
     provider,
+    options.commandAuth,
+    false,
+    options.providerEnvKey,
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -8374,6 +8374,10 @@ async function executeScan(
             {
               auth: arguments_.auth,
               provider,
+              providerEnvKey: scanProviderEnvironmentKey(
+                effectiveConfiguration,
+              ),
+              commandAuth: hasCommandAuth(effectiveConfiguration),
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -8402,6 +8406,7 @@ async function executeScan(
           provider,
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
+          scanProviderEnvironmentKey(effectiveConfiguration),
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,

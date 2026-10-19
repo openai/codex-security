@@ -260,6 +260,13 @@ Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 
+For a native custom provider selected through `model_provider` (including a
+selected profile), `auth: "auto"` and `auth: "api-key"` use that provider's
+`model_providers.<id>.env_key`. Set the named environment variable before
+starting the client. An unrelated OpenAI key does not satisfy the selected
+provider's explicit API-key requirement. Provider endpoints, headers, and
+Responses routing remain native Codex settings.
+
 New and resumed Deep Scans require a current plugin with
 `directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker
 configuration support. Older custom plugins fail before scan execution; update
