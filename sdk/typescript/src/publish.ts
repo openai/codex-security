@@ -721,15 +721,22 @@ async function publishLinearApiIssues(
   observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
 ): Promise<void> {
-  let handoffWrites = Promise.resolve();
+  let handoffWrites = Promise.resolve("");
   let recorded = 0;
   const appendHandoff = async (
     record: Record<string, unknown>,
   ): Promise<void> => {
-    const pending = handoffWrites.then(async () => {
-      await appendFile(handoffFile, `${JSON.stringify(record)}\n`, "utf8");
+    const pending = handoffWrites.then(async (prefix) => {
+      await appendFile(
+        handoffFile,
+        `${prefix}${JSON.stringify(record)}\n`,
+        "utf8",
+      );
     });
-    handoffWrites = pending.catch(() => undefined);
+    handoffWrites = pending.then(
+      () => "",
+      () => "\n",
+    );
     await pending;
   };
   for (let index = 0; index < publication.issues.length; index += 20) {

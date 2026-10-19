@@ -830,6 +830,117 @@ describe("direct Linear API publication", () => {
     },
   );
 
+  test.each([
+    { label: "zero bytes", failedWrites: 1, partial: "" },
+    { label: "a partial row", failedWrites: 1, partial: '{"scanId":' },
+    {
+      label: "consecutive partial rows",
+      failedWrites: 2,
+      partial: '{"scanId":',
+    },
+    { label: "a row without its newline", failedWrites: 1, partial: undefined },
+    {
+      label: "a complete row",
+      failedWrites: 1,
+      partial: undefined,
+      complete: true,
+    },
+  ])(
+    "preserves later direct handoffs after an append fails with $label",
+    async ({ failedWrites, partial, complete }) => {
+      const publication = preparedPublication(23);
+      const failure = new Error("Synthetic handoff append failure");
+      const progress: PublishScanProgress[] = [];
+      const created = mock(() => undefined);
+      const persisted = mock(copyPublishedIssues);
+      const receipt = mock(async () => undefined);
+      const injected = dependencies(publication, {
+        linearClient: linearApiClient(publication, { create: created }),
+        recordPublishedIssues: persisted,
+        writeReceipt: receipt,
+      });
+      const originalAppend = filesystem.appendFile;
+      let attempts = 0;
+      let handoffFile = "";
+      let failedBytes = "";
+      const append = spyOn(filesystem, "appendFile").mockImplementation(
+        async (file, data, options) => {
+          if (
+            typeof file !== "string" ||
+            !file.startsWith(publicationHandoffRoot(injected)) ||
+            !file.endsWith("issues.jsonl")
+          ) {
+            return originalAppend(file, data, options);
+          }
+          handoffFile = file;
+          attempts += 1;
+          if (attempts <= failedWrites) {
+            const text = data as string;
+            const bytes =
+              partial === undefined
+                ? complete
+                  ? text
+                  : text.slice(0, -1)
+                : `${text.startsWith("\n") ? "\n" : ""}${partial}`;
+            failedBytes += bytes;
+            await originalAppend(file, bytes, options);
+            throw failure;
+          }
+          await originalAppend(file, data, options);
+        },
+      );
+      let caught: unknown;
+      try {
+        await publishScanInternal(
+          publication.scanDirectory,
+          {
+            ...OPTIONS,
+            linearApiKey: "synthetic-key",
+            onProgress: (event) => progress.push(event),
+          },
+          injected,
+        );
+      } catch (error) {
+        caught = error;
+      } finally {
+        append.mockRestore();
+      }
+
+      expect(caught).toBeInstanceOf(CodexSecurityError);
+      expect((caught as Error).cause).toBe(failure);
+      expect((caught as Error).message).toContain(failure.message);
+      expect((caught as Error).message).toContain("recover it before retrying");
+      expect(created).toHaveBeenCalledTimes(20);
+      expect(persisted).not.toHaveBeenCalled();
+      expect(receipt).not.toHaveBeenCalled();
+      expect(attempts).toBe(20);
+      expect(
+        progress.filter((event) => event.type === "handoff_recorded"),
+      ).toHaveLength(20 - failedWrites);
+      const content = await readFile(handoffFile, "utf8");
+      expect(content.startsWith(failedBytes)).toBe(true);
+      const records: Record<string, unknown>[] = [];
+      let malformed = 0;
+      for (const line of content.split("\n")) {
+        if (line.length === 0) continue;
+        try {
+          records.push(JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          malformed += 1;
+        }
+      }
+      expect(malformed).toBe(partial ? failedWrites : 0);
+      const omitted = partial === undefined ? 0 : failedWrites;
+      expect(records).toEqual(
+        publication.issues.slice(omitted, 20).map((issue, index) =>
+          handoffRecord(publication, issue, {
+            url: `https://linear.app/example/issue/SEC-${index + omitted + 1}`,
+          }),
+        ),
+      );
+    },
+  );
+
   test("completes direct batches before continuing and preserves individual failures", async () => {
     const publication = preparedPublication(23);
     const updates: PublishScanProgress[] = [];
