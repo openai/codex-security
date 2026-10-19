@@ -358,7 +358,7 @@ committed Git scan, using the same checkout, model, and reasoning effort. Owner
 errors leave the base scan completed. The JSON result includes
 `ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
 manifest stay unchanged. This option is unsupported for working-tree and
-directory snapshots, and is skipped with a warning when `--max-cost-usd` is set.
+directory snapshots, and is skipped with a warning when `--max-cost` is set.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
