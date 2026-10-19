@@ -36,6 +36,7 @@
 - validate code evidence paths ([#1567](https://github.com/openai/codex-security/pull/1567))
 - bump taiki-e/install-action from 2.87.27 to 2.87.28 ([#1742](https://github.com/openai/codex-security/pull/1742))
 - update Zod, OpenCode SDK and Bun types ([#1743](https://github.com/openai/codex-security/pull/1743))
+- support canonical records with host reviews ([#1662](https://github.com/openai/codex-security/pull/1662))
 
 <!-- release-section: highlights:end -->
 
