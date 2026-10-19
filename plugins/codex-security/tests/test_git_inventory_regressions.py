@@ -29,6 +29,20 @@ def test_root_commit_message_does_not_supply_diff_parent(tmp_path: Path, workben
     assert diff["baseRevision"] == workbench_api["EMPTY_GIT_TREE"]
 
 
+def test_sha256_root_commit_uses_the_sha256_empty_tree(tmp_path: Path, workbench_api) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    git(target, "init", "-q", "--object-format=sha256")
+    git(target, "config", "user.email", "fixture@example.com")
+    git(target, "config", "user.name", "Fixture")
+    (target / "README.md").write_text("fixture\n")
+    git(target, "add", "README.md")
+    git(target, "commit", "-qm", "Initial commit")
+    diff = workbench_api["require_diff_target"](target, "commit", None, "HEAD", None)
+    revisions = (diff["baseRevision"], diff["headRevision"])
+    assert git(target, "diff", "--name-only", *revisions) == b"README.md"
+
+
 def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)

@@ -68,6 +68,17 @@ Refresh the artifact after changing native source or toolchain. The standalone
 plugin supports a host-only build; that does not satisfy the SDK's universal
 packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
 
+## Python test dependencies
+
+Use Python 3.10 or later. From the repository root, install the Python test and lint dependencies with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
+```
+
+This replaces `pip install -e 'plugins/codex-security[test]'`. Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
+The requirements file is the single list of pinned Python test dependencies. Ruff and pytest settings remain in `plugins/codex-security/pyproject.toml`; the Ruff dependency and its `required-version` setting must agree.
+
 ## Writing tests
 
 - Test observable results, failures, cancellation, and cleanup. Prefer a

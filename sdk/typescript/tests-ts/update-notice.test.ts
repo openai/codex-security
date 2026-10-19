@@ -104,6 +104,11 @@ describe("CLI update notice", () => {
       [{}, "/.yarn/global/pkg", `yarn global add ${packageName}`],
       [{}, "/.config/yarn/global/pkg", `yarn global add ${packageName}`],
       [
+        {},
+        "C:\\AppData\\Local\\Yarn\\Data\\global\\node_modules\\pkg",
+        `yarn global add ${packageName}`,
+      ],
+      [
         { npm_config_user_agent: "bun/1.3.0" },
         installed,
         `bun add ${packageName}`,

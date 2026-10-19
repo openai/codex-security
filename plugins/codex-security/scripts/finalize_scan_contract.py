@@ -9,6 +9,7 @@ import csv
 import errno
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import os
@@ -67,6 +68,7 @@ RFC3339_RE = re.compile(
     re.ASCII,
 )
 REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+REMOTE_UNSAFE_HOST_RE = re.compile(r"[\s<>^|]")
 GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
@@ -895,13 +897,35 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 def _validate_remote(remote: str, context: str) -> None:
     if REMOTE_CONTROL_RE.search(remote):
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    parsed = urlsplit(remote)
+    try:
+        parsed = urlsplit(remote)
+    except ValueError as exc:
+        # urlsplit rejects authorities with unbalanced brackets.
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
     if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if "@" in parsed.netloc or parsed.query or parsed.fragment:
         raise ContractError(
             f"{context}: remote URL must not contain credentials, query, or fragment"
         )
+    # Mirrors the authority rules of the WHATWG URL parser the SDK reader applies.
+    authority = parsed.netloc
+    if authority.startswith("["):
+        try:
+            ipaddress.IPv6Address(authority.partition("]")[0][1:])
+        except ValueError as exc:
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+        authority = authority.partition("]")[2]
+        if authority and not authority.startswith(":"):
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
+    port = authority.partition(":")[2]
+    hostname = parsed.hostname
+    if (
+        not hostname
+        or REMOTE_UNSAFE_HOST_RE.search(hostname)
+        or (port and (not port.isascii() or not port.isdigit() or int(port) > 65535))
+    ):
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -1401,19 +1425,53 @@ def _populate_unsealed_manifest_envelope(
         allowed_kinds = completion_binding["allowedTargetKinds"]
         if len(allowed_kinds) == 1:
             target.setdefault("kind", allowed_kinds[0])
-        _populate_unsealed_target_binding(target, completion_binding["target"])
+        _populate_unsealed_target_binding(target, completion_binding["target"], allowed_kinds)
 
     scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 
 
+def _populate_unsealed_target_kind(
+    target: dict[str, Any],
+    target_binding: dict[str, Any],
+    allowed_kinds: Any,
+) -> None:
+    """Adopt the registered target kind when the binding owns every coordinate it needs.
+
+    The workbench, not the draft, knows how the target was registered: a scan agent
+    that infers the kind from the checkout (a clean worktree registered as
+    git_revision is the common case) used to discard the whole completed scan at the
+    seal step. The kind carries no draft-owned information when the registration
+    allows a single value, so take that value instead of failing.
+
+    Rewriting the kind also reinterprets the coordinates that kind requires, and a
+    coordinate the binding does not own survives the replacement below with whatever
+    the draft computed under its own reading of the target. Adopting git_diff without
+    a bound snapshotDigest, for example, would seal a whole-worktree digest as the
+    diff digest. Leave the kind alone whenever the binding cannot restate every
+    coordinate the registered kind requires, and let the binding check reject the
+    draft instead.
+    """
+
+    if not isinstance(allowed_kinds, list) or len(allowed_kinds) != 1:
+        return
+    registered_kind = allowed_kinds[0]
+    if not isinstance(registered_kind, str) or target.get("kind") == registered_kind:
+        return
+    if not TARGET_REQUIRED_COORDINATE_FIELDS.get(registered_kind, set()) <= target_binding.keys():
+        return
+    target["kind"] = registered_kind
+
+
 def _populate_unsealed_target_binding(
     target: dict[str, Any],
     target_binding: dict[str, Any],
+    allowed_kinds: Any = None,
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
+    _populate_unsealed_target_kind(target, target_binding, allowed_kinds)
     target_kind = target.get("kind")
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())
@@ -2197,8 +2255,8 @@ def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
     tags = {"security", *categories}
     for cwe in cwes:
         match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
-        if match and int(match[1]) > 0:
-            tags.add(f"external/cwe/cwe-{int(match[1]):03d}")
+        if match and (digits := match[1].lstrip("0")):
+            tags.add(f"external/cwe/cwe-{digits.zfill(3)}")
     description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
     if cwes:
         description += f" Weaknesses: {', '.join(cwes)}."

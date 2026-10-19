@@ -67,6 +67,11 @@ function runPublisher({
   existingLookup = "existing",
   existingNotes = "Generated release notes",
   generatedNotes = "Generated release notes\n",
+  generateNotesResult = {
+    status: 0,
+    stdout: JSON.stringify({ body: generatedNotes }),
+    stderr: "",
+  },
 
   latestTag = "npm-v0.1.3",
   makeLatest = false,
@@ -151,12 +156,9 @@ function runPublisher({
               expect(
                 args.includes("configuration_file_path=.github/release.yml"),
               ).toBe(releaseConfiguration);
-              return {
-                status: 0,
-                stdout: JSON.stringify({
-                  body: generatedNotes,
-                }),
-              };
+              if (generateNotesResult.stderr)
+                console.error(generateNotesResult.stderr);
+              return generateNotesResult;
           }
         }
         if (program === "git" && args[0] === "cat-file")
@@ -3061,6 +3063,25 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.calls.at(-1)).toContain("--latest=false");
     expect(githubReleaseWorkflow).toContain("release-history");
   });
+
+  test.each(["", "not-json"])(
+    "preserves note-generation failure before parsing %j output",
+    (stdout) => {
+      const result = runPublisher({
+        existingLookup: "missing",
+        generateNotesResult: {
+          status: 17,
+          stdout,
+          stderr: "Release notes are unavailable.",
+        },
+      });
+      expect(result.status).toBe(17);
+      expect(result.stderr).toBe("Release notes are unavailable.\n");
+      expect(result.calls.at(-1)).toContain(
+        "repos/test/codex-security/releases/generate-notes",
+      );
+    },
+  );
 
   test("generates notes only from a previously published release", () => {
     expect(githubReleaseWorkflow).toContain(

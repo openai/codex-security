@@ -1,6 +1,7 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
@@ -72,6 +73,46 @@ test.each([
     const contents = await readFile(path, "utf8");
     expect(await runCapturedCli(main, args, deps)).toBe(2);
     expect(await readFile(path, "utf8")).toBe(contents);
+  },
+);
+
+test.each(["yaml", "json"])(
+  "init preserves URI-sensitive directory names in the %s schema reference",
+  async (extension) => {
+    const input = await fixture({});
+    const workspace = join(
+      input.root,
+      process.platform === "win32"
+        ? "project #draft %25"
+        : 'project #draft %25 ?review: "quoted"',
+    );
+    const schemaDirectory = join(
+      workspace,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "schemas",
+    );
+    await mkdir(schemaDirectory, { recursive: true });
+    const schema = join(schemaDirectory, "project-config.schema.json");
+    const contents = '{"type":"object"}\n';
+    await writeFile(schema, contents);
+    const path = join(input.configDirectory, `starter.${extension}`);
+
+    expect(
+      await runCapturedCli(
+        main,
+        ["init", path, "--json"],
+        dependencies({ currentDirectory: workspace }),
+      ),
+    ).toBe(0);
+
+    const selected = await readProjectConfig(path);
+    const reference = new URL(selected.input.$schema!, pathToFileURL(path));
+    expect(reference.hash).toBe("");
+    expect(reference.search).toBe("");
+    expect(await readFile(reference, "utf8")).toBe(contents);
+    expect(reference.href).toBe(pathToFileURL(schema).href);
   },
 );
 
