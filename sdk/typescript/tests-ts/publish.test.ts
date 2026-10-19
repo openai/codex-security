@@ -3700,8 +3700,8 @@ describe("connected Linear publication", () => {
       expect(results).toContainEqual(
         JSON.parse(await readFile(fixture.latest, "utf8")),
       );
-      expect(archives.map((text) => JSON.parse(text))).toEqual(
-        expect.arrayContaining(results),
+      expect(results).toEqual(
+        expect.arrayContaining(archives.map((text) => JSON.parse(text))),
       );
       expect((await readdir(fixture.directory)).sort()).toEqual(
         [...attempts, `${fixture.digest}.json`, "handoffs"].sort(),
