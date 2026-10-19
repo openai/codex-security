@@ -24,9 +24,9 @@
     "@actions/io": "3.0.2"
   },
   "devDependencies": {
-    "@types/node": "26.6.4",
+    "@types/node": "26.6.5",
     "esbuild": "0.28.2",
-    "prettier": "3.9.9",
+    "prettier": "3.9.10",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "yaml": "2.9.1"
