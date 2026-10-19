@@ -5,6 +5,7 @@ on:
     paths:
       - action.yml
       - github-action/**
+      - sdk/typescript/src/git-remote.ts
       - plugins/codex-security/examples/completed-scan/**
       - .github/workflows/action-ci.yml
   pull_request: *action-changes
