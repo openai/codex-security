@@ -47,6 +47,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -1924,7 +1925,11 @@ export async function planOutputArchive(
   if (outputDirectory === null) return null;
   const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  return `${outputDirectory}.previous-${new Date()
+  return `${outputDirectory}${outputArchiveSuffix()}`;
+}
+
+function outputArchiveSuffix(): string {
+  return `.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
@@ -2027,9 +2032,21 @@ async function prepareOutputDirectory(
   );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
-    const created = await mkdtemp(
-      join(temporaryRoot, `codex-security-${safePrefix(repositoryName)}-`),
-    );
+    const prefix = `codex-security-${safePrefix(repositoryName)}`;
+    let created: string;
+    if (process.platform === "win32") {
+      const suffix = `-${randomUUID()}`;
+      // Reserve room within NTFS's 255-unit component limit for later archival.
+      // The SDK suffix is longer than the workbench's .previous-<tempname> suffix.
+      const prefixLength = 255 - suffix.length - outputArchiveSuffix().length;
+      created = join(
+        temporaryRoot,
+        `${prefix.slice(0, prefixLength)}${suffix}`,
+      );
+      await createWindowsOutputDirectory(created, false);
+    } else {
+      created = await mkdtemp(join(temporaryRoot, `${prefix}-`));
+    }
     try {
       if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
       return await validatePreparedOutputDir(created, validateLocation);
@@ -2050,7 +2067,10 @@ async function prepareOutputDirectory(
       }
     }
     if (existing === null) {
-      createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
+      createdRoot =
+        process.platform === "win32"
+          ? await createWindowsOutputDirectory(path, true)
+          : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
     return await validatePreparedOutputDir(
@@ -2070,6 +2090,44 @@ async function prepareOutputDirectory(
       },
     );
   }
+}
+
+async function createWindowsOutputDirectory(
+  path: string,
+  recursive: boolean,
+): Promise<string | undefined> {
+  const native = createRequire(import.meta.url)(
+    join(
+      await bundledPluginRoot(),
+      "mcp",
+      "native",
+      `win32-${process.arch}`,
+      "windows.node",
+    ),
+  ) as { createPrivateWindowsDirectory(path: Buffer): number };
+  const create = async (target: string): Promise<string | undefined> => {
+    const createOne = () =>
+      native.createPrivateWindowsDirectory(
+        Buffer.from(win32.toNamespacedPath(target), "utf16le"),
+      );
+    let error = createOne();
+    let firstCreated: string | undefined;
+    if (
+      recursive &&
+      (error === 2 || error === 3) &&
+      dirname(target) !== target
+    ) {
+      firstCreated = await create(dirname(target));
+      error = createOne();
+    }
+    if (error === 0) return firstCreated ?? target;
+    if (recursive && error === 183 && (await stat(target)).isDirectory())
+      return firstCreated;
+    throw new OutputDirectoryError(
+      `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
+    );
+  };
+  return create(path);
 }
 
 export async function validatePreparedOutputDir(
