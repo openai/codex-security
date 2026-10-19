@@ -383,7 +383,13 @@ const PROJECT_CONFIG_OPTION = optionValue("--config")
   );
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .enum([
+    "openai",
+    "openrouter",
+    "fireworks",
+    "cheaperinference",
+    "amazon-bedrock",
+  ])
   .default("openai")
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
