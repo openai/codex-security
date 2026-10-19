@@ -60,6 +60,8 @@ export function validatePatchRiskAssessment(assessment: unknown): string[] {
       errors.push("merge cannot retain a failed validation");
     if (evidencePlan.length)
       errors.push("merge cannot retain an evidence plan");
+    if (assessment.regressionLikelihood.rating === "critical")
+      errors.push("merge cannot retain critical regression likelihood");
   } else if (workflowLabel !== recommendation) {
     errors.push("non-merge workflow label must match the recommendation");
   }

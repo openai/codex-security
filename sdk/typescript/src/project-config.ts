@@ -57,6 +57,7 @@ export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
 const PROJECT_SETTING_KEYS = {
   auth: "auth",
   mode: "scan.mode",
+  maxTimeMinutes: "scan.max_time_minutes",
   cyberAccessProgram: "scan.cyber_access_program",
   target: "scan.scope",
   knowledgeBasePaths: "scan.knowledge_base",
@@ -204,8 +205,9 @@ export function projectConfigStarter(
     "#   knowledge_base: [] # Paths relative to this file.",
     "#   instructions_file: instructions.md",
     "#   validation_file: validation.md # Standard mode only.",
+    "#   max_time_minutes: 15 # Advisory in Standard; enforced discovery limit in Deep.",
     "#   deep: # Used when mode is deep.",
-    ...DEEP_SCAN_SETTINGS.map(
+    ...DEEP_SCAN_SETTINGS.filter(([name]) => name !== "maxTimeHours").map(
       ([name, , key]) => `#     ${key}: ${DEFAULT_DEEP_SCAN_SETTINGS[name]}`,
     ),
     "# codex:",
@@ -274,7 +276,11 @@ export function resolveScanSettings(
 
   const mode =
     choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
-  const explicitDeep = deepScanOptions({ ...overrides, mode });
+  const explicitDeep = deepScanOptions({
+    ...overrides,
+    maxTimeMinutes: undefined,
+    mode,
+  });
   const target =
     choose(
       "scan.scope",
@@ -282,12 +288,22 @@ export function resolveScanSettings(
       overrides.target,
     ) ?? "repository";
   const configuredDeep = file?.scan?.deep;
+  const explicitTime =
+    overrides.maxTimeMinutes !== undefined ||
+    overrides.maxTimeHours !== undefined;
+  const maxTimeMinutes = choose(
+    "scan.max_time_minutes",
+    explicitTime ? undefined : file?.scan?.max_time_minutes,
+    overrides.maxTimeMinutes,
+  );
   const deep: DeepScanOptions = {};
   if (mode === "deep") {
     for (const [name, , field] of DEEP_SCAN_SETTINGS) {
       const value = choose(
         `scan.deep.${field}`,
-        configuredDeep?.[field],
+        name === "maxTimeHours" && explicitTime
+          ? undefined
+          : configuredDeep?.[field],
         explicitDeep[name],
       );
       if (value !== undefined) deep[name] = value;
@@ -338,6 +354,7 @@ export function resolveScanSettings(
       overrides.cyberAccessProgram,
     ),
     mode,
+    maxTimeMinutes,
     target,
     knowledgeBasePaths,
     scanPromptFile: choose(

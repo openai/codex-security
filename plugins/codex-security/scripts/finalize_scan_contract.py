@@ -847,16 +847,20 @@ def write_scan_local_bytes(
         os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = None
     finally:
-        if temp_name is not None and parent_fd is not None:
+        try:
+            if temp_name is not None and parent_fd is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    # The temporary file is already gone, so cleanup is complete.
+                    pass
+        finally:
             try:
-                os.unlink(temp_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                # The temporary file is already gone, so cleanup is complete.
-                pass
-        if parent_fd is not None:
-            os.close(parent_fd)
-        if root_fd is not None:
-            os.close(root_fd)
+                if parent_fd is not None:
+                    os.close(parent_fd)
+            finally:
+                if root_fd is not None:
+                    os.close(root_fd)
 
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
@@ -2501,31 +2505,6 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     return list(unique.values())
 
 
-def _github_primary_location_line_hash(
-    finding: dict[str, Any],
-    source_root: Path | None,
-    line_hash_cache: dict[tuple[Path, int], str | None] | None = None,
-) -> str | None:
-    if source_root is None:
-        return None
-    primary_location = _sarif_primary_location(finding)
-    try:
-        source_root = source_root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    relative_path = _require_safe_relative_path(primary_location["path"], "SARIF source location")
-    source_path = source_root / relative_path
-    start_line = primary_location["startLine"]
-    cache_key = (source_path, start_line)
-    if line_hash_cache is not None and cache_key in line_hash_cache:
-        return line_hash_cache[cache_key]
-    line_hashes = _github_line_hashes_for_source(source_root, relative_path, {start_line})
-    line_hash = None if line_hashes is None else line_hashes.get(start_line)
-    if line_hash_cache is not None:
-        line_hash_cache[cache_key] = line_hash
-    return line_hash
-
-
 def _github_line_hash_cache(
     findings: list[dict[str, Any]], source_root: Path | None
 ) -> dict[tuple[Path, int], str | None]:
@@ -2545,7 +2524,7 @@ def _github_line_hash_cache(
     line_hash_cache: dict[tuple[Path, int], str | None] = {}
     for relative_path, requested_lines in requested_lines_by_path.items():
         line_hashes = _github_line_hashes_for_source(source_root, relative_path, requested_lines)
-        source_path = source_root / relative_path
+        source_path = Path(relative_path)
         for line_number in requested_lines:
             line_hash_cache[(source_path, line_number)] = (
                 None if line_hashes is None else line_hashes.get(line_number)
@@ -2573,7 +2552,6 @@ def _sarif_location(location: dict[str, Any]) -> dict[str, Any]:
 def _sarif_result(
     finding: dict[str, Any],
     rule_index: int,
-    source_root: Path | None = None,
     line_hash_cache: dict[tuple[Path, int], str | None] | None = None,
 ) -> dict[str, Any]:
     properties = {
@@ -2590,7 +2568,8 @@ def _sarif_result(
     partial_fingerprints = {
         "codexSecurity/v1": finding["fingerprints"]["primary"],
     }
-    line_hash = _github_primary_location_line_hash(finding, source_root, line_hash_cache)
+    primary = _sarif_primary_location(finding)
+    line_hash = (line_hash_cache or {}).get((Path(primary["path"]), primary["startLine"]))
     if line_hash is not None:
         partial_fingerprints["primaryLocationLineHash"] = line_hash
     return {
@@ -2628,7 +2607,7 @@ def build_sarif(
         },
         "automationDetails": {"id": scan["id"]},
         "results": [
-            _sarif_result(finding, rule_index[finding["ruleId"]], source_root, line_hash_cache)
+            _sarif_result(finding, rule_index[finding["ruleId"]], line_hash_cache)
             for finding in ordered_findings
         ],
         "properties": {

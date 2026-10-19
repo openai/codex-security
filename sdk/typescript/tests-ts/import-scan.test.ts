@@ -297,6 +297,33 @@ test.each(["csv", "json"] as const)(
   },
 );
 
+test("CSV import seals and reloads non-whitespace byte order marks in required text", async () => {
+  const context = await fixture();
+  const title = "\uFEFF";
+  const source = context.source.replaceAll(
+    "Reported archive extraction issue",
+    title,
+  );
+  await writeFile(context.options.sourcePath, source);
+  expect(
+    await importScan(
+      { ...context.options, dryRun: true },
+      context.dependencies,
+    ),
+  ).toMatchObject({ findingCount: 2 });
+  const result = completed(
+    await importScan(context.options, context.dependencies),
+  );
+  const loaded = await loadContract(result.scanDir, {
+    pluginRoot: PLUGIN_ROOT,
+  });
+  expect(loaded.findings.findings.map((finding) => finding.title)).toEqual([
+    title,
+    title,
+  ]);
+  expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+});
+
 test.each(["csv", "json"] as const)(
   "empty %s imports preserve source integrity without claiming an analyzed surface",
   async (format) => {

@@ -19,8 +19,9 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
+from workbench_source_scopes import public_scan_recipe
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json, timestamp_key
+from workbench_validation import timestamp_key
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -37,7 +38,7 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
         "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "recipe": public_scan_recipe(scan),
         "scanId": scan["id"],
     }
 
