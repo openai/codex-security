@@ -2,6 +2,8 @@ import { SCAN_SEVERITIES } from "./scan-settings.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 
+export const classificationRunsSchema = z.number().int().min(1).max(10);
+
 const levelSchema = z.enum(SCAN_SEVERITIES);
 const textSchema = z
   .string()
@@ -57,4 +59,26 @@ export function parseSeverityDecision(
       { cause: error },
     );
   }
+}
+
+/** Run independent reviews and retain the first complete answer for the winning level. */
+export async function reviewSeverity(
+  review: () => Promise<SeverityDecision>,
+  classificationRuns = 3,
+): Promise<SeverityDecision> {
+  const runs = classificationRunsSchema.parse(classificationRuns);
+  const decisions: SeverityDecision[] = [];
+  for (let run = 0; run < runs; run++) decisions.push(await review());
+  // Exclusion is a distinct vote; any assessed severity wins a tied vote.
+  const levels = [...SCAN_SEVERITIES, null];
+  const count = (level: SeverityDecision["level"]) =>
+    decisions.filter((decision) => decision.level === level).length;
+  return decisions.reduce((winner, decision) => {
+    const difference = count(decision.level) - count(winner.level);
+    return difference > 0 ||
+      (difference === 0 &&
+        levels.indexOf(decision.level) < levels.indexOf(winner.level))
+      ? decision
+      : winner;
+  });
 }

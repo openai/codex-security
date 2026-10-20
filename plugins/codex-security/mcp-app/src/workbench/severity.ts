@@ -5,6 +5,7 @@ import type { Finding } from "./findings";
 import { transaction } from "./transaction";
 
 const fields = {
+  classificationRuns: "classification_runs",
   findingId: "finding_id",
   occurrenceId: "occurrence_id",
   inputSha256: "input_sha256",
@@ -20,7 +21,10 @@ const fields = {
   reviewTrigger: "review_trigger",
 } as const;
 
-type Assessment = Record<keyof typeof fields, string | null>;
+type Assessment = Record<
+  Exclude<keyof typeof fields, "classificationRuns">,
+  string | null
+> & { classificationRuns?: number | null };
 
 export type SeverityCheckpoint =
   | {
@@ -30,6 +34,7 @@ export type SeverityCheckpoint =
       assessedAt: string;
       rubricSha256: string | null;
       knowledgeBaseSha256: string | null;
+      classificationRuns?: number;
     }
   | {
       action: "save";
@@ -50,7 +55,12 @@ export function assessments(
       : "scan_severity_assessments";
   const scope = scanId === undefined ? "" : "WHERE assessment.scan_id = ?";
   // JSON preserves embedded NULs across Node 22 SQLite TEXT results.
+  const hasRunCount = database
+    .prepare(`PRAGMA table_info(${table})`)
+    .all()
+    .some((column) => column.name === "classification_runs");
   const projection = Object.entries(fields)
+    .filter(([key]) => key !== "classificationRuns" || hasRunCount)
     .map(([key, column]) => `'${key}', assessment.${column}`)
     .join(", ");
   // Keep selected IDs first so each assessment is a primary-key lookup.
@@ -84,13 +94,14 @@ export function severityCheckpoint(
       database
         .prepare(
           `INSERT INTO scan_severity_classifications (
-            scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256
-          ) VALUES (?, ?, ?, ?, ?)
+            scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256, classification_runs
+          ) VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(scan_id) DO UPDATE SET
             finding_ids_json = excluded.finding_ids_json,
             assessed_at = excluded.assessed_at,
             rubric_sha256 = excluded.rubric_sha256,
-            knowledge_base_sha256 = excluded.knowledge_base_sha256`,
+            knowledge_base_sha256 = excluded.knowledge_base_sha256,
+            classification_runs = excluded.classification_runs`,
         )
         .run(
           payload.scanId,
@@ -98,6 +109,7 @@ export function severityCheckpoint(
           payload.assessedAt,
           payload.rubricSha256,
           payload.knowledgeBaseSha256,
+          payload.classificationRuns ?? null,
         );
       // Cache hits are not saved again by the classifier. Keep each scan's own assessments.
       database
@@ -121,10 +133,15 @@ export function severityCheckpoint(
     const values = Object.fromEntries(
       Object.entries(fields).map(([key, column]) => [
         column,
-        assessment[key as keyof Assessment],
+        assessment[key as keyof Assessment] ?? null,
       ]),
     );
-    requireSqliteText([finding.findingId, ...Object.values(values)]);
+    requireSqliteText([
+      finding.findingId,
+      ...Object.values(values).filter(
+        (value): value is string => typeof value === "string",
+      ),
+    ]);
     // External scan directories may not have been indexed on this machine.
     if (
       !database
@@ -191,11 +208,16 @@ export function readSeverityClassification(
           .get()
       )
         return {};
+      const hasRunCount = database
+        .prepare("PRAGMA table_info(scan_severity_classifications)")
+        .all()
+        .some((column) => column.name === "classification_runs");
       const row = database
         .prepare(
           `SELECT json_object(
             'findingIds', json(finding_ids_json), 'assessedAt', assessed_at,
             'rubricSha256', rubric_sha256, 'knowledgeBaseSha256', knowledge_base_sha256
+            ${hasRunCount ? ", 'classificationRuns', classification_runs" : ""}
           ) AS value FROM scan_severity_classifications WHERE scan_id = ?`,
         )
         .get(scanId);
