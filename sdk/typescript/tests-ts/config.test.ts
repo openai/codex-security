@@ -603,7 +603,7 @@ describe("Codex configuration", () => {
   );
 
   test.skipIf(macOsSandboxUnavailable())(
-    "reads scoped policy source without exposing sibling files or changing host files",
+    "reads policy source without exposing credentials or changing host files",
     async () => {
       const { root, codexHome, workspace, stateDirectory, environment } =
         await scanSandboxFixture();
@@ -611,29 +611,71 @@ describe("Codex configuration", () => {
       await mkdir(source, { recursive: true });
       const sourceFile = join(source, "fixture.txt");
       await writeFile(sourceFile, "source");
+      const gitMetadata = join(source, ".git");
+      await mkdir(gitMetadata);
+      const privateConfig = join(stateDirectory, "worker-config.json");
+      await writeFile(privateConfig, "SYNTHETIC_PRIVATE");
+      const ambientHome = join(root, "ambient [home]{set}");
+      await mkdir(ambientHome);
+      const ambientCredentials = [
+        join(ambientHome, "auth.json"),
+        join(ambientHome, "config.toml"),
+        join(ambientHome, "codex_security_synthetic.config.toml"),
+        join(ambientHome, ".synthetic.config.toml.tmp"),
+      ];
+      const plugin = join(ambientHome, "plugins", "fixture");
+      await mkdir(plugin, { recursive: true });
+      const artifacts = join(ambientHome, "state", "policies");
+      await mkdir(artifacts, { recursive: true });
+      const guidance = join(plugin, "guidance.md");
+      await writeFile(guidance, "guidance");
       const config = scanRuntimeCodexConfig(
         await mergedCodexConfig({}),
         codexHome,
       );
       const permissions = config["permissions"] as Record<
         string,
-        { filesystem: Record<string, string> }
+        { filesystem: JsonObject }
       >;
-      permissions["codex_security_policy"]!.filesystem[source] = "read";
+      permissions["codex_security_policy"]!.filesystem[source] = {
+        ".": "read",
+      };
+      permissions["codex_security_policy"]!.filesystem[plugin] = {
+        ".": "read",
+      };
+      permissions["codex_security_policy"]!.filesystem[artifacts] = {
+        ".": "read",
+      };
+      permissions["codex_security_policy"]!.filesystem[gitMetadata] = {
+        ".": "deny",
+      };
+      permissions["codex_security_policy"]!.filesystem[privateConfig] = {
+        ".": "deny",
+      };
+      if (process.platform === "win32") {
+        permissions["codex_security_policy"]!.filesystem[
+          join(
+            ambientHome.replace(/[*?[\]{}]/gu, "[$&]"),
+            "{auth.json,config.toml,*.config.toml,.*.config.toml.tmp}",
+          )
+        ] = "deny";
+      }
       // The debug sandbox re-execs Codex, which may live outside OS read roots.
       permissions["codex_security_policy"]!.filesystem[
         resolveCodexCommand({}).command
       ] = "read";
       await writeCodexConfig(join(codexHome, "config.toml"), config);
-      const sandbox = (operation: "read" | "write", path: string) =>
+      const sandbox = (
+        operation: "read" | "write",
+        path: string,
+        permissionProfile = "codex_security_policy",
+      ) =>
         runPinnedCodex(
           codexHome,
           [
             "sandbox",
-            "--config",
-            "permissions.codex_security_policy.network.enabled=true",
             "--permission-profile",
-            "codex_security_policy",
+            permissionProfile,
             "--cd",
             workspace,
             ...(process.platform === "win32"
@@ -650,8 +692,8 @@ describe("Codex configuration", () => {
                   "-NonInteractive",
                   "-Command",
                   operation === "read"
-                    ? "$ErrorActionPreference = 'Stop'; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))"
-                    : "$ErrorActionPreference = 'Stop'; [System.IO.File]::WriteAllText($env:POLICY_PROBE_PATH, 'probe')",
+                    ? "$ErrorActionPreference = 'Stop'; Write-Host -NoNewline (Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw)"
+                    : "$ErrorActionPreference = 'Stop'; Set-Content -LiteralPath $env:POLICY_PROBE_PATH -Value 'probe' -NoNewline",
                 ]
               : [
                   "/bin/sh",
@@ -663,23 +705,16 @@ describe("Codex configuration", () => {
           ],
           { ...environment, POLICY_PROBE_PATH: path },
         );
-      const evidence = join(workspace, "previous-SECURITY.md");
+      const evidence = join(artifacts, "previous-SECURITY.md");
       await writeFile(evidence, "original");
       const read = sandbox("read", evidence);
       if (read.exitCode !== 0) {
         const details = new TextDecoder().decode(read.stderr);
         if (
-          (process.platform === "linux" &&
-            /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
-              details,
-            )) ||
-          (process.platform === "win32" &&
-            (details.includes(
-              "Restricted read-only access requires the elevated Windows sandbox backend",
-            ) ||
-              details.includes(
-                "elevated Windows sandbox requires effective `:root` read access",
-              )))
+          process.platform === "linux" &&
+          /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+            details,
+          )
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,
@@ -691,20 +726,47 @@ describe("Codex configuration", () => {
         );
       }
       expect(new TextDecoder().decode(read.stdout)).toBe("original");
+      for (const path of ambientCredentials)
+        await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       const inspected = sandbox("read", sourceFile);
       expect(
         inspected.exitCode,
         new TextDecoder().decode(inspected.stderr),
       ).toBe(0);
       expect(new TextDecoder().decode(inspected.stdout)).toBe("source");
+      const pluginRead = sandbox("read", guidance);
+      expect(
+        pluginRead.exitCode,
+        new TextDecoder().decode(pluginRead.stderr),
+      ).toBe(0);
+      expect(new TextDecoder().decode(pluginRead.stdout)).toBe("guidance");
+      const sibling = join(root, "repository", "sibling.txt");
+      await writeFile(sibling, "sibling");
+      const siblingRead = sandbox("read", sibling);
+      if (process.platform === "win32") {
+        expect(
+          siblingRead.exitCode,
+          new TextDecoder().decode(siblingRead.stderr),
+        ).toBe(0);
+        expect(new TextDecoder().decode(siblingRead.stdout)).toBe("sibling");
+      } else {
+        expect(siblingRead.exitCode).not.toBe(0);
+        expect(new TextDecoder().decode(siblingRead.stdout)).not.toContain(
+          "sibling",
+        );
+      }
       for (const path of [
-        join(root, "repository", "sibling.txt"),
-        join(stateDirectory, "private.txt"),
         join(codexHome, "private.txt"),
+        join(gitMetadata, "config"),
+        privateConfig,
+        ...ambientCredentials,
       ]) {
         await writeFile(path, "SYNTHETIC_PRIVATE");
         const denied = sandbox("read", path);
-        expect(denied.exitCode).not.toBe(0);
+        expect(
+          denied.exitCode,
+          `${path}: ${new TextDecoder().decode(denied.stdout)} ${new TextDecoder().decode(denied.stderr)}`,
+        ).not.toBe(0);
         expect(new TextDecoder().decode(denied.stdout)).not.toContain(
           "SYNTHETIC_PRIVATE",
         );
@@ -717,13 +779,30 @@ describe("Codex configuration", () => {
         join(codexHome, "policy.txt"),
         evidence,
       ]) {
-        sandbox("write", path);
+        const denied = sandbox("write", path);
+        if (process.platform === "win32") {
+          expect(
+            denied.exitCode,
+            new TextDecoder().decode(denied.stderr),
+          ).not.toBe(0);
+        }
         if (path === sourceFile)
           expect(await readFile(path, "utf8")).toBe("source");
         else if (path === evidence)
           expect(await readFile(path, "utf8")).toBe("original");
         else await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
       }
+      if (process.platform === "win32") {
+        // The same cmdlet must write when the scan profile permits it.
+        const allowed = join(workspace, "inside.txt");
+        const permitted = sandbox("write", allowed, "codex_security_scan");
+        expect(
+          permitted.exitCode,
+          new TextDecoder().decode(permitted.stderr),
+        ).toBe(0);
+        expect(await readFile(allowed, "utf8")).toBe("probe");
+      }
+      await requireSecureCredentialHome(codexHome);
     },
   );
 

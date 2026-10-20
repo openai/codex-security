@@ -334,9 +334,15 @@ and keeps completed documents. Fix the problem and retry in a new directory.
 ### Source access and restrictions
 
 The command uses scan authentication and read-only access to the selected source.
-It denies Git metadata and sibling-component access, disables network, web, apps,
-and MCP, and uses only Codex's core shell environment. Knowledge-base text stays
-in private review artifacts during generation and is removed afterward.
+It denies Git metadata, the credential home, and private runtime configuration,
+disables network, web, apps, and MCP, and uses only Codex's core shell environment.
+On Unix, filesystem reads are limited to the selected source, runtime files, and
+review artifacts. Windows' elevated sandbox requires broader local read access,
+including sibling components, while keeping those explicit denials and read-only
+permissions. Ambient Codex authentication and provider-profile files remain
+excluded; Windows resolves file-pattern denials when each sandboxed command
+starts. Knowledge-base text stays in private review artifacts during
+generation and is removed afterward.
 
 Targets and links stay within the checkout and outside Git metadata. Linked
 worktrees and initialized submodules use their own roots. For a separate Git

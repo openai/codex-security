@@ -5,6 +5,7 @@
 ## Highlights
 
 - preserve Daybreak settings across scans and remediation ([#1740](https://github.com/openai/codex-security/pull/1740))
+- support the elevated Windows sandbox ([#1741](https://github.com/openai/codex-security/pull/1741))
 
 <!-- release-section: highlights:end -->
 

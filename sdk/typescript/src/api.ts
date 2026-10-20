@@ -1374,9 +1374,38 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
+      const ambientHome =
+        process.platform === "win32"
+          ? await canonicalConfigPath(
+              scanCodexHome(this.#dependencies.environment),
+            )
+          : undefined;
+      const ambientCredentials =
+        ambientHome === undefined
+          ? []
+          : await Promise.all(
+              ["auth.json", "config.toml"].map((name) =>
+                realpath(join(ambientHome, name)).catch(
+                  (error: NodeJS.ErrnoException) => {
+                    if (error.code === "ENOENT") return null;
+                    throw error;
+                  },
+                ),
+              ),
+            );
       const policyFilesystem = policyFilesystemPermissions(
-        inputs.gitMetadataPaths,
+        [
+          session.runtimeHome,
+          ...ambientCredentials.filter((path) => path !== null),
+          ...(runtime.configPath === undefined ? [] : [runtime.configPath]),
+          ...(runtime.deepScanConfigPath === undefined ||
+          runtime.deepScanConfigDirectory !== undefined
+            ? []
+            : [runtime.deepScanConfigPath]),
+          ...inputs.gitMetadataPaths,
+        ],
         await codexExecutableReadPaths(this.#codexCommand().command),
+        ambientHome,
       );
       const { codex } = await this.#createSessionCodex(
         session,
@@ -5322,7 +5351,11 @@ export function scanRuntimeCodexConfig(
         },
       },
       [POLICY_PERMISSION_PROFILE]: {
-        filesystem: policyFilesystemPermissions(),
+        filesystem: policyFilesystemPermissions(
+          protectedCredentialHome === undefined
+            ? []
+            : [protectedCredentialHome],
+        ),
         network: { enabled: false },
       },
     },
@@ -5330,19 +5363,30 @@ export function scanRuntimeCodexConfig(
 }
 
 function policyFilesystemPermissions(
-  gitMetadataPaths: readonly string[] = [],
+  deniedPaths: readonly string[] = [],
   codexPaths: readonly string[] = [],
+  ambientHome?: string,
 ): JsonObject {
-  return {
-    ":minimal": "read",
+  const filesystem: JsonObject = {
+    // Windows' elevated sandbox requires root read access.
+    [process.platform === "win32" ? ":root" : ":minimal"]: "read",
     ":workspace_roots": "read",
     // Linux's sandbox re-executes Codex, including installations outside /usr.
     ...Object.fromEntries(codexPaths.map((path) => [path, { ".": "read" }])),
     // A scoped "." keeps native permission paths literal, including glob characters.
-    ...Object.fromEntries(
-      gitMetadataPaths.map((path) => [path, { ".": "deny" }]),
-    ),
+    ...Object.fromEntries(deniedPaths.map((path) => [path, { ".": "deny" }])),
   };
+  if (process.platform === "win32" && ambientHome !== undefined) {
+    // A glob avoids materializing absent credentials as directories on Windows.
+    // Absolute patterns also support literal metacharacters in the home path.
+    filesystem[
+      join(
+        ambientHome.replace(/[*?[\]{}]/gu, "[$&]"),
+        "{auth.json,config.toml,*.config.toml,.*.config.toml.tmp}",
+      )
+    ] = "deny";
+  }
+  return filesystem;
 }
 
 function rethrowPolicyOutputError(error: unknown): never {
