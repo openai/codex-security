@@ -11,6 +11,7 @@ import {
   OpenAiFindingEmbedder,
 } from "../src/server/embeddings.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { VERSION } from "../src/version.js";
 
 const example = (
   await readJson<FindingsDocument>(
@@ -63,6 +64,7 @@ test("uses the configured embedding model and preserves response indexes", async
       expect(url).toBe("https://api.openai.com/v1/embeddings");
       expect(init.headers).toMatchObject({
         Authorization: "Bearer synthetic-key",
+        "User-Agent": `codex-security/${VERSION}`,
       });
       const request = JSON.parse(String(init.body));
       expect(request).toMatchObject({

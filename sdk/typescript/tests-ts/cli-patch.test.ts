@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { gitText } from "./support/shell.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
@@ -1123,6 +1124,69 @@ describe("scan and patch workflow", () => {
     },
   );
 
+  test.each([
+    [undefined, false],
+    [true, false],
+    [false, true],
+  ] as const)(
+    "passes selected-profile telemetry to scan patches (root=%p, profile=%p)",
+    async (rootAnalytics, profileAnalytics) => {
+      const result = resultWithFindings(["high"]);
+      let childArgs: readonly string[] = [];
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--mode",
+          "standard",
+          "--json",
+          ...(rootAnalytics === undefined
+            ? []
+            : ["--codex", `analytics.enabled=${rootAnalytics}`]),
+          "--codex",
+          'profile="quiet"',
+          "--codex",
+          `profiles.quiet.analytics.enabled=${profileAnalytics}`,
+          "--codex",
+          'profiles.quiet.model_provider="amazon-bedrock"',
+          "--codex",
+          'responses_api_metadata={ "team.tag"="root", caller="preserved" }',
+          "--codex",
+          'profiles.quiet.responses_api_metadata={ "team.tag"="selected", codex_security_integration="github_action" }',
+          "--codex",
+          "otel.log_user_prompt=false",
+          "--codex",
+          'profiles.quiet.otel.metrics_exporter="none"',
+        ],
+        {
+          result,
+          onCodex: (args, output) => {
+            childArgs = args;
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(childArgs).toContain(`analytics.enabled=${profileAnalytics}`);
+      expect(requestMetadata(childArgs)).toMatchObject({
+        "team.tag": "selected",
+        caller: "preserved",
+        codex_security_surface: "cli",
+        codex_security_command: "patch",
+        codex_security_integration: "github_action",
+        codex_security_provider: "amazon-bedrock",
+        codex_security_scan_mode: "standard",
+      });
+      expect(
+        parseToml(childArgs.find((value) => value.startsWith("otel="))!)[
+          "otel"
+        ],
+      ).toEqual({ log_user_prompt: false, metrics_exporter: "none" });
+    },
+  );
+
   test("continues with separate patch tasks when one finding fails", async () => {
     const result = resultWithFindings(["critical", "high", "medium"]);
     const tasks: string[] = [];
@@ -1371,9 +1435,9 @@ describe("scan and patch workflow", () => {
             ) {
               expect(output.command).toBe("patch");
               expect(output.appServer?.sandbox).toBe("read-only");
-              expect(args).toContain(
-                'responses_api_metadata.codex_security_command="assess-patch-risk"',
-              );
+              expect(requestMetadata(args)).toMatchObject({
+                codex_security_command: "assess-patch-risk",
+              });
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:start -->",
               );

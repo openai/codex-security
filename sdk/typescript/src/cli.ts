@@ -212,6 +212,7 @@ import {
   checkScanPublication,
   forceTerminatePublicationProcesses as terminatePublishers,
   publishScan,
+  publishScanInternal,
   type CheckScanPublicationOptions,
   type PublishScanProgress,
   type PublishScanResult,
@@ -249,7 +250,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -1103,6 +1104,8 @@ interface SkillRunOptions {
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
+  requestMetadata?: JsonObject;
+  otel?: JsonObject;
   patchArtifact?: {
     path: string;
     repository: string;
@@ -3328,27 +3331,28 @@ export async function main(
         }
         let result;
         try {
-          result = await (dependencies.publishScan ?? publishScan)(
-            resolveCliPath(currentDirectory, scanDir),
-            {
-              ...destination!,
-              ...(options.findingId.length === 0
-                ? {}
-                : { findingIds: options.findingId }),
-              ...(selectedScans[0]?.scanId === undefined
-                ? {}
-                : { expectedScanId: selectedScans[0].scanId }),
-              dryRun: options.dryRun,
-              signal: controller.signal,
-              ...(options.skipExisting ? { skipExisting: true } : {}),
-              ...(options.dryRun
-                ? {}
-                : {
-                    onProgress: (event: PublishScanProgress) =>
-                      progress.observe(event),
-                  }),
-            },
-          );
+          result = await (
+            dependencies.publishScan ??
+            ((directory, options) =>
+              publishScanInternal(directory, options, { surface: "cli" }))
+          )(resolveCliPath(currentDirectory, scanDir), {
+            ...destination!,
+            ...(options.findingId.length === 0
+              ? {}
+              : { findingIds: options.findingId }),
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
+            dryRun: options.dryRun,
+            signal: controller.signal,
+            ...(options.skipExisting ? { skipExisting: true } : {}),
+            ...(options.dryRun
+              ? {}
+              : {
+                  onProgress: (event: PublishScanProgress) =>
+                    progress.observe(event),
+                }),
+          });
         } finally {
           progress.stop();
         }
@@ -7953,6 +7957,26 @@ async function runSkill(
   const threadSource = patch
     ? CODEX_SECURITY_THREAD_SOURCES.remediation
     : CODEX_SECURITY_THREAD_SOURCES.validation;
+  const requestContext = codexSecurityRequestContext(
+    {
+      ...effectiveOverrides,
+      ...(options.requestMetadata === undefined
+        ? {}
+        : { responses_api_metadata: options.requestMetadata }),
+    },
+    {
+      surface: "cli",
+      command: assess
+        ? "assess-patch-risk"
+        : verify
+          ? "verify-fix"
+          : patch
+            ? "patch"
+            : "validate",
+      pluginVersion,
+      providerResolved: provider !== undefined || validate,
+    },
+  );
   return dependencies.runCodex(
     [
       ...(appServer
@@ -7980,6 +8004,9 @@ async function runSkill(
             value.startsWith("analytics.") || value.startsWith("analytics="),
         )
         .flatMap((value) => ["--config", value]),
+      ...(options.otel === undefined
+        ? []
+        : ["--config", `otel=${inlineToml(options.otel)}`]),
       ...(provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(provider)}`]),
@@ -7994,22 +8021,8 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      ...Object.entries(
-        codexSecurityRequestMetadata(
-          "cli",
-          assess
-            ? "assess-patch-risk"
-            : verify
-              ? "verify-fix"
-              : patch
-                ? "patch"
-                : "validate",
-          pluginVersion,
-        ),
-      ).flatMap(([key, value]) => [
-        "--config",
-        `responses_api_metadata.${key}=${JSON.stringify(value)}`,
-      ]),
+      "--config",
+      requestContext.configOverride,
       ...(options.safetyIdentifier === undefined
         ? []
         : [
@@ -8682,6 +8695,8 @@ async function executeScan(
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let patchServiceTier: JsonValue | undefined;
+  let patchRequestMetadata: JsonObject | undefined;
+  let patchOtel: JsonObject | undefined;
   let patchDaybreak: JsonValue = false;
   let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
@@ -8725,10 +8740,19 @@ async function executeScan(
       ]),
     );
     const provider = scanModelProvider(effectiveConfiguration);
-    const analytics = effectiveConfiguration["analytics"];
+    const analytics = resolvedConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
+    patchRequestMetadata = {
+      ...codexSecurityRequestContext(resolvedConfiguration, {
+        surface: "cli",
+        command: "scan",
+        mode: arguments_.mode,
+      }).metadata,
+    };
+    const otel = resolvedConfiguration["otel"];
+    if (isJsonObject(otel)) patchOtel = otel;
     auth =
       !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
@@ -9478,6 +9502,8 @@ async function executeScan(
         {
           ...providerOptions,
           serviceTier: patchServiceTier,
+          requestMetadata: patchRequestMetadata,
+          otel: patchOtel,
           daybreakFeatures: patchDaybreakFeatures,
           cyberAccessProgram: arguments_.cyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,

@@ -415,5 +415,15 @@
     "version": 50,
     "name": "persist authorized source excerpt scopes",
     "statements": ["ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;"]
+  },
+  {
+    "version": 51,
+    "name": "preserve deep scan worker thread history",
+    "statements": [
+      "CREATE TABLE deep_scan_worker_threads (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL,\n    sdk_thread_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, worker_id, sdk_thread_id)\n);",
+      "INSERT INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\nSELECT scan_id, id, sdk_thread_id FROM deep_scan_workers\nWHERE sdk_thread_id IS NOT NULL;",
+      "CREATE TRIGGER record_deep_scan_worker_thread_insert\nAFTER INSERT ON deep_scan_workers\nWHEN NEW.sdk_thread_id IS NOT NULL\nBEGIN\n    INSERT OR IGNORE INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\n    VALUES (NEW.scan_id, NEW.id, NEW.sdk_thread_id);\nEND;",
+      "CREATE TRIGGER record_deep_scan_worker_thread_update\nAFTER UPDATE OF sdk_thread_id ON deep_scan_workers\nWHEN NEW.sdk_thread_id IS NOT NULL\nBEGIN\n    INSERT OR IGNORE INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\n    VALUES (NEW.scan_id, NEW.id, NEW.sdk_thread_id);\nEND;"
+    ]
   }
 ]

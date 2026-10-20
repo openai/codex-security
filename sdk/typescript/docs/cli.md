@@ -822,14 +822,28 @@ that command. Model, effort, and provider choices carry into patch-risk assessme
 Model requests include Codex Security attribution in `responses_api_metadata`:
 `codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
 `codex_security_package_version`, and `codex_security_plugin_version` when the
-selected plugin declares a version. These fields identify the workflow and
-versions producing a model request; they do not record command starts,
-completions, or failures.
+selected plugin declares a version. The shared context adds
+`codex_security_provider` for the configured provider family when the wrapper
+selects a provider, and
+`codex_security_scan_mode` for scans. Custom provider names use `custom`.
+Provider attribution reflects the wrapper's selected profile or default;
+native managed configuration may select a different provider before inference.
+The GitHub Action supplies `codex_security_integration=github_action`;
+Deep Scan workers retain the context and add `codex_security_worker_role`.
+Caller metadata, including literal dotted keys, is preserved. Connected-app
+publication uses the same request attribution; embedding requests identify
+the package and version in their `User-Agent`.
+
+These fields provide request attribution for supported inference providers, including
+Bedrock. They do not create a separate telemetry collector, record command
+starts or outcomes, or make another provider's traffic visible to OpenAI.
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
 patch-risk assessment, and Deep Scan discovery and reducer workers, including
-resumed workers. Deep Scan workers also preserve the scan's request metadata.
+resumed workers. Selected-profile settings take precedence over root settings.
+Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
+workers, including exporter choices and prompt-logging controls.
 Model-request attribution metadata remains attached when analytics are disabled.
 The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;

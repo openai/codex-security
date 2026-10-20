@@ -2,6 +2,7 @@ import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import { errorMessage } from "../errors.js";
 import type { Finding } from "../models.js";
+import { VERSION } from "../version.js";
 import { FindingsError } from "./errors.js";
 import type { FindingEmbedding } from "./storage.js";
 
@@ -93,6 +94,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          "User-Agent": `codex-security/${VERSION}`,
         },
         body: JSON.stringify({
           model: EMBEDDING_MODEL,

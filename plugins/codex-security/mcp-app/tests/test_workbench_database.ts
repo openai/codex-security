@@ -168,6 +168,43 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+test("worker thread history survives retry, replay, and worker retirement", (t) => {
+  const database = memory(t, 49);
+  insertScan(database);
+  database.exec(`
+    INSERT INTO deep_scan_runs (
+      scan_id, schema_version, workflow_version, status, phase, workers,
+      subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at
+    ) VALUES ('scan', 1, 'fixture', 'running', 'discovery', 1, 0, 3, 10, 'created', 'updated');
+    INSERT INTO deep_scan_workers (
+      id, scan_id, kind, status, prompt_path, artifact_dir, attempt,
+      sdk_thread_id, created_at, updated_at
+    ) VALUES ('worker', 'scan', 'discovery', 'running', '/synthetic/prompt.md',
+      '/synthetic/output', 1, 'first-thread', 'created', 'updated');
+  `);
+  applyMigrations(database);
+  database.exec(`
+    UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;
+    UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;
+    DELETE FROM deep_scan_workers;
+  `);
+  applyMigrations(database);
+  assert.deepEqual(
+    database
+      .prepare(
+        "SELECT sdk_thread_id FROM deep_scan_worker_threads ORDER BY sdk_thread_id",
+      )
+      .all()
+      .map((row) => row.sdk_thread_id),
+    ["first-thread", "retry-thread"],
+  );
+  database.exec("DELETE FROM scans");
+  assert.deepEqual(
+    database.prepare("SELECT * FROM deep_scan_worker_threads").all(),
+    [],
+  );
+});
+
 test("configured state paths use native parent traversal semantics", async () => {
   const directory = await temporary.create("workbench-symlink-");
   const actual = join(directory, "actual");
@@ -363,7 +400,7 @@ test("database-info retains scan names from installed migration 42", async () =>
   await databaseInfo(directory);
   const upgraded = new DatabaseSync(databasePath);
   try {
-    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50);
+    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51);
     assert.equal(
       upgraded.prepare("SELECT name FROM scans").get()?.name,
       "Original scan",

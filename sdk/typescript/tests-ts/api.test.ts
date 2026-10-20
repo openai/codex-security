@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import {
@@ -569,14 +570,14 @@ describe("CodexSecurity finding validation", () => {
           web_search: "disabled",
           approval_policy: "never",
           analytics: { enabled: false },
-          responses_api_metadata: {
-            codex_security_surface: "sdk",
-            codex_security_command: "validate",
-            codex_security_package_version: VERSION,
-            codex_security_plugin_version:
-              preparedRuntime("unused").plugin.version,
-          },
         },
+      });
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
+        codex_security_surface: "sdk",
+        codex_security_command: "validate",
+        codex_security_package_version: VERSION,
+        codex_security_plugin_version: preparedRuntime("unused").plugin.version,
+        codex_security_provider: "openai",
       });
       const credentialHome = captured.codex!.env!["CODEX_HOME"]!;
       const credentialDenies = {
@@ -584,7 +585,11 @@ describe("CodexSecurity finding validation", () => {
         [join(credentialHome, "deep-scan.toml")]: { ".": "deny" },
       };
       expect(
-        captured.codex?.configOverrides?.map((override) => parseToml(override)),
+        captured.codex?.configOverrides
+          ?.filter(
+            (override) => !override.startsWith("responses_api_metadata="),
+          )
+          .map((override) => parseToml(override)),
       ).toEqual([
         {
           permissions: {
@@ -641,6 +646,12 @@ describe("CodexSecurity finding validation", () => {
             review: {
               web_search: "cached",
               approval_policy: "on-request",
+              analytics: { enabled: false },
+              otel: { exporter: "none" },
+              responses_api_metadata: {
+                "team.tag": "synthetic-validation",
+                codex_security_integration: "github_action",
+              },
             },
           },
         },
@@ -675,8 +686,19 @@ describe("CodexSecurity finding validation", () => {
     expect(config).toMatchObject({
       web_search: "disabled",
       approval_policy: "never",
+      analytics: { enabled: false },
+      otel: { exporter: "none" },
       default_permissions: "codex_security_validation",
+      responses_api_metadata: {
+        "team.tag": "synthetic-validation",
+        codex_security_integration: "github_action",
+        codex_security_command: "validate",
+        codex_security_provider: "openai",
+      },
     });
+    expect(
+      overrides.filter((value) => value.startsWith("responses_api_metadata")),
+    ).toHaveLength(1);
     expect(config).not.toHaveProperty("profile");
     expect(config).not.toHaveProperty("profiles");
   });
@@ -1994,13 +2016,18 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           analytics: { enabled: true },
+          otel: { environment: "synthetic-root" },
           responses_api_metadata: { custom_attribution: "root" },
           model_context_window: 64_000,
           model_auto_compact_token_limit: 48_000,
           profiles: {
             cloud: {
               analytics: { enabled: false },
-              responses_api_metadata: { custom_attribution: "selected" },
+              otel: { environment: "synthetic-selected" },
+              responses_api_metadata: {
+                custom_attribution: "selected",
+                codex_security_integration: "github_action",
+              },
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_context_window: 96_000,
@@ -2124,12 +2151,15 @@ describe("CodexSecurity orchestration", () => {
                   expect(workerConfig["analytics"]).toEqual(
                     selected["analytics"],
                   );
+                  expect(workerConfig["otel"]).toEqual(selected["otel"]);
                   expect(workerConfig["responses_api_metadata"]).toMatchObject({
                     ...(selected["responses_api_metadata"] as
                       JsonObject | undefined),
                     codex_security_surface: "sdk",
                     codex_security_command: "scan",
                     codex_security_package_version: VERSION,
+                    codex_security_provider: "amazon-bedrock",
+                    codex_security_scan_mode: "deep",
                   });
                   const windows = (resolveCodexProfile(overrides)["windows"] ??
                     DEFAULT_CODEX_CONFIG["windows"]) as { sandbox: string };
@@ -4961,6 +4991,12 @@ describe("CodexSecurity orchestration", () => {
         {
           codexOverrides: {
             ...providerConfig,
+            analytics: { enabled: false },
+            otel: { environment: "synthetic-matching" },
+            responses_api_metadata: {
+              "team.tag": "synthetic-matching",
+              codex_security_integration: "github_action",
+            },
             ...(failure === "budget-context"
               ? {
                   model: "gpt-6.1-sol",
@@ -5043,6 +5079,17 @@ describe("CodexSecurity orchestration", () => {
           },
           async matchFindings(input, options, runtimeOptions) {
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+            expect(options?.config?.codexOverrides).toMatchObject({
+              analytics: { enabled: false },
+              otel: { environment: "synthetic-matching" },
+              responses_api_metadata: {
+                "team.tag": "synthetic-matching",
+                codex_security_integration: "github_action",
+                codex_security_command: "scan",
+                codex_security_scan_mode: "standard",
+                codex_security_provider: "custom",
+              },
+            });
             if (failure !== "managed")
               expect(options?.config?.codexOverrides).toMatchObject({
                 ...providerConfig,
