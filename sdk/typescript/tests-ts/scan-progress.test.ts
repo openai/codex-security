@@ -47,7 +47,7 @@ test.each([
   ["discovery", -1, 13],
   ["discovery", 14, 13],
 ] as const)(
-  "rejects invalid saved progress (%s, %s/%s)",
+  "rejects invalid saved progress (%s, %p/%p)",
   (phase, completed, total) => {
     expect(() =>
       scanProgressFromWorkbench(savedProgress(phase, completed, total)),
