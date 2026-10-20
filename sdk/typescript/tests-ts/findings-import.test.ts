@@ -182,7 +182,7 @@ describe("findings import formats", () => {
     const {
       findings: [finding],
     } = await sourceDocument();
-    for (const path of [" ", "\u00A0", "\uFEFF"]) {
+    for (const path of [" ", "\u00A0", "\u2028", "\u2029", "\uFEFF"]) {
       const [imported] = await parseImportedFindings(
         exportCsv(
           [
