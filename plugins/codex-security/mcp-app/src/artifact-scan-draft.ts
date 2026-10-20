@@ -112,7 +112,8 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
             trustedScope.filePaths as string[] | undefined,
           )
         : reconciled.findings;
-    if (finalDeepDraft)
+    // Coordinator publication also carries retained historical payloads.
+    if (finalDeepDraft && publication === undefined)
       requireFiniteNumbers({ ...parsed, findings: scopedFindings });
     const findings = buildFindings(scopedFindings, context.mode);
     const coverage = buildCoverage(
