@@ -245,6 +245,58 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
     assert all(p.read_bytes() == contents for p, contents in originals.items())
 
 
+@pytest.mark.parametrize("colliding_parent", [False, True])
+def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_parent):
+    surface = {"label": "Worker review", "disposition": "needs_follow_up"}
+    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface])
+    source = worker(tmp_path, "first", draft)
+    output = Path(source["artifact_dir"])
+    older = copy.deepcopy(draft)
+    older["coverage"]["surfaces"][0]["id"] = "restored"
+    checkpoint = write_checkpoint(output / "checkpoints", older)
+    os.utime(checkpoint, ns=(50, 50))
+    selected = copy.deepcopy(older)
+    selected["coverage"]["surfaces"][0]["notes"] = "Updated review."
+    checkpoint = write_checkpoint(output / "checkpoints", selected)
+    os.utime(checkpoint, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(400, 400))
+    parent = copy.deepcopy(draft)
+    parent["coverage"]["surfaces"][0].update(id="first/0", workerId="first")
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0"]}
+    ]
+    if colliding_parent:
+        parent["coverage"]["surfaces"].append(
+            {**surface, "id": "first/restored", "label": "Parent review", "workerId": "first"}
+        )
+        parent["coverage"]["deferred"].append(
+            {
+                "id": "unrelated-review",
+                "reason": "Review parent evidence.",
+                "surfaceIds": ["first/restored"],
+                "workerId": "first",
+            }
+        )
+    write_saved_parent(tmp_path, parent, 200)
+    originals = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+    assert replay[2] == result[2]
+    for coverage in (result[2], replay[2]):
+        assert len(coverage["surfaces"]) == 1 + colliding_parent
+        retained = next(row for row in coverage["surfaces"] if row["label"] == "Worker review")
+        assert retained["notes"] == "Updated review."
+        assert retained["id"] == ("first/restored-2" if colliding_parent else "first/restored")
+        task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == [retained["id"]]
+        if colliding_parent:
+            other = next(row for row in coverage["deferred"] if row["id"] == "unrelated-review")
+            assert other["surfaceIds"] == ["first/restored"]
+    assert all(p.read_bytes() == contents for p, contents in originals.items())
+
+
 def test_parent_only_task_remaps_anonymous_surface_links_once(tmp_path):
     draft = saved_draft(
         "coverage-scan",

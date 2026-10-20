@@ -401,15 +401,13 @@ async function preserveScanDraft(
           attempt,
           ...components,
         ].join("/");
-        if (!currentReceipts.has(retained)) {
-          archivedReceipts.set(retained, {
-            context: {
-              ...context,
-              root: join(dirname(context.root), "attempts", attempt),
-            },
-            components,
-          });
-        }
+        archivedReceipts.set(retained, {
+          context: {
+            ...context,
+            root: join(dirname(context.root), "attempts", attempt),
+          },
+          components,
+        });
         return retained;
       });
     }
@@ -738,6 +736,22 @@ async function preserveScanDraft(
   // Archived attempts move their receipt files with them. Copy only evidence
   // still retained by this draft into its current, independently bound output.
   // Superseded surfaces must not reserve a discarded receipt's spelling.
+  for (const ref of new Set(
+    result.coverage.surfaces.flatMap((row) => row.receiptRefs ?? []),
+  )) {
+    if (!currentReceipts.has(ref) || !archivedReceipts.has(ref)) continue;
+    try {
+      await artifactSourcePath(
+        context,
+        coverageReceiptComponents(ref),
+        "saved coverage receipt",
+      );
+      archivedReceipts.delete(ref);
+    } catch {
+      // A saved reference may outlive its copied receipt. Keep its archive
+      // origin for the normal copy/repair path, including destination checks.
+    }
+  }
   const retainedSelectedReceiptRefs = new Set(
     (result.coverage.surfaces as JsonObject[]).flatMap((row) =>
       ((row.receiptRefs as string[] | undefined) ?? []).filter((ref) =>

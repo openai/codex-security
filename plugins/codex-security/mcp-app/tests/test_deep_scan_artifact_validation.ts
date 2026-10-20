@@ -1436,6 +1436,14 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
     (row: JsonObject) => row.id === "writer",
   )!;
   const retainedPath = path.join(output, retainedWriter.receiptRefs[0]);
+  await rm(retainedPath);
+  await recordCodexSecurityWorkerScanDraft(context, accepted);
+  await validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId);
+  assert.equal(
+    await readFile(retainedPath, "utf8"),
+    "Previously completed writer review.\n",
+    "a saved reference must restore a missing copy from its intact archive",
+  );
   await writeFile(retainedPath, "Updated writer review.\n");
   await recordCodexSecurityWorkerScanDraft(context, accepted);
   assert.equal(

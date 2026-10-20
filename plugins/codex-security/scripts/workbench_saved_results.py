@@ -1480,6 +1480,7 @@ def merge_saved_results(
     linked_surface_sources = {id(surface) for _, _, surface in surface_links}
     linked_surface_outputs: dict[int, dict[str, Any]] = {}
     worker_row_owners: dict[int, str] = {}
+    worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
 
     def append_coverage_row(output: list[Any], item: Any, owner: str | None, field: str) -> Any:
         retained = _project_worker_coverage_row(
@@ -1492,6 +1493,8 @@ def merge_saved_results(
         # that worker's retained source. Track the actual source of output rows.
         if project_worker_coverage and owner is not None and isinstance(retained, dict):
             worker_row_owners[id(retained)] = owner
+            if field == "surfaces" and isinstance(item.get("id"), str):
+                worker_surface_outputs.setdefault((owner, item["id"]), {})[id(retained)] = retained
         return retained
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
@@ -2350,6 +2353,16 @@ def merge_saved_results(
     output_tasks = coverage.get("deferred", [])
     for task, published_id, surface in surface_links:
         retained_surface = linked_surface_outputs.get(id(surface))
+        if (
+            retained_surface is None
+            and isinstance(owner := surface.get("workerId"), str)
+            and isinstance(identity := surface.get("id"), str)
+        ):
+            # A selected checkpoint can update a reconciled surface's metadata.
+            # Follow its worker-owned identity only when one retained row owns it.
+            matches = worker_surface_outputs.get((owner, identity), {})
+            if len(matches) == 1:
+                retained_surface = next(iter(matches.values()))
         if retained_surface is None or not isinstance(retained_surface.get("id"), str):
             continue
         for retained_task in output_tasks if isinstance(output_tasks, list) else []:
