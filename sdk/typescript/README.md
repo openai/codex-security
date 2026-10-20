@@ -225,6 +225,7 @@ const result = await security.run("/path/to/repository", {
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
 | `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
+| `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
 | `archiveExisting`                           | Move previous results aside before reusing `outputDir`.                        |
 | `maxCostUsd`                                | Stop at an estimated model cost; see [cost limits](#progress-and-cost).        |
@@ -232,6 +233,16 @@ const result = await security.run("/path/to/repository", {
 
 The exported `ScanOptions` type describes all options and callbacks. For full
 CLI behavior, see [scan options and output](docs/cli.md#scan-options-and-output).
+
+Set `ownerSuggestions: true` or run `codex-security scan --owner-suggestions`
+to write `owner-suggestions.json` beside a completed committed Git scan. Project
+files can set `scan.owner_suggestions: true`. The report uses the scan's finding
+IDs and frozen revision; it does not change the sealed findings or assign users.
+Owner failures leave the base scan completed and appear as
+`result.ownerSuggestionsError`; successful reports set `result.ownerSuggestionsPath`.
+Owner inference uses the scan's model and reasoning effort. Owner enrichment is
+skipped with a warning when `maxCostUsd` is set, because its inference cannot yet
+share the scan cost limit. Working-tree and directory snapshots are unsupported.
 
 ### Scan a diff
 

@@ -210,6 +210,8 @@ def finding_workflow(
                     state["stages"][stage] = {"status": "completed", "result": payload["result"]}
                 elif action == "fail":
                     current.update(status="failed", error=payload["error"])
+                    if "result" in payload:
+                        current["result"] = payload["result"]
                 elif action == "prepare-dedupe":
                     current.update(result=payload["result"], pendingWrite=payload["pendingWrite"])
                 else:
