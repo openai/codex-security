@@ -2761,8 +2761,8 @@ export class CodexSecurity {
           }
         }
       }
+      scanProgressTracker?.stop();
       if (runPostScan !== null) {
-        scanProgressTracker?.stop();
         const followUp = runPostScan;
         runPostScan = null;
         const completedArtifacts = await Promise.all(

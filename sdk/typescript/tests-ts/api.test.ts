@@ -4860,6 +4860,7 @@ describe("CodexSecurity orchestration", () => {
       let modelCalled = false;
       let matchingTurns = 0;
       let observedSingleTurn: boolean | undefined;
+      let progressSignal: AbortSignal | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
       const managedProvider = {
@@ -4992,12 +4993,11 @@ describe("CodexSecurity orchestration", () => {
                 : {}),
             },
           })),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
+          runWorkbench: async (options, args, input): Promise<JsonObject> => {
             commands.push(args);
+            if (args[0] === "get-scan") {
+              progressSignal ??= options.signal;
+            }
             if (args[0] === "get-scan-feedback") {
               return {
                 scanId: "scan_example_001",
@@ -5017,6 +5017,7 @@ describe("CodexSecurity orchestration", () => {
               };
             }
             if (args[0] === "list-global-findings") {
+              expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
               if (failure === "dismissed" || failure === "managed") {
                 return {
@@ -5159,6 +5160,7 @@ describe("CodexSecurity orchestration", () => {
         const result = await client.run(repository, {
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
+          onProgress() {},
           onWarning: (message) => warnings.push(message),
         });
         expect(result.threadId).toBe("thread-1");
