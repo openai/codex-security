@@ -713,17 +713,38 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   complete:
-    name: release status
+    name: npm and Action release status
     if: always()
     needs: [release, installed, action]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_RESULT: ${{ needs.release.result }}
+      INSTALL_RESULT: ${{ needs.installed.result }}
+      ACTION_RESULT: ${{ needs.action.result }}
+      HAS_ACTION: ${{ needs.release.outputs.has-action }}
     steps:
-      - name: Require completed release channels
+      - name: Summarize release channels
+        continue-on-error: true
         env:
-          RELEASE_RESULT: ${{ needs.release.result }}
-          INSTALL_RESULT: ${{ needs.installed.result }}
-          ACTION_RESULT: ${{ needs.action.result }}
-          HAS_ACTION: ${{ needs.release.outputs.has-action }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          {
+            printf '## Release publication status\n\n'
+            printf '| Channel | Result |\n| --- | --- |\n'
+            printf '| npm package and CLI GitHub release | %s |\n' "$RELEASE_RESULT"
+            printf '| Published package installation checks | %s |\n' "$INSTALL_RESULT"
+            printf '| GitHub Action release | %s |\n' "$ACTION_RESULT"
+            printf '| GitHub Marketplace | Not checked; publish and verify separately |\n'
+            printf '| Container image | Not checked; separate release workflow |\n\n'
+            if [[ "$HAS_ACTION" == true && "$ACTION_RESULT" == success ]]; then
+              printf 'Marketplace: [edit the Action release](%s/%s/releases/edit/action-v%s) to publish or verify its listing.\n\n' \
+                "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
+            fi
+            printf 'See the [release process](%s/%s/blob/main/RELEASING.md#publish-to-github-marketplace) for Marketplace and container publication.\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require completed release channels
         run: |
           test "$RELEASE_RESULT" = success
           test "$INSTALL_RESULT" = success
