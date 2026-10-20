@@ -1,6 +1,10 @@
 import { appendFile } from "node:fs/promises";
 import { setTimeout } from "node:timers/promises";
-import { createGitHubClient } from "../../sdk/typescript/scripts/release-pr.mjs";
+import {
+  createGitHubClient,
+  createGitRepository,
+  readVersionHistory,
+} from "../../sdk/typescript/scripts/release-pr.mjs";
 import { isMain } from "../../sdk/typescript/scripts/is-main.mjs";
 
 const marker = "<!-- codex-security-release-progress -->";
@@ -233,20 +237,41 @@ async function awaitingEnvironment(github, run, environment) {
   );
 }
 
-export async function updateReleaseProgress(github, runId) {
+export async function updateReleaseProgress(
+  github,
+  runId,
+  repo = createGitRepository(process.cwd()),
+) {
   const incoming = await github.request("GET", `actions/runs/${runId}`);
   const sha = await releaseCommit(github, incoming);
   if (!sha) return { action: "ignored" };
-  const pulls = await github.list(`commits/${sha}/pulls?per_page=100`);
-  // The commit endpoint supplies the association; API 2026-03-10 omits merge_commit_sha.
-  const pull = pulls.find(
-    (candidate) =>
-      candidate.merged_at &&
-      candidate.base.ref === "main" &&
-      /^(?:chore\(release\)|release(?:\([^)]+\))?)!?: \d+\.\d+\.\d+$/u.test(
-        candidate.title,
-      ),
-  );
+  const name = workflowName(incoming);
+  const version = (
+    name === "node-release" ? incoming.head_branch : incoming.display_title
+  )?.match(/npm-v(\d+\.\d+\.\d+)$/u)?.[1];
+  const findPull = async (commit) => {
+    const pulls = await github.list(`commits/${commit}/pulls?per_page=100`);
+    // The commit endpoint supplies the association; API 2026-03-10 omits merge_commit_sha.
+    return pulls.find((candidate) => {
+      const candidateVersion =
+        /^(?:chore\(release\)|release(?:\([^)]+\))?)!?: (\d+\.\d+\.\d+)$/u.exec(
+          candidate.title,
+        )?.[1];
+      return (
+        candidate.merged_at &&
+        candidate.base.ref === "main" &&
+        candidateVersion &&
+        (!version || candidateVersion === version)
+      );
+    });
+  };
+  let pull = await findPull(sha);
+  if (!pull && name !== "node-ci") {
+    // A successful follow-up fix can be tagged after the version bump fails CI.
+    const { baseVersion, baseCommit } = readVersionHistory(repo, sha);
+    if (baseVersion === version && baseCommit !== sha)
+      pull = await findPull(baseCommit);
+  }
   if (!pull) return { action: "ignored" };
   const comments = await github.list(
     `issues/${pull.number}/comments?per_page=100`,
@@ -269,7 +294,16 @@ export async function updateReleaseProgress(github, runId) {
       if (error.status !== 404) throw error;
     }
   }
-  const name = workflowName(incoming);
+  if (name === "node-ci") {
+    const releasedSha =
+      runs["node-release"]?.head_sha ??
+      (runs["node-github-release"] &&
+        (await releaseCommit(github, runs["node-github-release"])));
+    if (releasedSha && releasedSha !== sha) return { action: "ignored" };
+  }
+  // A recovered release uses the tagged fix, not the original failed bump CI.
+  if (name !== "node-ci" && runs["node-ci"]?.head_sha !== sha)
+    delete runs["node-ci"];
   const last = runs[name];
   // Serialized release runs keep their active approval ahead of queued duplicates.
   const prioritizeActive = name !== "node-ci" && incoming.id !== last?.id;
