@@ -4,6 +4,9 @@
 stdin/stdout. Use the flag alone. It performs no login, update check, local
 inference, or model fallback. Ordinary local scans keep their existing behavior.
 
+For hosted patch generation and verification, use the separate
+[hosted remediation API](hosted-remediation.md).
+
 ## Public executor API
 
 Use the standalone `runHostedScan(input, { executor, signal, onEvent })`

@@ -1,5 +1,7 @@
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { once } from "node:events";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolving } from "./support/promises.js";
 import { describe, expect, test, mock } from "bun:test";
 import {
@@ -11,6 +13,7 @@ import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { main } from "../src/cli.js";
 import { rejecting } from "./support/errors.js";
 import { responding } from "./support/responses.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
 function registryResponse(version: unknown) {
   return async () => new Response(JSON.stringify({ version }));
@@ -76,7 +79,7 @@ describe("CLI update notice", () => {
     const installed = "/workspace/node_modules/pkg/dist/version.js";
     const packageName = "@openai/codex-security@latest";
 
-    for (const [environment, entrypoint, command] of [
+    for (const [environment, entrypoint, command, nodeExecutable] of [
       [{ npm_command: "exec" }, installed, `npx ${packageName}`],
       [{}, "/cache/_npx/pkg", `npx ${packageName}`],
       [{}, installed, `npm install ${packageName}`],
@@ -85,6 +88,36 @@ describe("CLI update notice", () => {
         {},
         "C:\\AppData\\Roaming\\npm\\node_modules\\pkg",
         `npm install -g ${packageName}`,
+      ],
+      [
+        {},
+        "C:\\AppData\\Local\\nvm\\v22.20.0\\node_modules\\pkg",
+        `npm install -g ${packageName}`,
+        "C:\\AppData\\Local\\nvm\\v22.20.0\\node.exe",
+      ],
+      [
+        {},
+        "D:/Node Versions/v22.20.0/node_modules/pkg",
+        `npm install -g ${packageName}`,
+        "d:\\node versions\\v22.20.0\\node.exe",
+      ],
+      [
+        {},
+        "D:/Node Versions/v22.20.0/project/node_modules/pkg",
+        `npm install ${packageName}`,
+        "D:/Node Versions/v22.20.0/node.exe",
+      ],
+      [
+        { npm_command: "exec" },
+        "D:/Node Versions/v22.20.0/node_modules/pkg",
+        `npx ${packageName}`,
+        "D:/Node Versions/v22.20.0/node.exe",
+      ],
+      [
+        {},
+        "D:/release/.install/node_modules/pkg",
+        "download and extract the latest Codex Security release",
+        "D:/release/.install/node.exe",
       ],
       [
         { npm_config_user_agent: "pnpm/10.0.0" },
@@ -121,7 +154,34 @@ describe("CLI update notice", () => {
       ],
       [{}, "/workspace/src/version.ts", `npx ${packageName}`],
     ] as const) {
-      expect(updateCommand(environment, entrypoint)).toBe(command);
+      expect(updateCommand(environment, entrypoint, nodeExecutable)).toBe(
+        command,
+      );
+    }
+  });
+
+  test("recognizes Windows globals through a linked Node directory", () => {
+    const temporaryDirectories = createTemporaryDirectoriesSync(true);
+    const root = temporaryDirectories.create("codex-update-notice-");
+    const nodeDirectory = join(root, "Node Versions", "v22.20.0");
+    const nodeLink = join(root, "nodejs");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const execPath = Object.getOwnPropertyDescriptor(process, "execPath")!;
+
+    try {
+      mkdirSync(nodeDirectory, { recursive: true });
+      writeFileSync(join(nodeDirectory, "node.exe"), "");
+      symlinkSync(nodeDirectory, nodeLink, "junction");
+      Object.defineProperties(process, {
+        platform: { value: "win32" },
+        execPath: { value: join(nodeLink, "node.exe") },
+      });
+      expect(
+        updateCommand({}, join(nodeDirectory, "node_modules", "pkg")),
+      ).toBe("npm install -g @openai/codex-security@latest");
+    } finally {
+      Object.defineProperties(process, { platform, execPath });
+      temporaryDirectories.cleanup();
     }
   });
 

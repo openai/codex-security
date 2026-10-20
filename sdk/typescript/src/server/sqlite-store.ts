@@ -81,7 +81,12 @@ export class SqliteFindingsStore implements FindingsStore {
           }
         : undefined,
     );
-    const options = await (this.options ??= this.resolveOptions());
+    const options = await (this.options ??= this.resolveOptions().catch(
+      (error: unknown) => {
+        this.options = undefined;
+        throw error;
+      },
+    ));
     const result = await runWorkbench(options, [command], input);
     const messages = {
       finding_conflict:

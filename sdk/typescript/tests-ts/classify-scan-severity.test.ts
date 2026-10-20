@@ -842,6 +842,73 @@ test("publication reads SQLite even when the JSON export is modified or symlinke
   expect(await readFile(external, "utf8")).toBe(JSON.stringify(result));
 });
 
+test.each(["saved scan", "latest listing", "latest scan"])(
+  "cancels a pending %s history request and preserves its cleanup and error",
+  async (boundary) => {
+    const controller = new AbortController();
+    const reason = new Error("Classification canceled");
+    const abortError = Object.assign(new Error("History request aborted"), {
+      name: "AbortError",
+      cause: reason,
+    });
+    const entered = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<JsonObject>();
+    const calls: string[] = [];
+    const events: string[] = [];
+    let receivedSignal: AbortSignal | undefined;
+    const operation = classifyScanSeverityInternal(
+      boundary === "saved scan" ? "scan-example" : "latest",
+      { signal: controller.signal },
+      {
+        currentDirectory: () => process.cwd(),
+        runWorkbench: async (args, _input, signal) => {
+          calls.push(args[0]!);
+          if (boundary === "latest scan" && args[0] === "list-scans")
+            return { scans: [{ scanId: "scan-example" }] };
+          receivedSignal = signal;
+          const abort = () => {
+            events.push("aborted");
+            response.reject(abortError);
+          };
+          signal?.addEventListener("abort", abort, { once: true });
+          events.push("entered");
+          entered.resolve();
+          try {
+            return await response.promise;
+          } finally {
+            signal?.removeEventListener("abort", abort);
+            events.push("cleaned up");
+          }
+        },
+      },
+    );
+    const pending = operation.catch((error: unknown) => error);
+    try {
+      await Promise.race([
+        entered.promise,
+        pending.then((error) => {
+          throw error;
+        }),
+      ]);
+      controller.abort(reason);
+      response.reject(new Error("History lookup did not observe cancellation"));
+      expect(await pending).toBe(abortError);
+      expect(receivedSignal).toBe(controller.signal);
+      expect(events).toEqual(["entered", "aborted", "cleaned up"]);
+      expect(calls).toEqual(
+        boundary === "saved scan"
+          ? ["get-scan"]
+          : boundary === "latest listing"
+            ? ["list-scans"]
+            : ["list-scans", "get-scan"],
+      );
+    } finally {
+      response.resolve({});
+      await pending;
+    }
+  },
+);
+
 test.each(["latest", "scan_prefix"])(
   "resolves %s using existing saved-scan history",
   async (selector) => {
