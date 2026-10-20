@@ -1,4 +1,5 @@
 name: node-github-release
+run-name: Publish ${{ inputs.tag }}
 
 on:
   workflow_dispatch:

@@ -64,7 +64,8 @@ jobs:
             while IFS= read -r -d '' path; do
               case "$path" in
                 .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml | \
-                  docker/verify-container-compose.sh)
+                  .github/scripts/release-progress.mjs | .github/scripts/test_release_progress.mjs | \
+                  sdk/typescript/scripts/release-pr.mjs | docker/verify-container-compose.sh)
                   workflow_quality=true
                   ;;
               esac
