@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { runWorkflowScript } from "./support/workflow-script.js";
 
 type Step = {
@@ -95,7 +96,7 @@ function fixture() {
     );
     return { ...result, output: readFileSync(output, "utf8") };
   }
-  return { source, automation, git, commit, run };
+  return { directory, repository, source, automation, git, commit, run };
 }
 
 test("backfills the tagged release after main has advanced", () => {
@@ -214,9 +215,14 @@ test("builds and downloads native payloads from the same source as the image", (
   expect(native.jobs["bundle"]!.steps![1]?.with?.["name"]).toBe(
     "native-universal-${{ inputs.ref || github.sha }}",
   );
-  for (const job of ["publish-platform", "manifest", "promote"]) {
+  for (const job of ["publish-platform", "manifest"]) {
     expect(release.jobs[job]!.steps![0]?.with?.["ref"]).toBe(
       "${{ needs.authorize.outputs.sha }}",
+    );
+  }
+  for (const job of ["authorize", "promote"]) {
+    expect(release.jobs[job]!.steps![0]?.with?.["ref"]).toBe(
+      "${{ github.sha }}",
     );
   }
   const buildSteps = release.jobs["publish-platform"]!.steps!;
@@ -230,4 +236,160 @@ test("builds and downloads native payloads from the same source as the image", (
   expect(validation[1]?.with?.["name"]).toBe(
     "native-universal-${{ inputs.ref || github.sha }}",
   );
+});
+
+const digest = `sha256:${"a".repeat(64)}`;
+function existingFixture() {
+  const source = fixture();
+  const bin = join(source.directory, "bin");
+  const events = join(source.directory, "events");
+  const output = join(source.directory, "reuse-output");
+  mkdirSync(bin);
+  mkdirSync(join(source.repository, "docker"));
+  copyFileSync(
+    new URL(
+      "../../../docker/verify-container-release-version.sh",
+      import.meta.url,
+    ),
+    join(source.repository, "docker/verify-container-release-version.sh"),
+  );
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/bin/sh
+case "$1" in
+  api) printf '%s\\n' "$MOCK_VERSIONS"; exit "$MOCK_API_STATUS" ;;
+  attestation) printf '%s\\n' "$*" >> "$EVENTS"; exit "$MOCK_ATTESTATION_STATUS" ;;
+  *) exit 99 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    join(bin, "docker"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$EVENTS"
+case "$1" in
+  buildx) printf '%s\\n' "$MOCK_MANIFEST" ;;
+  pull|run) exit "$MOCK_DOCKER_STATUS" ;;
+  *) exit 99 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  const manifest = {
+    annotations: {
+      "org.opencontainers.image.version": "99.1.2",
+      "org.opencontainers.image.revision": source.source,
+    },
+    manifests: ["amd64", "arm64"].map((architecture) => ({
+      platform: { os: "linux", architecture },
+    })),
+  };
+  const script = release.jobs["source"]!.steps!.find(
+    (step) => step.name === "Verify an existing immutable container release",
+  )!.run;
+  function run(env: Record<string, string> = {}) {
+    writeFileSync(events, "");
+    writeFileSync(output, "");
+    const result = runWorkflowScript(source.repository, script, {
+      PATH: `${bin}${delimiter}${process.env["PATH"]}`,
+      EVENTS: events.replaceAll("\\", "/"),
+      GITHUB_OUTPUT: output.replaceAll("\\", "/"),
+      GITHUB_REPOSITORY: "example/project",
+      GITHUB_REPOSITORY_OWNER: "Example",
+      IMAGE: "ghcr.io/example/codex-security",
+      VERSION: "99.1.2",
+      RELEASE_SHA: source.source,
+      MOCK_VERSIONS: JSON.stringify([
+        {
+          name: digest,
+          metadata: {
+            container: { tags: ["99.1.2", "latest", `sha-${source.source}`] },
+          },
+        },
+      ]),
+      MOCK_MANIFEST: JSON.stringify(manifest),
+      MOCK_API_STATUS: "0",
+      MOCK_ATTESTATION_STATUS: "0",
+      MOCK_DOCKER_STATUS: "0",
+      ...env,
+    });
+    return {
+      ...result,
+      output: readFileSync(output, "utf8"),
+      events: readFileSync(events, "utf8"),
+    };
+  }
+  return { run, manifest, source: source.source };
+}
+
+test("verifies and reuses the published source without a registry write", () => {
+  const { run } = existingFixture();
+  const result = run();
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.output).toContain(`digest=${digest}\n`);
+  expect(result.events.trim().split("\n")).toEqual([
+    `buildx imagetools inspect ghcr.io/example/codex-security@${digest} --raw`,
+    `attestation verify oci://ghcr.io/example/codex-security@${digest} --repo example/project`,
+    `pull ghcr.io/example/codex-security@${digest}`,
+    `run --rm ghcr.io/example/codex-security@${digest} --version`,
+  ]);
+});
+
+test("leaves an unpublished version on the build and approval path", () => {
+  const result = existingFixture().run({ MOCK_VERSIONS: "[]" });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.output).toBe("");
+  expect(result.events).toBe("");
+});
+
+test.each(["MOCK_API_STATUS", "MOCK_ATTESTATION_STATUS", "MOCK_DOCKER_STATUS"])(
+  "does not reuse an image when %s fails",
+  (variable) => {
+    const result = existingFixture().run({ [variable]: "1" });
+    expect(result.status).not.toBe(0);
+    expect(result.output).not.toContain("digest=");
+  },
+);
+
+test.each(["source", "version", "architecture"] as const)(
+  "rejects published container %s mismatches",
+  (field) => {
+    const { run, manifest } = existingFixture();
+    if (field === "source")
+      manifest.annotations["org.opencontainers.image.revision"] = "b".repeat(
+        40,
+      );
+    if (field === "version")
+      manifest.annotations["org.opencontainers.image.version"] = "99.1.1";
+    if (field === "architecture") manifest.manifests.pop();
+    const result = run({ MOCK_MANIFEST: JSON.stringify(manifest) });
+    expect(result.status).not.toBe(0);
+    expect(result.output).toBe("");
+  },
+);
+
+test("does not reuse a version whose latest tag is incomplete", () => {
+  const { run, source } = existingFixture();
+  const result = run({
+    MOCK_VERSIONS: JSON.stringify([
+      {
+        name: digest,
+        metadata: { container: { tags: ["99.1.2", `sha-${source}`] } },
+      },
+    ]),
+  });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("matching latest tag");
+  expect(result.output).not.toContain("digest=");
+});
+
+test("does not reuse a version missing its source commit tag", () => {
+  const result = existingFixture().run({
+    MOCK_VERSIONS: JSON.stringify([
+      { name: digest, metadata: { container: { tags: ["99.1.2", "latest"] } } },
+    ]),
+  });
+  expect(result.status).not.toBe(0);
+  expect(result.output).toBe("");
 });

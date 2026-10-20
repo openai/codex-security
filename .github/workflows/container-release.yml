@@ -26,10 +26,15 @@ jobs:
     if: github.repository == 'openai/codex-security'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
     outputs:
       sha: ${{ steps.release.outputs.sha }}
       image: ${{ steps.release.outputs.image }}
       version: ${{ steps.release.outputs.version }}
+      existing-digest: ${{ steps.existing.outputs.digest }}
     steps:
       - name: Checkout release history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -90,9 +95,57 @@ jobs:
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
+      - &set-up-docker-buildx
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Verify an existing immutable container release
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          endpoint="orgs/$owner/packages/container/codex-security"
+          versions="$(gh api --paginate "$endpoint/versions?per_page=100")"
+          digest="$(jq -r -s --arg version "$VERSION" '
+            [.[][] | select(any(.metadata.container.tags[]?; . == $version)) | .name]
+            | unique | .[]
+          ' <<< "$versions")"
+          if [[ -z "$digest" ]]; then
+            exit 0
+          fi
+          if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo 'The existing container version must resolve to one immutable digest.' >&2
+            exit 1
+          fi
+          jq --exit-status --slurp --arg tag "sha-$RELEASE_SHA" --arg digest "$digest" '
+            [.[][] | select(any(.metadata.container.tags[]?; . == $tag)) | .name]
+            | unique == [$digest]
+          ' <<< "$versions" > /dev/null
+          reference="$IMAGE@$digest"
+          docker buildx imagetools inspect "$reference" --raw |
+            jq --exit-status --arg version "$VERSION" --arg sha "$RELEASE_SHA" '
+              .annotations["org.opencontainers.image.version"] == $version
+              and .annotations["org.opencontainers.image.revision"] == $sha
+              and (
+                [.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+                | (index("amd64") != null and index("arm64") != null)
+              )
+            ' > /dev/null
+          gh attestation verify "oci://$reference" --repo "$GITHUB_REPOSITORY"
+          docker pull "$reference"
+          docker run --rm "$reference" --version
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION" "$digest"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
   native:
     needs: source
-    if: github.repository == 'openai/codex-security'
+    if: github.repository == 'openai/codex-security' && needs.source.outputs.existing-digest == ''
     uses: ./.github/workflows/native-artifacts.yml
     with:
       ref: ${{ needs.source.outputs.sha }}
@@ -121,10 +174,10 @@ jobs:
       labels: ${{ steps.metadata.outputs.labels }}
       metadata: ${{ steps.metadata.outputs.json }}
     steps:
-      - name: Checkout release source
+      - name: Checkout release automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.source.outputs.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Preflight public package and immutable release version
@@ -194,9 +247,7 @@ jobs:
           name: native-universal-${{ needs.authorize.outputs.sha }}
           path: plugins/codex-security/native/prebuilt
 
-      - &set-up-docker-buildx
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - *set-up-docker-buildx
 
       - &sign-in-to-github-container-registry
         name: Sign in to GitHub Container Registry
@@ -422,7 +473,7 @@ jobs:
       - name: Checkout approved immutable-version verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.authorize.outputs.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - *set-up-docker-buildx

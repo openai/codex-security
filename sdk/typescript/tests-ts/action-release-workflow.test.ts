@@ -902,6 +902,31 @@ test("detects container support from the release commit, not the automation chec
 });
 
 test.each([
+  ["0.1.26", false],
+  ["0.4.0", false],
+  ["0.5.0", true],
+  ["0.10.0", true],
+  ["1.0.0", true],
+] as const)(
+  "preserves historical recovery before coordinated containers: %s",
+  (version, included) => {
+    const release = fixture();
+    release.write("Dockerfile", "FROM scratch\n");
+    release.updateJson("sdk/typescript/package.json", (value) => ({
+      ...value,
+      version,
+    }));
+    const source = release.commit("Add container source");
+    expect(
+      release.run(detectContainer, {
+        RELEASE_SHA: source,
+        RELEASE_VERSION: version,
+      }).output,
+    ).toBe(included ? "present=true\n" : "");
+  },
+);
+
+test.each([
   ["success", "true", true],
   ["failure", "true", false],
   ["cancelled", "true", false],

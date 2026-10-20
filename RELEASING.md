@@ -302,13 +302,18 @@ binaries, Docker builds, OCI revision labels, and image tags all use that commit
 including when the release is older than `main`. Publication still requires
 approval in the protected `container` environment. The final status waits for
 both architectures, public pulls, attestation, and stable tag promotion.
-Sources without a Dockerfile skip container publication.
+Coordinated container publication starts at 0.5.0. Earlier releases use older
+container and native build contracts, so their recovery runs continue to publish
+npm and the Action without requiring this container pipeline. Sources without a
+Dockerfile also skip container publication.
 
 To publish a missing container for an existing npm release, dispatch
 `node-github-release` on `main` with its `npm-vX.Y.Z` tag and approve the container
-deployment after validation. If a run fails, rerun only failed jobs so successful
-immutable container releases are not rebuilt. Standalone `container-vX.Y.Z` and
-manual `container-release` triggers remain available.
+deployment after validation. Recovery verifies and reuses an existing container
+only when its version, source commit, architectures, attestation, public pull, and
+immutable tag checks pass. It does not rebuild or overwrite that version.
+Standalone `container-vX.Y.Z` and manual `container-release` triggers remain
+available.
 See [Container releases](docker/README.md) for publication and verification.
 
 ## Verify
@@ -321,8 +326,8 @@ Check the published state before announcing the release:
 - The npm GitHub Release is stable, has the correct title, and contains one
   verified npm package archive.
 - The exact-version published installation checks succeeded.
-- For releases with a Dockerfile, container publication succeeded and the
-  version tag is publicly pullable on Linux `amd64` and `arm64`.
+- For releases at or after 0.5.0 with a Dockerfile, container publication
+  succeeded and the version tag is publicly pullable on Linux `amd64` and `arm64`.
 - For releases with the Action, `action-vX.Y.Z` points to the distribution
   commit recorded in its manifest, whose parent is the CLI release commit.
   Its companion GitHub Release contains the manifest and SBOM, links to the

@@ -377,7 +377,13 @@ jobs:
         id: container
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          # Coordinated container publication starts at 0.5.0. Earlier releases
+          # use older container/native build contracts and retain npm/Action recovery.
+          if [[ "$RELEASE_VERSION" =~ ^0\.[0-4]\. ]]; then
+            exit 0
+          fi
           if git cat-file -e "$RELEASE_SHA:Dockerfile" 2>/dev/null; then
             echo 'present=true' >> "$GITHUB_OUTPUT"
           fi
