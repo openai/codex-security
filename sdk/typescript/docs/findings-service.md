@@ -25,6 +25,8 @@ deployments; local deduplication uses the database selected by
 For direct embedding/storage integrations, `OpenAiFindingEmbedder` accepts a
 static key or `() => string | Promise<string>` as its first argument. It calls
 the callback before each HTTP batch; the caller handles token acquisition.
+Cancellation prevents a new callback or HTTP request. Direct embedder callers
+still await a key callback that has already started.
 Pass `fetch` as the second argument and the full endpoint URL as the third.
 By default, the saved-scan deduplication APIs use environment credentials. A
 custom SDK `embedding` binding can supply an adapter with its own credentials,
@@ -185,7 +187,8 @@ console.log(result.duplicateGroups);
 For a different embedding provider or model, both saved-scan SDK methods accept
 an `embedding` binding. Reuse the `FindingEmbedder` interface: return one
 `{ model, vector }` per input finding, in input order. The adapter owns its
-credentials, tokenization, chunking, and provider request format.
+credentials, tokenization, chunking, and provider request format. Cancellation
+stops the SDK's wait for embeddings; the adapter owns cleanup of its ongoing work.
 
 ```typescript
 import { deduplicateScan, type FindingEmbedder } from "@openai/codex-security";

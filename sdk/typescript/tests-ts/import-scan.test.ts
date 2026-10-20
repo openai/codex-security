@@ -324,6 +324,49 @@ test("CSV import seals and reloads non-whitespace byte order marks in required t
   expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
 });
 
+test.each(["\u00A0", "\u2028", "\u2029", "src/a\u2028b.py", "src/a\u2029b.py"])(
+  "CSV import retains literal fields without replaying source decisions for %j",
+  async (path) => {
+    const context = await fixture();
+    const source =
+      "\uFEFF" +
+      context.source
+        .replaceAll('"title"', '"candidate_id","title"')
+        .replaceAll(
+          '"Reported archive extraction issue"',
+          '"\uFEFF","Reported archive extraction issue"',
+        )
+        .replaceAll('"open","",""', '"closed","false_positive"," \uFEFF "')
+        .replaceAll('"src/extract.ts"', `"${path}"`);
+    await writeFile(context.options.sourcePath, source);
+    const result = completed(
+      await importScan(context.options, context.dependencies),
+    );
+    const loaded = await loadContract(result.scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+    for (const finding of loaded.findings.findings) {
+      expect(finding.locations[0]!.path).toBe(path);
+      expect(finding.extensions?.["candidateId"]).toBe("\uFEFF");
+      expect(finding.validation).toMatchObject({
+        method: "Source-reported CSV import metadata",
+        status: "closed",
+        summary: expect.stringContaining(
+          "Source close reason: false_positive\nSource note:  \uFEFF ",
+        ),
+      });
+    }
+    const decisions = await runCommand(context.python, [
+      "-c",
+      "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); print(c.execute('SELECT COUNT(*) FROM finding_decisions').fetchone()[0], c.execute('SELECT COUNT(*) FROM finding_triage').fetchone()[0])",
+      join(context.stateDirectory, "workbench.sqlite3"),
+    ]);
+    expect(decisions.status, decisions.stderr).toBe(0);
+    expect(decisions.stdout.trim()).toBe("0 0");
+    expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+  },
+);
+
 test.each(["csv", "json"] as const)(
   "empty %s imports preserve source integrity without claiming an analyzed surface",
   async (format) => {

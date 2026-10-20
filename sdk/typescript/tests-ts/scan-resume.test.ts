@@ -988,6 +988,7 @@ test.each([
     const selected = {
       model: `synthetic-${auth ?? "auto"}-model`,
       model_reasoning_effort: "high",
+      daybreak: auth === "api-key",
       features: { goals: false },
     };
     const settings = {
@@ -1066,7 +1067,10 @@ test.each([
                       max_discovery_runs: 5,
                       max_time_hours: 1.5,
                     },
-                    worker_runtime: { features: { goals: false } },
+                    worker_runtime: {
+                      daybreak: selected.daybreak,
+                      features: { goals: false },
+                    },
                   });
                   const workerConfigPath =
                     options.env?.["CODEX_SECURITY_CONFIG_PATH"];
@@ -1077,6 +1081,7 @@ test.each([
                     await readFile(workerConfigPath!, "utf8"),
                   );
                   expect(workerConfig).toMatchObject({
+                    daybreak: selected.daybreak,
                     codex_security: {
                       cyber_access_program: settings.cyberAccessProgram,
                     },

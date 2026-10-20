@@ -2,7 +2,8 @@
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the
 canonical changelog. Under the current process, each new release combines a
-short, reviewed summary with a categorized list of merged pull requests.
+short, reviewed summary with an expandable categorized list of merged pull
+requests.
 Historical releases may contain generated notes only. The release tag and npm
 package use the same stable version: `npm-vX.Y.Z` and
 `@openai/codex-security@X.Y.Z`. Releases whose source includes the GitHub Action
@@ -159,6 +160,28 @@ drafts highlights from merged titles and lists marked breaking changes for
 migration review; it does not infer migration instructions from source code.
 Review and refine these suggestions before releasing.
 
+Keep the published notes easy to scan:
+
+- Start with a short overview and the main user-facing highlights. Use bold
+  topic labels to make the bullets easy to skim. Put secondary improvements
+  in a `<details>` block when they would crowd out upgrade guidance.
+- Keep breaking changes and required upgrade actions visible. Long migration
+  procedures can go in a clearly named `<details>` block under the relevant
+  upgrade note. Keep code fences, tables, and lists intact.
+- Keep each prose paragraph or list item on one source line. GitHub Releases
+  renders source newlines as visible breaks, including those before links.
+  The release-note Prettier override uses `proseWrap: "never"`, and the SDK
+  format check includes this file.
+- Leave the complete PR inventory to the publisher. It appends the generated
+  notes, contributor credits, and comparison link in an **All changes**
+  disclosure after the reviewed summary. Releases without a reviewed summary
+  keep their generated notes visible.
+
+Preview both the release list and the individual release in GitHub. Check
+paragraph flow, inline links, tables, code examples, and expanded details.
+Edits to an already published release do not change its immutable tagged
+source; rerunning publication uses that tagged summary again.
+
 - Edit the highlights or upgrade notes on the release PR branch. Keep the
   surrounding `release-section` comments if you want to retain section
   boundaries. The bot refreshes a section only while it matches the last
@@ -268,7 +291,7 @@ for that exact commit:
    manifest and SBOM attached before publication makes those assets immutable.
    The companion links to the `npm-vX.Y.Z` changelog and lists the full Action
    distribution commit SHA. It is never marked Latest. A final status job
-   reports publication, installation smoke, and Action results.
+   reports publication, installation smoke, Action, and container results.
 
 The Action tag points to a generated distribution commit whose parent is the
 CLI release commit. That additional commit contains the runnable Action bundle
@@ -292,15 +315,62 @@ registry errors fail immediately.
 do not prepare a release by editing or committing files there.
 
 Monitor all three workflows and the final status in `node-github-release`.
-A release is complete when npm and GitHub publication, exact-version install
-checks, and applicable Action publication have succeeded. The protected npm
-publication gates and immutable `npm-vX.Y.Z` tag remain in place.
+The automated release is complete when npm and GitHub publication, exact-version
+install checks, and applicable Action and container publication have succeeded.
+The final job summarizes each result and identifies Marketplace publication as a
+separate step. A successful workflow does not confirm a Marketplace listing.
+The protected npm publication gates and immutable `npm-vX.Y.Z` tag remain in place.
 
-Container publication currently has its own workflow and approval. It uses
-`container-vX.Y.Z` or a manual `container-release` run on `main`, with the version
-matching the SDK package. It is not part of the coordinated npm and Action
-completion status. See [Container releases](docker/README.md) for its
-publication and verification steps.
+The npm package and CLI GitHub release become public before the installation and
+Action and container checks finish. Use the final workflow result before
+announcing that the automated release is complete.
+
+After the installed-package checks pass, `node-github-release` calls
+`container-release` with the verified npm version and source commit. Native
+binaries, Docker builds, OCI revision labels, and image tags all use that commit,
+including when the release is older than `main`. Publication still requires
+approval in the protected `container` environment. The final status waits for
+both architectures, public pulls, attestation, and stable tag promotion.
+Coordinated container publication starts at 0.5.0. Earlier releases use older
+container and native build contracts, so their recovery runs continue to publish
+npm and the Action without requiring this container pipeline. Sources without a
+Dockerfile also skip container publication.
+
+To publish a missing container for an existing npm release, dispatch
+`node-github-release` on `main` with its `npm-vX.Y.Z` tag and approve the container
+deployment after validation. Recovery verifies and reuses an existing container
+only when its version, source commit, architectures, attestation, public pull, and
+immutable tag checks pass. It does not rebuild or overwrite that version.
+Standalone `container-vX.Y.Z` and manual `container-release` triggers remain
+available.
+See [Container releases](docker/README.md) for publication and verification.
+
+## Publish to GitHub Marketplace
+
+Publishing the companion `action-vX.Y.Z` GitHub Release does not publish its
+Marketplace listing. Complete this step separately for each Action version
+that should appear in Marketplace:
+
+1. Wait for `node-github-release` to succeed for the version.
+2. Open the existing `action-vX.Y.Z` release and choose **Edit**. Select
+   **Publish this Action to the GitHub Marketplace**. Use the Action release,
+   whose tag contains the tested distribution, rather than the `npm-vX.Y.Z`
+   source release or a new tag on `main`.
+3. Confirm the metadata checks pass. The Marketplace display name comes from
+   `name` in the tagged `action.yml`, currently **OpenAI Codex Security**.
+   GitHub requires a globally unique Action name. If a released version's name
+   is rejected, correct the source metadata and publish a new version; do not
+   move an existing release tag.
+4. Select **Security** as the primary category and **Code review** as the
+   optional secondary category. Confirm the security contact and complete any
+   organization-owned Marketplace agreement requirements.
+5. Review the listing details, keep the Action release unmarked as **Latest**,
+   and choose **Update release**. Verify that the public Marketplace page links
+   to this repository and offers the intended `action-vX.Y.Z` version.
+
+Changing the Marketplace display name does not change the repository reference
+used by workflows or the npm package name. Existing releases retain their tagged
+metadata. See [GitHub's Marketplace publishing requirements](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/publish-in-github-marketplace).
 
 ## Verify
 
@@ -312,6 +382,8 @@ Check the published state before announcing the release:
 - The npm GitHub Release is stable, has the correct title, and contains one
   verified npm package archive.
 - The exact-version published installation checks succeeded.
+- For releases at or after 0.5.0 with a Dockerfile, container publication
+  succeeded and the version tag is publicly pullable on Linux `amd64` and `arm64`.
 - For releases with the Action, `action-vX.Y.Z` points to the distribution
   commit recorded in its manifest, whose parent is the CLI release commit.
   Its companion GitHub Release contains the manifest and SBOM, links to the

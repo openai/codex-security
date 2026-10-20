@@ -22,7 +22,7 @@ import {
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
 import type { CodexSecuritySurface } from "../api.js";
-import { codexSecurityRequestMetadata } from "../request-metadata.js";
+import { codexSecurityRequestContext } from "../request-metadata.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
@@ -103,6 +103,7 @@ interface Message {
 function transientCodexError(info: unknown): boolean {
   if (
     info === "usageLimitExceeded" ||
+    info === "rateLimitExceeded" ||
     info === "serverOverloaded" ||
     info === "internalServerError"
   )
@@ -299,7 +300,7 @@ export class CodexReviewRunner {
         "--config",
         'default_permissions="codex_security_review"',
         "--config",
-        `permissions.codex_security_review={extends=":read-only",filesystem={${[...privatePaths].map((path) => `${JSON.stringify(path)}="deny"`).join(",")}}}`,
+        `permissions.codex_security_review={extends=":read-only",filesystem=${inlineToml(Object.fromEntries([...privatePaths].map((path) => [path, "deny"])))}}`,
         "--config",
         `windows=${inlineToml(executionConfig["windows"] ?? DEFAULT_CODEX_CONFIG["windows"]!)}`,
       );
@@ -388,11 +389,14 @@ export class CodexReviewRunner {
                 update_plan: { enabled: false },
                 experimental_request_user_input: { enabled: false },
               },
-              responses_api_metadata: {
-                ...(executionConfig["responses_api_metadata"] as
-                  Record<string, string> | undefined),
-                ...codexSecurityRequestMetadata(this.surface, "dedupe"),
-              },
+              responses_api_metadata: codexSecurityRequestContext(
+                executionConfig,
+                {
+                  surface: this.surface,
+                  command: "dedupe",
+                  providerResolved: false,
+                },
+              ).metadata,
               features: {
                 code_mode: {
                   direct_only_tool_namespaces: ["review_validator"],
