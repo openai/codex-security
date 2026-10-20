@@ -18,6 +18,9 @@
 - reject non-finite numbers before storage ([#1773](https://github.com/openai/codex-security/pull/1773))
 - read scan counts and latest scans together ([#1771](https://github.com/openai/codex-security/pull/1771))
 - avoid success output after command failures ([#1775](https://github.com/openai/codex-security/pull/1775))
+- preserve CODEOWNERS token grammar ([#1787](https://github.com/openai/codex-security/pull/1787))
+- stabilize Python discovery and native worker tests ([#1793](https://github.com/openai/codex-security/pull/1793))
+- retain finding details with own JSON keys ([#1780](https://github.com/openai/codex-security/pull/1780))
 
 <!-- release-section: highlights:end -->
 

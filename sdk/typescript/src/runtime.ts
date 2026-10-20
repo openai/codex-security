@@ -3490,7 +3490,8 @@ async function usablePython(
       {
         env: command.environment,
         encoding: "utf8",
-        timeout: 5_000,
+        // Cold Python startup can exceed five seconds on busy Windows hosts.
+        timeout: 30_000,
         windowsHide: true,
         signal,
       },

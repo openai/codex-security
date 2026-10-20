@@ -6274,6 +6274,51 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result.stdout.trim()).toBe(python);
   });
 
+  test("accepts Python when a cold interpreter starts after five seconds", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `
+      import { expect, jest, mock } from "bun:test";
+      import * as childProcess from "node:child_process";
+      import { promisify } from "node:util";
+      const started = Promise.withResolvers();
+      const probe = () => {};
+      probe[promisify.custom] = (_command, _args, options) =>
+        new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            clearTimeout(ready);
+            reject(new Error("Python startup timed out"));
+          }, options.timeout);
+          const ready = setTimeout(() => {
+            clearTimeout(timeout);
+            resolve({ stdout: "codex-security-python-ok\\n", stderr: "" });
+          }, 6_000);
+          started.resolve();
+        });
+      mock.module("node:child_process", () => ({ ...childProcess, execFile: probe }));
+      const { resolvePluginPython } = await import(process.argv[1]);
+      jest.useFakeTimers();
+      try {
+        const resolving = resolvePluginPython({ configuredPath: process.execPath }).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+        await started.promise;
+        jest.advanceTimersByTime(6_000);
+        expect(await resolving).toEqual({ value: process.execPath });
+      } finally {
+        jest.useRealTimers();
+      }
+    `,
+        fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  });
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
     const configured = join(root, "configured-python");
