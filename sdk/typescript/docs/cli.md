@@ -391,6 +391,7 @@ codex-security scan .
 codex-security scan . --path src --path tests
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
+codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
@@ -401,6 +402,13 @@ working copies. Their source inventories exclude `.git` and `.svn` metadata.
 changes. Both require Git. Deep scans support whole repositories and path scopes.
 Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
+
+`--owner-suggestions` writes optional `owner-suggestions.json` after a completed
+committed Git scan, using the same checkout, model, and reasoning effort. Owner
+errors leave the base scan completed. The JSON result includes
+`ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
+manifest stay unchanged. This option is unsupported for working-tree and
+directory snapshots, and is skipped with a warning when `--max-cost` is set.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;

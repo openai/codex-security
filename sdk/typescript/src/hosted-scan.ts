@@ -31,6 +31,7 @@ export const HostedScanInputSchema = z.strictObject({
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string(),
+  ownerSuggestions: z.boolean().optional(),
   identity: z.strictObject({
     runId: z.string().min(1),
     attemptId: z.string().min(1),
@@ -171,6 +172,15 @@ function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
 
 export interface HostedScanOptions {
   executor: ScanExecutor;
+  /** Host-owned, read-only inference for the optional owner stage. Never uses local credentials. */
+  ownerCodex?: {
+    startThread(options: { model?: string; modelReasoningEffort?: string }): {
+      run(
+        input: string,
+        options: { outputSchema?: unknown; signal?: AbortSignal },
+      ): Promise<{ finalResponse: string }>;
+    };
+  };
   signal?: AbortSignal;
   onEvent?: (event: ScanExecutionEvent) => void;
 }
@@ -201,6 +211,11 @@ export async function runHostedScan(
       environment: hostedScanEnvironment(input.stateDirectory),
       hostedScan: {
         context,
+        ownerCodex: options.ownerCodex ?? {
+          startThread() {
+            throw new Error("Hosted owner inference is unavailable.");
+          },
+        },
         executor: {
           async run(value, runOptions) {
             request = value;
@@ -245,6 +260,7 @@ export async function runHostedScan(
       mode: "standard",
       outputDir: outputDirectory,
       signal: options.signal,
+      ownerSuggestions: input.ownerSuggestions,
       onOutputDirReady(path) {
         outputDirectory = path;
       },
@@ -261,8 +277,8 @@ export async function runHostedScan(
     });
     if (
       result.manifest.scan.target.revision !== context.revision ||
-      (await repositoryRevision(context.repository, options.signal)) !==
-        context.revision
+      // Owner cancellation cannot invalidate an already sealed base scan.
+      (await repositoryRevision(context.repository)) !== context.revision
     )
       throw new Error(
         "Checkout changed from the frozen revision during execution.",
@@ -284,6 +300,8 @@ export async function runHostedScan(
       ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
       ...(isRecord(sources) ? Object.keys(sources) : []),
     ]);
+    if (result.ownerSuggestionsPath !== undefined)
+      names.add("owner-suggestions.json");
     const artifacts = await Promise.all(
       [...names].sort().map(async (path) => {
         const contents = await readScanFile(outputDirectory, path, path);
@@ -297,6 +315,9 @@ export async function runHostedScan(
     return {
       ...base(),
       status: "completed" as const,
+      ...(result.ownerSuggestionsError === undefined
+        ? {}
+        : { ownerSuggestionsError: result.ownerSuggestionsError }),
       artifacts,
     };
   } catch (error) {

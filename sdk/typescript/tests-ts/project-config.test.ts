@@ -23,6 +23,13 @@ afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
+  ["owner artifact disabled", { scan: { owner_suggestions: false } }, true],
+  [
+    "owner artifact requires a boolean",
+    { scan: { owner_suggestions: "true" } },
+    false,
+  ],
   [
     "fractional investigation minutes",
     { scan: { max_time_minutes: 0.5 } },

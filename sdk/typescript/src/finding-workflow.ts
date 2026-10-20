@@ -111,11 +111,16 @@ export class FindingWorkflow {
     return (await this.command({ action: "complete", stage, result }))!;
   }
 
-  async fail(stage: WorkflowStage, error: unknown): Promise<void> {
+  async fail(
+    stage: WorkflowStage,
+    error: unknown,
+    result?: unknown,
+  ): Promise<void> {
     await this.command({
       action: "fail",
       stage,
       error: errorMessage(error),
+      ...(result === undefined ? {} : { result }),
     }).catch(() => undefined);
   }
 
