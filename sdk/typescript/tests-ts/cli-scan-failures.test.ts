@@ -448,7 +448,7 @@ test.each(commands.slice(1))(
 
 for (const command of ["rerun", "resume"]) {
   test.each([true, false, undefined])(
-    `${command} restores owner suggestions from its saved recipe (%s)`,
+    `${command} restores owner suggestions from its saved recipe (%p)`,
     async (ownerSuggestions) => {
       let observed: boolean | undefined;
       let called = false;

@@ -415,7 +415,7 @@ test("canonical records use majority voting and highest severity for a three-way
 });
 
 test.each([2, 3, 10])(
-  "canonical review %s must succeed before returning any assessment",
+  "canonical review %p must succeed before returning any assessment",
   async (failedRun) => {
     for (const invalid of [false, true]) {
       let calls = 0;
@@ -446,7 +446,7 @@ test.each([2, 3, 10])(
 );
 
 test.each([2, 3])(
-  "canonical cancellation during review %s never returns a partial vote",
+  "canonical cancellation during review %p never returns a partial vote",
   async (canceledRun) => {
     const controller = new AbortController();
     let calls = 0;
@@ -510,7 +510,7 @@ test.each([1, 2, 4, 10])(
 );
 
 test.each([0, -1, 11, 1.5, NaN, Infinity])(
-  "rejects invalid canonical run count %s before host work",
+  "rejects invalid canonical run count %p before host work",
   async (classificationRuns) => {
     let calls = 0;
     await expect(
