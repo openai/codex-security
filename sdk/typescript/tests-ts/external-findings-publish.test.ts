@@ -1,4 +1,5 @@
 import { createServer, type ServerResponse } from "node:http";
+import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import {
@@ -12,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -1078,40 +1080,182 @@ test("reset retirement tolerates a checkpoint written while waiting for the acti
   expect((await fresh.publish()).counts.created).toBe(1);
 });
 
-test("canceling a waiting publisher preserves the active request", async () => {
+test.each(["receipt", "readback"] as const)(
+  "canceling a waiting CLI preserves acknowledgements and the active request during %s",
+  async (stage) => {
+    const f = await fixture();
+    const { completion: active, release } = await pauseAtPublication(f, stage);
+    const directory = join(f.root, "state", "external-finding-publications");
+    const name = (await readdir(directory)).find((name) =>
+      name.endsWith(".pending.json"),
+    )!;
+    const before = await readFile(join(directory, name), "utf8");
+    const listeners = new Map<string, () => void>();
+    const cli = createCliTest(main);
+    const observer = observeLockContention();
+    const waiting = cli.runCli([...f.command, "--yes"], {
+      ...f.cliDeps,
+      addSignalListener: (signal, listener) => {
+        listeners.set(signal, listener);
+      },
+      removeSignalListener: (signal) => {
+        listeners.delete(signal);
+      },
+    });
+    try {
+      await Promise.race([
+        observer.contended,
+        waiting.then(() => {
+          throw new Error("Concurrent publication skipped the active lock.");
+        }),
+      ]);
+      listeners.get("SIGINT")!();
+      expect(await waiting).toBe(130);
+      const interrupted = JSON.parse(cli.stdout.text());
+      expect(interrupted).toMatchObject({
+        status: "interrupted",
+        counts: { created: stage === "readback" ? 1 : 0 },
+        unacknowledged: stage === "readback" ? 0 : 1,
+        verified: 0,
+        savedSubmission: join(directory, name),
+      });
+      expect(interrupted.receipts).toEqual(JSON.parse(before).receipts ?? []);
+      expect(await readFile(join(directory, name), "utf8")).toBe(before);
+      expect(listeners.size).toBe(0);
+      expect(f.posts).toHaveLength(1);
+      const retry = await prepareExternalPublication(f.file, options, f.deps);
+      expect(retry.preview.resumed).toBe(true);
+      expect(retry.preview.requests[0]!.request_id).toBe(
+        JSON.parse(f.posts[0]!).request_id,
+      );
+      release.resolve();
+      expect((await active).counts.created).toBe(1);
+    } finally {
+      release.resolve();
+      observer.restore();
+      await Promise.allSettled([active, waiting]);
+    }
+  },
+);
+
+test("canceling before acquiring a new publication lock reports no saved work", async () => {
   const f = await fixture();
-  const { completion: active, release } = await pauseAtPublication(f);
   const controller = new AbortController();
-  const observer = observeLockContention();
-  const waiting = (
-    await prepareExternalPublication(f.file, options, {
-      ...f.deps,
-      signal: controller.signal,
-    })
-  ).publish();
+  const prepared = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    signal: controller.signal,
+  });
+  controller.abort();
   try {
-    await Promise.race([
-      observer.contended,
-      waiting.then(() => {
-        throw new Error("Concurrent publication skipped the active lock.");
-      }),
-    ]);
-    controller.abort();
-    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
-    expect(f.posts).toHaveLength(1);
-    const retry = await prepareExternalPublication(f.file, options, f.deps);
-    expect(retry.preview.resumed).toBe(true);
-    expect(retry.preview.requests[0]!.request_id).toBe(
-      JSON.parse(f.posts[0]!).request_id,
-    );
-    release.resolve();
-    expect((await active).counts.created).toBe(1);
-  } finally {
-    release.resolve();
-    observer.restore();
-    await Promise.allSettled([active, waiting]);
+    await prepared.publish();
+    throw new Error("Expected cancellation");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ExternalPublicationError);
+    const result = (error as ExternalPublicationError).result;
+    expect(result).toMatchObject({
+      status: "interrupted",
+      receipts: [],
+      counts: { created: 0, updated: 0, unchanged: 0, error: 0 },
+      unacknowledged: 1,
+      verified: 0,
+    });
+    expect(result.savedSubmission).toBeUndefined();
   }
+  expect(f.posts).toEqual([]);
+  expect(
+    (
+      await readdir(join(f.root, "state", "external-finding-publications"))
+    ).filter((name) => name.endsWith(".pending.json")),
+  ).toEqual([]);
 });
+
+test("lock cancellation does not report a saved receipt for another request", async () => {
+  const f = await fixture();
+  f.state.brokenReadback = true;
+  await expect(
+    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+  ).rejects.toThrow("resume the saved request");
+  const directory = join(f.root, "state", "external-finding-publications");
+  const name = (await readdir(directory)).find((name) =>
+    name.endsWith(".pending.json"),
+  )!;
+  const saved = JSON.parse(await readFile(join(directory, name), "utf8"));
+  saved.receipts[0].id = "another-request";
+  const bytes = JSON.stringify(saved);
+  await writeFile(join(directory, name), bytes);
+  const controller = new AbortController();
+  const prepared = await prepareExternalPublication(f.file, options, {
+    ...f.deps,
+    signal: controller.signal,
+  });
+  controller.abort();
+  await expect(prepared.publish()).rejects.toThrow(
+    "receipt for a different publication",
+  );
+  expect(await readFile(join(directory, name), "utf8")).toBe(bytes);
+  expect(f.posts).toHaveLength(1);
+});
+
+test.skipIf(process.platform !== "win32")(
+  "Windows publication checkpoints start private beneath a shared parent",
+  async () => {
+    const f = await fixture();
+    const shared = join(f.root, "shared");
+    await mkdir(shared);
+    f.environment.CODEX_SECURITY_STATE_DIR = join(shared, "state");
+    const exec = promisify(execFile);
+    const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
+    await exec(join(system, "icacls.exe"), [
+      shared,
+      "/grant",
+      "*S-1-1-0:(OI)(CI)R",
+    ]);
+    const descriptor = async (path: string): Promise<string> => {
+      const result = await exec(
+        join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "$ErrorActionPreference = 'Stop'; (Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH).Sddl",
+        ],
+        { env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: path } },
+      );
+      return result.stdout.trim();
+    };
+    const before = await descriptor(shared);
+    expect(before).toContain(";;;WD)");
+    f.state.brokenReadback = true;
+    await expect(
+      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
+    ).rejects.toThrow("resume the saved request");
+    const directory = join(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+      "external-finding-publications",
+    );
+    const name = (await readdir(directory)).find((name) =>
+      name.endsWith(".pending.json"),
+    )!;
+    for (const path of [f.environment.CODEX_SECURITY_STATE_DIR, directory]) {
+      const acl = await descriptor(path);
+      expect(acl).toContain("D:P");
+      expect(acl).not.toContain(";;;WD)");
+    }
+    expect(await descriptor(join(directory, name))).not.toContain(";;;WD)");
+    expect(await descriptor(shared)).toBe(before);
+    f.state.brokenReadback = false;
+    expect(
+      (
+        await (
+          await prepareExternalPublication(f.file, options, f.deps)
+        ).publish()
+      ).counts.created,
+    ).toBe(1);
+    expect(f.posts).toHaveLength(1);
+  },
+  60_000,
+);
 
 test("readback failure retries acknowledged receipts without another POST", async () => {
   const f = await fixture();

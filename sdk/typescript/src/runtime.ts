@@ -2092,7 +2092,7 @@ async function prepareOutputDirectory(
   }
 }
 
-async function createWindowsOutputDirectory(
+export async function createWindowsOutputDirectory(
   path: string,
   recursive: boolean,
 ): Promise<string | undefined> {

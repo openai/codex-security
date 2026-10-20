@@ -21,6 +21,7 @@ import {
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityStateDirectory,
+  createWindowsOutputDirectory,
   validatePreparedOutputDir,
 } from "./runtime.js";
 import {
@@ -234,13 +235,66 @@ class CloudImportError extends CodexSecurityError {
   }
 }
 
+function validatePublicationReceipt(
+  value: unknown,
+  batch: FindingImportRequest,
+): FindingImportReceipt {
+  const receipt = validateImportReceipt(value);
+  const batchItems = new Map(batch.items.map((item) => [item.client_id, item]));
+  if (
+    receipt.id !== batch.request_id ||
+    canonicalJson(receipt.repository) !== canonicalJson(batch.repository) ||
+    canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
+    receipt.item_count !== batch.items.length ||
+    receipt.results.length !== batch.items.length ||
+    new Set(receipt.results.map((item) => item.client_id)).size !==
+      batch.items.length ||
+    receipt.results.some((item) => !batchItems.has(item.client_id))
+  )
+    throw new CodexSecurityError(
+      "Cloud returned a receipt for a different publication.",
+    );
+  const actual = { created: 0, updated: 0, unchanged: 0, error: 0 };
+  for (const result of receipt.results) {
+    actual[result.outcome]++;
+    if (result.outcome === "error") {
+      if (
+        !result.error ||
+        result.source_report_id !== null ||
+        result.observation_id !== null ||
+        result.canonical_finding_id !== null ||
+        result.version !== null
+      )
+        throw new CodexSecurityError(
+          "Cloud returned inconsistent item error fields.",
+        );
+    } else if (
+      result.error !== null ||
+      !result.source_report_id ||
+      !result.observation_id ||
+      !result.canonical_finding_id ||
+      result.version === null
+    )
+      throw new CodexSecurityError(
+        "Cloud returned an incomplete saved finding.",
+      );
+  }
+  if (canonicalJson(receipt.counts) !== canonicalJson(actual))
+    throw new CodexSecurityError(
+      "Cloud returned inconsistent publication counts.",
+    );
+  return receipt;
+}
+
 async function withImportLock<T>(
   state: string,
   key: string,
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
-  await mkdir(state, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32")
+    await createWindowsOutputDirectory(state, true);
+  else await mkdir(state, { recursive: true, mode: 0o700 });
   await validatePreparedOutputDir(state, undefined, true);
   const path = join(state, `${key}.lock.sqlite`);
   const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
@@ -702,7 +756,48 @@ export async function prepareExternalPublication(
     preview,
     async publish() {
       progress({ phase: "waiting", completed: 0 });
+      const result = (
+        acknowledged: FindingImportReceipt[],
+        verified: number,
+      ): ExternalPublicationResult => {
+        const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
+        const failures: ExternalPublicationResult["failures"] = [];
+        for (const [index, receipt] of acknowledged.entries()) {
+          for (const outcome of Object.keys(counts) as (keyof typeof counts)[])
+            counts[outcome] += receipt.counts[outcome] ?? 0;
+          const ids = new Map(
+            requests[index]!.items.map((item) => [
+              item.client_id,
+              item.source_finding_id,
+            ]),
+          );
+          for (const item of receipt.results)
+            if (item.error)
+              failures.push({
+                source_finding_id: ids.get(item.client_id)!,
+                ...item.error,
+              });
+        }
+        return {
+          cloudApiUrl,
+          cloudUrl: preview.cloudUrl,
+          status:
+            parsed.excluded.length || counts.error ? "partial" : "complete",
+          read: parsed.read,
+          ready: parsed.findings.length,
+          excluded: parsed.excluded,
+          receipts: acknowledged,
+          counts,
+          failures,
+          unacknowledged:
+            parsed.findings.length -
+            Object.values(counts).reduce((sum, count) => sum + count, 0),
+          verified,
+        };
+      };
+      let acquired = false;
       return await withImportLock(state, key, dependencies.signal, async () => {
+        acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
         const pending = await readOptionalFile(pendingPath);
         if (pending === undefined && !saved)
@@ -723,44 +818,6 @@ export async function prepareExternalPublication(
         const acknowledged: FindingImportReceipt[] = [];
         let verified = 0;
         let persisted = pending !== undefined;
-        const result = (): ExternalPublicationResult => {
-          const counts = { created: 0, updated: 0, unchanged: 0, error: 0 };
-          const failures: ExternalPublicationResult["failures"] = [];
-          for (const [index, receipt] of acknowledged.entries()) {
-            for (const outcome of Object.keys(
-              counts,
-            ) as (keyof typeof counts)[])
-              counts[outcome] += receipt.counts[outcome] ?? 0;
-            const ids = new Map(
-              requests[index]!.items.map((item) => [
-                item.client_id,
-                item.source_finding_id,
-              ]),
-            );
-            for (const item of receipt.results)
-              if (item.error)
-                failures.push({
-                  source_finding_id: ids.get(item.client_id)!,
-                  ...item.error,
-                });
-          }
-          return {
-            cloudApiUrl,
-            cloudUrl: preview.cloudUrl,
-            status:
-              parsed.excluded.length || counts.error ? "partial" : "complete",
-            read: parsed.read,
-            ready: parsed.findings.length,
-            excluded: parsed.excluded,
-            receipts: acknowledged,
-            counts,
-            failures,
-            unacknowledged:
-              parsed.findings.length -
-              Object.values(counts).reduce((sum, count) => sum + count, 0),
-            verified,
-          };
-        };
         try {
           if (pending === undefined) {
             await writeAtomicJson(pendingPath, submission);
@@ -773,56 +830,11 @@ export async function prepareExternalPublication(
           });
           let acknowledgedCount = 0;
           for (const [batchIndex, batch] of requests.entries()) {
-            const receipt = validateImportReceipt(
+            const receipt = validatePublicationReceipt(
               receipts[batchIndex] ??
                 (await request("/finding_imports", batch)),
+              batch,
             );
-            const batchItems = new Map(
-              batch.items.map((item) => [item.client_id, item]),
-            );
-            if (
-              receipt.id !== batch.request_id ||
-              canonicalJson(receipt.repository) !==
-                canonicalJson(batch.repository) ||
-              canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
-              receipt.item_count !== batch.items.length ||
-              receipt.results.length !== batch.items.length ||
-              new Set(receipt.results.map((item) => item.client_id)).size !==
-                batch.items.length ||
-              receipt.results.some((item) => !batchItems.has(item.client_id))
-            )
-              throw new CodexSecurityError(
-                "Cloud returned a receipt for a different publication.",
-              );
-            const actual = { created: 0, updated: 0, unchanged: 0, error: 0 };
-            for (const result of receipt.results) {
-              actual[result.outcome]++;
-              if (result.outcome === "error") {
-                if (
-                  !result.error ||
-                  result.source_report_id !== null ||
-                  result.observation_id !== null ||
-                  result.canonical_finding_id !== null ||
-                  result.version !== null
-                )
-                  throw new CodexSecurityError(
-                    "Cloud returned inconsistent item error fields.",
-                  );
-              } else if (
-                result.error !== null ||
-                !result.source_report_id ||
-                !result.observation_id ||
-                !result.canonical_finding_id ||
-                result.version === null
-              )
-                throw new CodexSecurityError(
-                  "Cloud returned an incomplete saved finding.",
-                );
-            }
-            if (canonicalJson(receipt.counts) !== canonicalJson(actual))
-              throw new CodexSecurityError(
-                "Cloud returned inconsistent publication counts.",
-              );
             acknowledged.push(receipt);
             acknowledgedCount += receipt.item_count;
             progress({
@@ -888,7 +900,7 @@ export async function prepareExternalPublication(
               total: readbacks.length,
             });
           });
-          const completed = result();
+          const completed = result(acknowledged, verified);
           await writeAtomicJson(join(state, `${key}.result.json`), completed);
           await rm(pendingPath, { force: true });
           return completed;
@@ -901,7 +913,7 @@ export async function prepareExternalPublication(
           throw new ExternalPublicationError(
             message,
             {
-              ...result(),
+              ...result(acknowledged, verified),
               status: "interrupted",
               error: message,
               ...(persisted ? { savedSubmission: pendingPath } : {}),
@@ -909,6 +921,31 @@ export async function prepareExternalPublication(
             error,
           );
         }
+      }).catch((error: unknown) => {
+        if (acquired || !dependencies.signal?.aborted) throw error;
+        // The active publisher owns the checkpoint. Report only acknowledgements
+        // already observed during preparation, without rewriting its files.
+        const known = submission.receipts ?? [];
+        if (known.length > requests.length)
+          throw new CodexSecurityError(
+            "Saved publication has more receipts than requests.",
+          );
+        const acknowledged = known.map((receipt, index) =>
+          validatePublicationReceipt(receipt, requests[index]!),
+        );
+        const message = saved
+          ? `Publication canceled while waiting. Repeat the same command to resume the saved request. Saved submission: ${pendingPath}`
+          : "Publication canceled while waiting. No resumable request was saved by this invocation.";
+        throw new ExternalPublicationError(
+          message,
+          {
+            ...result(acknowledged, 0),
+            status: "interrupted",
+            error: message,
+            ...(saved ? { savedSubmission: pendingPath } : {}),
+          },
+          error,
+        );
       });
     },
   };
