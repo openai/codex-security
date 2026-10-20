@@ -8787,7 +8787,7 @@ async function executeScan(
         provider,
         providerConfiguration:
           (
-            effectiveConfiguration["model_providers"] as
+            resolvedConfiguration["model_providers"] as
               Record<string, JsonObject> | undefined
           )?.[provider] ??
           (isExternalModelProvider(provider)

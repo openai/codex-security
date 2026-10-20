@@ -1,7 +1,9 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { parse } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
+import { inlineToml } from "../src/config.js";
 import { dependencies, fakePreflight, fakeResult } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -18,6 +20,8 @@ const receipt = {
   argv: process.argv.slice(2),
   homeTier: homeConfig.match(/^service_tier\\s*=\\s*(.*)$/m)?.[1] ?? null,
   homeDaybreak: homeConfig.match(/^daybreak\\s*=\\s*(.*)$/m)?.[1] ?? null,
+  providerKey: process.env.SYNTHETIC_PROVIDER_KEY ?? null,
+  providerHeader: process.env.SYNTHETIC_PROVIDER_HEADER ?? null,
 };
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
@@ -69,6 +73,8 @@ interface ChildReceipt {
   daybreakEnabled: boolean | null;
   experimentalApi: boolean;
   features: Record<string, boolean>;
+  providerKey: string | null;
+  providerHeader: string | null;
 }
 
 async function patchSettings(
@@ -102,6 +108,9 @@ async function patchSettings(
         ),
       ),
       OPENAI_API_KEY: "SYNTHETIC_LOCAL_KEY",
+      SYNTHETIC_ROOT_KEY: "SYNTHETIC_ROOT_VALUE",
+      SYNTHETIC_PROVIDER_KEY: "SYNTHETIC_PROVIDER_VALUE",
+      SYNTHETIC_PROVIDER_HEADER: "SYNTHETIC_HEADER_VALUE",
       CODEX_HOME: join(root, "home"),
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       SYNTHETIC_PATCH_RECEIPT: receipt,
@@ -160,6 +169,113 @@ async function patchSettings(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+describe("inline patch provider configuration", () => {
+  const provider = {
+    name: "Synthetic gateway",
+    base_url: "https://root.example.test/v1",
+    wire_api: "responses",
+    env_key: "SYNTHETIC_ROOT_KEY",
+    http_headers: { "X-Root": "retained", "X-Selected": "root" },
+  };
+  const selected = {
+    base_url: "https://selected.example.test/v1",
+    env_key: "SYNTHETIC_PROVIDER_KEY",
+    http_headers: { "X-Selected": "profile" },
+    env_http_headers: { "X-Synthetic": "SYNTHETIC_PROVIDER_HEADER" },
+  };
+  const root = [
+    'model_provider="gateway"',
+    `model_providers.gateway=${inlineToml(provider)}`,
+  ];
+  const definition = (child: ChildReceipt) =>
+    parse(
+      child.argv
+        .filter((value) => value.startsWith("model_providers="))
+        .join("\n"),
+    )["model_providers"];
+
+  test.each([
+    ["root definition", root, provider],
+    [
+      "profile-only definition",
+      [
+        'profile="selected"',
+        'profiles.selected.model_provider="gateway"',
+        `profiles.selected.model_providers.gateway=${inlineToml(provider)}`,
+      ],
+      provider,
+    ],
+    [
+      "selected profile overrides",
+      [
+        ...root,
+        'profile="selected"',
+        `profiles.selected.model_providers.gateway=${inlineToml(selected)}`,
+      ],
+      {
+        ...provider,
+        ...selected,
+        http_headers: { ...provider.http_headers, ...selected.http_headers },
+      },
+    ],
+    [
+      "inactive profile",
+      [
+        ...root,
+        `profiles.inactive.model_providers.gateway=${inlineToml(selected)}`,
+      ],
+      provider,
+    ],
+  ] as const)(
+    "preserves the %s at the child-process boundary",
+    async (_, overrides, expected) => {
+      const child = await patchSettings(
+        overrides.flatMap((value) => ["--codex", value]),
+      );
+      expect(child.argv).toContain('model_provider="gateway"');
+      expect(definition(child)).toEqual({ gateway: expected });
+      expect(child.providerKey).toBe("SYNTHETIC_PROVIDER_VALUE");
+      expect(child.providerHeader).toBe("SYNTHETIC_HEADER_VALUE");
+      expect(child.argv).toContain('model="gpt-6.1-sol"');
+      expect(child.argv).toContain('model_reasoning_effort="low"');
+      expect(child.approvalPolicy).toBe("never");
+      expect(child.sandbox).toBe("workspace-write");
+      expect(child.preflightSandbox).toBe("workspaceWrite");
+    },
+  );
+
+  test("keeps overlapping selected provider definitions isolated", async () => {
+    let arrivals = 0;
+    const { promise: ready, resolve: release } = Promise.withResolvers<void>();
+    const beforeChild = async () => {
+      if (++arrivals === 2) release();
+      await ready;
+    };
+    const providers = ["first", "second"].map((name) => ({
+      ...provider,
+      base_url: `https://${name}.example.test/v1`,
+    }));
+    const children = await Promise.all(
+      providers.map((definition) =>
+        patchSettings(
+          [
+            "--codex",
+            'profile="selected"',
+            "--codex",
+            'profiles.selected.model_provider="gateway"',
+            "--codex",
+            `profiles.selected.model_providers.gateway=${inlineToml(definition)}`,
+          ],
+          { beforeChild },
+        ),
+      ),
+    );
+    expect(children.map(definition)).toEqual(
+      providers.map((gateway) => ({ gateway })),
+    );
+  });
+});
 
 describe("inline patch service tier", () => {
   test.each([
