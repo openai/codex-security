@@ -7,7 +7,11 @@ import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
-import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
+import {
+  mergedCodexConfig,
+  type CodexSecurityConfig,
+  type JsonObject,
+} from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
@@ -1112,6 +1116,48 @@ test("a malformed selected file fails before constructing a client", async () =>
     status: "failed",
     code: "SCAN_FAILED",
     message: expect.stringContaining("end with a ]"),
+  });
+});
+
+test("dry-run reports native defaults restored by a CLI table", async () => {
+  const input = await fixture({
+    codex: { features: { multi_agent_v2: null } },
+  });
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  const { stdout, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "scan",
+        input.repository,
+        "-c",
+        input.config,
+        "--codex",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=2",
+        "--dry-run",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+        onRun: throwing("Dry-run must not start a scan"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    dryRun: true,
+    projectConfig: {
+      sources: {
+        "codex.features.multi_agent_v2.enabled": "default",
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      },
+    },
+  });
+  expect(
+    (await mergedCodexConfig(onConfig.mock.lastCall![0]))["features"],
+  ).toMatchObject({
+    multi_agent_v2: { enabled: true, max_concurrent_threads_per_session: 2 },
   });
 });
 
