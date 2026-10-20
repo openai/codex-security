@@ -389,6 +389,41 @@ test("new adapters do not fabricate missing occurrence IDs, severity, or line ra
   expect(parsed.excluded).toHaveLength(invalid.length);
 });
 
+test.each([
+  "schema:prod.json",
+  "config:prod/schema.json",
+  "config/schema:prod.json",
+])(
+  "Wiz preserves repository-relative colon path %s and original evidence",
+  async (path) => {
+    const finding = { ...sast, filePath: path };
+    const parsed = await parse(envelope("sastFindings", [finding]));
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings[0]!.evidence.locations).toEqual([
+      { path, line: 10 },
+    ]);
+    expect(parsed.findings[0]!.evidence.source_data).toEqual(finding);
+  },
+);
+
+test.each([
+  "C:query.ts",
+  "c:/query.ts",
+  "D:\\query.ts",
+  "/query.ts",
+  "\\\\server\\query.ts",
+  "../query.ts",
+  "src/../query.ts",
+])("external evidence rejects non-repository path %s", (path) => {
+  expect(() =>
+    validateExternalEvidence({
+      title: "Synthetic evidence",
+      severity: "high",
+      locations: [{ path }],
+    }),
+  ).toThrow("repository-relative paths");
+});
+
 test("legacy evidence defaults retain their saved-submission bytes, including explicit null details", () => {
   const input = {
     title: "Legacy evidence",

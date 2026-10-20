@@ -178,7 +178,7 @@ export function validateExternalEvidence(
     const path = location.path.replaceAll("\\", "/");
     if (
       path.startsWith("/") ||
-      path.split("/")[0]!.includes(":") ||
+      /^[A-Za-z]:/.test(path) ||
       path.split("/").includes("..")
     )
       throw new Error("Locations must use repository-relative paths.");
