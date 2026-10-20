@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createGitRepository } from "../../sdk/typescript/scripts/release-pr.mjs";
 import {
   renderProgress,
   updateReleaseProgress,
@@ -41,7 +46,7 @@ function job(name, conclusion = "success") {
   };
 }
 
-function fixture() {
+function fixture(repo) {
   const runs = new Map();
   const jobs = new Map();
   const deployments = new Map();
@@ -49,11 +54,16 @@ function fixture() {
   const comments = [];
   const requests = [];
   const pulls = [structuredClone(pull)];
+  const commitPulls = new Map([[sha, pulls]]);
+  let tagCommit = sha;
   let annotated = false;
   const github = {
     async list(path) {
       requests.push({ method: "GET", path });
-      if (path === `commits/${sha}/pulls?per_page=100`) return pulls;
+      const commit = /^commits\/([0-9a-f]+)\/pulls\?per_page=100$/u.exec(
+        path,
+      )?.[1];
+      if (commit) return commitPulls.get(commit) ?? [];
       if (path === "issues/42/comments?per_page=100") return comments;
       throw new Error(`Unexpected list: ${path}`);
     },
@@ -85,10 +95,10 @@ function fixture() {
         return {
           object: {
             type: annotated ? "tag" : "commit",
-            sha: annotated ? "tag-object" : sha,
+            sha: annotated ? "tag-object" : tagCommit,
           },
         };
-      if (path === "git/tags/tag-object") return { object: { sha } };
+      if (path === "git/tags/tag-object") return { object: { sha: tagCommit } };
       const match = /^actions\/runs\/(\d+)(.*)$/u.exec(path);
       assert.ok(match, `Unexpected request: ${path}`);
       const id = Number(match[1]);
@@ -114,10 +124,14 @@ function fixture() {
     comments,
     requests,
     pulls,
+    commitPulls,
+    tag(commit) {
+      tagCommit = commit;
+    },
     annotate() {
       annotated = true;
     },
-    update: (id) => updateReleaseProgress(github, id),
+    update: (id) => updateReleaseProgress(github, id, repo),
     watch: (id, wait) => watchReleaseProgress(github, id, wait),
     writes: () => requests.filter((request) => request.method !== "GET"),
     body: () => comments.find((comment) => comment.id === 101)?.body,
@@ -417,6 +431,79 @@ test("keeps one comment across CI, verification, and protected approval", async 
   );
   assert.equal((await f.update(2)).action, "unchanged");
   assert.equal(f.writes().length, 2);
+});
+
+test("follows a release tagged on a successful fix back to its version-bump PR", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "release-progress-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Release Test");
+  git("config", "user.email", "release@example.invalid");
+  mkdirSync(join(root, "sdk/typescript"), { recursive: true });
+  const commit = (version, description) => {
+    writeFileSync(
+      join(root, "sdk/typescript/package.json"),
+      JSON.stringify({ name: "@openai/codex-security", version, description }),
+    );
+    git("add", ".");
+    git("commit", "-m", description);
+    return git("rev-parse", "HEAD");
+  };
+  commit("99.1.1", "previous release");
+  const bump = commit("99.1.2", "version bump");
+  const fix = commit("99.1.2", "fix release verification");
+  const f = fixture(createGitRepository(root));
+  f.commitPulls.set(bump, [structuredClone(pull)]);
+  f.commitPulls.set(fix, [
+    { ...pull, number: 43, title: "fix: release verification" },
+  ]);
+  f.tag(fix);
+  f.runs.set(
+    1,
+    run(1, "node-ci", {
+      head_sha: bump,
+      status: "completed",
+      conclusion: "failure",
+    }),
+  );
+  await f.update(1);
+  assert.match(f.body(), /Post-merge CI \| Failed/u);
+  f.runs.set(2, run(2, "node-release", { head_sha: fix, status: "waiting" }));
+  f.jobs.set(2, [job("verify")]);
+  f.deployments.set(2, [{ environment: { name: "npm" } }]);
+  assert.equal((await f.update(2)).action, "updated");
+  assert.equal(f.comments.length, 1);
+  assert.match(f.body(), /Post-merge CI \| Not recorded/u);
+  assert.match(
+    f.body(),
+    /Protected npm publication \| Waiting for npm approval/u,
+  );
+  Object.assign(f.runs.get(2), { status: "completed", conclusion: "success" });
+  f.runs.set(
+    3,
+    run(3, "node-github-release", {
+      head_sha: automationSha,
+      status: "completed",
+      conclusion: "success",
+    }),
+  );
+  assert.equal((await f.update(3)).action, "updated");
+  assert.match(f.body(), /## Automated release complete/u);
+  assert.equal(f.comments.length, 1);
+  const completed = f.body();
+  assert.equal((await f.update(1)).action, "ignored");
+  f.runs.set(
+    4,
+    run(4, "node-ci", {
+      head_sha: fix,
+      status: "completed",
+      conclusion: "success",
+    }),
+  );
+  assert.equal((await f.update(4)).action, "ignored");
+  assert.equal(f.body(), completed);
 });
 
 test("continues a release backfill when saved workflow runs were deleted", async () => {
