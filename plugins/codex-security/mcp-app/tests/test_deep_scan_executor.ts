@@ -151,7 +151,6 @@ try {
       fakeCodexFixture,
       parentSandbox: trustedParentSandbox,
       bundledCodexSdkEnvironment,
-      assertConfigOverrides,
       assertReadOnlyWorkerPolicy,
     });
     await testSdkInvocationAndThreadCapture();
