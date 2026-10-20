@@ -306,6 +306,7 @@ describe("semantic scan comparison", () => {
           codex_security_surface: "sdk",
           codex_security_command: "compare",
           codex_security_package_version: VERSION,
+          ...(withProfile ? { codex_security_provider: "custom" } : {}),
         },
       });
       const parsed = await runCodexCommand(
@@ -470,6 +471,11 @@ describe("semantic scan comparison", () => {
             codex_security_surface: "sdk",
             codex_security_command: "compare",
             codex_security_package_version: VERSION,
+            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
+              selection,
+            )
+              ? selection
+              : "custom",
           },
           default_permissions: "codex_security_deep_scan_worker",
           permissions: {
@@ -1251,6 +1257,7 @@ describe("semantic scan comparison", () => {
               codex_security_surface: "sdk",
               codex_security_command: "compare",
               codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
             },
           });
           expect(profileClient.profiles).toHaveLength(0);

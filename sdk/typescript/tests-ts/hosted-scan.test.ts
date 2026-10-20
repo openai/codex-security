@@ -19,6 +19,7 @@ import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import {
+  ScanExecutionEventSchema,
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
   type ScanExecutionResult,
@@ -617,7 +618,11 @@ test.each([false, true])(
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
           requestId = message.params.requestId;
-          for (const event of [progressEvent, { invalid: true }])
+          for (const event of [
+            progressEvent,
+            reviewProgressEvent,
+            { invalid: true },
+          ])
             send(child.stdin, {
               method: "execution.progress",
               params: { requestId, event },
@@ -650,11 +655,12 @@ test.each([false, true])(
       expect(
         messages.filter((message) => message.method === "execution.run"),
       ).toHaveLength(1);
-      expect(messages).toContainEqual({
-        jsonrpc: "2.0",
-        method: "scan.progress",
-        params: { id: "run", event: progressEvent },
-      });
+      for (const event of [progressEvent, reviewProgressEvent])
+        expect(messages).toContainEqual({
+          jsonrpc: "2.0",
+          method: "scan.progress",
+          params: { id: "run", event },
+        });
       expect(messages.at(-1)).toMatchObject({
         id: "run",
         result: {
@@ -672,6 +678,28 @@ const progressEvent: ScanExecutionEvent = {
   type: "progress",
   progress: { phase: "discovery", filesCompleted: 1, filesTotal: 2 },
 };
+const reviewProgressEvent: ScanExecutionEvent = {
+  type: "progress",
+  progress: {
+    ...progressEvent.progress,
+    phase: "validation",
+    reviewItems: { completed: 3, total: 4 },
+  },
+};
+
+test.each([
+  { completed: -1, total: 4 },
+  { completed: 5, total: 4 },
+  { completed: 1.5, total: 4 },
+])("rejects invalid hosted review counts %j", (reviewItems) => {
+  expect(
+    ScanExecutionEventSchema.safeParse({
+      ...progressEvent,
+      progress: { ...progressEvent.progress, reviewItems },
+    }).success,
+  ).toBe(false);
+});
+
 const activityEvent: ScanExecutionEvent = {
   type: "activity",
   activity: {

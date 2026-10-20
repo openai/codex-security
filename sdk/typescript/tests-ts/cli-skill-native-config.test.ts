@@ -18,6 +18,46 @@ import {
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
 
+test.each([0, 23])(
+  "native configuration fixture preserves early exit %s with its input still open",
+  async (exitCode) => {
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("./fixtures/skill-native-config.mjs", import.meta.url),
+        ),
+        "-e",
+        `process.stderr.write("synthetic native exit\\n"); process.exitCode = ${exitCode};`,
+      ],
+      {
+        env: { ...process.env, SYNTHETIC_NATIVE_CODEX: process.execPath },
+        stdio: ["pipe", "ignore", "pipe"],
+        windowsHide: true,
+      },
+    );
+    const closed = once(child, "close");
+    let diagnostic = "";
+    child.stderr.on("data", (chunk) => {
+      diagnostic += chunk;
+    });
+    const timeout = setTimeout(() => child.kill(), 10_000);
+    try {
+      const [code, signal] = await closed;
+      expect({ code, signal, diagnostic }).toEqual({
+        code: exitCode,
+        signal: null,
+        diagnostic: "synthetic native exit\n",
+      });
+    } finally {
+      clearTimeout(timeout);
+      child.stdin.destroy();
+      child.stderr.destroy();
+      child.kill();
+    }
+  },
+);
+
 test.each([
   ["trusted", undefined, "patch", ""],
   ["untrusted", undefined, "patch", ""],

@@ -73,9 +73,11 @@ local profiles and other local scan options are not accepted.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
-uses the existing `ScanProgress` type; activity uses `ScanActivity`. Observer
-failures cannot stop execution. Aborting waits for the executor to settle; the
-host must cancel remote work and return its recorded outcome.
+uses the existing `ScanProgress` type; activity uses `ScanActivity`. Progress may
+include `reviewItems: { completed, total }` for saved reviews, counted separately
+from files. Observer failures cannot stop execution. Aborting waits for the
+executor to settle; the host must cancel remote work and return its recorded
+outcome.
 
 Preparation errors throw before execution. Execution and finalization return a
 `HostedScanResult` receipt with status `completed`, `failed`,

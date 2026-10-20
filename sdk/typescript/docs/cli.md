@@ -394,9 +394,12 @@ codex-security scan . --working-tree
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+Whole-codebase and path scans also accept ordinary directories, including SVN
+working copies. Their source inventories exclude `.git` and `.svn` metadata.
+
 `--diff` scans committed changes; `--working-tree` scans staged and unstaged
-changes. Deep scans support whole repositories and path scopes. Working-tree
-snapshots include untracked nested Git repositories. Initialized submodules must
+changes. Both require Git. Deep scans support whole repositories and path scopes.
+Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
@@ -819,14 +822,28 @@ that command. Model, effort, and provider choices carry into patch-risk assessme
 Model requests include Codex Security attribution in `responses_api_metadata`:
 `codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
 `codex_security_package_version`, and `codex_security_plugin_version` when the
-selected plugin declares a version. These fields identify the workflow and
-versions producing a model request; they do not record command starts,
-completions, or failures.
+selected plugin declares a version. The shared context adds
+`codex_security_provider` for the configured provider family when the wrapper
+selects a provider, and
+`codex_security_scan_mode` for scans. Custom provider names use `custom`.
+Provider attribution reflects the wrapper's selected profile or default;
+native managed configuration may select a different provider before inference.
+The GitHub Action supplies `codex_security_integration=github_action`;
+Deep Scan workers retain the context and add `codex_security_worker_role`.
+Caller metadata, including literal dotted keys, is preserved. Connected-app
+publication uses the same request attribution; embedding requests identify
+the package and version in their `User-Agent`.
+
+These fields provide request attribution for supported inference providers, including
+Bedrock. They do not create a separate telemetry collector, record command
+starts or outcomes, or make another provider's traffic visible to OpenAI.
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
 patch-risk assessment, and Deep Scan discovery and reducer workers, including
-resumed workers. Deep Scan workers also preserve the scan's request metadata.
+resumed workers. Selected-profile settings take precedence over root settings.
+Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
+workers, including exporter choices and prompt-logging controls.
 Model-request attribution metadata remains attached when analytics are disabled.
 The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;
@@ -1807,6 +1824,9 @@ It uses a read-only sandbox. Standard, Deep, and diff scans retain their existin
 validation, and `patch` still fixes and verifies findings. Both commands accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
+
+Basic patching also works in ordinary directories and Git worktrees before their
+first commit. Directory change tracking excludes `.git` and `.svn` metadata.
 
 ```bash
 codex-security validate "Possible SQL injection" --effort high

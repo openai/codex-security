@@ -670,6 +670,82 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_directory_snapshots_exclude_svn_metadata(tmp_path: Path, git: bool) -> None:
+    target = tmp_path / "target"
+    if git:
+        initialize_unborn_git_repository(target)
+    else:
+        target.mkdir()
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "pristine" / "base"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    if git:
+        subprocess.run(["git", "add", "--force", "."], cwd=target, check=True)
+
+    original = directory_content_digest(target)
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target) == 1
+    for path in metadata:
+        path.write_text("metadata changed\n")
+    assert directory_content_digest(target) == original
+    assert count_files(target) == 1
+    source.write_text("source changed\n")
+    assert directory_content_digest(target) != original
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("scope", [".", "nested[scope]"])
+def test_worktree_snapshots_exclude_svn_metadata(tmp_path: Path, tracked: bool, scope: str) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    target = repository / scope
+    target.mkdir(exist_ok=True)
+    source = target / ".svn-backup" / "app.py"
+    source.parent.mkdir()
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "entries"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    subprocess.run(["git", "add", str(source)], cwd=repository, check=True)
+    if tracked:
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "Synthetic source and metadata"], cwd=repository, check=True
+    )
+
+    original = worktree_content_digest(target)
+    for path in metadata:
+        path.write_text("updated metadata\n")
+    assert worktree_content_digest(target) == original
+    source.write_text("updated source\n")
+    assert worktree_content_digest(target) != original
+
+
+@pytest.mark.parametrize("scope", [".svn", "nested/.svn"])
+def test_git_directory_snapshots_exclude_svn_junctions(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None], scope: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = target / scope
+    metadata.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state").write_text("metadata\n")
+    junction_factory(metadata / "linked", outside)
+
+    assert workbench_target.git_directory_snapshot_paths(target) == [source]
+
+
 def test_windows_inventory_batches_wide_untracked_trees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1233,7 +1309,7 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
     def require_streamed_diff(
         repository: Path, *args: str, **kwargs: object
     ) -> subprocess.CompletedProcess[Any]:
-        if args and args[0] == "diff":
+        if "diff" in args:
             assert kwargs.get("stdout_file") is not None
         return git_command(repository, *args, **kwargs)
 

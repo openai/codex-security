@@ -129,6 +129,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Worker-owned tool and permission settings take precedence over inheritance.
       const configOverrides = profileConfigOverrides({
         ...runtimeSettings.config,
+        responses_api_metadata: {
+          codex_security_surface: "plugin",
+          codex_security_command: "scan",
+          codex_security_scan_mode: "deep",
+          // Keep the host's integration/provider context as this coordinator
+          // launches or resumes workers with a different role.
+          ...(isRecord(runtimeSettings.config.responses_api_metadata)
+            ? runtimeSettings.config.responses_api_metadata
+            : {}),
+          codex_security_worker_role: request.kind,
+        },
         ...(this.modelSettings.reasoningEffort
           ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
           : {}),
@@ -544,6 +555,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function mergeConfigTables(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries([
+    ...Object.entries(base),
+    ...Object.entries(override).map(([key, value]) => {
+      const inherited = base[key];
+      return [
+        key,
+        isRecord(inherited) &&
+        !Array.isArray(inherited) &&
+        isRecord(value) &&
+        !Array.isArray(value)
+          ? mergeConfigTables(inherited, value)
+          : value,
+      ];
+    }),
+  ]);
+}
+
 async function workerRuntimeSettings(
   environment: Record<string, string>,
 ): Promise<CodexSdkWorkerRuntimeSettings> {
@@ -559,10 +591,18 @@ async function workerRuntimeSettings(
     typeof config.profile === "string" && isRecord(profiles)
       ? profiles[config.profile]
       : undefined;
-  const selected = { ...config, ...(isRecord(profile) ? profile : {}) };
-  for (const key of ["analytics", "responses_api_metadata", "features"]) {
+  const selected: Record<string, unknown> = {
+    ...config,
+    ...(isRecord(profile) ? profile : {}),
+  };
+  for (const key of [
+    "analytics",
+    "otel",
+    "responses_api_metadata",
+    "features",
+  ]) {
     if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
-      selected[key] = { ...config[key], ...profile[key] };
+      selected[key] = mergeConfigTables(config[key], profile[key]);
     }
   }
   const settings: CodexSdkWorkerRuntimeSettings = { config: selected };

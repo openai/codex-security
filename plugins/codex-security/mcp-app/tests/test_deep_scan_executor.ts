@@ -44,6 +44,7 @@ import type {
 } from "../src/deep-scan/types.js";
 import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_alias_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
+import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
@@ -1451,7 +1452,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
-        { model: "fixture-future-model", reasoningEffort: "future-effort" },
+        {
+          model: 'fixture-"future"\\模型',
+          reasoningEffort: 'future-"effort"\\強度\u007f',
+        },
         // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
@@ -1516,46 +1520,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     },
                   ],
                 };
-          const mergeProfileTelemetry = index === 0 && configuration !== "";
-          const telemetry =
-            index === 0 && configuration === ""
-              ? {}
-              : {
-                  analytics: { enabled: index % 2 === 0 },
-                  responses_api_metadata: {
-                    codex_security_surface: index % 2 === 0 ? "cli" : "sdk",
-                    codex_security_command: "scan",
-                    codex_security_package_version: `0.2.${index}`,
-                    codex_security_plugin_version: `0.1.${index}`,
-                    custom_tag: `synthetic-scan-${index}`,
-                    ...(mergeProfileTelemetry
-                      ? {
-                          root_only: "native-root",
-                          profile_only: "selected-profile",
-                        }
-                      : {}),
-                  },
-                };
-          const overrideTelemetry = index === 1 || index === 2;
-          const inheritedTelemetry =
-            overrideTelemetry || index === 4
-              ? {
-                  analytics: { enabled: index % 2 !== 0 },
-                  responses_api_metadata: { custom_tag: "preflight-default" },
-                }
-              : mergeProfileTelemetry
-                ? {
-                    analytics: { enabled: true },
-                    responses_api_metadata: {
-                      codex_security_surface: "cli",
-                      codex_security_command: "scan",
-                      codex_security_package_version: "0.2.0",
-                      codex_security_plugin_version: "0.1.0",
-                      custom_tag: "preflight-default",
-                      root_only: "native-root",
-                    },
-                  }
-                : telemetry;
+          const {
+            mergeProfileTelemetry,
+            telemetry,
+            inheritedTelemetry,
+            workerTelemetry,
+          } = workerTelemetryFixture(index, configuration !== "");
           const features =
             index === 0
               ? undefined
@@ -1578,6 +1548,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeProfile === undefined
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
+          const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
@@ -1586,6 +1557,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...trustedParentSandboxWithDenials.literalFilesystemDenies,
               deepPath,
               codexHome,
+              literalDeniedPath,
             ],
             globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
           };
@@ -1637,6 +1609,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ...deniedWorkerPermissionProfile.filesystem,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
+                [literalDeniedPath]: { ".": "deny" },
               },
             },
             provider,
@@ -1682,7 +1655,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             skills,
             features,
             telemetry,
-            workerTelemetry: overrideTelemetry ? telemetry : {},
+            workerTelemetry,
             configuration: {
               ...parsedConfiguration,
               ...inheritedTelemetry,
@@ -1734,6 +1707,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         ...(mergeProfileTelemetry
                           ? {
                               analytics: {},
+                              otel: {
+                                environment: "synthetic-scan-0",
+                                exporter: {
+                                  "otlp-http": {
+                                    endpoint: "http://localhost:4318/v1/logs",
+                                  },
+                                },
+                              },
                               responses_api_metadata: {
                                 custom_tag: "synthetic-scan-0",
                                 profile_only: "selected-profile",
@@ -2086,7 +2067,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   parseToml(
                     nativeConfigOverrides(invocation.argv)
                       .filter((override) =>
-                        /^(analytics|responses_api_metadata)[.=]/.test(
+                        /^(analytics|otel|responses_api_metadata)[.=]/.test(
                           override,
                         ),
                       )
@@ -2094,19 +2075,29 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ),
                 ),
               ),
-              workerConfigurations[index].telemetry,
+              {
+                ...workerConfigurations[index].telemetry,
+                responses_api_metadata: {
+                  codex_security_surface: "plugin",
+                  codex_security_command: "scan",
+                  codex_security_scan_mode: "deep",
+                  ...workerConfigurations[index].telemetry
+                    .responses_api_metadata,
+                  codex_security_worker_role: kind,
+                },
+              },
             );
             assert.equal(
               invocation.cacheDirectory,
               path.join(fixture.root, `cache-${index} `),
             );
             assert.deepEqual(
-              invocation.argv.filter((arg: string) =>
-                arg.startsWith("model_reasoning_effort="),
-              ),
-              reasoningEffort === undefined
-                ? []
-                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
+              nativeConfigOverrides(invocation.argv)
+                .filter((override) =>
+                  override.startsWith("model_reasoning_effort="),
+                )
+                .map((override) => parseToml(override).model_reasoning_effort),
+              reasoningEffort === undefined ? [] : [reasoningEffort],
             );
             if (model === undefined) {
               assert.equal(invocation.argv.includes("--model"), false);

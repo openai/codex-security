@@ -9,13 +9,19 @@ const child = spawn(process.env.SYNTHETIC_NATIVE_CODEX, process.argv.slice(2), {
   windowsHide: true,
 });
 child.stderr.pipe(process.stderr);
+const input = createInterface({ input: process.stdin });
+child.once("close", (code) => {
+  process.exitCode = code ?? 1;
+  input.close();
+  process.stdin.destroy();
+});
 let turnRequest;
 let modelProvider;
 let initialConfig;
 let daybreakEnabled;
 await Promise.all([
   (async () => {
-    for await (const line of createInterface({ input: process.stdin })) {
+    for await (const line of input) {
       const request = JSON.parse(line);
       if (request.id !== undefined) methods.set(request.id, request.method);
       if (request.method === "thread/start") {
