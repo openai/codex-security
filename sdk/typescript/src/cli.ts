@@ -146,6 +146,7 @@ import {
   mergeCodexOverrides,
   hasCommandAuth,
   inlineToml,
+  quoteTomlString,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   resolveCodexProfile,
@@ -8001,9 +8002,9 @@ async function runSkill(
       "plugins",
       ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
       "--config",
-      `model=${JSON.stringify(model)}`,
+      `model=${quoteTomlString(model)}`,
       "--config",
-      `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      `model_reasoning_effort=${quoteTomlString(reasoningEffort)}`,
       ...(options.serviceTier === undefined
         ? []
         : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
@@ -9504,8 +9505,8 @@ async function executeScan(
         selected,
         {
           codex: [
-            `model=${JSON.stringify(effectiveModel)}`,
-            `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            `model=${quoteTomlString(effectiveModel)}`,
+            `model_reasoning_effort=${quoteTomlString(effectiveReasoningEffort)}`,
             `daybreak=${inlineToml(patchDaybreak)}`,
             ...(patchAnalyticsOverride === undefined
               ? []
