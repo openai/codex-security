@@ -306,6 +306,7 @@ describe("semantic scan comparison", () => {
           codex_security_surface: "sdk",
           codex_security_command: "compare",
           codex_security_package_version: VERSION,
+          ...(withProfile ? { codex_security_provider: "custom" } : {}),
         },
       });
       const parsed = await runCodexCommand(
@@ -470,6 +471,11 @@ describe("semantic scan comparison", () => {
             codex_security_surface: "sdk",
             codex_security_command: "compare",
             codex_security_package_version: VERSION,
+            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
+              selection,
+            )
+              ? selection
+              : "custom",
           },
           default_permissions: "codex_security_deep_scan_worker",
           permissions: {
@@ -1005,27 +1011,38 @@ describe("semantic scan comparison", () => {
     },
   );
 
-  test.each(["unselected", "default", "home", "overrides", "override-profile"])(
+  test.each([
+    "unselected",
+    "default",
+    "home",
+    "overrides",
+    "override-profile",
+    "toggle-only",
+  ])(
     "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
     async (selection) => {
       const home = await temporaryDirectory("codex-security-cyber-helper-");
       const disabled = {
+        cli_daybreak: false,
         api_key_cyber_access_programs: false,
         api_key_model_discovery: false,
         shell_tool: true,
       };
       const profile = {
+        daybreak: true,
         profile: "selected",
-        features: { api_key_cyber_access_programs: true },
-        profiles: { selected: { features: disabled } },
+        features: { cli_daybreak: true, api_key_cyber_access_programs: true },
+        profiles: { selected: { daybreak: false, features: disabled } },
       };
       await writeFile(
         join(home, "config.toml"),
         stringify(selection === "home" ? { features: disabled } : {}),
       );
-      const options = {
+      const options: ScanComparisonOptions = {
         cyberAccessProgram:
-          selection === "unselected" ? undefined : ("daybreak_blue" as const),
+          selection === "unselected" || selection === "toggle-only"
+            ? undefined
+            : ("daybreak_blue" as const),
         environment: {
           PATH: process.env["PATH"],
           SystemRoot: process.env["SystemRoot"],
@@ -1034,11 +1051,17 @@ describe("semantic scan comparison", () => {
           OPENAI_API_KEY: "synthetic-key",
         },
         workingDirectory: home,
-        ...(selection === "overrides"
-          ? { config: { codexOverrides: { features: disabled } } }
-          : selection === "override-profile"
-            ? { config: { codexOverrides: profile } }
-            : {}),
+        ...(selection === "home"
+          ? { config: { codexOverrides: { daybreak: true } } }
+          : selection === "overrides" || selection === "toggle-only"
+            ? {
+                config: {
+                  codexOverrides: { daybreak: true, features: disabled },
+                },
+              }
+            : selection === "override-profile"
+              ? { config: { codexOverrides: profile } }
+              : {}),
       };
       let captured: CodexOptions | undefined;
       const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
@@ -1066,6 +1089,16 @@ describe("semantic scan comparison", () => {
             string,
             unknown
           >;
+          expect(captured?.config?.["daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : selection !== "override-profile",
+          );
+          expect(features["cli_daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
           expect(features["api_key_cyber_access_programs"]).toBe(
             selection === "unselected" ? undefined : selection === "default",
           );
@@ -1224,6 +1257,7 @@ describe("semantic scan comparison", () => {
               codex_security_surface: "sdk",
               codex_security_command: "compare",
               codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
             },
           });
           expect(profileClient.profiles).toHaveLength(0);

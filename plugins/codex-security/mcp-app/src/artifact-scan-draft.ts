@@ -22,6 +22,7 @@ import {
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { requireFiniteNumbers } from "./helpers/json.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
@@ -116,6 +117,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
             trustedScope.filePaths as string[] | undefined,
           )
         : reconciled.findings;
+    // Coordinator publication also carries retained historical payloads.
+    if (finalDeepDraft && publication === undefined)
+      requireFiniteNumbers({ ...parsed, findings: scopedFindings });
     const findings = buildFindings(scopedFindings, context.mode);
     const coverage = buildCoverage(
       context,
@@ -199,6 +203,10 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         fs.rm(draftPath, { force: true }),
       ]);
     }
+    const warnings = [
+      ...(preserved.warnings ?? []),
+      ...(documentWarnings ?? []),
+    ];
     return {
       scanId: reconciled.scanId,
       findingCount: findings.length,
@@ -206,7 +214,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       coverage,
       operation: "replace",
       status: "draft_written",
-      ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
+      ...(warnings.length ? { warnings } : {}),
     };
   }
 }
@@ -345,6 +353,7 @@ async function preserveScanDraft(
   previousDigest: string;
   warnings?: string[];
 }> {
+  requireFiniteNumbers(input);
   const warnings: string[] = [];
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
@@ -401,15 +410,13 @@ async function preserveScanDraft(
           attempt,
           ...components,
         ].join("/");
-        if (!currentReceipts.has(retained)) {
-          archivedReceipts.set(retained, {
-            context: {
-              ...context,
-              root: join(dirname(context.root), "attempts", attempt),
-            },
-            components,
-          });
-        }
+        archivedReceipts.set(retained, {
+          context: {
+            ...context,
+            root: join(dirname(context.root), "attempts", attempt),
+          },
+          components,
+        });
         return retained;
       });
     }
@@ -738,6 +745,22 @@ async function preserveScanDraft(
   // Archived attempts move their receipt files with them. Copy only evidence
   // still retained by this draft into its current, independently bound output.
   // Superseded surfaces must not reserve a discarded receipt's spelling.
+  for (const ref of new Set(
+    result.coverage.surfaces.flatMap((row) => row.receiptRefs ?? []),
+  )) {
+    if (!currentReceipts.has(ref) || !archivedReceipts.has(ref)) continue;
+    try {
+      await artifactSourcePath(
+        context,
+        coverageReceiptComponents(ref),
+        "saved coverage receipt",
+      );
+      archivedReceipts.delete(ref);
+    } catch {
+      // A saved reference may outlive its copied receipt. Keep its archive
+      // origin for the normal copy/repair path, including destination checks.
+    }
+  }
   const retainedSelectedReceiptRefs = new Set(
     (result.coverage.surfaces as JsonObject[]).flatMap((row) =>
       ((row.receiptRefs as string[] | undefined) ?? []).filter((ref) =>
@@ -1480,7 +1503,11 @@ async function readPreviousScanDocuments(context: ArtifactContext) {
 async function preserveDeepThreatModel(
   context: ArtifactContext,
   input: ScanDraftInput,
-): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest?: string;
+  warnings?: string[];
+}> {
   if (input.threatModel !== undefined) return { input };
   const { contents, digest } = await readPreviousScanDocuments(context);
   const previous =
@@ -1761,8 +1788,10 @@ function containsSavedValue(current: unknown, previous: unknown): boolean {
   if (isObject(previous)) {
     return (
       isObject(current) &&
-      Object.entries(previous).every(([key, value]) =>
-        containsSavedValue(current[key], value),
+      Object.entries(previous).every(
+        ([key, value]) =>
+          Object.hasOwn(current, key) &&
+          containsSavedValue(current[key], value),
       )
     );
   }
@@ -1982,7 +2011,7 @@ export async function getCodexSecurityCompletedScan(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
     value === "." ||
     value.startsWith("/") ||

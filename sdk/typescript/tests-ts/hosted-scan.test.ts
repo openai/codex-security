@@ -19,6 +19,7 @@ import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import {
+  ScanExecutionEventSchema,
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
   type ScanExecutionResult,
@@ -380,6 +381,66 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+test.each(["missing", "file"] as const)(
+  "hosted preparation preserves cancellation for a %s repository",
+  async (kind) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, kind);
+    if (kind === "file") writeSource(root, kind, "owned fixture\n");
+    const input: HostedScanInput = {
+      version: 2,
+      repository,
+      revision: "a".repeat(40),
+      outputDirectory: join(root, "output"),
+      stateDirectory: join(root, "state"),
+      model: "synthetic-model",
+      reasoningEffort: "high",
+      identity: {
+        runId: "run-1",
+        attemptId: "attempt-1",
+        buildId: "fixture-build",
+      },
+    };
+    const executor = noExecution();
+    for (const timing of ["before", "during"] as const) {
+      const controller = new AbortController();
+      const reason = new Error(`Host canceled ${timing} preparation`);
+      if (timing === "before") controller.abort(reason);
+      const pending = runHostedScan(input, {
+        executor,
+        signal: controller.signal,
+      });
+      if (timing === "during") queueMicrotask(() => controller.abort(reason));
+      await expect(pending).rejects.toBe(reason);
+    }
+    for (const options of [{}, { signal: new AbortController().signal }]) {
+      await expect(
+        runHostedScan(input, { executor, ...options }),
+      ).rejects.toMatchObject({
+        name: "InvalidTargetError",
+        message: `Repository is not a directory: ${repository}`,
+      });
+    }
+    const signal = AbortSignal.abort(new Error("Host canceled preparation"));
+    await expect(
+      runHostedScan({ ...input, revision: "invalid" }, { executor, signal }),
+    ).rejects.toMatchObject({ name: "ZodError" });
+    await expect(
+      runHostedScan(
+        { ...input, scope: { paths: ["../outside"] } },
+        { executor, signal },
+      ),
+    ).rejects.toMatchObject({
+      name: "HostedScanPreparationError",
+      reason: "scope_syntax",
+    });
+    expect(executor.run).not.toHaveBeenCalled();
+    for (const directory of [input.outputDirectory, input.stateDirectory]) {
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  },
+);
+
 test("preparation verifies revision and rejects missing or escaping paths before execution", async () => {
   const input = await fixture();
   const executor = noExecution();
@@ -522,9 +583,10 @@ test.each([
 });
 
 test.each([false, true])(
-  "CLI pipes retain progress and execution receipts, including cancellation (%p)",
+  "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
+    if (!cancel) input.reasoningEffort = "synthetic-future-effort";
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -554,8 +616,13 @@ test.each([false, true])(
         const message = JSON.parse(line);
         messages.push(message);
         if (message.method === "execution.run") {
+          expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
           requestId = message.params.requestId;
-          for (const event of [progressEvent, { invalid: true }])
+          for (const event of [
+            progressEvent,
+            reviewProgressEvent,
+            { invalid: true },
+          ])
             send(child.stdin, {
               method: "execution.progress",
               params: { requestId, event },
@@ -588,11 +655,12 @@ test.each([false, true])(
       expect(
         messages.filter((message) => message.method === "execution.run"),
       ).toHaveLength(1);
-      expect(messages).toContainEqual({
-        jsonrpc: "2.0",
-        method: "scan.progress",
-        params: { id: "run", event: progressEvent },
-      });
+      for (const event of [progressEvent, reviewProgressEvent])
+        expect(messages).toContainEqual({
+          jsonrpc: "2.0",
+          method: "scan.progress",
+          params: { id: "run", event },
+        });
       expect(messages.at(-1)).toMatchObject({
         id: "run",
         result: {
@@ -610,6 +678,28 @@ const progressEvent: ScanExecutionEvent = {
   type: "progress",
   progress: { phase: "discovery", filesCompleted: 1, filesTotal: 2 },
 };
+const reviewProgressEvent: ScanExecutionEvent = {
+  type: "progress",
+  progress: {
+    ...progressEvent.progress,
+    phase: "validation",
+    reviewItems: { completed: 3, total: 4 },
+  },
+};
+
+test.each([
+  { completed: -1, total: 4 },
+  { completed: 5, total: 4 },
+  { completed: 1.5, total: 4 },
+])("rejects invalid hosted review counts %j", (reviewItems) => {
+  expect(
+    ScanExecutionEventSchema.safeParse({
+      ...progressEvent,
+      progress: { ...progressEvent.progress, reviewItems },
+    }).success,
+  ).toBe(false);
+});
+
 const activityEvent: ScanExecutionEvent = {
   type: "activity",
   activity: {

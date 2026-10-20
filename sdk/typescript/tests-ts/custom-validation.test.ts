@@ -19,6 +19,7 @@ import {
   type CoverageDocument,
   type FindingsDocument,
   type ScanManifest,
+  type ScanProgress,
 } from "../src/index.js";
 import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
@@ -417,6 +418,7 @@ describe("custom validation", () => {
 
   const completionScenarios = [
     "standard",
+    "progress",
     "diff",
     "empty",
     "incomplete",
@@ -427,6 +429,7 @@ describe("custom validation", () => {
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
+      const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -469,6 +472,7 @@ describe("custom validation", () => {
       const workingDirectories: Array<string | undefined> = [];
       const commands: string[] = [];
       const activities: ScanActivity[] = [];
+      const progress: ScanProgress[] = [];
       const validationActivity = "Synthetic validation activity.";
       const profileDisabledTools =
         scenario === "standard"
@@ -508,6 +512,7 @@ describe("custom validation", () => {
             },
         {
           environment: { CODEX_SECURITY_STATE_DIR: stateDir },
+          now: () => Date.UTC(2026, 0, 1),
           prepareRuntime: async () => {
             const runtime = preparedRuntime(codexHome);
             runtime.plugin.version = (
@@ -548,6 +553,9 @@ describe("custom validation", () => {
                     );
                     turns += 1;
                     if (turns === 1) {
+                      expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
+                        maxTimeMinutes !== undefined,
+                      );
                       expect(prompt).not.toContain(workflow);
                       expect(prompt).toContain("SDK-owned discovery workflow");
                       expect(prompt).not.toContain(
@@ -581,9 +589,33 @@ describe("custom validation", () => {
                       );
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
+                      if (scenario === "progress") {
+                        return {
+                          events:
+                            (async function* (): AsyncGenerator<ThreadEvent> {
+                              yield {
+                                type: "item.completed",
+                                item: {
+                                  id: "primary-reporting",
+                                  type: "agent_message",
+                                  text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"reporting","filesCompleted":1,"filesTotal":1}',
+                                },
+                              };
+                              yield* completedEvents();
+                            })(),
+                        };
+                      }
                       return { events: completedEvents() };
                     }
+                    if (scenario === "progress") {
+                      await Promise.resolve();
+                      expect(
+                        progress.some(({ phase }) => phase === "reporting"),
+                      ).toBe(true);
+                      expect(progress.at(-1)?.phase).toBe("validation");
+                    }
                     expect(prompt).toContain(workflow);
+                    expect(prompt).not.toContain("2026-01-01T00:05:00.000Z");
                     const pendingManifest = await json<ScanManifest>(
                       join(scanDir, "scan-manifest.json"),
                     );
@@ -694,10 +726,14 @@ describe("custom validation", () => {
       try {
         const pending = client.run(repository, {
           cyberAccessProgram: "daybreak_blue",
+          maxTimeMinutes,
           ...(scenario === "standard"
             ? { validationPromptFile: workflowFile }
             : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
+          ...(scenario === "progress"
+            ? { onProgress: (update: ScanProgress) => progress.push(update) }
+            : {}),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
         if (scenario === "unfinished-source") {

@@ -207,7 +207,7 @@ bashTest(
   "required Unix checks fail when selected workflow checks do not pass",
   () => {
     const aggregate = ci.jobs["required-test"]!;
-    expect(aggregate.if).toBe("always()");
+    expect(aggregate.if).toStartWith("always() && (");
     const gate = aggregate.steps.find(
       (step) => step.name === "Require selected workflow checks",
     )!;

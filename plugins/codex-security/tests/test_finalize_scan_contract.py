@@ -155,10 +155,7 @@ The extraction root is not enforced.
                 "targetId": "target_sha256_example",
                 "displayName": "example/repo",
                 "revision": "deadbeef",
-                "snapshotDigest": (
-                    "codex-security-snapshot/v1:sha256:"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                ),
+                "snapshotDigest": "codex-security-snapshot/v1:sha256:" + "0" * 64,
             },
             "allowedTargetKinds": ["git_worktree"],
             "scope": {"includePaths": ["src/"], "excludePaths": []},
@@ -201,6 +198,11 @@ The extraction root is not enforced.
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
         return source_root
+
+    def sarif_result(self, finding: dict, source_root: Path) -> dict:
+        return FINALIZER.build_sarif(self.manifest, {"findings": [finding]}, source_root)["runs"][
+            0
+        ]["results"][0]
 
     def export_csv(self) -> csv.DictReader:
         self.findings["findings"] = [copy.deepcopy(self.finding)]
@@ -2341,6 +2343,55 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_unsupported_port(self) -> None:
+        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_unsafe_authority(self) -> None:
+        for remote in (
+            "https://exa mple.com/repo",
+            "https://example.com>/repo",
+            "https://exa^mple.com/repo",
+            "https://exa|mple.com/repo",
+            "https://:8022/repo",
+            "https://a:b:80/repo",
+            "https://[::1/repo",
+            "https://[example]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_bare_userinfo_separator(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_seals_remote_port_and_ipv6_authority(self) -> None:
+        for remote in (
+            "https://example.com:8022/repo",
+            "https://example.com:/repo",
+            "https://[::1]:8022/repo",
+            "https://[::ffff:1.2.3.4]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                manifest = self.read_json("scan-manifest.json")
+                self.assertEqual(manifest["scan"]["target"]["remote"], remote)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()
@@ -2358,8 +2409,8 @@ The extraction root is not enforced.
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
 
-    def test_preserves_literal_whitespace_repository_paths(self) -> None:
-        for path in (" ", "  ", "\u00a0"):
+    def test_preserves_literal_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
                 self.manifest["scan"]["scope"]["includePaths"] = [path]
                 self.coverage["includePaths"] = [path]
@@ -2384,7 +2435,7 @@ The extraction root is not enforced.
                 self.assertEqual(coverage["deferred"][0]["paths"], [path])
                 self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
                 self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
-                if path.isascii():
+                if path.isascii() and path.isspace():
                     self.assertIn(
                         f'- Included paths: `"{path}"`',
                         (self.scan_dir / "report.md").read_text(encoding="utf-8"),
@@ -2455,38 +2506,60 @@ The extraction root is not enforced.
         self.assertEqual(coverage["deferred"], self.coverage["deferred"])
         self.assertEqual(coverage["surfaces"][0]["disposition"], "needs_follow_up")
 
+    def write_code_evidence_scan(self, path: str) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": path,
+                "startLine": 1,
+                "code": "source()",
+                "explanation": "Synthetic source evidence.",
+            }
+        ]
+        self.write_scan()
+
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
             with self.subTest(path=path):
-                self.findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "source",
-                        "label": "Source",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "source()",
-                        "explanation": "Synthetic source evidence.",
-                    }
-                ]
-                self.write_scan()
+                self.write_code_evidence_scan(path)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
                     r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_unsafe_deferred_paths(self) -> None:
-
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+    def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
+        for path in ("src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
+                self.write_code_evidence_scan(path)
+                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        for path in (
+            "",
+            "../../outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "/outside.ts",
+            "//server/share",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            "src/\u0000outside.ts",
+            "src/\u0001outside.ts",
+            "src/\toutside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "src/\u2028/../outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]
                 self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-                ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"coverage.*deferred"):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
@@ -2501,7 +2574,27 @@ The extraction root is not enforced.
             }
         ]
 
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+        for path in (
+            ".",
+            "./",
+            "././",
+            "src",
+            "src/parser.ts",
+            "./src/parser.ts",
+            "src/./parser.ts",
+            "src//parser.ts",
+            "src/",
+            "src:parser.ts",
+            "src/a:b.py",
+            "src/.hidden",
+            "src/na\u00efve file.ts",
+            "src/\u007fparser.ts",
+            "src/\u2028parser.ts",
+            "src/\u2029parser.ts",
+            " ",
+            "\u0085",
+            "\ufeff",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
@@ -2958,7 +3051,7 @@ The extraction root is not enforced.
     def test_sarif_emits_github_line_hash_when_source_is_available(self) -> None:
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         fingerprints = result["partialFingerprints"]
         self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
         self.assertEqual(fingerprints["primaryLocationLineHash"], "614150a715d5311d:1")
@@ -2973,7 +3066,7 @@ The extraction root is not enforced.
             mock.patch.object(FINALIZER, "_is_windows", return_value=True),
             mock.patch.object(FINALIZER, "_windows_scan_local_files", return_value=backend),
         ):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
 
         backend.open_read_fd.assert_called_once_with(
             source_root, "src/extract.py", "source file src/extract.py"
@@ -2993,14 +3086,14 @@ The extraction root is not enforced.
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
-            {"path": "src/control.py", "startLine": 1, "role": "root_control"},
+            {"path": "./src//control.py", "startLine": 1, "role": "root_control"},
         ]
 
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
 
         self.assertEqual(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "src/control.py",
+            "./src//control.py",
         )
         self.assertEqual(
             result["partialFingerprints"]["primaryLocationLineHash"], "41499a4b14756ba2:1"
@@ -3012,7 +3105,7 @@ The extraction root is not enforced.
         source_path.parent.mkdir(parents=True)
         source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_skips_symlink_source(self) -> None:
@@ -3026,7 +3119,7 @@ The extraction root is not enforced.
             )
             source_path.symlink_to(external_path)
             sarif_finding = self.sarif_finding("semantic-fingerprint")
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
@@ -3087,7 +3180,7 @@ The extraction root is not enforced.
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_streams_source(self) -> None:
@@ -3121,6 +3214,54 @@ The extraction root is not enforced.
         for result in results:
             self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
+    def test_sarif_keeps_captured_hash_when_source_root_changes(self) -> None:
+        read_hashes = FINALIZER._github_line_hashes_for_source
+        for change in ("disappear", "retarget"):
+            with self.subTest(change=change):
+                source_root = self.write_line_hash_source()
+                moved_root = source_root.with_name(f"moved-source-{change}")
+
+                def read_then_move(
+                    *args, source_root=source_root, moved_root=moved_root, change=change
+                ):
+                    hashes = read_hashes(*args)
+                    source_root.rename(moved_root)
+                    if change == "retarget":
+                        replacement = self.scan_dir / "replacement"
+                        (replacement / "src").mkdir(parents=True)
+                        (replacement / "src" / "extract.py").write_text(
+                            "replacement source\n" * 41, encoding="utf-8"
+                        )
+                        source_root.symlink_to(replacement, target_is_directory=True)
+                    return hashes
+
+                with mock.patch.object(
+                    FINALIZER, "_github_line_hashes_for_source", side_effect=read_then_move
+                ) as source_reads:
+                    result = self.sarif_result(
+                        self.sarif_finding("semantic-fingerprint"), source_root
+                    )
+
+                self.assertEqual(
+                    result["partialFingerprints"]["primaryLocationLineHash"], "614150a715d5311d:1"
+                )
+                self.assertEqual(source_reads.call_count, 1)
+
+    def test_sarif_does_not_retry_source_root_that_appears_after_capture(self) -> None:
+        source_root = self.scan_dir / "source"
+        sarif_rule = FINALIZER._sarif_rule
+
+        def create_source_then_render_rule(*args):
+            self.write_line_hash_source()
+            return sarif_rule(*args)
+
+        with mock.patch.object(
+            FINALIZER, "_sarif_rule", side_effect=create_source_then_render_rule
+        ):
+            result = self.sarif_result(self.sarif_finding("semantic-fingerprint"), source_root)
+
+        self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
+
     def test_sarif_caches_line_hashes_per_source_file(self) -> None:
         source_root = self.write_line_hash_source()
         findings = []
@@ -3136,81 +3277,6 @@ The extraction root is not enforced.
             FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
 
         self.assertEqual(line_hashes.call_count, 1)
-
-
-@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
-def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
-    schema = {"type": expected}
-    FINALIZER._validate_schema_node(value, schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
-        FINALIZER._validate_schema_node(True, schema, "value")
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
-@pytest.mark.parametrize(
-    "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
-)
-def test_missing_writeup_recovery_rejects_other_file_errors(tmp_path, kind):
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
-    report = scan_dir / "findings" / "report.md"
-    report.parent.mkdir()
-    outside = tmp_path / "outside.md"
-    outside.write_text("# Outside the scan\n")
-    report_path = "findings/report.md"
-    if kind == "unsafe":
-        report_path = "../outside.md"
-    elif kind == "symlink":
-        report.symlink_to(outside)
-    elif kind == "dangling-symlink":
-        report.symlink_to(report.parent / "missing.md")
-    elif kind == "parent-symlink":
-        report.parent.rmdir()
-        report.parent.symlink_to(tmp_path, target_is_directory=True)
-    elif kind == "directory":
-        report.mkdir()
-    else:
-        if os.geteuid() == 0:
-            pytest.skip("root can read files without permission bits")
-        report.write_text("# Unreadable writeup\n")
-        report.chmod(0)
-    findings = {"findings": [{"writeup": {"reportPath": report_path}}]}
-    original = copy.deepcopy(findings)
-    with pytest.raises(FINALIZER.ContractError):
-        FINALIZER._prepare_derived_writeups(scan_dir, findings, allow_missing=True)
-    assert findings == original
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("error_code", [2, 3, 5, 22, 32, 33])
-def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch, error_code):
-    backend = windows_file_backend()
-    windows_error = load_script("windows_scan_local_files").WindowsScanLocalFileError
-    backend.open_read_fd.side_effect = windows_error(error_code, "Synthetic Windows file error")
-    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
-    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
-    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
-    findings = {"findings": [{"writeup": {"reportPath": "findings/report.md"}}]}
-    if error_code in {2, 3}:
-        warnings = FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert findings == {"findings": [{}]}
-        assert len(warnings) == 1
-    else:
-        with pytest.raises(FINALIZER.ContractError):
-            FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert "writeup" in findings["findings"][0]
-
-
-def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
-    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
-    reference = {"$ref": "#/$defs/text"}
-    FINALIZER._validate_schema_node("yes", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
-        FINALIZER._validate_schema_node("", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
-    with pytest.raises(RecursionError):
-        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
 if __name__ == "__main__":

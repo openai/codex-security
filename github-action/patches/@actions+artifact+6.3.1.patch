@@ -1,0 +1,95 @@
+diff --git a/node_modules/@actions/artifact/lib/internal/upload/blob-upload.js b/node_modules/@actions/artifact/lib/internal/upload/blob-upload.js
+--- a/node_modules/@actions/artifact/lib/internal/upload/blob-upload.js
++++ b/node_modules/@actions/artifact/lib/internal/upload/blob-upload.js
+@@ -12,6 +12,7 @@
+ import * as core from '@actions/core';
+ import * as crypto from 'crypto';
+ import * as stream from 'stream';
++import { pipeline } from 'node:stream/promises';
+ import { NetworkError } from '../shared/errors.js';
+ export function uploadToBlobStorage(authenticatedUploadURL, uploadStream, contentType) {
+     return __awaiter(this, void 0, void 0, function* () {
+@@ -47,14 +48,20 @@
+             abortSignal: abortController.signal
+         };
+         let sha256Hash = undefined;
+-        const blobUploadStream = new stream.PassThrough();
+         const hashStream = crypto.createHash('sha256');
+-        uploadStream.pipe(blobUploadStream); // This stream is used for the upload
+-        uploadStream.pipe(hashStream).setEncoding('hex'); // This stream is used to compute a hash of the content for integrity check
++        const blobUploadStream = new stream.Transform({
++            transform(chunk, encoding, callback) {
++                hashStream.update(chunk);
++                callback(null, chunk);
++            }
++        });
+         core.info('Beginning upload of artifact content to blob storage');
+         try {
+             yield Promise.race([
+-                blockBlobClient.uploadStream(blobUploadStream, bufferSize, maxConcurrency, options),
++                Promise.all([
++                    pipeline(uploadStream, blobUploadStream, { signal: abortController.signal }),
++                    blockBlobClient.uploadStream(blobUploadStream, bufferSize, maxConcurrency, options)
++                ]),
+                 chunkTimer(getUploadChunkTimeout())
+             ]);
+         }
+@@ -68,8 +75,7 @@
+             abortController.abort();
+         }
+         core.info('Finished uploading artifact content to blob storage!');
+-        hashStream.end();
+-        sha256Hash = hashStream.read();
++        sha256Hash = hashStream.digest('hex');
+         core.info(`SHA256 digest of uploaded artifact is ${sha256Hash}`);
+         if (uploadByteCount === 0) {
+             core.warning(`No data was uploaded to blob storage. Reported upload byte count is 0.`);
+diff --git a/node_modules/@actions/artifact/lib/internal/upload/zip.js b/node_modules/@actions/artifact/lib/internal/upload/zip.js
+--- a/node_modules/@actions/artifact/lib/internal/upload/zip.js
++++ b/node_modules/@actions/artifact/lib/internal/upload/zip.js
+@@ -8,6 +8,7 @@
+     });
+ };
+ import { realpath } from 'fs/promises';
++import { pipeline } from 'node:stream';
+ import archiver from 'archiver';
+ import * as core from '@actions/core';
+ import { getUploadChunkSize } from '../shared/config.js';
+@@ -20,8 +21,14 @@
+             highWaterMark: getUploadChunkSize(),
+             zlib: { level: compressionLevel }
+         });
++        const bufferSize = getUploadChunkSize();
++        const zipUploadStream = new WaterMarkedUploadStream(bufferSize);
++        core.debug(`Zip write high watermark value ${zipUploadStream.writableHighWaterMark}`);
++        core.debug(`Zip read high watermark value ${zipUploadStream.readableHighWaterMark}`);
++        pipeline(zip, zipUploadStream, error => {
++            if (error) zipErrorCallback(error);
++        });
+         // register callbacks for various events during the zip lifecycle
+-        zip.on('error', zipErrorCallback);
+         zip.on('warning', zipWarningCallback);
+         zip.on('finish', zipFinishCallback);
+         zip.on('end', zipEndCallback);
+@@ -42,12 +49,7 @@
+                 zip.append('', { name: file.destinationPath });
+             }
+         }
+-        const bufferSize = getUploadChunkSize();
+-        const zipUploadStream = new WaterMarkedUploadStream(bufferSize);
+-        core.debug(`Zip write high watermark value ${zipUploadStream.writableHighWaterMark}`);
+-        core.debug(`Zip read high watermark value ${zipUploadStream.readableHighWaterMark}`);
+-        zip.pipe(zipUploadStream);
+-        zip.finalize();
++        zip.finalize().catch(error => zip.destroy(error));
+         return zipUploadStream;
+     });
+ }
+@@ -55,7 +57,6 @@
+ const zipErrorCallback = (error) => {
+     core.error('An error has occurred while creating the zip file for upload');
+     core.info(error);
+-    throw new Error('An error has occurred during zip creation for the artifact');
+ };
+ // eslint-disable-next-line @typescript-eslint/no-explicit-any
+ const zipWarningCallback = (error) => {

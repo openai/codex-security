@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_deep_coordinator_succeeded,
     resume_deep_scan,
     run_workbench,
@@ -524,7 +526,8 @@ def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path, context_reporti
             "SELECT cost_json FROM scans WHERE id = ?", (scan["scanId"],)
         ).fetchone()
     assert stored is not None
-    assert json.loads(stored[0]) == cost
+    assert json.loads(stored[0]) == {"cost": cost, "usage": listed["scans"][0]["usage"]}
+    assert listed["scans"][0]["usage"]["coverage"] == "unavailable"
 
 
 def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion(
@@ -846,6 +849,37 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
 
 
+@pytest.mark.parametrize(
+    ("timestamps", "expected_order"),
+    [
+        (("2026-08-01T00:00:00Z", "2026-08-01T01:00:00+02:00"), (1, 0)),
+        (("2026-08-01T00:00:00.000200Z", "2026-08-01T01:00:00.000100+01:00"), (1, 0)),
+        (("2026-08-01T01:00:00+01:00", "2026-08-01T00:00:00Z"), (0, 1)),
+    ],
+    ids=["mixed-offsets", "microseconds", "equal-instants"],
+)
+def test_finding_occurrence_history_uses_start_instants(
+    tmp_path: Path, timestamps: tuple[str, str], expected_order: tuple[int, int]
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scans = sorted(
+        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
+        key=lambda scan: scan["scanId"],
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(timestamp, scan["scanId"]) for scan, timestamp in zip(scans, timestamps)],
+        )
+
+    for scan in scans:
+        finding = get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
+        assert finding["knownSince"] == timestamps[expected_order[0]]
+        assert finding["knownScanIds"] == [scans[index]["scanId"] for index in expected_order]
+
+
 def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -931,6 +965,103 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
         [first["scanId"]],
         [first["scanId"], second["scanId"]],
     ]
+
+
+@pytest.mark.parametrize(
+    ("before_started", "after_started"),
+    [
+        ("2026-01-02T00:15:00+02:00", "2026-01-01T21:00:00-02:00"),
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00.000001Z"),
+        ("2026-01-01t02:00:00.000000+02:00", "2026-01-01T00:00:00Z"),
+    ],
+)
+def test_automatic_matching_orders_instants_and_preserves_directed_cache(
+    tmp_path: Path, before_started: str, after_started: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before, after = sorted(
+        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
+        key=lambda scan: scan["scanId"],
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(before_started, before["scanId"]), (after_started, after["scanId"])],
+        )
+    save_scan_matches(state_dir, after, before)
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert pending["skippedPairs"] == 0
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [after["scanId"]]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [before["scanId"]]
+
+    save_scan_matches(state_dir, before, after)
+    cached = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert cached["batches"] == []
+    assert cached["skippedPairs"] == 1
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert forced == pending
+
+
+def test_automatic_matching_keeps_unavailable_history_without_future_links(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    earlier, unavailable, current, future = (
+        create_cli_scan(
+            state_dir, tmp_path / "results", repository, identity_anchor=f"archive-check-{index}"
+        )
+        for index in range(4)
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [
+                ("2026-01-01T00:00:00Z", earlier["scanId"]),
+                ("2026-01-01T03:00:00+02:00", unavailable["scanId"]),
+                ("2026-01-01T02:00:00Z", current["scanId"]),
+                ("2026-01-01T00:30:00-03:00", future["scanId"]),
+            ],
+        )
+    findings = [
+        get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
+        for scan in (unavailable, current, future)
+    ]
+    for before, after, before_finding, after_finding in (
+        (unavailable, current, findings[0], findings[1]),
+        (current, future, findings[1], findings[2]),
+    ):
+        save_scan_matches(
+            state_dir,
+            before,
+            after,
+            confirmed_match(before_finding["occurrenceId"], after_finding["occurrenceId"]),
+        )
+    shutil.rmtree(unavailable["scanDir"])
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert (pending["scanCount"], pending["unavailableScans"], pending["skippedPairs"]) == (4, 1, 1)
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [
+        current["scanId"],
+        future["scanId"],
+    ]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [earlier["scanId"]]
+    assert pending["batches"][0]["knownFindingGroups"] == [
+        sorted(finding["findingId"] for finding in findings[:2])
+    ]
+    assert pending["batches"][1]["knownFindingGroups"] == [
+        sorted(finding["findingId"] for finding in findings)
+    ]
+
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert (forced["scanCount"], forced["unavailableScans"], forced["skippedPairs"]) == (4, 1, 0)
+    assert all("knownFindingGroups" not in batch for batch in forced["batches"])
 
 
 def test_list_unmatched_scan_pairs_skips_unavailable_scan_artifacts(tmp_path: Path) -> None:
@@ -1064,6 +1195,97 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     latest_finding = get_scan(state_dir, latest["scanId"])["scan"]["findings"][0]
     assert latest_finding["knownScanIds"] == [before["scanId"], latest["scanId"]]
     assert latest_finding["knownSince"] == known_since
+
+
+@pytest.mark.parametrize(
+    "timestamps",
+    [
+        (
+            "2026-08-01T03:00:00+02:00",
+            "2026-08-01T01:15:00Z",
+            "2026-08-01T01:30:00Z",
+            "2026-08-01T00:45:00-01:00",
+        ),
+        (
+            "2026-08-01T01:00:00Z",
+            "2026-08-01T01:00:00.000001Z",
+            "2026-08-01T01:00:00.000002Z",
+            "2026-08-01T01:00:00.000003Z",
+        ),
+        (
+            "2026-08-01t03:00:00.000000+02:00",
+            "2026-08-01T01:00:00Z",
+            "2026-08-01T01:00:00.0Z",
+            "2026-08-01T01:00:00.000Z",
+        ),
+    ],
+    ids=["offsets", "microseconds", "equal-instants"],
+)
+def test_explicit_comparison_uses_chronological_matching_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scans = sorted(
+        (
+            create_cli_scan(
+                state_dir, tmp_path / "scans", repository, identity_anchor=f"synthetic-{index}"
+            )
+            for index in range(4)
+        ),
+        key=lambda scan: scan["scanId"],
+    )
+    middle, after, future = scans[1:]
+    findings = [get_scan(state_dir, scan["scanId"])["scan"]["findings"][0] for scan in scans]
+    for left, right in ((0, 1), (1, 3)):
+        save_scan_matches(
+            state_dir,
+            scans[left],
+            scans[right],
+            confirmed_match(findings[left]["occurrenceId"], findings[right]["occurrenceId"]),
+        )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(timestamp, scan["scanId"]) for timestamp, scan in zip(timestamps, scans)],
+        )
+        original = list(connection.iterdump())
+    expected = [sorted(finding["findingId"] for finding in findings[:2])]
+
+    for before_scan, after_scan in ((middle, after), (after, middle)):
+        compared = compare_scan_pair(
+            state_dir, before_scan, after_scan, "--include-matching-inputs"
+        )
+        assert (compared["beforeScanId"], compared["afterScanId"]) == (
+            before_scan["scanId"],
+            after_scan["scanId"],
+        )
+        assert compared["matchingInputs"]["knownFindingGroups"] == expected
+
+    history = load_script("workbench_scan_history")
+
+    def unexpected_git_lookup(*_args: Any) -> str:
+        raise AssertionError("Future scans must not trigger repository discovery")
+
+    monkeypatch.setattr(history, "git_output", unexpected_git_lookup)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert list(connection.iterdump()) == original
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "UPDATE scans SET target_id = NULL, target_path = ? WHERE id = ?",
+            (str(tmp_path / "future-repository"), future["scanId"]),
+        )
+        compared = history.compare_scans(
+            connection,
+            Namespace(before_scan_id=middle["scanId"], after_scan_id=after["scanId"]),
+            require_scan=lambda db, scan_id: db.execute(
+                "SELECT * FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone(),
+            read_coverage=lambda _: {},
+            include_matching_inputs=True,
+        )
+    assert compared["matchingInputs"]["knownFindingGroups"] == expected
 
 
 def test_semantic_scan_matching_backfills_legacy_finding_details(tmp_path: Path) -> None:

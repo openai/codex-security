@@ -16,6 +16,13 @@ codex-security info --json
 `info --json` reports package, plugin, runtime, and model details.
 `scans` and `findings` default to their `list` subcommands.
 
+To retrieve GitHub code scanning alerts without an MCP server, use
+[`import github`](#import-alerts-from-the-cli). To save an existing CSV or JSON
+findings file in local scan history, use
+[`scan import`](#import-findings-as-a-saved-scan). These are separate workflows:
+GitHub import returns upstream alerts for validation; file import saves findings
+without running security analysis.
+
 ## Authentication
 
 Sign in with ChatGPT, or supply an API key for CI:
@@ -98,6 +105,40 @@ changed; otherwise run `logout`, then `login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
+### Daybreak opt-in
+
+Codex 0.163.0 and later default the Daybreak toggle to off. Enable it through
+the existing native configuration override:
+
+```bash
+codex-security scan . --codex daybreak=true
+codex-security scan . --mode deep --codex daybreak=true
+```
+
+In the SDK, use `new CodexSecurity({ codexOverrides: { daybreak: true } })`.
+In project files, set `daybreak: true` inside the `codex` mapping. Use `false`
+to explicitly turn it off.
+The setting carries through saved scan recipes, resumed scans, Deep Scan
+discovery and reducer workers, and `scan --patch`. Standalone `validate`,
+`patch`, and `verify-fix` accept the same `--codex daybreak=true` override.
+Threads created by these commands retain the setting when resumed in Codex.
+Scans use isolated configuration, so set it on the CLI, SDK client, or project
+file even if it is enabled in your personal Codex configuration.
+
+For the plugin inside Codex, use the desktop Daybreak toggle or `/daybreak` in
+an interactive CLI session. For headless Codex, use `codex exec -c daybreak=true`
+or set top-level `daybreak = true` in the configuration loaded by the runner.
+Deep Scan inherits the active turn's effective access program from its saved
+Codex session, including an explicit Standard selection. Discovery and reducer
+workers retain that selection when resumed. If the host does not supply a
+persisted turn context, workers use their runner configuration; CLI and SDK scans
+use the explicit scan settings above.
+
+Daybreak requires the built-in OpenAI provider and compatible account or API
+project access. Codex selects the available program; this setting does not
+grant access. An explicit [Cyber access program](#select-a-cyber-access-program)
+takes precedence over the toggle for that turn.
+
 ### Daybreak Blue with an API key
 
 The [Responses API defaults](https://developers.openai.com/api/docs/guides/daybreak#understand-defaults-when-omitted)
@@ -169,6 +210,9 @@ codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
+codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
 ### Amazon Bedrock
@@ -290,9 +334,15 @@ and keeps completed documents. Fix the problem and retry in a new directory.
 ### Source access and restrictions
 
 The command uses scan authentication and read-only access to the selected source.
-It denies Git metadata and sibling-component access, disables network, web, apps,
-and MCP, and uses only Codex's core shell environment. Knowledge-base text stays
-in private review artifacts during generation and is removed afterward.
+It denies Git metadata, the credential home, and private runtime configuration,
+disables network, web, apps, and MCP, and uses only Codex's core shell environment.
+On Unix, filesystem reads are limited to the selected source, runtime files, and
+review artifacts. Windows' elevated sandbox requires broader local read access,
+including sibling components, while keeping those explicit denials and read-only
+permissions. Ambient Codex authentication and provider-profile files remain
+excluded; Windows resolves file-pattern denials when each sandboxed command
+starts. Knowledge-base text stays in private review artifacts during
+generation and is removed afterward.
 
 Targets and links stay within the checkout and outside Git metadata. Linked
 worktrees and initialized submodules use their own roots. For a separate Git
@@ -344,9 +394,12 @@ codex-security scan . --working-tree
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+Whole-codebase and path scans also accept ordinary directories, including SVN
+working copies. Their source inventories exclude `.git` and `.svn` metadata.
+
 `--diff` scans committed changes; `--working-tree` scans staged and unstaged
-changes. Deep scans support whole repositories and path scopes. Working-tree
-snapshots include untracked nested Git repositories. Initialized submodules must
+changes. Both require Git. Deep scans support whole repositories and path scopes.
+Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
@@ -354,11 +407,15 @@ SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
 explicit unsupported binary files are rejected. Bulk scans share this context
 with every repository.
 
-Output directories must be empty and outside the scanned directory and enclosing
-Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`).
+Use `--output-dir DIR` to choose where a scan saves its results. The directory
+must be empty and outside the scanned directory and enclosing Git worktree. On
+macOS/Linux, existing directories must be private (`chmod 700`).
 `--archive-existing` moves earlier output to
 `<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
-SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
+
+Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
+optional export fails, the scan can still complete. Use the
+[export command](#export-findings) to write or retry SARIF from the saved results.
 
 Completed scans exit with `0` by default. Configure `--fail-on-severity high`
 to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
@@ -370,6 +427,13 @@ command exit code to distinguish execution failures from findings-policy violati
 Legacy completeness values affect neither.
 Bulk and component summaries report completed and failed scans without an
 `incomplete` count. Component matching errors have status `failed`.
+
+Usage coverage is separate from execution status. A recorded interruption or a
+closed turn without a numeric usage receipt makes usage coverage `partial`, even
+if a later turn succeeds. Recorded numeric zero is distinct from a missing
+receipt. These checks describe available local records; they cannot reconstruct
+requests whose usage was never persisted locally or prove an exhaustive billing
+total.
 
 New drafts use the current finding schema: `codeEvidence`, `rootCause`,
 `attackPath.dataflow`, and `evidenceRefs`. Source snippets belong in
@@ -405,6 +469,82 @@ stderr-only failures, including when `--full-output` is selected.
 Diagnostics stay on stderr. Each command's `--schema --format json` describes
 its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
+
+### Understand scan scope and follow-up work
+
+A completed scan means the requested workflow finished. It does not mean every
+file or possible vulnerability was examined. A scan can finish with intentional
+exclusions, deferred review work, or unanswered questions.
+
+To investigate a particular run, use its scan ID explicitly:
+
+```bash
+codex-security scans show SCAN_ID --json
+codex-security scans logs SCAN_ID
+```
+
+Replace `SCAN_ID` with the ID from the completion or failure summary. A scan can
+fail after registration but before writing its artifacts; investigate those
+failures through its history record and any available logs. When artifacts were
+retained, use the saved results directory returned by `scans show` to inspect
+whichever of these files are present:
+
+| File                 | What to check                                                                                                                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scan-manifest.json` | `scan.status`, the target snapshot, and any recorded `scan.scope` limitations.                                                                                                                                   |
+| `report.md`          | Scope, reviewed surfaces, and open questions or follow-up work.                                                                                                                                                  |
+| `coverage.json`      | `includePaths` and `excludePaths` for scope boundaries; `explicitExclusions` for recorded exclusion reasons; `surfaces` for reviewed areas; `deferred` for unfinished review work; and optional `openQuestions`. |
+
+Deferred items can identify affected `paths` or `surfaceIds`. Surface
+`receiptRefs` link to retained evidence under `artifacts/` when available.
+Deep Scan summaries retain coverage from accepted worker reviews, including
+worker-specific deferred work. Check those details as well as the final findings.
+
+These records describe what the scan recorded, not an exhaustive file-by-file
+audit. A retained source inventory, when present, lists inputs rather than
+proving that each file was reviewed. An absent path in a surface summary does not
+establish whether it was read, and the scan ID cannot reconstruct evidence that
+was never saved.
+Session logs can help explain failures and tool activity, but do not prove
+complete review either.
+
+For a local plugin scan, ask Codex to open the saved scan and explain its scope,
+exclusions, deferred work, and follow-up questions. CLI history can also locate
+that scan when it uses the same Codex home and state directory on the machine
+where the scan ran. A scan ID alone does not download another machine's or
+Cloud's artifacts. Preserve the saved results directory with the ID.
+
+Choose the next step from the recorded reason:
+
+- **The run completed and its scope matches your intent:** analyze the findings.
+  Record any remaining limitations; an exclusion or follow-up note alone is not
+  an execution failure.
+- **An important path or security question remains unreviewed:** run a focused
+  scan with `--path`, adding relevant context with `--knowledge-base` or specific
+  instructions with `--scan-prompt-file`. Address missing access or context first.
+  Repeating the same scan does not guarantee that an omission will be resolved.
+- **The run failed or was canceled:** inspect its logs and address the cause.
+  Use `scans rerun SCAN_ID` when the scan has a saved launch recipe; otherwise,
+  start a new scan with the intended scope, including for plugin scans without
+  a recipe. Retained findings can still be reviewed, but absence of findings
+  from a stopped run is inconclusive.
+- **A Deep Scan was interrupted and is still recorded as `running`:** it may
+  support [resume](#resuming-an-interrupted-deep-scan) with the original checkout,
+  artifacts, and session. Completed, failed, and canceled scans cannot resume.
+
+For example, after identifying an omitted API directory:
+
+```bash
+codex-security scan . --path services/api --knowledge-base architecture.md
+```
+
+Replace the path and context file with those for your repository. A new scan
+reviews the current checkout; it does not amend the original saved report.
+
+Older reports may still contain `coverage.completeness: "partial"` or
+`"unknown"`. Read their scope and follow-up details to understand the limitation.
+Current reports omit that field, and current commands do not use legacy
+completeness values to determine scan status or exit codes.
 
 ### Project files
 
@@ -551,6 +691,29 @@ From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
 Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
 planning and authentication choices.
 
+### Set investigation time
+
+```bash
+codex-security scan . --max-time 15
+codex-security scan . --diff origin/main --max-time 15
+codex-security scan . --mode deep --max-time 90
+```
+
+`--max-time` accepts positive fractional **minutes**. Standard scans have no
+time allowance by default. When selected, it is advisory: spend the available
+time on useful investigation and validation, finish early if no worthwhile work
+remains, and stop starting investigations at the deadline. Reporting can run
+longer. This is not a hard timeout or a minimum runtime. The allowance covers
+repository, path, diff, and working-tree scans; standalone custom validation and
+post-scan instructions are outside it. Existing `--max-cost` and cancellation
+behavior are unchanged.
+
+The SDK setting is `maxTimeMinutes`; project files use `scan.max_time_minutes`.
+Each launched scan or rerun gets its own allowance after setup, and reconnects
+do not reset it. Standard scans still do not support resume. For batch and
+component scans, the project setting applies separately to each scan attempt,
+not to planning, result matching, or the total campaign.
+
 ### Configure deep scans
 
 ```ts
@@ -561,19 +724,27 @@ await security.run("/path/to/repository", {
   stopAfterNoNew: 3,
   stopAfterConsecutiveErrors: 2,
   maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
+  maxTimeMinutes: 90,
 });
 ```
 
 For `scan --mode deep`, `--workers` controls discovery concurrency and
 `--subagents` controls subagents per worker. `--stop-after-no-new`,
-`--max-discovery-runs`, and `--max-time-hours` stop discovery by novelty, count,
+`--max-discovery-runs`, and `--max-time` stop discovery by novelty, count,
 or duration. At the deadline, discovery stops; the scan then combines and returns
 completed findings.
 
 Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
-that `subagents` can be zero. Time accepts positive fractional hours up to 96.
+that `subagents` can be zero. Discovery time accepts positive fractional minutes;
+its default and maximum remain 5760 minutes (96 hours). Unlike Standard's
+advisory allowance, this existing Deep discovery limit is enforced. Resuming a
+Deep scan keeps its original deadline; rerunning starts a new scan.
+`--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
+legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
+hours. Explicit settings override lower-priority configuration across units.
+At the winning source, conflicting minute/hour durations are errors; equivalent
+durations are accepted.
 `stopAfterConsecutiveErrors` is an SDK/project-file setting, with no CLI flag.
 `--codex` does not configure deep-scan settings. See
 [Deep settings and limits](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#deep-settings-and-limits).
@@ -629,7 +800,7 @@ or Windows MCP launcher. Saved reports remain readable.
 Multi-agent v2 must remain enabled; `agents.max_threads` is unsupported.
 
 `validate`, `patch`, and `verify-fix` limit native overrides to `model`,
-`model_reasoning_effort`, `model_provider`, `model_providers`, and
+`model_reasoning_effort`, `model_provider`, `model_providers`, `daybreak`, and
 `analytics.enabled`. For a custom provider:
 
 ```bash
@@ -651,14 +822,28 @@ that command. Model, effort, and provider choices carry into patch-risk assessme
 Model requests include Codex Security attribution in `responses_api_metadata`:
 `codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
 `codex_security_package_version`, and `codex_security_plugin_version` when the
-selected plugin declares a version. These fields identify the workflow and
-versions producing a model request; they do not record command starts,
-completions, or failures.
+selected plugin declares a version. The shared context adds
+`codex_security_provider` for the configured provider family when the wrapper
+selects a provider, and
+`codex_security_scan_mode` for scans. Custom provider names use `custom`.
+Provider attribution reflects the wrapper's selected profile or default;
+native managed configuration may select a different provider before inference.
+The GitHub Action supplies `codex_security_integration=github_action`;
+Deep Scan workers retain the context and add `codex_security_worker_role`.
+Caller metadata, including literal dotted keys, is preserved. Connected-app
+publication uses the same request attribution; embedding requests identify
+the package and version in their `User-Agent`.
+
+These fields provide request attribution for supported inference providers, including
+Bedrock. They do not create a separate telemetry collector, record command
+starts or outcomes, or make another provider's traffic visible to OpenAI.
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
 patch-risk assessment, and Deep Scan discovery and reducer workers, including
-resumed workers. Deep Scan workers also preserve the scan's request metadata.
+resumed workers. Selected-profile settings take precedence over root settings.
+Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
+workers, including exporter choices and prompt-logging controls.
 Model-request attribution metadata remains attached when analytics are disabled.
 The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;
@@ -709,10 +894,27 @@ Finish older-version operations before upgrading. Never remove
 `.codex-security-scan.sqlite3` during an operation. Stop all operations using the
 credential home before manually removing an old `.codex-security-scan.lock`.
 
-On Windows, an older sandboxed run can leave invalid ACLs on a credential-home
-ancestor. Preserve that state, then select a new private `CODEX_SECURITY_STATE_DIR`
-outside the old state and repository. Sign in again if needed; the new directory
-has separate scan history.
+On Windows, credential-home checks require trusted ownership and permissions
+through every ancestor, including the volume root. Codex Security can repair
+the credential home and its descendants; it does not change ancestor ownership
+or ACLs. An error identifies the rejected ancestor and its underlying ACL
+problem. A volume root owned by `Everyone` (`S-1-1-0`) is unsupported, even when
+the credential home itself is private.
+
+Preserve existing state, then choose a private `CODEX_SECURITY_STATE_DIR` outside
+the rejected ancestor and the repository, with a full ancestor chain that passes
+the same checks. If the volume root is rejected, another directory on that
+volume cannot resolve it; use a separately provisioned volume with trusted
+ancestry. On Windows, local runtime bootstrap directories are created beside
+`codex-home` in the state directory and removed when the SDK client closes.
+They use the same trusted ancestry checks, so sandbox write permissions on
+`TEMP` do not prevent runtime preparation. `TEMP`, `TMP`, and scan output
+locations are unchanged. Do not change the system volume's owner or ACL to
+make a scan run. If no suitable
+location is available, this layout cannot provision credentials safely under
+the current checks. Sign in again if needed; a new state directory has separate
+scan history and does not migrate credentials or reports from the old state
+directory.
 
 ### Progress and cost
 
@@ -725,6 +927,19 @@ Token totals include input plus output; cache reads and writes are subsets of
 input. Missing cache-write usage makes the uncached/cache-write breakdown
 unavailable. The CLI cannot recover missing information already recorded as zero
 by the runtime.
+
+Completed scan history also saves rollout observations under `usage`, alongside
+any `cost` estimate. `byRole` separates parent tokens from combined worker tokens.
+`window` bounds the counted events, `observedAt` records collection time, and
+`tokensUpdatedAt` records the newest token receipt. Partial coverage means some
+work could not be measured, including in-flight turns or missing earlier attempts.
+The parent can continue after report completion, so final CLI tokens can exceed
+the saved measurement window.
+
+`usage.accountRateLimits` saves the latest observed account-wide readings with
+their own timestamps, window durations, and reset times. These are historical
+observations, not a live allowance check or scan-only consumption. Empty readings
+mean allowance was unavailable. There is no token-to-allowance conversion here.
 
 Cost displays use [standard API prices](https://developers.openai.com/api/docs/pricing)
 and show a short/long-context range. They estimate model usage, excluding other
@@ -858,6 +1073,10 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
+Completed results are skipped only when their saved contract and seal are valid
+and the manifest records a completed scan. Damaged or unsuccessful results get a
+new attempt, including with `--recover`, while the old artifacts remain available.
+Missing or invalid plugin schemas stop resume without starting another scan.
 Changes to project configuration, extracted knowledge-base text, staged document
 filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
 require a new output directory. Version 1 manifests also require a new directory
@@ -1059,7 +1278,11 @@ codex-security classify-severity --scan latest --rubric /path/to/policy.md --jso
 codex-security classify-severity --scan-dir /path/to/completed-scan --json
 ```
 
-Use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
+For repository-free canonical records, use `classify-severity --records` alone.
+The [records protocol](classify-severity-records.md) accepts immutable Markdown and
+report snapshots and delegates model execution to the host.
+
+For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
 Omitting `--rubric` inherits original severity without model calls. Rubrics and
 repeatable `--knowledge-base` context accept text, PDF, DOCX, and directories.
 Each finding is classified in a separate read-only turn using its report and
@@ -1381,31 +1604,80 @@ Progress callback failures do not stop matching.
 
 ## Exports and CI
 
-`export` reads saved results without Codex or credentials. It defaults to the
-current repository's latest completed scan. Choose either a positional result
-directory or `--scan ID`. Findings require sealed results and support
-`--export-format csv|json|sarif` (default SARIF). `--source-root PATH` adds SARIF
-source-line fingerprints.
+Export saved findings and threat models without rerunning a scan or signing in.
+
+### Export findings
+
+To save a completed scan's findings as SARIF, run:
+
+```bash
+codex-security export /path/to/scan-results --output results.sarif
+```
+
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+The command writes `results.sarif` in the current directory. The output directory
+must already exist.
+
+SARIF is the default format, and `./results.sarif` is the default output path.
+Use `--export-format json` or `--export-format csv` to choose another format.
+To select a saved scan by its ID and export JSON, run:
 
 ```bash
 codex-security export --scan SCAN_ID --export-format json --output findings.json
-codex-security export --artifact threat-model --output docs/threatmodel.md
-codex-security export /path/to/policy-results --artifact threat-model --output -
 ```
 
-Threat-model exports use Markdown and default to `./threatmodel.md`. Standard,
-Deep, Diff, and policy workflows retain models when available; component/bulk
-runs save one per child. Explicit results may expose a model before completion
-or after later failure. Missing models return an error rather than generating
-or substituting one. Historical models in sealed scans need a matching manifest
-digest.
+Replace `SCAN_ID` with the ID printed by `scan`. If you omit both the results
+directory and `--scan`, `export` uses the current repository's latest completed
+scan.
+
+JSON preserves the saved findings. CSV marks them open, omits local triage state,
+and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
+leading apostrophes; import removes the escape. Use JSON to recover ambiguous
+apostrophes from older CSV exports.
+
+For SARIF, `--source-root` adds source-line fingerprints that help tools match
+findings across scans. Before changing the scanned files or applying patches,
+run the export from the scanned repository's root:
+
+```bash
+codex-security export /path/to/scan-results --source-root . --output results.sarif
+```
+
+The `.` selects the current directory as the source root. Its source files must
+be unchanged since the scan. `--source-root` is supported only for SARIF.
+
+If export fails, it exits with `2`. Fix the reported error and rerun the export;
+the saved scan remains available, so you don't need to run another scan.
+
+### Export a threat model
+
+To save a scan's threat model as Markdown, run:
+
+```bash
+codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+```
+
+Threat-model exports default to `./threatmodel.md`. Standard, Deep, Diff, and
+policy workflows retain models when available; component/bulk runs save one per
+child. With an explicit results directory, you can export a saved threat model
+even if the workflow has not completed or later failed. Missing models return
+an error rather than generating or substituting one. Historical models in sealed
+scans need a matching manifest digest.
+
+To print a policy workflow's saved threat model, pass its results directory and
+`--output -`:
+
+```bash
+codex-security export /path/to/policy-results --artifact threat-model --output -
+```
 
 `--output -` emits only artifact content, with diagnostics on stderr. Markdown
 and CSV stdout cannot combine with JSON command output. Exporting into a checkout
 does not make the model scan input; pass it with `--knowledge-base`.
 
-`ScanResult.threatModel` and `threatModelPath` expose the retained model and
-document, or null. Export still works if the document could not be written.
+### Export with the SDK
+
+Use `exportArtifact()` to export saved results from TypeScript:
 
 ```ts
 import { exportArtifact } from "@openai/codex-security";
@@ -1422,12 +1694,12 @@ Use `artifact: "findings"` with `format: "csv" | "json" | "sarif"` for findings.
 `output: "-"` streams stdout and returns null path/provenance. `pythonPath`
 selects an interpreter; `signal` cancels.
 
-JSON preserves sealed findings. CSV marks them open, omits local triage state,
-and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
-leading apostrophes; import removes the escape. Use JSON to recover ambiguous
-apostrophes from older CSV exports.
+`ScanResult.threatModel` and `threatModelPath` expose the retained model and
+document, or null. Export still works if the document could not be written.
 
-For CI, place output outside the checkout and set a severity threshold:
+### Use exports in CI
+
+Save each scan's results outside the checkout and set a severity threshold:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
@@ -1442,6 +1714,21 @@ codex-security scan . --diff origin/main \
 | `1`           | Severity policy violation.                                               |
 | `2`           | Invalid input, runtime error, target change, or required-output failure. |
 | `130` / `143` | Interrupt / termination.                                                 |
+
+If the scan exits with `2`, `130`, or `143`, skip export and upload. After a scan
+exits with `0` or `1`, use these steps:
+
+1. Export from that run's results directory. Using the explicit directory keeps
+   concurrent scans from changing which results are selected:
+
+   ```bash
+   codex-security export "$SCAN_ROOT/results" --source-root . \
+     --output "$SCAN_ROOT/results.sarif"
+   ```
+
+2. If export succeeds, upload the SARIF file.
+3. If the scan exited with `1`, keep the CI job failed so the severity threshold
+   remains enforced.
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
 `--json`. Use `validate --output-schema FILE` for a schema-checked JSON assessment.
@@ -1540,6 +1827,9 @@ It uses a read-only sandbox. Standard, Deep, and diff scans retain their existin
 validation, and `patch` still fixes and verifies findings. Both commands accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
+
+Basic patching also works in ordinary directories and Git worktrees before their
+first commit. Directory change tracking excludes `.git` and `.svn` metadata.
 
 ```bash
 codex-security validate "Possible SQL injection" --effort high
@@ -1661,6 +1951,8 @@ Both candidate IDs remain in the output, including the unresolved claim.
 `--scan latest` uses the current repository's latest completed scan. Patching
 supports JSON for saved findings, literal text, and files. Each finding gets a
 saved Codex desktop task. `--model` and `--effort` control the model.
+Saved-scan patching and fix verification use the complete sealed finding evidence
+and exclude findings that are currently closed in triage.
 
 `--validation-prompt-file PATH` supplies setup, authorized targets, expected
 results, and cleanup for dynamic validation. It works with saved findings,
@@ -1741,8 +2033,11 @@ Use `--llms` for the command manifest, `scan --schema --format json` for its
 schema, and `completions bash|zsh|fish` for shell completions. Scan output supports
 `--format toon|json|yaml|jsonl` and `--full-output`.
 
-`skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
-MCP exposes only read-only `info`, because the transport cannot cancel scans.
+`skills add` syncs generated CLI command guidance; it does not install the full
+Codex Security plugin. `mcp add` registers the CLI as an MCP server, exposing
+only read-only `info` because the transport cannot cancel scans. For the plugin's
+scan, triage, patch, and verification workflows, see the
+[agent workflow guide](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md).
 
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).

@@ -16,6 +16,14 @@ import { copyCompletedScan } from './fixtures.js';
 type Scenario = 'schedule' | 'pr' | 'policy-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
 
+function assertAttribution(args: readonly string[], provider: string): void {
+  assert.deepEqual(args.flatMap((arg, index) => arg === '--codex' ? [args[index + 1]] : []), [
+    'analytics.enabled=false',
+    'responses_api_metadata.codex_security_integration="github_action"',
+    `responses_api_metadata.codex_security_provider="${provider}"`,
+  ]);
+}
+
 function outputValues(text: string): Record<string, string> {
   const values: Record<string, string> = {};
   const lines = text.split(/\r?\n/u);
@@ -32,7 +40,7 @@ function outputValues(text: string): Record<string, string> {
   return values;
 }
 
-async function harness(t: TestContext, scenario: Scenario = 'schedule') {
+async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUrl = 'https://github.com') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'codex-main-test-')));
   const repository = join(root, 'repo');
   await mkdir(repository);
@@ -40,7 +48,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     '-c', 'user.name=Offline Test', '-c', 'user.email=offline@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args,
   ], { cwd: repository, env: gitEnvironment(), encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main');
-  git('remote', 'add', 'origin', 'https://github.com/example/repo.git');
+  git('remote', 'add', 'origin', `${serverUrl}/example/repo.git`);
   await writeFile(join(repository, 'app.txt'), 'synthetic source\n');
   git('add', '.'); git('commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
@@ -69,7 +77,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: scenario === 'schedule' ? 'schedule' : 'pull_request',
     GITHUB_REPOSITORY: 'example/repo', GITHUB_WORKSPACE: repository, GITHUB_SHA: sha,
     GITHUB_REF: scenario === 'schedule' ? 'refs/heads/main' : 'refs/pull/4/merge',
-    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: serverUrl,
     GITHUB_OUTPUT: outputPath, GITHUB_STATE: statePath, RUNNER_TEMP: root,
     OPENAI_API_KEY: 'synthetic-offline-test-key', INPUT_SUMMARY: 'true', INPUT_ANNOTATIONS: 'false',
     INPUT_SCOPE: scenario === 'schedule' ? 'repository' : 'diff',
@@ -112,6 +120,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule') {
     }
     if (process.env.INPUT_MODE === 'deep') coverage.mode = 'deep_repository';
     sarif.runs[0].versionControlProvenance[0].revisionId = scanSha;
+    sarif.runs[0].versionControlProvenance[0].repositoryUri = `${serverUrl}/example/repo`;
     await writeFile(sarifPath, JSON.stringify(sarif));
     if (configuration.missingSarif) await rm(sarifPath);
     const value = {manifest, coverage, findings: JSON.parse(await readFile(join(runtime.resultsDirectory, 'findings.json'), 'utf8')),
@@ -171,7 +180,7 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
   assert.equal(result.outputs['scanned-sha'], app.sha); assert.equal(result.outputs['high-count'], '1');
   assert.equal(result.outputs['estimated-cost'], '0.125'); assert.ok(result.outputs['sarif-path']);
   assert.ok(result.args.includes('--model=gpt-5.6-luna'));
-  assert.equal(result.args[result.args.indexOf('--effort') + 1], 'medium');
+  assert.ok(result.args.includes('--effort=medium'));
   assert.ok(!result.args.includes('--max-cost'));
   assert.match(result.logs, /::error::Scan completed\. Findings meet the configured failure threshold\./);
   assert.match(result.summary, /^## Codex Security\n\n\*\*Scan completed\. Findings meet the configured failure threshold\.\*\*/);
@@ -186,6 +195,7 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
 
 test('scheduled complete report-only scan succeeds', async (t) => {
   const app = await harness(t); const result = await app.run();
+  assertAttribution(result.args, 'openai');
   assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
   assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
   assert.equal(result.outputs['analysis-ref'], 'refs/heads/main');
@@ -205,13 +215,40 @@ test('unrelated ambient input variables do not reject a valid scan', async (t) =
   app.setInput('effort', 'medium');
   const result = await app.run();
   assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
-  assert.equal(result.args[result.args.indexOf('--effort') + 1], 'medium');
+  assert.ok(result.args.includes('--effort=medium'));
 });
+
+for (const [scenario, mode] of [['schedule', 'standard'], ['pr', 'standard'], ['schedule', 'deep']] as const) {
+  test(`enterprise ${scenario} ${mode} scans preserve reports and upload identity`, async t => {
+    const serverUrl = 'https://example-enterprise.ghe.com';
+    const app = await harness(t, scenario, serverUrl);
+    app.setInput('mode', mode); app.setInput('upload-artifacts', 'true'); app.setInput('annotations', 'true');
+    let uploadedFiles: string[] = [];
+    t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
+      assert.equal(process.env.GITHUB_SERVER_URL, serverUrl);
+      uploadedFiles = files.map(file => basename(file));
+      for (const file of files) assert.ok((await readFile(file)).length);
+      return {id:1, size:1};
+    });
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.processes, 1); assert.equal(result.cleanups, 1);
+    assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['report-status'], 'ready');
+    assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
+    assert.equal(result.outputs['scanned-sha'], app.sha);
+    assert.equal(result.outputs['analysis-ref'], scenario === 'pr' ? 'refs/pull/4/head' : 'refs/heads/main');
+    assert.deepEqual(uploadedFiles.sort(), ['coverage.json', 'findings.json', 'results.sarif', 'scan-manifest.json']);
+    const sarif = JSON.parse(await readFile(result.outputs['sarif-path'], 'utf8'));
+    assert.equal(sarif.runs[0].versionControlProvenance[0].repositoryUri, `${serverUrl}/example/repo`);
+    assert.match(result.logs, /^::warning .*file=src\/extract\.py/m);
+    assert.match(result.summary, /Scan completed/);
+  });
+}
 
 test('Deep scans forward their budget and publish completed reports with cleanup', async (t) => {
   const app = await harness(t);
   app.setInput('mode', 'deep'); app.setInput('max-time-hours', '1.5');
   const result = await app.run();
+  assertAttribution(result.args, 'openai');
   assert.equal(result.args[result.args.indexOf('--mode') + 1], 'deep');
   assert.equal(result.args[result.args.indexOf('--max-time-hours') + 1], '1.5');
   assert.equal(result.exitCode, 0); assert.equal(result.cleanups, 1);
@@ -254,6 +291,7 @@ for (const mode of ['standard', 'deep']) {
     assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
     assert.equal(result.outputs['sarif-upload-ready'], 'true');
     assert.equal(result.args[result.args.indexOf('--provider') + 1], 'amazon-bedrock');
+    assertAttribution(result.args, 'amazon-bedrock');
     assert.equal(result.args[result.args.indexOf('--auth') + 1], 'auto');
     assert.equal(result.environment.AWS_ACCESS_KEY_ID, 'synthetic-access-key');
     assert.equal(result.environment.AWS_SECRET_ACCESS_KEY, 'synthetic-secret-key');
@@ -274,6 +312,7 @@ for (const [provider, key] of [['openrouter', 'OPENROUTER_API_KEY'], ['fireworks
     const result = await app.run();
     assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
     assert.equal(result.args[result.args.indexOf('--provider') + 1], provider);
+    assertAttribution(result.args, provider);
     assert.equal(result.args[result.args.indexOf('--auth') + 1], 'api-key');
     assert.equal(result.environment[key], expectedKey);
     for (const other of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN'])

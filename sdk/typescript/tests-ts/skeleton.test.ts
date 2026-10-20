@@ -177,7 +177,7 @@ describe("TypeScript package skeleton", () => {
     expect([false, "false"]).not.toContain(
       verificationSteps[pythonSetup]?.with?.["update-environment"],
     );
-    expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
+    expect(jobs["required-test"]?.name).toEndWith("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
       "workflow-quality",

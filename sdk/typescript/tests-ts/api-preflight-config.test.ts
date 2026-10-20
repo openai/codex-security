@@ -7,6 +7,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelProvider,
@@ -33,6 +34,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "FIREWORKS_API_KEY",
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
   ],
 ] as const;
 
@@ -171,7 +179,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("separates writable scans from repository-scoped policy reads", () => {
+  test("separates writable scans from read-only policy permissions", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -202,7 +210,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
         codex_security_policy: {
           filesystem: {
-            ":minimal": "read",
+            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
           },
           network: { enabled: false },
@@ -233,19 +241,13 @@ describe("CodexSecurity preflight configuration", () => {
       },
       codex_security_policy: {
         filesystem: {
-          ":minimal": "read",
+          [process.platform === "win32" ? ":root" : ":minimal"]: "read",
           ":workspace_roots": "read",
+          [credentialHome]: { ".": "deny" },
         },
         network: { enabled: false },
       },
     });
-    const policyFilesystem = (
-      (config["permissions"] as JsonObject)[
-        "codex_security_policy"
-      ] as JsonObject
-    )["filesystem"] as JsonObject;
-    expect(policyFilesystem).not.toHaveProperty(":root");
-    expect(policyFilesystem).not.toHaveProperty(credentialHome);
   });
 
   test("preserves an explicitly requested strict approval policy", () => {
@@ -261,23 +263,30 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("preserves a strict approval policy from the selected profile", () => {
-    const config = {
-      approval_policy: "on-request",
-      profile: "strict",
-      profiles: {
-        strict: { approval_policy: "never", model: "profile-model" },
-        other: { approval_policy: "on-request" },
-      },
-    };
+  test.each([
+    ["on-request", "never"],
+    ["never", "on-request"],
+  ] as const)(
+    "lets root %s use the selected profile's %s approval policy",
+    (rootPolicy, profilePolicy) => {
+      const config = {
+        approval_policy: rootPolicy,
+        profile: "selected",
+        profiles: {
+          selected: { approval_policy: profilePolicy, model: "profile-model" },
+          other: { approval_policy: rootPolicy },
+        },
+      };
 
-    expect(scanRuntimeCodexConfig(config)).toMatchObject({
-      approval_policy: "never",
-      approvals_reviewer: "auto_review",
-      profiles: { strict: { model: "profile-model" }, other: {} },
-    });
-    expect(config.profiles.strict.approval_policy).toBe("never");
-  });
+      expect(scanRuntimeCodexConfig(config)).toMatchObject({
+        approval_policy: profilePolicy,
+        approvals_reviewer: "auto_review",
+        profiles: { selected: { model: "profile-model" }, other: {} },
+      });
+      expect(config.approval_policy).toBe(rootPolicy);
+      expect(config.profiles.selected.approval_policy).toBe(profilePolicy);
+    },
+  );
 
   test("removes execution and permission overrides from every configured profile", () => {
     const original = {

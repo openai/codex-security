@@ -2,6 +2,7 @@ import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
+import type { DeepScanParentTurn } from "./permission-profile-preflight.js";
 import {
   DeepScanCoordinatorRegistry,
   startOrJoinDeepScanCoordinator,
@@ -18,6 +19,7 @@ export function startDeepScanEngine(options: {
   pluginRoot: string;
   pythonCommand: string;
   parentSandbox: DeepWorkerParentSandbox;
+  parentTurn?: DeepScanParentTurn;
   threadId: string;
   handoffClaimToken?: string;
   model?: string;
@@ -35,6 +37,7 @@ export function startDeepScanEngine(options: {
         model: options.model,
         reasoningEffort: options.reasoningEffort,
         parentSandbox: options.parentSandbox,
+        parentTurn: options.parentTurn,
         artifactContext: {
           pluginRoot,
           repoRoot: run.targetPath,

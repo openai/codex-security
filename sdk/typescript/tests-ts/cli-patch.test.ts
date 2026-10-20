@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { gitText } from "./support/shell.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
@@ -427,6 +428,67 @@ describe("scan and patch workflow", () => {
     ).toMatchObject({ type: "string" });
   });
 
+  test.each([
+    [0, false, 0],
+    [0, true, 2],
+    [130, true, 130],
+    [143, true, 143],
+  ] as const)(
+    "completes required patch output (status %i, failure %p)",
+    async (codexStatus, failOutput, expectedStatus) => {
+      const report = "Synthetic patch report: café → fixed.\n";
+      const started = Promise.withResolvers<(error?: Error) => void>();
+      const stdout = new Writable({
+        highWaterMark: 1,
+        write(_chunk, _encoding, callback) {
+          started.resolve(callback);
+        },
+      });
+      const failure = new Error("Synthetic patch output failure");
+      const emitted = failOutput
+        ? new Promise<Error>((resolve) => stdout.once("error", resolve))
+        : undefined;
+      const stderr = capture();
+      let patched = false;
+      let laterCommands = 0;
+      const operation = main(
+        ["patch", "Synthetic finding"],
+        stdout,
+        stderr.stream,
+        dependencies({
+          currentDirectory: CURRENT_REPOSITORY,
+          onCodex: (_args, output) => {
+            output?.stdout.write(report);
+            patched = true;
+            return codexStatus;
+          },
+          onRepositoryCommand: (_command, args) => {
+            if (patched) laterCommands++;
+            return args.includes("--name-only") ? "synthetic.ts\0" : "tree";
+          },
+        }),
+      );
+      const complete = await started.promise;
+      const commandsBeforeCompletion = laterCommands;
+      complete(failOutput ? failure : undefined);
+      expect(await operation).toBe(expectedStatus);
+      expect(commandsBeforeCompletion).toBe(0);
+      expect(patched).toBe(true);
+      if (failOutput) {
+        expect(await emitted).toBe(failure);
+        expect(laterCommands).toBe(0);
+        expect(stderr.text()).toContain(failure.message);
+        expect(stderr.text()).not.toContain("Patch applied.");
+      } else {
+        expect(laterCommands).toBeGreaterThan(0);
+        expect(stderr.text()).toContain("Patch applied. Files changed: 1.");
+        expect(stdout.writableEnded).toBe(false);
+      }
+      expect(stdout.listenerCount("error")).toBe(0);
+      stdout.destroy();
+    },
+  );
+
   test.each(["literal", "file", "linear"])(
     "passes custom validation instructions to the %s patch task",
     async (source) => {
@@ -517,6 +579,7 @@ describe("scan and patch workflow", () => {
         ],
         {
           currentDirectory: directory,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             calls++;
@@ -594,6 +657,7 @@ describe("scan and patch workflow", () => {
           ],
           {
             currentDirectory: directory,
+            result,
             onWorkbench: () => savedScan(result, "scan-1", repository),
             onCodex: (args, output) => {
               started = true;
@@ -722,6 +786,7 @@ describe("scan and patch workflow", () => {
         "--json",
       ],
       {
+        result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
@@ -794,6 +859,8 @@ describe("scan and patch workflow", () => {
           "--codex",
           "analytics.enabled=false",
           "--codex",
+          "daybreak=true",
+          "--codex",
           'model_provider="synthetic.gateway"',
           "--codex",
           'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
@@ -804,6 +871,7 @@ describe("scan and patch workflow", () => {
             expect(args).toContain('model="gpt-6.1-sol"');
             expect(args).toContain('model_reasoning_effort="max"');
             expect(args).toContain("analytics.enabled=false");
+            expect(args).toContain("daybreak=true");
             expect(args).toContain('model_provider="synthetic.gateway"');
             expect(output?.modelProvider).toBe("synthetic.gateway");
             expect(output?.codexOverrides).toMatchObject({
@@ -1117,6 +1185,69 @@ describe("scan and patch workflow", () => {
     },
   );
 
+  test.each([
+    [undefined, false],
+    [true, false],
+    [false, true],
+  ] as const)(
+    "passes selected-profile telemetry to scan patches (root=%p, profile=%p)",
+    async (rootAnalytics, profileAnalytics) => {
+      const result = resultWithFindings(["high"]);
+      let childArgs: readonly string[] = [];
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--mode",
+          "standard",
+          "--json",
+          ...(rootAnalytics === undefined
+            ? []
+            : ["--codex", `analytics.enabled=${rootAnalytics}`]),
+          "--codex",
+          'profile="quiet"',
+          "--codex",
+          `profiles.quiet.analytics.enabled=${profileAnalytics}`,
+          "--codex",
+          'profiles.quiet.model_provider="amazon-bedrock"',
+          "--codex",
+          'responses_api_metadata={ "team.tag"="root", caller="preserved" }',
+          "--codex",
+          'profiles.quiet.responses_api_metadata={ "team.tag"="selected", codex_security_integration="github_action" }',
+          "--codex",
+          "otel.log_user_prompt=false",
+          "--codex",
+          'profiles.quiet.otel.metrics_exporter="none"',
+        ],
+        {
+          result,
+          onCodex: (args, output) => {
+            childArgs = args;
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(childArgs).toContain(`analytics.enabled=${profileAnalytics}`);
+      expect(requestMetadata(childArgs)).toMatchObject({
+        "team.tag": "selected",
+        caller: "preserved",
+        codex_security_surface: "cli",
+        codex_security_command: "patch",
+        codex_security_integration: "github_action",
+        codex_security_provider: "amazon-bedrock",
+        codex_security_scan_mode: "standard",
+      });
+      expect(
+        parseToml(childArgs.find((value) => value.startsWith("otel="))!)[
+          "otel"
+        ],
+      ).toEqual({ log_user_prompt: false, metrics_exporter: "none" });
+    },
+  );
+
   test("continues with separate patch tasks when one finding fails", async () => {
     const result = resultWithFindings(["critical", "high", "medium"]);
     const tasks: string[] = [];
@@ -1214,9 +1345,9 @@ describe("scan and patch workflow", () => {
         "--auth",
         "chatgpt",
         "--model",
-        "gpt-5.6-terra",
+        'synthetic-"model"\\雪\u007f',
         "--effort",
-        "high",
+        'future-"effort"\\雪\u007f',
         "--json",
       ],
       {
@@ -1237,8 +1368,16 @@ describe("scan and patch workflow", () => {
       },
     );
     expect(chatgpt.exitCode).toBe(0);
-    expect(invocation).toContain('model="gpt-5.6-terra"');
-    expect(invocation).toContain('model_reasoning_effort="high"');
+    expect(
+      parseToml(invocation.find((value) => value.startsWith("model="))!),
+    ).toEqual({ model: 'synthetic-"model"\\雪\u007f' });
+    expect(
+      parseToml(
+        invocation.find((value) =>
+          value.startsWith("model_reasoning_effort="),
+        )!,
+      ),
+    ).toEqual({ model_reasoning_effort: 'future-"effort"\\雪\u007f' });
     expect(authentication).toBe("chatgpt");
 
     const attributed = await runWorkflow(
@@ -1365,9 +1504,9 @@ describe("scan and patch workflow", () => {
             ) {
               expect(output.command).toBe("patch");
               expect(output.appServer?.sandbox).toBe("read-only");
-              expect(args).toContain(
-                'responses_api_metadata.codex_security_command="assess-patch-risk"',
-              );
+              expect(requestMetadata(args)).toMatchObject({
+                codex_security_command: "assess-patch-risk",
+              });
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:start -->",
               );
@@ -1517,6 +1656,7 @@ describe("scan and patch workflow", () => {
 
         const fixtures: Parameters<typeof dependencies>[0] = {
           currentDirectory: repository,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             modelCalls += 1;
@@ -2049,6 +2189,7 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--severity", "high", "--json"],
       {
+        result,
         onWorkbench: (args): JsonObject => {
           expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
           return savedScan(result);
@@ -2146,6 +2287,7 @@ describe("scan and patch workflow", () => {
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           environment,
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args, target) => {
             expect(target).toBe(SAVED_REPOSITORY);
@@ -2376,6 +2518,7 @@ describe("scan and patch workflow", () => {
               "--json",
             ],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2435,6 +2578,7 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2506,6 +2650,7 @@ describe("scan and patch workflow", () => {
     const calls: Array<readonly string[]> = [];
     let patched: Finding[] = [];
     const outcome = await runWorkflow(["patch", "occ_1"], {
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-global-findings") {
@@ -2535,6 +2680,7 @@ describe("scan and patch workflow", () => {
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "latest"], {
       currentDirectory: SAVED_REPOSITORY,
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-scans") {
@@ -2555,6 +2701,7 @@ describe("scan and patch workflow", () => {
     const patched: Finding[] = [];
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "scan-1"], {
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "get-scan") {

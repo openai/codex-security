@@ -66,6 +66,7 @@ assert.deepEqual(
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
+    "CHEAPER_INFERENCE_API_KEY",
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -1093,6 +1094,10 @@ try {
   assertNoError(initialized);
   assert.equal(initialized.result.serverInfo.name, "codex-security");
   assert.equal(initialized.result.serverInfo.title, "Codex Security");
+  assert.equal(
+    initialized.result.serverInfo.version,
+    (await readJson(mcpAppRoot, "package.json")).version,
+  );
   assert.equal(initialized.result.capabilities.resources, undefined);
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],

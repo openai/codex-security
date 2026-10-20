@@ -1,4 +1,4 @@
-name: Codex Security
+name: OpenAI Codex Security
 description: Scan code with Codex Security, enforce findings policy, and produce JSON, coverage, and SARIF reports.
 branding:
   icon: shield
@@ -25,7 +25,7 @@ inputs:
   cyber-access-program:
     description: 'Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately.'
   effort:
-    description: 'Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).'
+    description: 'Reasoning effort passed to Codex; supported values depend on the model and provider.'
     default: xhigh
   max-cost:
     description: Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.

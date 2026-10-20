@@ -71,11 +71,14 @@ test("keeps container validation available to forks and publication upstream-onl
   expect(container.jobs["native"]).not.toHaveProperty("if");
   expect(container.jobs["container"]).not.toHaveProperty("if");
   expect(validation.jobs["validate"]).not.toHaveProperty("if");
-  for (const name of ["native", "validate", "authorize"]) {
+  for (const name of ["source", "validate", "authorize"]) {
     expect(release.jobs[name]?.if).toBe(
       "github.repository == 'openai/codex-security'",
     );
   }
+  expect(release.jobs["native"]?.if).toBe(
+    "github.repository == 'openai/codex-security' && needs.source.outputs.existing-digest == ''",
+  );
   expect(release.jobs["publish-platform"]?.needs).toBe("authorize");
 });
 
@@ -139,7 +142,7 @@ test.each([
 test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
   const gate = ci.jobs["required-test"]!;
   expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toBe("always()");
+  expect(gate.if).toStartWith("always() && (");
   const step = gate.steps!.find(
     (step) => step.name === "Require selected container coverage",
   )!;
