@@ -1220,7 +1220,17 @@ test.skipIf(process.platform !== "win32")(
           "-Command",
           "$ErrorActionPreference = 'Stop'; (Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH).Sddl",
         ],
-        { env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: path } },
+        {
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            CODEX_SECURITY_TEST_ACL_PATH: path,
+            PSModulePath: join(system, "WindowsPowerShell", "v1.0", "Modules"),
+          },
+        },
       );
       return result.stdout.trim();
     };
