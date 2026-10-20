@@ -96,3 +96,79 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     assert replay["findingCount"] == 1
     assert all((scan_dir / name).read_bytes() == content for name, content in sealed.items())
     assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(tmp_path: Path) -> None:
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    result.write_text(
+        json.dumps(
+            saved_draft(
+                scan_id,
+                complete=True,
+                surfaces=[
+                    {
+                        "id": "api",
+                        "label": "API",
+                        "disposition": "no_issue_found",
+                        "receiptRefs": ["result.json"],
+                    }
+                ],
+            )
+        )
+    )
+    original = result.read_bytes()
+
+    fail_deep_scan(state_dir, codex_home, scan_id)
+
+    coverage_path = scan_dir / "coverage.json"
+    surface = json.loads(coverage_path.read_text())["surfaces"][0]
+    assert surface["id"] == f"{worker_id}/api"
+    assert surface["disposition"] == "needs_follow_up"
+    assert surface["receiptRefs"] == []
+    assert any(
+        "under artifacts/" in warning
+        for warning in get_scan(state_dir, scan_id)["scan"]["warnings"]
+    )
+    sealed = coverage_path.read_bytes()
+    preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert coverage_path.read_bytes() == sealed
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("anonymous_first", [True, False])
+def test_stopped_worker_links_follow_explicit_surface_identity_through_collisions(
+    tmp_path: Path, anonymous_first: bool
+) -> None:
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    anonymous = {"candidateId": "api", "label": "Anonymous", "disposition": "needs_follow_up"}
+    explicit = {"id": "api", "label": "Explicit", "disposition": "needs_follow_up"}
+    result.write_text(
+        json.dumps(
+            saved_draft(
+                scan_id,
+                complete=True,
+                surfaces=[anonymous, explicit] if anonymous_first else [explicit, anonymous],
+                deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+            )
+        )
+    )
+    original = result.read_bytes()
+
+    fail_deep_scan(state_dir, codex_home, scan_id)
+
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    surfaces = {row["label"]: row for row in coverage["surfaces"]}
+    assert len(surfaces) == 2
+    assert surfaces["Explicit"]["id"] != surfaces["Anonymous"]["id"]
+    assert coverage["deferred"][0]["surfaceIds"] == [surfaces["Explicit"]["id"]]
+    sealed = coverage_path.read_bytes()
+    preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
+    )
+    assert coverage_path.read_bytes() == sealed
+    assert result.read_bytes() == original

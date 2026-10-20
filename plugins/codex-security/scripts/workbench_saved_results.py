@@ -1143,7 +1143,8 @@ def _prepare_worker_coverage_recovery(
                             except ContractError:
                                 pass  # Leave malformed refs to the existing per-record recovery.
                             else:
-                                ref = f"{directory.as_posix()}/{normalized}"
+                                if normalized.startswith("artifacts/"):
+                                    ref = f"{directory.as_posix()}/{normalized}"
                         refs.append(ref)
                     row["receiptRefs"] = refs
                 if field == "surfaces":
@@ -2371,13 +2372,24 @@ def merge_saved_results(
                 links[published_id] = retained_surface
     if project_worker_coverage:
         worker_surfaces: dict[tuple[str, str], dict[str, Any]] = {}
+        named_surface_outputs = {
+            identity for outputs in worker_surface_outputs.values() for identity in outputs
+        }
         surfaces = coverage.get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:
             if not isinstance(surface, dict):
                 continue
             owner, identity = worker_row_owners.get(id(surface)), surface.get("id")
             if isinstance(owner, str) and isinstance(identity, str):
-                worker_surfaces.setdefault((owner, identity), surface)
+                key = (owner, identity)
+                existing = worker_surfaces.get(key)
+                # An anonymous candidate ID can collide with an explicit surface ID.
+                # Bind a named worker link to the explicitly named source.
+                if existing is None or (
+                    id(surface) in named_surface_outputs
+                    and id(existing) not in named_surface_outputs
+                ):
+                    worker_surfaces[key] = surface
         for task in output_tasks if isinstance(output_tasks, list) else []:
             if (
                 not isinstance(task, dict)
