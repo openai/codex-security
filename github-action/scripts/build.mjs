@@ -28,9 +28,9 @@ function components(packages, namespace) {
     ...(info.resolved ? {externalReferences: [{type: 'distribution', url: info.resolved}]} : {}),
   }));
 }
-const sourceFiles = (await readdir(resolve(root, 'src'))).filter(name => name.endsWith('.ts')).sort();
+const sourceFiles = Object.keys(bundle.metafile.inputs).filter(path => !path.includes('node_modules/')).sort();
 const sourceHash = createHash('sha256');
-for (const file of sourceFiles) sourceHash.update(file).update('\0').update(await readFile(resolve(root, 'src', file))).update('\0');
+for (const file of sourceFiles) sourceHash.update(file).update('\0').update(await readFile(resolve(root, file))).update('\0');
 const manifest = {
   actionVersion, status: 'unreleased', nodeRuntime: 'node24', platform: 'linux-x64', cliVersion,
   sourceSha256: sourceHash.digest('hex'), actionLockSha256: hash(await readFile(resolve(root, 'package-lock.json'))),

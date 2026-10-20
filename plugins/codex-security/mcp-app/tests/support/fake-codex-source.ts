@@ -7,7 +7,7 @@ export function fakeCodexSource(
   preflightMarkerPath: string,
 ) {
   return `#!/usr/bin/env node
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
@@ -25,6 +25,16 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'thread/read') {
+        preflight.requests.push({ method: message.method, threadId: message.params.threadId });
+        writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
+        const failOncePath = join(process.env.CODEX_HOME, message.params.threadId + '.read-fails-once');
+        if (existsSync(failOncePath)) {
+          unlinkSync(failOncePath);
+          process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'synthetic parent read temporary failure' } }) + '\\n');
+          continue;
+        }
+        result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
         result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
