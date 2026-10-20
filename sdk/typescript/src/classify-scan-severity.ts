@@ -60,7 +60,8 @@ export async function classifyScanSeverityInternal(
       });
   const scan = await resolveCompletedScan(scanId, {
     currentDirectory: () => currentDirectory,
-    runWorkbench: dependencies.runWorkbench ?? bootstrap!,
+    runWorkbench: (args, input) =>
+      (dependencies.runWorkbench ?? bootstrap!)(args, input, options.signal),
   });
   if (
     options.expectedScanId !== undefined &&
