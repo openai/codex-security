@@ -1101,14 +1101,22 @@ def _aggregate_worker_coverage_rows(rows: list[Any], worker_id: str, field: str)
 def _prepare_worker_coverage_recovery(
     sources: list[tuple[str, dict[str, Any], str | None]],
     parent: dict[str, Any] | None,
+    source_order: dict[str, tuple[int, int]],
     *,
     enabled: bool,
 ) -> tuple[bool, list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], str | None]]]:
     """Put bound worker evidence in parent coordinates without changing source files."""
     workers = {owner for _, _, owner in sources if owner is not None}
-    parents = [draft for _, draft, owner in sources if owner is None]
+    parents = [
+        draft
+        for _, draft, owner in sorted(
+            sources, key=lambda source: source_order[source[0]], reverse=True
+        )
+        if owner is None
+    ]
     if parent is not None:
-        parents.append(parent)
+        # Prefer the selected parent over historical copies of a task's surface.
+        parents.insert(0, parent)
     fields = ("surfaces", "explicitExclusions", "deferred", "openQuestions")
     if not enabled:
         enabled = any(
@@ -1499,7 +1507,7 @@ def merge_saved_results(
         parent = drafts_by_path[latest_reducer]
 
     project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
-        sources, parent, enabled=project_worker_coverage
+        sources, parent, source_order, enabled=project_worker_coverage
     )
     # Keep the actual retained row even when recovery adds previous findings.
     linked_surface_sources = {id(surface) for _, _, surface, _, _ in surface_links}

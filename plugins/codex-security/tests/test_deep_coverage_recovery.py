@@ -192,6 +192,70 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+@pytest.mark.parametrize("old_label", ["Older review", "Earlier review"])
+@pytest.mark.parametrize("selected_parent", [False, True])
+def test_parent_surface_fallback_uses_current_snapshot(tmp_path, old_label, selected_parent):
+    current_surface = {
+        "id": "api",
+        "label": "Current review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/new.md"],
+    }
+    current = saved_draft("coverage-scan", complete=True, surfaces=[current_surface])
+    source = worker(tmp_path, "first", current)
+    output = Path(source["artifact_dir"])
+    older = copy.deepcopy(current)
+    older["coverage"]["surfaces"][0].update(label=old_label, receiptRefs=["artifacts/old.md"])
+    for name, draft, modified in [("old", older, 50), ("new", current, 100)]:
+        (output / "artifacts" / f"{name}.md").write_text(f"{name} evidence\n")
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(modified, modified))
+        parent = copy.deepcopy(draft)
+        parent["coverage"]["surfaces"][0].update(
+            id="first/api",
+            workerId="first",
+            receiptRefs=[f"{output.relative_to(tmp_path).as_posix()}/artifacts/{name}.md"],
+        )
+        parent["coverage"]["deferred"] = [
+            {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}
+        ]
+        parent_path = write_checkpoint(tmp_path / "checkpoints", parent)
+        os.utime(parent_path, ns=(modified + 100, modified + 100))
+    if selected_parent:
+        head = tmp_path / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": parent_path.name}))
+        os.utime(head, ns=(250, 250))
+    else:
+        write_saved_parent(tmp_path, parent, 200)
+    template = tmp_path / "template"
+    template.mkdir()
+    write_completed_contract(template, "coverage-scan", tmp_path, target_kind="git_revision")
+    finding = json.loads((template / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(workerId="first", candidateId="api")
+    selected = write_checkpoint(
+        output / "checkpoints", saved_draft("coverage-scan", complete=True, findings=[finding])
+    )
+    os.utime(selected, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+
+    assert replay[2] == result[2]
+    for documents in (result, replay):
+        assert len(documents[1]["findings"]) == 1
+        assert len(documents[2]["surfaces"]) == 1
+        surface = documents[2]["surfaces"][0]
+        assert surface["label"] == "Current review"
+        assert (tmp_path / surface["receiptRefs"][0]).read_text() == "new evidence\n"
+        task = next(row for row in documents[2]["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == [surface["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 @pytest.mark.parametrize("earlier_identity", [None, "restored"])
 @pytest.mark.parametrize("colliding_candidate", [False, True])
 @pytest.mark.parametrize("selected_checkpoint", [False, True])
