@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -7,6 +8,7 @@ import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { importSource } from "./import-module.ts";
 import {
   DeepScanCoordinatorRegistry,
+  FakeExecutor,
   FakeStore,
   fixtureRun,
   temporaryDirectories,
@@ -26,6 +28,50 @@ const { recordCodexSecurityDeepReduction } = await importSource(
   "src/artifact-deep-reducer.ts",
 );
 after(() => temporaryDirectories.cleanup());
+
+test("Deep engine preserves stopped results for an option-shaped thread ID", async () => {
+  const fixture = await fixtureRun();
+  const store = new FakeStore(fixture.run);
+  store.run.coordinatorGeneration = 7;
+  const handoffClaimToken = randomUUID();
+  const registry = new DeepScanCoordinatorRegistry();
+  const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  const calls: string[][] = [];
+  const { coordinator } = await startDeepScanEngine({
+    run: store.run,
+    store,
+    registry,
+    pluginRoot: fixture.pluginRoot,
+    pythonCommand: "fixture-python",
+    parentSandbox: { filesystemDenies: [] },
+    threadId: "--fixture-owner",
+    handoffClaimToken,
+    runWorkbench: async (args: string[]) => {
+      calls.push(args);
+      return {};
+    },
+  });
+  await executor.discoveryStarted.promise;
+  store.run.status = "canceled";
+  coordinator.cancel("fixture canceled");
+  const terminal = await coordinator.wait(undefined, 5_000);
+  assert.equal(terminal?.status, "canceled");
+  assert.deepEqual(calls, [
+    [
+      "preserve-scan-results",
+      "--scan-id",
+      store.run.scanId,
+      "--thread-id=--fixture-owner",
+      "--claim-token",
+      handoffClaimToken,
+      "--coordinator-generation",
+      String(store.run.coordinatorGeneration),
+    ],
+  ]);
+});
 
 for (const route of ["mcp", "file"] as const) {
   test(`Deep engine publishes historical metadata inherited by a ${route} reducer`, async () => {
