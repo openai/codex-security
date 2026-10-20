@@ -1,14 +1,20 @@
 import childProcess from "node:child_process";
+import { once } from "node:events";
 import { mock } from "bun:test";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
 const spawn = childProcess.spawn;
 let workerArgs;
+let workerProcess;
 // Capture actual worker arguments in this isolated coordinator process.
 const recordedSpawn = (command, args, options) => {
-  if (args[0] === "exec") workerArgs = args;
-  return spawn(command, args, options);
+  const child = spawn(command, args, options);
+  if (args[0] === "exec") {
+    workerArgs = args;
+    workerProcess = child;
+  }
+  return child;
 };
 for (const name of ["node:child_process", "child_process"])
   mock.module(name, () => ({ ...childProcess, spawn: recordedSpawn }));
@@ -45,6 +51,7 @@ try {
     const request = JSON.parse(line);
     const requestCount = requests.length;
     workerArgs = undefined;
+    workerProcess = undefined;
     const result = await executor.run({
       ...request,
       promptPath: process.argv[3],
@@ -56,6 +63,10 @@ try {
       throw new Error("Native worker arguments were not captured");
     if (requests.length === requestCount)
       throw new Error("Worker completed without a synthetic Responses request");
+    // Turn completion can precede exec's exit. Release its SQLite handles before
+    // this fixture starts a separate app-server against the same Codex home.
+    if (workerProcess.exitCode === null && workerProcess.signalCode === null)
+      await once(workerProcess, "exit");
     const config = await readDeepScanRuntimeConfig({
       codexPath: process.env.CODEX_CLI_PATH,
       cwd: process.cwd(),
