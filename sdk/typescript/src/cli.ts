@@ -8783,16 +8783,15 @@ async function executeScan(
           )
         : arguments_.auth;
     if (typeof provider === "string") {
+      const providerConfiguration = (
+        resolvedConfiguration["model_providers"] as
+          Record<string, JsonObject> | undefined
+      )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration:
-          (
-            resolvedConfiguration["model_providers"] as
-              Record<string, JsonObject> | undefined
-          )?.[provider] ??
-          (isExternalModelProvider(provider)
-            ? EXTERNAL_CODEX_PROVIDERS[provider]
-            : undefined),
+        providerConfiguration: isExternalModelProvider(provider)
+          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
+          : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock

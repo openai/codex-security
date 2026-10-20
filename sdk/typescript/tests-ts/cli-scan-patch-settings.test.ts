@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import { inlineToml } from "../src/config.js";
+import { FIREWORKS_CODEX_PROVIDER, inlineToml } from "../src/config.js";
 import { dependencies, fakePreflight, fakeResult } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -108,6 +108,7 @@ async function patchSettings(
         ),
       ),
       OPENAI_API_KEY: "SYNTHETIC_LOCAL_KEY",
+      FIREWORKS_API_KEY: "SYNTHETIC_FIREWORKS_KEY",
       SYNTHETIC_ROOT_KEY: "SYNTHETIC_ROOT_VALUE",
       SYNTHETIC_PROVIDER_KEY: "SYNTHETIC_PROVIDER_VALUE",
       SYNTHETIC_PROVIDER_HEADER: "SYNTHETIC_HEADER_VALUE",
@@ -242,6 +243,36 @@ describe("inline patch provider configuration", () => {
       expect(child.approvalPolicy).toBe("never");
       expect(child.sandbox).toBe("workspace-write");
       expect(child.preflightSandbox).toBe("workspaceWrite");
+    },
+  );
+
+  test.each([
+    ["no override", undefined, FIREWORKS_CODEX_PROVIDER],
+    [
+      "partial override",
+      { http_headers: { "X-Selected": "profile" } },
+      {
+        ...FIREWORKS_CODEX_PROVIDER,
+        http_headers: { "X-Selected": "profile" },
+      },
+    ],
+    ["full override", provider, provider],
+  ] as const)(
+    "preserves external provider defaults with a selected profile %s",
+    async (_, override, expected) => {
+      const child = await patchSettings(
+        [
+          'profile="selected"',
+          'profiles.selected.model_provider="fireworks"',
+          ...(override === undefined
+            ? []
+            : [
+                `profiles.selected.model_providers.fireworks=${inlineToml(override)}`,
+              ]),
+        ].flatMap((value) => ["--codex", value]),
+      );
+      expect(child.argv).toContain('model_provider="fireworks"');
+      expect(definition(child)).toEqual({ fireworks: expected });
     },
   );
 
