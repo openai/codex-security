@@ -43,12 +43,12 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from workbench_constants import PHASES
-from workbench_saved_coverage import (
+from workbench.saved_coverage import (
     _prepare_worker_coverage_recovery,
     _project_worker_coverage_row,
     _saved_coverage_id,
 )
+from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
