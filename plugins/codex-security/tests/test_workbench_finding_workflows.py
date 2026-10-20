@@ -138,7 +138,7 @@ def test_failed_stages_resume_and_completed_results_are_immutable(
     assert completed["workflow"]["stages"][stage] == {"status": "completed", "result": result}
     for action, payload in [
         ("begin", {}),
-        ("fail", {"error": "Late failure"}),
+        ("fail", {"error": "Late failure", "result": {"unexpected": True}}),
         ("complete", {"result": {"unexpected": True}}),
     ]:
         assert workflow(workbench_api, workbench_db, action, stage=stage, **payload) == completed
