@@ -34,7 +34,7 @@ import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
-import { DiffTarget } from "../src/targets.js";
+import { DiffTarget, normalizeTarget } from "../src/targets.js";
 import { prepareOutputDir } from "../src/runtime.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
@@ -55,6 +55,60 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(cleanup);
+
+test("keeps literal CSV scopes at the checked out repository", async () => {
+  const name = "keeps literal CSV scopes at the checked out repository";
+  if (runTestInSubprocess(import.meta.path, name)) return;
+  const { paths, source } = await repositoryFixture("literal-scopes");
+  const os = { ...(await import("node:os")) };
+  mock.module("node:os", () => ({ ...os, homedir: () => source.path }));
+  const literals = ["~/src", "$HOME/src", "%HOME%/src", "space name"];
+  for (const path of literals) {
+    await mkdir(join(source.path, path), { recursive: true });
+    await writeFile(join(source.path, path, "app.ts"), "export {};\n");
+  }
+  git(source.path, "add", ".");
+  git(
+    source.path,
+    "-c",
+    "user.name=Multiscan Test",
+    "-c",
+    "user.email=multiscan@example.test",
+    "commit",
+    "-qm",
+    "literal scopes",
+  );
+  const revision = git(source.path, "rev-parse", "HEAD");
+  await writeFile(
+    paths.input,
+    [
+      "id,repository,revision,scope",
+      ...literals.map(
+        (scope, index) => `scope-${index},${source.path},${revision},${scope}`,
+      ),
+      `configured,${source.path},${revision},`,
+    ].join("\n"),
+  );
+  const observed: string[] = [];
+  const summary = await runMultiscan(
+    options(
+      paths,
+      client(async (repository, scanOptions = {}) => {
+        const target = await normalizeTarget(repository, scanOptions.target!);
+        observed.push(...target.paths);
+        expect(scanOptions.target).toEqual(
+          target.paths[0] === "src"
+            ? ["src"]
+            : target.paths.map((path) => join(repository, path)),
+        );
+        return await completedScan(scanOptions.outputDir!);
+      }),
+      { scanOptionsByMode: { standard: { target: ["src"] } } },
+    ),
+  );
+  expect(summary).toMatchObject({ completed: literals.length + 1, failed: 0 });
+  expect(observed.sort()).toEqual([...literals, "src"].sort());
+});
 
 async function fixture() {
   const root = await temporaryDirectory();
@@ -1319,8 +1373,8 @@ describe("multiscan", () => {
     const summary = await runMultiscan(
       options(
         paths,
-        client(async (_repository, scanOptions = {}) => {
-          expect(scanOptions.target).toEqual(["src"]);
+        client(async (repository, scanOptions = {}) => {
+          expect(scanOptions.target).toEqual([join(repository, "src")]);
           expect(scanOptions.mode).toBe("deep");
           expect(scanOptions.scanPrompt).toBe(
             "Review boundaries.\n\nFocus on authentication, authorization.",
@@ -1952,7 +2006,7 @@ describe("multiscan", () => {
       expect(await readFile(join(path, "src", "app.ts"), "utf8")).toContain(
         'name = "payments"',
       );
-      expect(scanOptions.target).toEqual(["src"]);
+      expect(scanOptions.target).toEqual([join(path, "src")]);
       expect(scanOptions.mode).toBe("deep");
       expect(scanOptions.outputDir).toBe(
         join(paths.output, "artifacts", "payments", "attempt-1"),

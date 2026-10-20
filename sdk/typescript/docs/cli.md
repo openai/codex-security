@@ -656,7 +656,9 @@ codex-security scan-components . \
   --output-dir /path/outside/project/results
 ```
 
-Plans use repository-relative paths:
+Plans use literal repository-relative paths, so `~/src` selects a directory
+named `~` inside the repository rather than expanding the home directory.
+Existing absolute paths inside the repository are also accepted.
 
 ```json
 {
@@ -689,7 +691,8 @@ or API-key auth. SDK-selected command providers retain their authentication.
 
 From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
 Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
-planning and authentication choices.
+planning and authentication choices. Custom `createSecurity` clients receive
+absolute targets; saved plans and component receipts retain relative paths.
 
 ### Set investigation time
 
@@ -1061,6 +1064,8 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
+CSV scopes are literal paths relative to each checkout, including names such
+as `~/src`.
 Configured diff or working-tree scopes are rejected unless every affected row
 overrides them with a path scope. `--output-dir` requires CSV input.
 

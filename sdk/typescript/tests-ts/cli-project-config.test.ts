@@ -545,7 +545,9 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   });
   expect(selected.find((options) => options.mode === "standard")).toMatchObject(
     {
-      target: ["lib"],
+      target: [
+        join(input.root, "batch-results", "checkouts", "standard", "lib"),
+      ],
       auth: "api-key",
       maxCostUsd: 3,
       failureSeverity: "high",
@@ -637,7 +639,7 @@ test.each(["standard", "deep"] as const)(
     const selected = onTurn.mock.lastCall?.[1];
     expect(selected).toMatchObject({
       mode,
-      target: ["lib"],
+      target: [join(input.repository, "lib")],
       scanPrompt: "Review synthetic boundaries.",
       failureSeverity: "high",
       maxCostUsd: 7,
