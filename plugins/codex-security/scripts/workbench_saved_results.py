@@ -1463,9 +1463,20 @@ def merge_saved_results(
     # Keep the actual retained row even when recovery adds previous findings.
     linked_surface_sources = {id(surface) for _, _, surface in surface_links}
     linked_surface_outputs: dict[int, dict[str, Any]] = {}
+    worker_row_owners: dict[int, str] = {}
 
-    def retained_coverage_row(item: Any, owner: str | None, field: str) -> Any:
-        return _project_worker_coverage_row(item, owner if project_worker_coverage else None, field)
+    def append_coverage_row(output: list[Any], item: Any, owner: str | None, field: str) -> Any:
+        retained = _project_worker_coverage_row(
+            item, owner if project_worker_coverage else None, field
+        )
+        if retained not in output:
+            output.append(retained)
+        retained = output[output.index(retained)]
+        # Parent aggregates can carry worker metadata without originating in
+        # that worker's retained source. Track the actual source of output rows.
+        if project_worker_coverage and owner is not None and isinstance(retained, dict):
+            worker_row_owners[id(retained)] = owner
+        return retained
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     # Older checkpoints can omit IDs already assigned in their published output.
@@ -1992,9 +2003,7 @@ def merge_saved_results(
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
         for owner, surface in surface_updates:
-            surface = retained_coverage_row(surface, owner, "surfaces")
-            if surface not in coverage["surfaces"]:
-                coverage["surfaces"].append(surface)
+            append_coverage_row(coverage["surfaces"], surface, owner, "surfaces")
         for surface in coverage["surfaces"]:
             if isinstance(surface, dict):
                 surface.setdefault("receiptRefs", [])
@@ -2008,9 +2017,8 @@ def merge_saved_results(
         ) in resolved:
             continue
         pending = coverage.setdefault("deferred", [])
-        retained = retained_coverage_row(item, owner, "deferred")
-        if isinstance(pending, list) and retained not in pending:
-            pending.append(retained)
+        if isinstance(pending, list):
+            append_coverage_row(pending, item, owner, "deferred")
     ambiguous_surface_ids = {
         (owner, identity)
         for owner, row in reopened_rows
@@ -2043,11 +2051,12 @@ def merge_saved_results(
                 and not any(key in surface for key in ("candidateId", "candidate", "finding"))
                 and isinstance(coverage.get("surfaces"), list)
             ):
-                retained_surface = retained_coverage_row(
-                    {**surface, "receiptRefs": surface.get("receiptRefs", [])}, owner, "surfaces"
+                append_coverage_row(
+                    coverage["surfaces"],
+                    {**surface, "receiptRefs": surface.get("receiptRefs", [])},
+                    owner,
+                    "surfaces",
                 )
-                if retained_surface not in coverage["surfaces"]:
-                    coverage["surfaces"].append(copy.deepcopy(retained_surface))
     for relative, draft, worker_id in all_sources:
         selection = source_coverage_selection(relative, worker_id)
         selected_coverage_superseded, selected_candidates, superseded, retain_pending = selection
@@ -2294,14 +2303,14 @@ def merge_saved_results(
                         None,
                     )
                     if existing is not None:
+                        if project_worker_coverage and worker_id is not None:
+                            worker_row_owners[id(existing)] = worker_id
                         if field == "surfaces" and id(source_item) in linked_surface_sources:
                             linked_surface_outputs[id(source_item)] = existing
                         continue
-                retained = retained_coverage_row(item, worker_id, field)
-                if retained not in output:
-                    output.append(retained)
+                retained = append_coverage_row(output, item, worker_id, field)
                 if field == "surfaces" and id(source_item) in linked_surface_sources:
-                    linked_surface_outputs[id(source_item)] = output[output.index(retained)]
+                    linked_surface_outputs[id(source_item)] = retained
 
     identities: dict[str, str] = {}
     for finding in findings:
@@ -2335,13 +2344,13 @@ def merge_saved_results(
         for surface in surfaces if isinstance(surfaces, list) else []:
             if not isinstance(surface, dict):
                 continue
-            owner, identity = surface.get("workerId"), surface.get("id")
+            owner, identity = worker_row_owners.get(id(surface)), surface.get("id")
             if isinstance(owner, str) and isinstance(identity, str):
                 worker_surfaces.setdefault((owner, identity), surface)
         for task in output_tasks if isinstance(output_tasks, list) else []:
             if (
                 not isinstance(task, dict)
-                or not isinstance(owner := task.get("workerId"), str)
+                or (owner := worker_row_owners.get(id(task))) is None
                 or not isinstance(task.get("surfaceIds"), list)
             ):
                 continue

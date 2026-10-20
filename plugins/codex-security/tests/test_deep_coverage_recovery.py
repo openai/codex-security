@@ -90,7 +90,10 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
 
 
 @pytest.mark.parametrize("collision", [False, True])
-def test_worker_links_follow_final_ids_without_redirecting_parent_links(tmp_path, collision):
+@pytest.mark.parametrize("parent_has_worker_metadata", [False, True])
+def test_worker_links_follow_final_ids_without_redirecting_parent_links(
+    tmp_path, collision, parent_has_worker_metadata
+):
     surface = {"id": "api", "label": "Worker review", "disposition": "needs_follow_up"}
     source = worker(
         tmp_path,
@@ -103,14 +106,20 @@ def test_worker_links_follow_final_ids_without_redirecting_parent_links(tmp_path
         ),
     )
     parent_id = "first/api" if collision else "parent-api"
+    parent_metadata = {"workerId": "first"} if parent_has_worker_metadata else {}
     write_saved_parent(
         tmp_path,
         saved_draft(
             "coverage-scan",
             complete=True,
-            surfaces=[{**surface, "id": parent_id, "label": "Parent review"}],
+            surfaces=[{**surface, "id": parent_id, "label": "Parent review", **parent_metadata}],
             deferred=[
-                {"id": "parent-review", "reason": "Review parent.", "surfaceIds": [parent_id]}
+                {
+                    "id": "parent-review",
+                    "reason": "Review parent.",
+                    "surfaceIds": [parent_id],
+                    **parent_metadata,
+                }
             ],
         ),
         200,
