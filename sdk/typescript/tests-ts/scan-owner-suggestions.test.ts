@@ -29,9 +29,8 @@ async function fixture() {
   source.findings.findings[0]!.occurrenceId = "occurrence-one";
   const result = new ScanResult({
     ...source,
-    scanDir: join(repository, "output"),
+    scanDir: await temporaryDirectory(),
   });
-  await mkdir(result.scanDir);
   return { repository, result };
 }
 

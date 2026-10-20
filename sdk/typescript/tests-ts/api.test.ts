@@ -149,6 +149,8 @@ test.each([
   "prompt-files",
   "owner-success",
   "owner-failure",
+  "owner-success-receipt-lost",
+  "owner-failure-receipt-lost",
 ])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
@@ -169,19 +171,21 @@ test.each([
     const promptFile = join(root, "instructions.md");
     if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
     const ownerScenario = scenario.startsWith("owner-");
+    const ownerFailure = scenario.startsWith("owner-failure");
+    const receiptLost = scenario.endsWith("receipt-lost");
     const ownerPath = join(scanDir, "owner-suggestions.json");
     const ownerSpy = ownerScenario
       ? spyOn(ownerArtifacts, "writeScanOwnerSuggestions").mockImplementation(
           async () => {
-            if (scenario === "owner-failure")
-              throw new Error("Synthetic owner failure");
+            if (ownerFailure) throw new Error("Synthetic owner failure");
+            await writeFile(ownerPath, "{}\n");
             return ownerPath;
           },
         )
       : undefined;
     let modelCalls = 0;
     let completed = false;
-    let loseReceipt = scenario === "receipt-lost";
+    let loseReceipt = receiptLost;
     const makeClient = async (attempt: number) => {
       const codexHome = join(root, `codex-home-${attempt}`);
       await mkdir(codexHome);
@@ -239,24 +243,16 @@ test.each([
     const first = await makeClient(1);
     let original: Record<string, unknown> | undefined;
     try {
-      if (
-        scenario === "completed" ||
-        scenario === "prompt-files" ||
-        ownerScenario
-      )
-        original = (
-          await first.run(repository, {
-            workflowId,
-            ownerSuggestions: ownerScenario || undefined,
-            ...(scenario === "prompt-files"
-              ? { scanPromptFile: promptFile }
-              : {}),
-          })
-        ).toJSON();
-      else
-        await expect(first.run(repository, { workflowId })).rejects.toThrow(
+      const options = {
+        workflowId,
+        ownerSuggestions: ownerScenario || undefined,
+        ...(scenario === "prompt-files" ? { scanPromptFile: promptFile } : {}),
+      };
+      if (receiptLost || scenario === "scan-interrupted")
+        await expect(first.run(repository, options)).rejects.toThrow(
           "Synthetic",
         );
+      else original = (await first.run(repository, options)).toJSON();
     } finally {
       await first.close();
     }
@@ -278,11 +274,13 @@ test.each([
       if (ownerScenario) {
         expect(ownerSpy).toHaveBeenCalledTimes(1);
         expect(result.ownerSuggestionsPath).toBe(
-          scenario === "owner-success" ? ownerPath : undefined,
+          ownerFailure ? undefined : ownerPath,
         );
         expect(result.ownerSuggestionsError).toBe(
-          scenario === "owner-failure" ? "Synthetic owner failure" : undefined,
+          ownerFailure ? "Synthetic owner failure" : undefined,
         );
+        if (!ownerFailure)
+          expect(await readFile(ownerPath, "utf8")).toBe("{}\n");
       }
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
       expect(

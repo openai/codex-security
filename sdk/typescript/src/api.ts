@@ -774,7 +774,7 @@ export class CodexSecurity {
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
         if (completed)
-          metadata = {
+          metadata ??= {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
           };
@@ -801,8 +801,17 @@ export class CodexSecurity {
       }
     }
     await workflow.begin("scan");
+    let metadata: ScanMetadata | undefined;
     try {
       const result = await this.#run(repository, options, local);
+      metadata = {
+        threadId: result.threadId,
+        turnResult: result.turnResult,
+        sarifPath: result.sarifPath,
+        repositoryFindings: result.repositoryFindings,
+        ownerSuggestionsPath: result.ownerSuggestionsPath,
+        ownerSuggestionsError: result.ownerSuggestionsError,
+      };
       await workflow.protectArtifacts(result.scanDir);
       await workflow.bind({
         scanId: result.manifest.scan.id,
@@ -813,17 +822,10 @@ export class CodexSecurity {
           coverage: result.coverage,
         }),
       });
-      await workflow.complete("scan", {
-        threadId: result.threadId,
-        turnResult: result.turnResult,
-        sarifPath: result.sarifPath,
-        repositoryFindings: result.repositoryFindings,
-        ownerSuggestionsPath: result.ownerSuggestionsPath,
-        ownerSuggestionsError: result.ownerSuggestionsError,
-      } satisfies ScanMetadata);
+      await workflow.complete("scan", metadata);
       return result;
     } catch (error) {
-      await workflow.fail("scan", error);
+      await workflow.fail("scan", error, metadata);
       throw error;
     }
   }
