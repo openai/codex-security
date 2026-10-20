@@ -1,12 +1,14 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures("runtime-zip-");
+const execFileAsync = promisify(execFile);
 afterEach(cleanup);
 
 for (const scenario of [
@@ -40,7 +42,8 @@ for (const scenario of [
         const fifo = spawnSync("mkfifo", [join(root, "replacement.fifo")]);
         expect(fifo.status, fifo.stderr?.toString()).toBe(0);
       }
-      const child = spawnSync(
+      // Avoid Bun's stale synchronous-process timeout on Windows.
+      const { stdout } = await execFileAsync(
         process.execPath,
         [
           fileURLToPath(
@@ -51,9 +54,7 @@ for (const scenario of [
         ],
         { encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" },
       );
-      expect(child.error, child.stderr).toBeUndefined();
-      expect(child.status, child.stderr).toBe(0);
-      expect(JSON.parse(child.stdout)).toEqual({ scenario, passed: true });
+      expect(JSON.parse(stdout)).toEqual({ scenario, passed: true });
     },
   );
 }
