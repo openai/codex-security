@@ -5,6 +5,26 @@ export type {
 } from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
 export {
+  runHostedRemediation,
+  HostedRemediationInputSchema,
+  HostedRemediationPreparationError,
+} from "./hosted-remediation.js";
+export type {
+  HostedRemediationInput,
+  HostedRemediationOptions,
+  HostedRemediationResult,
+  RemediationExecutor,
+  RemediationExecutionRequest,
+  RemediationExecutionResult,
+  RemediationExecutionEvent,
+} from "./hosted-remediation.js";
+export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
+export type {
+  FindingPatch,
+  FindingVerification,
+  FindingVerificationCheck,
+} from "./remediation.js";
+export {
   runHostedScan,
   HostedScanInputSchema,
   HostedScanPreparationError,
@@ -70,7 +90,7 @@ export type {
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
-export type { DeepScanProgress } from "./deep-progress.js";
+export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";

@@ -139,7 +139,12 @@ export function composeReleaseNotes(generatedNotes, releaseSummary) {
     releaseSummary,
     releaseSummaryEnd,
     "",
+    "<details>",
+    "<summary>All changes</summary>",
+    "",
     generatedNotes,
+    "",
+    "</details>",
   ].join("\n");
 }
 

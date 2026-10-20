@@ -670,6 +670,82 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_directory_snapshots_exclude_svn_metadata(tmp_path: Path, git: bool) -> None:
+    target = tmp_path / "target"
+    if git:
+        initialize_unborn_git_repository(target)
+    else:
+        target.mkdir()
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "pristine" / "base"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    if git:
+        subprocess.run(["git", "add", "--force", "."], cwd=target, check=True)
+
+    original = directory_content_digest(target)
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target) == 1
+    for path in metadata:
+        path.write_text("metadata changed\n")
+    assert directory_content_digest(target) == original
+    assert count_files(target) == 1
+    source.write_text("source changed\n")
+    assert directory_content_digest(target) != original
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("scope", [".", "nested[scope]"])
+def test_worktree_snapshots_exclude_svn_metadata(tmp_path: Path, tracked: bool, scope: str) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    target = repository / scope
+    target.mkdir(exist_ok=True)
+    source = target / ".svn-backup" / "app.py"
+    source.parent.mkdir()
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "entries"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    subprocess.run(["git", "add", str(source)], cwd=repository, check=True)
+    if tracked:
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "Synthetic source and metadata"], cwd=repository, check=True
+    )
+
+    original = worktree_content_digest(target)
+    for path in metadata:
+        path.write_text("updated metadata\n")
+    assert worktree_content_digest(target) == original
+    source.write_text("updated source\n")
+    assert worktree_content_digest(target) != original
+
+
+@pytest.mark.parametrize("scope", [".svn", "nested/.svn"])
+def test_git_directory_snapshots_exclude_svn_junctions(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None], scope: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = target / scope
+    metadata.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state").write_text("metadata\n")
+    junction_factory(metadata / "linked", outside)
+
+    assert workbench_target.git_directory_snapshot_paths(target) == [source]
+
+
 def test_windows_inventory_batches_wide_untracked_trees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -943,6 +1019,31 @@ def test_git_metadata_preserves_unicode_commit_subject(
     assert WORKBENCH_TARGET["git_bytes"](
         target, "show", "-s", "--format=%s", "HEAD"
     ) == f"{subject}\n".encode("utf-8")
+
+
+@pytest.mark.cross_platform
+def test_git_metadata_ignores_signature_output_in_commit_subject(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    headers = subprocess.check_output(["git", "cat-file", "commit", "HEAD"], cwd=target).split(
+        b"\n\n", 1
+    )[0]
+    # A synthetic signature reproduces Git's extra output without a signing tool.
+    commit = headers + (
+        b"\ngpgsig -----BEGIN SSH SIGNATURE-----\n synthetic\n -----END SSH SIGNATURE-----"
+        b"\n\nSigned subject\n"
+    )
+    revision = (
+        subprocess.check_output(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=target, input=commit
+        )
+        .decode()
+        .strip()
+    )
+    subprocess.run(["git", "update-ref", "HEAD", revision], cwd=target, check=True)
+    subprocess.run(["git", "config", "log.showSignature", "true"], cwd=target, check=True)
+
+    assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == "Signed subject"
 
 
 @pytest.mark.parametrize("encoding", ["cp932", "cp949"])
@@ -1233,7 +1334,7 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
     def require_streamed_diff(
         repository: Path, *args: str, **kwargs: object
     ) -> subprocess.CompletedProcess[Any]:
-        if args and args[0] == "diff":
+        if "diff" in args:
             assert kwargs.get("stdout_file") is not None
         return git_command(repository, *args, **kwargs)
 

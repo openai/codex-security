@@ -7,7 +7,11 @@ import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
-import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
+import {
+  mergedCodexConfig,
+  type CodexSecurityConfig,
+  type JsonObject,
+} from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
@@ -541,7 +545,9 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   });
   expect(selected.find((options) => options.mode === "standard")).toMatchObject(
     {
-      target: ["lib"],
+      target: [
+        join(input.root, "batch-results", "checkouts", "standard", "lib"),
+      ],
       auth: "api-key",
       maxCostUsd: 3,
       failureSeverity: "high",
@@ -633,7 +639,7 @@ test.each(["standard", "deep"] as const)(
     const selected = onTurn.mock.lastCall?.[1];
     expect(selected).toMatchObject({
       mode,
-      target: ["lib"],
+      target: [join(input.repository, "lib")],
       scanPrompt: "Review synthetic boundaries.",
       failureSeverity: "high",
       maxCostUsd: 7,
@@ -1115,6 +1121,48 @@ test("a malformed selected file fails before constructing a client", async () =>
   });
 });
 
+test("dry-run reports native defaults restored by a CLI table", async () => {
+  const input = await fixture({
+    codex: { features: { multi_agent_v2: null } },
+  });
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  const { stdout, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "scan",
+        input.repository,
+        "-c",
+        input.config,
+        "--codex",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=2",
+        "--dry-run",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+        onRun: throwing("Dry-run must not start a scan"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    dryRun: true,
+    projectConfig: {
+      sources: {
+        "codex.features.multi_agent_v2.enabled": "default",
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      },
+    },
+  });
+  expect(
+    (await mergedCodexConfig(onConfig.mock.lastCall![0]))["features"],
+  ).toMatchObject({
+    multi_agent_v2: { enabled: true, max_concurrent_threads_per_session: 2 },
+  });
+});
+
 test("dry-run uses the real SDK without initializing its runtime and reports provenance", async () => {
   const input = await fixture({
     scan: {
@@ -1355,7 +1403,9 @@ test.each([
           codexHome: input.root,
           model,
           onUsage: options?.onUsage,
-          onCost: options?.onCost,
+          onCost: (cost, complete) => {
+            if (complete) options?.onCost?.(cost);
+          },
         });
         tracker.start("synthetic-scan-thread");
         await tracker.stop(usage);

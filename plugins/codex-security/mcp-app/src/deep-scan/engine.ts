@@ -1,5 +1,6 @@
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
+import { workbenchArgs } from "../workbench-arguments.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import type { DeepScanParentTurn } from "./permission-profile-preflight.js";
@@ -75,22 +76,14 @@ export function startDeepScanEngine(options: {
         );
       },
       onStopped: async (stopped) => {
-        await runWorkbench([
-          "preserve-scan-results",
-          "--scan-id",
-          stopped.scanId,
-          "--thread-id",
-          threadId,
-          ...(handoffClaimToken === undefined
-            ? []
-            : ["--claim-token", handoffClaimToken]),
-          ...(stopped.coordinatorGeneration === undefined
-            ? []
-            : [
-                "--coordinator-generation",
-                String(stopped.coordinatorGeneration),
-              ]),
-        ]);
+        await runWorkbench(
+          workbenchArgs("preserve-scan-results", {
+            scanId: stopped.scanId,
+            threadId,
+            claimToken: handoffClaimToken,
+            coordinatorGeneration: stopped.coordinatorGeneration,
+          }),
+        );
       },
     },
   });

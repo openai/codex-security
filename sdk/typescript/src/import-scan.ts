@@ -66,6 +66,7 @@ export interface ImportScanDependencies {
   environment?: ProcessEnvironment;
   runWorkbench?: typeof runWorkbench;
   resolvePluginPython?: typeof resolvePluginPython;
+  onWarning?: (warning: string) => void;
 }
 
 const IMPORT_DESCRIPTION =
@@ -364,6 +365,14 @@ export async function importScan(
     }
     throw error;
   } finally {
-    await cleanupSdkDirectory(workspace);
+    await cleanupSdkDirectory(workspace).catch((error: unknown) => {
+      void Promise.resolve()
+        .then(() =>
+          dependencies.onWarning?.(
+            `Could not clean up after the Codex Security import: ${errorMessage(error)}`,
+          ),
+        )
+        .catch(() => {});
+    });
   }
 }

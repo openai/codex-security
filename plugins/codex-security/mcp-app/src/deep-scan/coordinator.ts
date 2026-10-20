@@ -130,7 +130,13 @@ export class DeepScanCoordinator {
   constructor(private readonly options: CoordinatorOptions) {
     this.state = cloneState(options.run);
     this.clock = options.clock ?? systemClock;
-    this.log = options.log ?? (() => undefined);
+    this.log = (event) => {
+      try {
+        void Promise.resolve(options.log?.(event)).catch(() => {});
+      } catch {
+        // Optional logging must not interrupt scan control flow.
+      }
+    };
     this.artifacts = createDeepScanArtifacts(this.state.scanDir);
     const workerOptions = {
       run: this.state,

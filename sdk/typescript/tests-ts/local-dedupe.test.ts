@@ -1,6 +1,10 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { existsSync } from "node:fs";
-import { setTimeout as delay } from "node:timers/promises";
+import { getEventListeners } from "node:events";
+import {
+  setTimeout as delay,
+  setImmediate as nextTurn,
+} from "node:timers/promises";
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -16,6 +20,7 @@ import { FindingWorkflow } from "../src/finding-workflow.js";
 import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
+  OpenAiFindingEmbedder,
   type FindingEmbedder,
 } from "../src/server/embeddings.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
@@ -793,11 +798,16 @@ test("embedding writes reject stale content and reuse certified vectors", async 
   ).rejects.toThrow("Missing embedding credentials");
 });
 
-test.each(["failure", "cancellation"] as const)(
+test.each([
+  "failure",
+  "cancellation",
+  "pending resolution",
+  "pending rejection",
+] as const)(
   "preparation checkpoints batches and reuses them after a later %s",
   async (failure) => {
     const f = await fixture();
-    const findings = Array.from({ length: 65 }, (_, index) => ({
+    const findings = Array.from({ length: 129 }, (_, index) => ({
       ...f.document.findings[0]!,
       findingId: `csf_batch_${index}`,
       fingerprints: {
@@ -809,13 +819,19 @@ test.each(["failure", "cancellation"] as const)(
     const controller = new AbortController();
     const reason = new Error(`Later batch ${failure}`);
     const batches: Finding[][] = [];
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
     const interrupted = f.local(
       {
         async embed(batch) {
           batches.push([...batch]);
           if (batches.length === 2) {
             if (failure === "failure") throw reason;
-            controller.abort(reason);
+            if (failure === "cancellation") controller.abort(reason);
+            else {
+              entered.resolve();
+              await release.promise;
+            }
           }
           return await f.embed(batch);
         },
@@ -823,9 +839,25 @@ test.each(["failure", "cancellation"] as const)(
       false,
       controller.signal,
     );
-    await expect(interrupted.prepare(findings, f.targetId)).rejects.toBe(
-      reason,
+    const preparation = interrupted.prepare(findings, f.targetId);
+    const settled = preparation.then(
+      () => undefined,
+      (error: unknown) => error,
     );
+    try {
+      if (failure.startsWith("pending")) {
+        await Promise.race([entered.promise, preparation]);
+        controller.abort(reason);
+        expect(await Promise.race([settled, nextTurn()])).toBe(reason);
+      }
+      await expect(preparation).rejects.toBe(reason);
+    } finally {
+      if (failure === "pending rejection")
+        release.reject(new Error("Synthetic late embedding failure"));
+      else release.resolve();
+      await settled;
+      await nextTurn();
+    }
     expect(batches).toHaveLength(2);
     expect(batches[0]!.length).toBeGreaterThan(1);
     const completed = new Set(batches[0]!.map((finding) => finding.findingId));
@@ -849,6 +881,97 @@ test.each(["failure", "cancellation"] as const)(
     await f
       .local({ embed: rejecting("Completed preparation must be cached") })
       .prepare(findings, f.targetId);
+  },
+);
+
+test("cancellation at embedding admission does not start the adapter", async () => {
+  const f = await fixture();
+  const finding = f.document.findings[0]!;
+  const controller = new AbortController();
+  const reason = new Error("Synthetic admission cancellation");
+  let prepared = false;
+  const addEventListener = controller.signal.addEventListener.bind(
+    controller.signal,
+  );
+  const listener = spyOn(
+    controller.signal,
+    "addEventListener",
+  ).mockImplementation((...args: Parameters<typeof addEventListener>) => {
+    addEventListener(...args);
+    if (prepared && args[0] === "abort") controller.abort(reason);
+  });
+  try {
+    const local = new LocalDeduplication(
+      f.environment,
+      { repositoryId: f.targetId },
+      f.repository,
+      controller.signal,
+      async () => {
+        prepared = true;
+        return JSON.parse(
+          JSON.stringify({
+            cacheKeys: { [finding.findingId]: "synthetic-cache-key" },
+            findingsToEmbed: [finding],
+          }),
+        );
+      },
+      f.embedding,
+    );
+    await expect(local.prepare([finding], f.targetId)).rejects.toBe(reason);
+    await nextTurn();
+    expect(f.embed).not.toHaveBeenCalled();
+  } finally {
+    listener.mockRestore();
+  }
+});
+
+test.each(["resolve", "reject"])(
+  "local preparation stops waiting for a pending key that will %s",
+  async (completion) => {
+    const f = await fixture();
+    const findings = [f.document.findings[0]!];
+    const controller = new AbortController();
+    const reason = new Error("Synthetic preparation cancellation");
+    const entered = Promise.withResolvers<void>();
+    const key = Promise.withResolvers<string>();
+    const request = mock(async () =>
+      Response.json({
+        model: EMBEDDING_MODEL,
+        data: [{ index: 0, embedding: vector }],
+      }),
+    );
+    const embedder = new OpenAiFindingEmbedder(
+      () => {
+        entered.resolve();
+        return key.promise;
+      },
+      request,
+      undefined,
+      controller.signal,
+    );
+    const preparation = f
+      .local(embedder, false, controller.signal)
+      .prepare(findings, f.targetId);
+    const settled = preparation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    try {
+      await Promise.race([entered.promise, preparation]);
+      controller.abort(reason);
+      expect(await Promise.race([settled, nextTurn()])).toBe(reason);
+      expect(request).not.toHaveBeenCalled();
+      expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+    } finally {
+      if (completion === "reject")
+        key.reject(new Error("Synthetic late credential failure"));
+      else key.resolve("synthetic-key");
+      await settled;
+      await nextTurn();
+    }
+    expect(request).not.toHaveBeenCalled();
+    await f.local().prepare(findings, f.targetId);
+    expect(f.embed).toHaveBeenCalledWith(findings);
   },
 );
 

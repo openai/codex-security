@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
@@ -166,6 +166,93 @@ async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
     summaries: string[];
   }>;
 }
+
+test.each(["completed", "failed", "interrupted", "preview"] as const)(
+  "scratch cleanup failure preserves the %s import outcome",
+  async (outcome) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `scratch cleanup failure preserves the ${outcome} import outcome`,
+      )
+    )
+      return;
+    const context = await fixture();
+    const controller = new AbortController();
+    const primaryError = new Error("Synthetic import failure");
+    const warnings: string[] = [];
+    const originalRm = filesystem.rm;
+    const removing = spyOn(filesystem, "rm").mockImplementation(
+      async (path, options) => {
+        if (basename(String(path)).startsWith("codex-security-import-")) {
+          roots.track(String(path));
+          throw new Error("Synthetic scratch cleanup failure");
+        }
+        return await originalRm(path, options);
+      },
+    );
+    try {
+      const operation = importScan(
+        {
+          ...context.options,
+          dryRun: outcome === "preview",
+          signal: controller.signal,
+        },
+        {
+          ...context.dependencies,
+          onWarning: async (message) => {
+            warnings.push(message);
+            throw new Error("Synthetic warning observer failure");
+          },
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "prepare-scan-completion" && outcome === "failed")
+              throw primaryError;
+            const result = await runWorkbench(options, args, input);
+            if (args[0] === "register-cli-scan" && outcome === "interrupted")
+              controller.abort(primaryError);
+            return result;
+          },
+        },
+      );
+      if (outcome === "failed")
+        await expect(operation).rejects.toBe(primaryError);
+      else if (outcome === "interrupted") {
+        await expect(operation).rejects.toMatchObject({
+          name: "ScanInterruptedError",
+          cause: primaryError,
+        });
+      } else if (outcome === "preview") {
+        expect(await operation).toMatchObject({
+          dryRun: true,
+          findingCount: 2,
+        });
+      } else {
+        const result = completed(await operation);
+        expect(result.findings.findings).toHaveLength(2);
+        expect(
+          (await loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }))
+            .manifest.scan.id,
+        ).toBe(result.manifest.scan.id);
+      }
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("Synthetic scratch cleanup failure");
+      if (outcome === "preview") {
+        await expect(stat(context.stateDirectory)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        const scans = await storedScans(context);
+        expect(scans).toHaveLength(1);
+        expect(scans[0]!.status).toBe(
+          outcome === "completed" ? "complete" : "failed",
+        );
+        if (outcome === "completed") expect(scans[0]!.occurrence_count).toBe(2);
+      }
+    } finally {
+      removing.mockRestore();
+    }
+  },
+);
 
 test("a rejected import registration keeps existing output in place", async () => {
   const context = await fixture();
@@ -323,6 +410,49 @@ test("CSV import seals and reloads non-whitespace byte order marks in required t
   ]);
   expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
 });
+
+test.each(["\u00A0", "\u2028", "\u2029", "src/a\u2028b.py", "src/a\u2029b.py"])(
+  "CSV import retains literal fields without replaying source decisions for %j",
+  async (path) => {
+    const context = await fixture();
+    const source =
+      "\uFEFF" +
+      context.source
+        .replaceAll('"title"', '"candidate_id","title"')
+        .replaceAll(
+          '"Reported archive extraction issue"',
+          '"\uFEFF","Reported archive extraction issue"',
+        )
+        .replaceAll('"open","",""', '"closed","false_positive"," \uFEFF "')
+        .replaceAll('"src/extract.ts"', `"${path}"`);
+    await writeFile(context.options.sourcePath, source);
+    const result = completed(
+      await importScan(context.options, context.dependencies),
+    );
+    const loaded = await loadContract(result.scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+    for (const finding of loaded.findings.findings) {
+      expect(finding.locations[0]!.path).toBe(path);
+      expect(finding.extensions?.["candidateId"]).toBe("\uFEFF");
+      expect(finding.validation).toMatchObject({
+        method: "Source-reported CSV import metadata",
+        status: "closed",
+        summary: expect.stringContaining(
+          "Source close reason: false_positive\nSource note:  \uFEFF ",
+        ),
+      });
+    }
+    const decisions = await runCommand(context.python, [
+      "-c",
+      "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); print(c.execute('SELECT COUNT(*) FROM finding_decisions').fetchone()[0], c.execute('SELECT COUNT(*) FROM finding_triage').fetchone()[0])",
+      join(context.stateDirectory, "workbench.sqlite3"),
+    ]);
+    expect(decisions.status, decisions.stderr).toBe(0);
+    expect(decisions.stdout.trim()).toBe("0 0");
+    expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+  },
+);
 
 test.each(["csv", "json"] as const)(
   "empty %s imports preserve source integrity without claiming an analyzed surface",

@@ -23,7 +23,11 @@ import {
 } from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
-import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
+import {
+  scanPhaseLabel,
+  scanProgressCount,
+  type ScanProgress,
+} from "./worker-progress.js";
 
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
@@ -709,12 +713,15 @@ export class ScanDashboard {
       ),
     );
     const time = formatElapsed(elapsed);
+    const count = this.#files === null ? null : scanProgressCount(this.#files);
     const files =
-      this.#files === null
+      count === null
         ? "waiting for inventory"
-        : this.#files.filesCompleted > 0
-          ? `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`
-          : `${formatCount(this.#files.filesTotal)} in scope`;
+        : count.label === "reviews"
+          ? `${formatCount(count.completed)} / ${formatCount(count.total)} completed`
+          : count.completed > 0
+            ? `${formatCount(count.completed)} / ${formatCount(count.total)} reviewed`
+            : `${formatCount(count.total)} in scope`;
     const history = this.#activityLines(width);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
@@ -759,7 +766,10 @@ export class ScanDashboard {
         : [
             ...(this.#options.mode === "deep"
               ? []
-              : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
+              : [
+                  `  STAGE    ${this.#stage}`,
+                  `  ${count?.label === "reviews" ? "REVIEWS" : "FILES  "}  ${files}`,
+                ]),
             ...this.#tokenLines(),
             ...this.#costLines(),
             ...(this.#budget === null

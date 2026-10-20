@@ -309,13 +309,11 @@ def parse_args(description: str) -> argparse.Namespace:
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     subparsers.add_parser("local-dedupe")
-    arguments = sys.argv[1:]
-    if "--user-context-stdin" in arguments:
-        if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
-            parser.error("pass exactly one user-context transport")
-        index = arguments.index("--user-context-stdin")
-        arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
-    return parser.parse_args(arguments)
+    args = parser.parse_args()
+    if getattr(args, "user_context_stdin", False):
+        args.user_context = sys.stdin.buffer.read().decode("utf-8")
+        args.user_context_stdin = False
+    return args
 
 
 if __name__ == "__main__":

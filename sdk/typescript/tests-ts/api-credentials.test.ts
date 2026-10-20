@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { nodeCommand } from "./support/shell.js";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -342,10 +343,10 @@ describe("CodexSecurity orchestration", () => {
               shell_environment_policy: {
                 set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
               },
-              responses_api_metadata: {
-                request_trace: "preserve-configured-metadata",
-                codex_security_surface: "sdk",
-              },
+            });
+            expect(requestMetadata(options.configOverrides)).toMatchObject({
+              request_trace: "preserve-configured-metadata",
+              codex_security_surface: "sdk",
             });
             if (process.platform !== "win32") {
               expect((await stat(configPath!)).mode & 0o777).toBe(0o600);

@@ -1186,12 +1186,18 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
                 completed_turn_id=args.turn_id,
             )
             if usage["coverage"] == "unavailable":
-                return scan_context(connection, scan_id)
-            if args.turn_status != "completed":
-                if usage["coverage"] == "complete":
-                    usage["coverage"] = "partial"
-                usage["warnings"] = [*usage.get("warnings", []), f"scan_turn_{args.turn_status}"]
-            usage["completion"] = {**completion, "finalized": True}
+                if not usage.get("accountRateLimits"):
+                    return scan_context(connection, scan_id)
+                usage = {**stored["usage"], "accountRateLimits": usage["accountRateLimits"]}
+            else:
+                if args.turn_status != "completed":
+                    if usage["coverage"] == "complete":
+                        usage["coverage"] = "partial"
+                    usage["warnings"] = [
+                        *usage.get("warnings", []),
+                        f"scan_turn_{args.turn_status}",
+                    ]
+                usage["completion"] = {**completion, "finalized": True}
             cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
             with connection:
                 connection.execute(

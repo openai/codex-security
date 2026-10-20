@@ -5,8 +5,10 @@ import subprocess
 import uuid
 from pathlib import Path
 
+import pytest
 from workbench_test_support import (
     cancel_remediation_request,
+    mark_remediation_delivered,
     request_remediation,
     request_remediation_action,
     run_workbench,
@@ -17,7 +19,10 @@ from workbench_test_support import (
 )
 
 
-def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("verification_started", [False, True])
+def test_cancel_finding_remediation_request_restores_previous_state(
+    tmp_path: Path, verification_started: bool
+) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
@@ -108,14 +113,39 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     )["scan"]
 
     verify_token = str(uuid.uuid4())
-    request_remediation_action(
+    verify_requested = request_remediation_action(
         state_dir,
         occurrence_id,
         request_id,
         str(applied["findings"][0]["remediationState"]["version"]),
         "verify",
         verify_token,
+    )["scan"]["findings"][0]["remediationState"]
+    if verification_started:
+        mark_remediation_delivered(state_dir, occurrence_id, request_id, verify_token)
+        verify_requested = set_remediation(
+            state_dir,
+            occurrence_id,
+            request_id,
+            verify_token,
+            str(verify_requested["version"]),
+            "verifying",
+            "--base-revision",
+            "unversioned",
+        )["scan"]["findings"][0]["remediationState"]
+    wrong_owner = run_workbench(
+        state_dir,
+        "cancel-finding-remediation-request",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        str(uuid.uuid4()),
+        check=False,
     )
+    assert wrong_owner["returncode"] != 0
+    assert "owned by a different action token" in wrong_owner["stderr"]
     canceled_verify = cancel_remediation_request(
         state_dir, occurrence_id, request_id, verify_token
     )["scan"]
@@ -123,3 +153,34 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     assert restored_after_verify["state"] == "applied"
     assert restored_after_verify["pendingAction"] is None
     assert restored_after_verify["actionClaimToken"] is None
+    assert restored_after_verify["actionClaimedAt"] is None
+    assert restored_after_verify["actionDeliveredAt"] is None
+    assert restored_after_verify["version"] == verify_requested["version"] + 1
+    assert restored_after_verify["patchPath"] == patch_path.name
+    assert restored_after_verify["patchDigest"] == verify_requested["patchDigest"]
+    assert source.read_text() == "fixed\n"
+    replayed_verify = cancel_remediation_request(
+        state_dir, occurrence_id, request_id, verify_token
+    )["scan"]["findings"][0]["remediationState"]
+    assert replayed_verify == restored_after_verify
+
+    stale_update = set_remediation(
+        state_dir,
+        occurrence_id,
+        request_id,
+        verify_token,
+        str(verify_requested["version"]),
+        "failed",
+        check=False,
+    )
+    assert stale_update["returncode"] != 0
+    assert "This remediation request changed" in stale_update["stderr"]
+    retried_verify = request_remediation_action(
+        state_dir,
+        occurrence_id,
+        request_id,
+        str(restored_after_verify["version"]),
+        "verify",
+        str(uuid.uuid4()),
+    )["scan"]["findings"][0]["remediationState"]
+    assert retried_verify["pendingAction"] == "verify"

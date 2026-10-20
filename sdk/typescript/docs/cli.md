@@ -394,9 +394,12 @@ codex-security scan . --working-tree
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+Whole-codebase and path scans also accept ordinary directories, including SVN
+working copies. Their source inventories exclude `.git` and `.svn` metadata.
+
 `--diff` scans committed changes; `--working-tree` scans staged and unstaged
-changes. Deep scans support whole repositories and path scopes. Working-tree
-snapshots include untracked nested Git repositories. Initialized submodules must
+changes. Both require Git. Deep scans support whole repositories and path scopes.
+Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
@@ -653,7 +656,9 @@ codex-security scan-components . \
   --output-dir /path/outside/project/results
 ```
 
-Plans use repository-relative paths:
+Plans use literal repository-relative paths, so `~/src` selects a directory
+named `~` inside the repository rather than expanding the home directory.
+Existing absolute paths inside the repository are also accepted.
 
 ```json
 {
@@ -686,7 +691,8 @@ or API-key auth. SDK-selected command providers retain their authentication.
 
 From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
 Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
-planning and authentication choices.
+planning and authentication choices. Custom `createSecurity` clients receive
+absolute targets; saved plans and component receipts retain relative paths.
 
 ### Set investigation time
 
@@ -819,14 +825,28 @@ that command. Model, effort, and provider choices carry into patch-risk assessme
 Model requests include Codex Security attribution in `responses_api_metadata`:
 `codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
 `codex_security_package_version`, and `codex_security_plugin_version` when the
-selected plugin declares a version. These fields identify the workflow and
-versions producing a model request; they do not record command starts,
-completions, or failures.
+selected plugin declares a version. The shared context adds
+`codex_security_provider` for the configured provider family when the wrapper
+selects a provider, and
+`codex_security_scan_mode` for scans. Custom provider names use `custom`.
+Provider attribution reflects the wrapper's selected profile or default;
+native managed configuration may select a different provider before inference.
+The GitHub Action supplies `codex_security_integration=github_action`;
+Deep Scan workers retain the context and add `codex_security_worker_role`.
+Caller metadata, including literal dotted keys, is preserved. Connected-app
+publication uses the same request attribution; embedding requests identify
+the package and version in their `User-Agent`.
+
+These fields provide request attribution for supported inference providers, including
+Bedrock. They do not create a separate telemetry collector, record command
+starts or outcomes, or make another provider's traffic visible to OpenAI.
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
 patch-risk assessment, and Deep Scan discovery and reducer workers, including
-resumed workers. Deep Scan workers also preserve the scan's request metadata.
+resumed workers. Selected-profile settings take precedence over root settings.
+Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
+workers, including exporter choices and prompt-logging controls.
 Model-request attribution metadata remains attached when analytics are disabled.
 The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;
@@ -890,9 +910,12 @@ Preserve existing state, then choose a private `CODEX_SECURITY_STATE_DIR` outsid
 the rejected ancestor and the repository, with a full ancestor chain that passes
 the same checks. If the volume root is rejected, another directory on that
 volume cannot resolve it; use a separately provisioned volume with trusted
-ancestry. Temporary bootstrap homes also need trusted ancestry: set `TEMP` and
-`TMP` to a private directory on that volume before launching the CLI. Do not
-change the system volume's owner or ACL to make a scan run. If no suitable
+ancestry. On Windows, local runtime bootstrap directories are created beside
+`codex-home` in the state directory and removed when the SDK client closes.
+They use the same trusted ancestry checks, so sandbox write permissions on
+`TEMP` do not prevent runtime preparation. `TEMP`, `TMP`, and scan output
+locations are unchanged. Do not change the system volume's owner or ACL to
+make a scan run. If no suitable
 location is available, this layout cannot provision credentials safely under
 the current checks. Sign in again if needed; a new state directory has separate
 scan history and does not migrate credentials or reports from the old state
@@ -1043,6 +1066,8 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
+CSV scopes are literal paths relative to each checkout, including names such
+as `~/src`.
 Configured diff or working-tree scopes are rejected unless every affected row
 overrides them with a path scope. `--output-dir` requires CSV input.
 
@@ -1750,6 +1775,9 @@ scan and custom-validation prompts when the original used them:
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md
 ```
 
+Saved path scopes remain relative to the repository. Names such as `~` and
+`~/source.ts` are replayed literally; they do not select the home directory.
+
 A rerun creates a new scan. When the original has saved input identities, the
 rerun reports changes to the scan instructions or knowledge base. `scans show`
 includes the saved scope, runtime and Deep Scan settings, instruction digest,
@@ -2066,6 +2094,9 @@ It uses a read-only sandbox. Standard, Deep, and diff scans retain their existin
 validation, and `patch` still fixes and verifies findings. Both commands accept files
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
+
+Basic patching also works in ordinary directories and Git worktrees before their
+first commit. Directory change tracking excludes `.git` and `.svn` metadata.
 
 ```bash
 codex-security validate "Possible SQL injection" --effort high
