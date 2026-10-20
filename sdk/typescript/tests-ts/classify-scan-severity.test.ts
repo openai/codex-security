@@ -328,7 +328,11 @@ test.each(["id", "prefix", "latest", "missing target"])(
         : selection === "prefix"
           ? f.scanId.slice(0, 8)
           : f.scanId,
-      { environment, expectedScanId: f.scanId },
+      {
+        environment,
+        expectedScanId: f.scanId,
+        codex: recordingClassifier().codex,
+      },
       {
         currentDirectory: () =>
           selection === "latest" ? f.repository : f.caller,
@@ -358,6 +362,7 @@ test("saved severity protects repository and caller tools across concurrent look
       const result = await classifyScanSeverityInternal(
         f.scanId,
         {
+          codex: recordingClassifier().codex,
           environment: {
             ...f.environment,
             PYTHON: f.python,
