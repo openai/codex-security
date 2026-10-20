@@ -2,12 +2,13 @@ import { requestMetadata } from "./support/request-metadata.js";
 import { describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { main } from "../src/cli.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { dependencies, fakeResult } from "./cli-fixtures.js";
+import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
 
@@ -462,6 +463,105 @@ describe("read-only finding verification", () => {
     expect(stdout.text()).toBe(
       "FIXED finding-1: Original exploit rejected. Forged result.\n",
     );
+  });
+
+  test.each(["fixed", "still_vulnerable", "inconclusive"])(
+    "reports required output failure for a %s verification",
+    async (status) => {
+      const failure = new Error("Synthetic verification output failure");
+      const stdout = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() => callback(failure));
+        },
+      });
+      const emitted = new Promise<Error>((resolve) =>
+        stdout.once("error", resolve),
+      );
+      const stderr = capture();
+      const [exitCode, error] = await Promise.all([
+        main(
+          ["verify-fix", "Synthetic finding"],
+          stdout,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(
+                JSON.stringify({
+                  results: [
+                    {
+                      id: "finding-1",
+                      status,
+                      evidence: "Synthetic evidence.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+        emitted,
+      ]);
+      expect(error).toBe(failure);
+      expect(exitCode).toBe(2);
+      expect(stderr.text()).toContain(failure.message);
+      expect(stdout.listenerCount("error")).toBe(0);
+    },
+  );
+
+  test("waits for each verification result before writing the next", async () => {
+    const writes = [
+      Promise.withResolvers<() => void>(),
+      Promise.withResolvers<() => void>(),
+    ];
+    const chunks: string[] = [];
+    const stdout = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        writes[chunks.length - 1]!.resolve(callback);
+      },
+    });
+    const operation = main(
+      ["verify-fix", "First finding", "Second finding"],
+      stdout,
+      capture().stream,
+      dependencies({
+        onCodex: (_args, output) => {
+          output?.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id: "finding-1",
+                  status: "fixed",
+                  evidence: "Café evidence.",
+                },
+                {
+                  id: "finding-2",
+                  status: "still_vulnerable",
+                  evidence: "Exploit still succeeds.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      }),
+    );
+    const first = await writes[0]!.promise;
+    const firstBufferedBytes = stdout.writableLength;
+    first();
+    const second = await writes[1]!.promise;
+    second();
+    expect(await operation).toBe(1);
+    expect(chunks).toEqual([
+      "FIXED finding-1: Café evidence.\n",
+      "STILL_VULNERABLE finding-2: Exploit still succeeds.\n",
+    ]);
+    expect(firstBufferedBytes).toBe(Buffer.byteLength(chunks[0]!));
+    expect(stdout.writableEnded).toBe(false);
+    expect(stdout.listenerCount("error")).toBe(0);
+    stdout.destroy();
   });
 
   test.each([

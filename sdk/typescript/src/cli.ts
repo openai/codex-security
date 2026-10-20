@@ -5362,7 +5362,8 @@ export async function main(
             };
           }
           for (const result of results) {
-            output.write(
+            await writeCliOutput(
+              output,
               `${result.status.toUpperCase()} ${safePatchText(result.id)}: ${safePatchText(result.evidence)}\n`,
             );
           }
@@ -5661,7 +5662,7 @@ export async function main(
               validationPrompt,
             },
           );
-          if (!jsonOutput) output.write(report.text());
+          if (!jsonOutput) await writeCliOutput(output, report.text());
           const files = await changedPatchFiles(
             repository,
             patchBase,

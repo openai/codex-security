@@ -428,6 +428,67 @@ describe("scan and patch workflow", () => {
     ).toMatchObject({ type: "string" });
   });
 
+  test.each([
+    [0, false, 0],
+    [0, true, 2],
+    [130, true, 130],
+    [143, true, 143],
+  ] as const)(
+    "completes required patch output (status %i, failure %p)",
+    async (codexStatus, failOutput, expectedStatus) => {
+      const report = "Synthetic patch report: café → fixed.\n";
+      const started = Promise.withResolvers<(error?: Error) => void>();
+      const stdout = new Writable({
+        highWaterMark: 1,
+        write(_chunk, _encoding, callback) {
+          started.resolve(callback);
+        },
+      });
+      const failure = new Error("Synthetic patch output failure");
+      const emitted = failOutput
+        ? new Promise<Error>((resolve) => stdout.once("error", resolve))
+        : undefined;
+      const stderr = capture();
+      let patched = false;
+      let laterCommands = 0;
+      const operation = main(
+        ["patch", "Synthetic finding"],
+        stdout,
+        stderr.stream,
+        dependencies({
+          currentDirectory: CURRENT_REPOSITORY,
+          onCodex: (_args, output) => {
+            output?.stdout.write(report);
+            patched = true;
+            return codexStatus;
+          },
+          onRepositoryCommand: (_command, args) => {
+            if (patched) laterCommands++;
+            return args.includes("--name-only") ? "synthetic.ts\0" : "tree";
+          },
+        }),
+      );
+      const complete = await started.promise;
+      const commandsBeforeCompletion = laterCommands;
+      complete(failOutput ? failure : undefined);
+      expect(await operation).toBe(expectedStatus);
+      expect(commandsBeforeCompletion).toBe(0);
+      expect(patched).toBe(true);
+      if (failOutput) {
+        expect(await emitted).toBe(failure);
+        expect(laterCommands).toBe(0);
+        expect(stderr.text()).toContain(failure.message);
+        expect(stderr.text()).not.toContain("Patch applied.");
+      } else {
+        expect(laterCommands).toBeGreaterThan(0);
+        expect(stderr.text()).toContain("Patch applied. Files changed: 1.");
+        expect(stdout.writableEnded).toBe(false);
+      }
+      expect(stdout.listenerCount("error")).toBe(0);
+      stdout.destroy();
+    },
+  );
+
   test.each(["literal", "file", "linear"])(
     "passes custom validation instructions to the %s patch task",
     async (source) => {

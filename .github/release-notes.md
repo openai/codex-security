@@ -14,6 +14,9 @@
 - preserve sealed SARIF artifacts during export ([#1769](https://github.com/openai/codex-security/pull/1769))
 - order occurrence history by scan start time ([#1772](https://github.com/openai/codex-security/pull/1772))
 - use chronological cutoffs for explicit comparisons ([#1774](https://github.com/openai/codex-security/pull/1774))
+- await required patch and verification output ([#1777](https://github.com/openai/codex-security/pull/1777))
+- reject non-finite numbers before storage ([#1773](https://github.com/openai/codex-security/pull/1773))
+- read scan counts and latest scans together ([#1771](https://github.com/openai/codex-security/pull/1771))
 
 <!-- release-section: highlights:end -->
 
