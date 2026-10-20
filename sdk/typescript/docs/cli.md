@@ -377,7 +377,16 @@ try {
 `preflightPolicy()` checks local inputs. `previewPolicy()` previews the supplied
 in-memory draft and escapes terminal controls; editing its saved file does not
 change that object. `securityPolicyDiff()` returns a raw diff for files and other
-non-terminal uses, with an optional Python interpreter.
+non-terminal uses. Both preview methods compute the diff in Node without
+discovering or launching Python; `pythonPath` and `PYTHON` do not affect previews.
+
+The optional second argument to `securityPolicyDiff(draft, python, signal)` is
+deprecated. Interpreter paths, including paths returned by a resolver callback,
+no longer select an executable or get validated. For compatibility, an explicitly
+supplied resolver is still awaited when the draft changes, and any error it throws
+propagates. Omit that argument for new code, or pass `undefined` when supplying a
+cancellation signal. Source freshness is checked before and after computing the
+diff.
 
 `generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
 `maxCostUsd`, `signal`, and progress/cost callbacks. `answerQuestions` receives
