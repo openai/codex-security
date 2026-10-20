@@ -129,9 +129,7 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     ):
         if provenance.get(key):
             footer.append(f"- {label}: {text(str(provenance[key]), 'not recorded')}")
-    footer.append(
-        f"- Model origin: {text(str(model.get('origin', 'not recorded')), 'not recorded')}"
-    )
+    footer.append(f"- Model origin: {text(model.get('origin'), 'not recorded')}")
     footer.extend(_scope_lines(model.get("scope"), "Model scope", text))
     scan_scope = provenance.get("scanScope")
     if isinstance(scan_scope, dict):

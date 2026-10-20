@@ -1,7 +1,7 @@
 import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
   DEFAULT_DEPENDENCIES,
@@ -230,7 +230,7 @@ export async function runComponentScans(
               ...options.scanOptions,
               ...observers,
               mode: options.scanOptions?.mode ?? "standard",
-              target: receipt.paths,
+              target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
               signal: options.signal,
             });

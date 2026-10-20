@@ -74,8 +74,8 @@ importers:
         specifier: 3.4.0
         version: 3.4.0
       zod:
-        specifier: 4.6.6
-        version: 4.6.6
+        specifier: 4.6.7
+        version: 4.6.7
     devDependencies:
       '@stryker-mutator/core':
         specifier: 10.0.0
@@ -1650,8 +1650,8 @@ packages:
   yoga-layout@3.2.1:
     resolution: {integrity: sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ==}
 
-  zod@4.6.6:
-    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -2117,7 +2117,7 @@ snapshots:
 
   '@modelcontextprotocol/server@2.0.0-alpha.4':
     dependencies:
-      zod: 4.6.6
+      zod: 4.6.7
 
   '@napi-rs/canvas-android-arm64@1.0.10':
     optional: true
@@ -2657,7 +2657,7 @@ snapshots:
       '@toon-format/toon': 2.3.1
       tokenx: 1.6.0
       yaml: 2.9.1
-      zod: 4.6.6
+      zod: 4.6.7
 
   indent-string@5.0.0: {}
 
@@ -2767,7 +2767,7 @@ snapshots:
 
   mutation-server-protocol@0.4.1:
     dependencies:
-      zod: 4.6.6
+      zod: 4.6.7
 
   mutation-testing-elements@3.8.4: {}
 
@@ -3018,4 +3018,4 @@ snapshots:
 
   yoga-layout@3.2.1: {}
 
-  zod@4.6.6: {}
+  zod@4.6.7: {}

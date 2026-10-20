@@ -553,7 +553,9 @@ async function runCampaign(
             result = await security.run(checkout, {
               ...scanSettings,
               knowledgeBaseSnapshot: knowledge?.snapshot,
-              ...(task.scope === undefined ? {} : { target: [task.scope] }),
+              ...(task.scope === undefined
+                ? {}
+                : { target: [resolve(checkout, task.scope)] }),
               ...(options.knowledgeBasePaths?.length
                 ? { knowledgeBasePaths: options.knowledgeBasePaths }
                 : {}),

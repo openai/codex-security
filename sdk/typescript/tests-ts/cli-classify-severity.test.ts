@@ -117,10 +117,12 @@ test.each([
     deps.addSignalListener = (name, listener) => signals.add(name, listener);
     deps.removeSignalListener = (name, listener) =>
       signals.remove(name, listener);
-    deps.classifyScanSeverity = async (_scanId, options) => {
+    let historySignal: AbortSignal | undefined;
+    deps.runWorkbench = async (_args, _input, receivedSignal) => {
+      historySignal = receivedSignal;
       signals.emit(signal);
-      options!.signal!.throwIfAborted();
-      return result;
+      receivedSignal?.throwIfAborted();
+      throw new Error("History lookup did not observe cancellation");
     };
     expect(
       await runCapturedCli(
@@ -129,6 +131,9 @@ test.each([
         deps,
       ),
     ).toBe(expectedCode);
+    expect(historySignal).toBeInstanceOf(AbortSignal);
+    expect(historySignal!.aborted).toBe(true);
+    expect(historySignal!.reason).toBe(signal);
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   },
