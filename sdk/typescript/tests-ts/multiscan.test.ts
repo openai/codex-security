@@ -3,6 +3,7 @@ import { gitText } from "./support/shell.js";
 import { parseJsonLines, readJsonLines } from "./support/json.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   access,
   appendFile,
@@ -20,10 +21,13 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
+import { zipSync } from "fflate";
 import { main } from "../src/cli.js";
+import { loadContract } from "../src/contract.js";
+import * as contracts from "../src/contract.js";
 import { writeThreatModel } from "../src/artifact-export.js";
 import { PYTHON } from "./support/security-policy.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
@@ -40,6 +44,7 @@ import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
@@ -103,17 +108,62 @@ async function completedScan(
   completeness?: "complete" | "partial" | "unknown",
 ): Promise<ScanResult> {
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
-  await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"].map(
-      (name) => writeFile(join(outputDir, name), "{}\n"),
-    ),
-  );
+  await chmod(outputDir, 0o700);
+  await copyCompletedScanFixture(outputDir);
+  await writeFile(join(outputDir, "report.md"), "{}\n");
+  if (completeness !== undefined) {
+    const coveragePath = join(outputDir, "coverage.json");
+    const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+    coverage.completeness = completeness;
+    await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
+    await reseal(outputDir);
+  }
   const result = fakeResult([], completeness);
-  await writeFile(
-    join(outputDir, "scan-manifest.json"),
-    JSON.stringify(result.manifest),
-  );
   return { manifest: result.manifest, coverage: result.coverage } as ScanResult;
+}
+
+async function reseal(scanDir: string): Promise<void> {
+  const manifestPath = join(scanDir, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    scan: { artifacts: Array<{ path: string; sha256: string }> };
+  };
+  for (const artifact of manifest.scan.artifacts) {
+    artifact.sha256 = createHash("sha256")
+      .update(await readFile(join(scanDir, artifact.path)))
+      .digest("hex");
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+async function customPlugin(
+  root: string,
+  format: "directory" | "zip",
+): Promise<string> {
+  const files: Record<string, Uint8Array> = {};
+  for (const name of [
+    ".codex-plugin/plugin.json",
+    "schemas/scan-manifest.schema.json",
+    "schemas/findings.schema.json",
+    "schemas/coverage.schema.json",
+  ]) {
+    files[name] = await readFile(join(PLUGIN_ROOT, name));
+  }
+  const coverage = JSON.parse(
+    Buffer.from(files["schemas/coverage.schema.json"]!).toString("utf8"),
+  );
+  coverage.properties.schemaVersion = { enum: ["1.0", "custom-test"] };
+  files["schemas/coverage.schema.json"] = Buffer.from(JSON.stringify(coverage));
+  const path = join(root, format === "zip" ? "plugin.zip" : "plugin");
+  if (format === "zip") {
+    await writeFile(path, zipSync(files));
+  } else {
+    await mkdir(join(path, ".codex-plugin"), { recursive: true });
+    await mkdir(join(path, "schemas"));
+    for (const [name, bytes] of Object.entries(files)) {
+      await writeFile(join(path, name), bytes);
+    }
+  }
+  return path;
 }
 
 const completeRun: SecurityClient["run"] = async (
@@ -156,7 +206,220 @@ function options(
 
 const results = readJsonLines<Record<string, unknown>>;
 
+function receiptCost(onSerialized: () => void) {
+  const cost = {
+    model: "synthetic-model",
+    inputTokens: 1,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 1,
+    estimatedUsd: 0,
+  };
+  return {
+    ...cost,
+    toJSON() {
+      onSerialized();
+      return cost;
+    },
+  };
+}
+
 describe("multiscan", () => {
+  test("serializes receipt writes through close and drains workers before unlocking", async () => {
+    const { paths, source } = await repositoryFixture("receipt-order", "first");
+    await appendFile(paths.input, `second,${source.path},${source.revision}\n`);
+    const pause = () => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      return {
+        entered: entered.promise,
+        release: release.resolve,
+        async wait() {
+          entered.resolve();
+          await release.promise;
+        },
+      };
+    };
+    const firstWrite = pause();
+    const firstSync = pause();
+    const firstClose = pause();
+    const secondClose = pause();
+    const secondSerialized = Promise.withResolvers<void>();
+    const firstCompleted = Promise.withResolvers<void>();
+    const clientsClosing = Promise.withResolvers<void>();
+    const releaseClients = Promise.withResolvers<void>();
+    const ledger = join(paths.output, "results.jsonl");
+    const originalOpen = filesystem.open;
+    let opens = 0;
+    let closes = 0;
+    let settled = false;
+    const openSpy = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof originalOpen>) => {
+        const ordinal = String(args[0]) === ledger ? ++opens : 0;
+        const file = await Reflect.apply(originalOpen, filesystem, args);
+        if (ordinal === 0) return file;
+        const write = file.writeFile.bind(file);
+        const sync = file.sync.bind(file);
+        const close = file.close.bind(file);
+        file.writeFile = async (...writeArgs) => {
+          if (ordinal === 1) await firstWrite.wait();
+          await write(...writeArgs);
+        };
+        file.sync = async () => {
+          if (ordinal === 1) await firstSync.wait();
+          await sync();
+        };
+        file.close = async () => {
+          await (ordinal === 1 ? firstClose : secondClose).wait();
+          await close();
+        };
+        return file;
+      },
+    );
+    const configured = options(
+      paths,
+      client(
+        async (_repository, scanOptions = {}) => {
+          const second = basename(dirname(scanOptions.outputDir!)) === "second";
+          if (second) await firstWrite.entered;
+          return Object.assign(await completedScan(scanOptions.outputDir!), {
+            threatModelPath: null,
+            cost: second ? receiptCost(secondSerialized.resolve) : null,
+          });
+        },
+        async () => {
+          if (++closes === 2) clientsClosing.resolve();
+          await releaseClients.promise;
+        },
+      ),
+      {
+        workers: 2,
+        onProgress: (event) => {
+          if (event.repository === "first" && event.status === "completed") {
+            firstCompleted.resolve();
+          }
+        },
+      },
+    );
+    const operation = runMultiscan(configured);
+    void operation.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    try {
+      // Serialization is the final synchronous step before enqueueing the row.
+      await secondSerialized.promise;
+      for (const stage of [firstWrite, firstSync, firstClose]) {
+        await stage.entered;
+        expect(opens).toBe(1);
+        stage.release();
+      }
+      await secondClose.entered;
+      await firstCompleted.promise;
+      expect(opens).toBe(2);
+      expect(settled).toBe(false);
+      await expect(runMultiscan(configured)).rejects.toThrow(
+        "A multiscan supervisor is already running.",
+      );
+      secondClose.release();
+      await clientsClosing.promise;
+      expect(settled).toBe(false);
+      expect((await lstat(join(paths.output, ".lock"))).isDirectory()).toBe(
+        true,
+      );
+      releaseClients.resolve();
+      expect(await operation).toMatchObject({ completed: 2, failed: 0 });
+      expect(await results(ledger)).toMatchObject([
+        { id: "first", status: "completed" },
+        { id: "second", status: "completed" },
+      ]);
+      await expect(lstat(join(paths.output, ".lock"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      for (const stage of [firstWrite, firstSync, firstClose, secondClose]) {
+        stage.release();
+      }
+      releaseClients.resolve();
+      await operation.catch(() => {});
+      openSpy.mockRestore();
+    }
+  });
+
+  test.each(["open", "write", "sync", "close"])(
+    "stops queued receipt appends after a receipt %s failure",
+    async (failure) => {
+      const { paths, source } = await repositoryFixture(
+        "receipt-failure",
+        "first",
+      );
+      await appendFile(
+        paths.input,
+        `second,${source.path},${source.revision}\n`,
+      );
+      const failing = Promise.withResolvers<void>();
+      const secondSerialized = Promise.withResolvers<void>();
+      const injected = new Error(`Synthetic receipt ${failure} failure`);
+      const rejectAppend = async () => {
+        failing.resolve();
+        await secondSerialized.promise;
+        throw injected;
+      };
+      const ledger = join(paths.output, "results.jsonl");
+      const originalOpen = filesystem.open;
+      let opens = 0;
+      const openSpy = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof originalOpen>) => {
+          const ordinal = String(args[0]) === ledger ? ++opens : 0;
+          if (ordinal === 1 && failure === "open") await rejectAppend();
+          const file = await Reflect.apply(originalOpen, filesystem, args);
+          if (ordinal !== 1) return file;
+          const write = file.writeFile.bind(file);
+          const sync = file.sync.bind(file);
+          const close = file.close.bind(file);
+          file.writeFile = async (...writeArgs) => {
+            if (failure === "write") await rejectAppend();
+            await write(...writeArgs);
+          };
+          file.sync = async () => {
+            if (failure === "sync") await rejectAppend();
+            await sync();
+          };
+          file.close = async () => {
+            await close();
+            if (failure === "close") await rejectAppend();
+          };
+          return file;
+        },
+      );
+      const close = mock(async () => {});
+      const security = client(async (_repository, scanOptions = {}) => {
+        const second = basename(dirname(scanOptions.outputDir!)) === "second";
+        if (second) await failing.promise;
+        return Object.assign(await completedScan(scanOptions.outputDir!), {
+          threatModelPath: null,
+          cost: second ? receiptCost(secondSerialized.resolve) : null,
+        });
+      }, close);
+      try {
+        await expect(
+          runMultiscan(options(paths, security, { workers: 2 })),
+        ).rejects.toBe(injected);
+        expect(opens).toBe(1);
+        expect(close).toHaveBeenCalledTimes(2);
+        await expect(lstat(join(paths.output, ".lock"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        openSpy.mockRestore();
+      }
+    },
+  );
+
   test.each([false, true])(
     "only links current models from failed child runs with recovery=%p",
     async (recovery) => {
@@ -466,6 +729,180 @@ describe("multiscan", () => {
       { status: "failed", error: failure },
     ]);
   });
+
+  const interruptedUtf8Cases: [string, number, boolean][] = [
+    ["é", 1, false],
+    ["中", 1, false],
+    ["中", 2, false],
+    ["🧪", 1, false],
+    ["🧪", 2, false],
+    ["🧪", 3, false],
+    ["malformed prefix", 0, true],
+  ];
+  test.each(interruptedUtf8Cases)(
+    "recovery preserves interrupted %s after %d UTF-8 bytes (malformed prefix=%p)",
+    async (character, length, malformedPrefix) => {
+      const paths = await fixture();
+      const task = {
+        id: "complete",
+        repository: join(paths.root, "unused-source"),
+        revision: "a".repeat(40),
+        mode: "standard",
+      };
+      const outputDir = join(paths.output, "artifacts", task.id, "attempt-1");
+      await completedScan(outputDir);
+      const artifacts = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+        "report.md",
+      ].map((name) => join(outputDir, name));
+      const before = await Promise.all(artifacts.map((path) => readFile(path)));
+      await writeFile(
+        paths.input,
+        `id,repository,revision\n${task.id},${task.repository},${task.revision}\n`,
+      );
+      await writeFile(
+        join(paths.output, "manifest.json"),
+        JSON.stringify({ version: 2, tasks: [task] }, null, 2) + "\n",
+      );
+      let prefix = Buffer.from(
+        JSON.stringify({
+          ...task,
+          status: "completed",
+          attempt: 1,
+          outputDir,
+          error: "prefix marker é中🧪",
+        }) + "\n",
+      );
+      if (malformedPrefix) {
+        const offset = prefix.indexOf("prefix marker");
+        expect(offset).toBeGreaterThan(-1);
+        prefix = Buffer.concat([
+          prefix.subarray(0, offset),
+          Buffer.from([0xff, 0xfe]),
+          prefix.subarray(offset + "prefix marker".length),
+        ]);
+      }
+      const receipt = Buffer.from(
+        JSON.stringify({
+          ...task,
+          status: "failed",
+          attempt: 2,
+          error: character,
+        }) + "\n",
+      );
+      // The malformed prefix made the old offset retain this byte and add NULs.
+      const tail = malformedPrefix
+        ? Buffer.from([0xf0])
+        : receipt.subarray(
+            0,
+            receipt.lastIndexOf(Buffer.from(character)) + length,
+          );
+      const ledger = join(paths.output, "results.jsonl");
+      await writeFile(ledger, Buffer.concat([prefix, tail]));
+      const createSecurity = mock(
+        throwing("Completed task must not start a client"),
+      );
+      const recoverScan = mock(rejecting("Completed task must not be resumed"));
+      for (const _ of [1, 2]) {
+        expect(
+          await runMultiscan({
+            inputPath: paths.input,
+            outputDir: paths.output,
+            mode: "standard",
+            workers: 1,
+            maxAttempts: 1,
+            config: {},
+            createSecurity,
+            recoverScan,
+          }),
+        ).toEqual({
+          total: 1,
+          completed: 1,
+          failed: 0,
+          skipped: 1,
+          resultsPath: ledger,
+        });
+        expect(createSecurity).not.toHaveBeenCalled();
+        expect(recoverScan).not.toHaveBeenCalled();
+        expect(await readFile(ledger)).toEqual(prefix);
+        const backups = (await readdir(paths.output)).filter((name) =>
+          name.startsWith("results.jsonl.interrupted-"),
+        );
+        expect(backups).toHaveLength(1);
+        expect(await readFile(join(paths.output, backups[0]!))).toEqual(tail);
+        expect(
+          await Promise.all(artifacts.map((path) => readFile(path))),
+        ).toEqual(before);
+      }
+    },
+  );
+
+  test.each(["backup", "truncate"] as const)(
+    "recovery preserves interrupted receipt bytes when %s fails",
+    async (operation) => {
+      const { paths } = await repositoryFixture("interrupted-receipt");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run));
+      const initial = await runMultiscan(configured);
+      const original = await readFile(initial.resultsPath);
+      const tail = Buffer.concat([
+        Buffer.from('{"error":"'),
+        Buffer.from([0xc3]),
+      ]);
+      const damaged = Buffer.concat([original, tail]);
+      await writeFile(initial.resultsPath, damaged);
+      const failure = new Error(`Synthetic receipt ${operation} failure`);
+      const recoverScan = mock(async () => undefined);
+      const originalWriteFile = filesystem.writeFile;
+      const originalTruncate = filesystem.truncate;
+      const backupSpy = spyOn(filesystem, "writeFile").mockImplementation(
+        async (...args) => {
+          if (
+            operation === "backup" &&
+            String(args[0]).startsWith(`${initial.resultsPath}.interrupted-`)
+          )
+            throw failure;
+          return await originalWriteFile(...args);
+        },
+      );
+      const truncateSpy = spyOn(filesystem, "truncate").mockImplementation(
+        async (path, length) => {
+          if (path === initial.resultsPath && operation === "truncate")
+            throw failure;
+          return await originalTruncate(path, length);
+        },
+      );
+      try {
+        await expect(runMultiscan({ ...configured, recoverScan })).rejects.toBe(
+          failure,
+        );
+        expect(await readFile(initial.resultsPath)).toEqual(damaged);
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(recoverScan).not.toHaveBeenCalled();
+        const names = await readdir(paths.output);
+        expect(names).not.toContain(".lock");
+        const backups = names.filter((name) =>
+          name.startsWith("results.jsonl.interrupted-"),
+        );
+        if (operation === "backup") {
+          expect(backups).toHaveLength(0);
+          expect(truncateSpy).not.toHaveBeenCalled();
+        } else {
+          expect(backups).toHaveLength(1);
+          expect(await readFile(join(paths.output, backups[0]!))).toEqual(tail);
+          expect(truncateSpy).toHaveBeenCalledWith(
+            initial.resultsPath,
+            original.length,
+          );
+        }
+      } finally {
+        backupSpy.mockRestore();
+        truncateSpy.mockRestore();
+      }
+    },
+  );
 
   test("recovery skips untouched rows and saves an interrupted ledger tail before appending", async () => {
     const paths = await fixture();
@@ -1235,10 +1672,6 @@ describe("multiscan", () => {
       );
       const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
       await completedScan(outputDir, completeness);
-      await writeFile(
-        join(outputDir, "coverage.json"),
-        `${JSON.stringify({ completeness })}\n`,
-      );
       const cost = {
         model: "gpt-5.6-sol",
         inputTokens: 1_250,
@@ -2428,6 +2861,374 @@ describe("multiscan", () => {
     expect(security.run.mock.calls.length).toBe(2);
   });
 
+  test.each([
+    "malformed manifest",
+    "schema-invalid manifest",
+    "changed findings",
+    "failed",
+    "canceled",
+    "interrupted",
+  ] as const)(
+    "rescans a completed receipt with %s artifacts",
+    async (problem) => {
+      const { paths } = await repositoryFixture("resume-integrity");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run));
+      await runMultiscan(configured);
+      const [receipt] = await results(join(paths.output, "results.jsonl"));
+      const scanDir = receipt!["outputDir"] as string;
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      if (problem === "malformed manifest")
+        await writeFile(manifestPath, "{broken json");
+      else if (problem === "schema-invalid manifest")
+        await writeFile(manifestPath, "{}");
+      else if (problem === "changed findings")
+        await appendFile(join(scanDir, "findings.json"), "\n");
+      else {
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        manifest.scan.status = problem;
+        await writeFile(manifestPath, JSON.stringify(manifest));
+        expect(
+          (await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT })).manifest
+            .scan.status,
+        ).toBe(problem);
+      }
+      const savedArtifacts = () =>
+        Promise.all(
+          [
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+            "report.md",
+          ].map((name) => readFile(join(scanDir, name))),
+        );
+      const before = await savedArtifacts();
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+      });
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(await savedArtifacts()).toEqual(before);
+      expect(
+        (await results(join(paths.output, "results.jsonl"))).at(-1),
+      ).toMatchObject({
+        status: "completed",
+        attempt: 2,
+        outputDir: join(
+          paths.output,
+          "artifacts",
+          "resume-integrity",
+          "attempt-2",
+        ),
+      });
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(run).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  test.each(["completed_with_incomplete_coverage", "failed"])(
+    "validates artifacts before reusing a legacy %s receipt",
+    async (status) => {
+      const { paths } = await repositoryFixture("legacy-integrity");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run));
+      await runMultiscan(configured);
+      const ledger = join(paths.output, "results.jsonl");
+      const [receipt] = await results(ledger);
+      await writeFile(
+        ledger,
+        JSON.stringify({
+          ...receipt,
+          status,
+          error: "Multiscan repository coverage is incomplete.",
+        }) + "\n",
+      );
+      await appendFile(
+        join(receipt!["outputDir"] as string, "findings.json"),
+        "\n",
+      );
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+      });
+      expect(run).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  test.each(["directory", "zip"] as const)(
+    "uses configured %s schemas for resume and removes temporary plugin files",
+    async (format) => {
+      const { paths } = await repositoryFixture(`custom-${format}`);
+      const pluginPath = await customPlugin(paths.root, format);
+      const run = mock(completeRun);
+      const configured = options(paths, client(run), {
+        config: { pluginPath },
+      });
+      await runMultiscan(configured);
+      const [receipt] = await results(join(paths.output, "results.jsonl"));
+      const scanDir = receipt!["outputDir"] as string;
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+      coverage.schemaVersion = "custom-test";
+      await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
+      await reseal(scanDir);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow();
+      expect(await runMultiscan(configured)).toMatchObject({ skipped: 1 });
+      expect(run).toHaveBeenCalledTimes(1);
+      const clean = async () =>
+        expect(
+          (await readdir(paths.output)).filter(
+            (name) => name === ".lock" || name.startsWith(".resume-plugin-"),
+          ),
+        ).toEqual([]);
+      await clean();
+
+      await rm(pluginPath, { recursive: true, force: true });
+      await expect(runMultiscan(configured)).rejects.toThrow(
+        "Plugin path must be a directory or ZIP",
+      );
+      expect(run).toHaveBeenCalledTimes(1);
+      await clean();
+    },
+  );
+
+  test.each(["plugin resolution", "contract validation"] as const)(
+    "preserves cancellation during %s without rescanning or retaining plugin files",
+    async (phase) => {
+      const { paths } = await repositoryFixture("cancel-validation");
+      const pluginPath = await customPlugin(paths.root, "zip");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run), {
+        config: { pluginPath },
+      });
+      await runMultiscan(configured);
+      const before = await readFile(
+        join(paths.output, "results.jsonl"),
+        "utf8",
+      );
+      const controller = new AbortController();
+      const reason = new Error("Synthetic resume cancellation");
+      const resolvePlugin = runtime.resolvePluginPath;
+      const load = contracts.loadContract;
+      const resolveSpy = spyOn(runtime, "resolvePluginPath").mockImplementation(
+        async (...args) => {
+          if (phase === "plugin resolution") controller.abort(reason);
+          return await resolvePlugin(...args);
+        },
+      );
+      const loadSpy = spyOn(contracts, "loadContract").mockImplementation(
+        async (...args) => {
+          if (phase === "contract validation") controller.abort(reason);
+          return await load(...args);
+        },
+      );
+      try {
+        await expect(
+          runMultiscan({ ...configured, signal: controller.signal }),
+        ).rejects.toBe(reason);
+        expect(resolveSpy).toHaveBeenCalledWith(
+          pluginPath,
+          expect.any(String),
+          controller.signal,
+        );
+        if (phase === "contract validation")
+          expect(loadSpy).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({ signal: controller.signal }),
+          );
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(
+          await readFile(join(paths.output, "results.jsonl"), "utf8"),
+        ).toBe(before);
+        expect(
+          (await readdir(paths.output)).filter(
+            (name) => name === ".lock" || name.startsWith(".resume-plugin-"),
+          ),
+        ).toEqual([]);
+      } finally {
+        resolveSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    },
+  );
+
+  test("does not resolve a validation plugin before a new scan", async () => {
+    const { paths } = await repositoryFixture("lazy-validation");
+    const run = mock(completeRun);
+    const configured = options(paths, client(run), {
+      config: { pluginPath: join(paths.root, "unused-plugin.zip") },
+    });
+    const resolveSpy = spyOn(runtime, "resolvePluginPath");
+    try {
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+      });
+      expect(resolveSpy).not.toHaveBeenCalled();
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
+  test.each([
+    ["missing", "valid", false],
+    ["invalid JSON", "valid", false],
+    ["invalid schema", "valid", false],
+    ["missing", "malformed", false],
+    ["missing", "malformed", true],
+    ["invalid JSON", "schema-invalid", false],
+    ["invalid JSON", "schema-invalid", true],
+    ["invalid schema", "missing", false],
+    ["invalid schema", "missing", true],
+    ["async", "malformed", false],
+  ] as const)(
+    "keeps completed artifacts when the plugin schema is %s and output is %s with recovery=%p",
+    async (problem, output, recovery) => {
+      const { paths } = await repositoryFixture("schema-error");
+      const pluginPath = await customPlugin(paths.root, "directory");
+      const run = mock(completeRun);
+      const createSecurity = mock(() => client(run));
+      const configured = options(paths, client(run), {
+        config: { pluginPath },
+        createSecurity,
+      });
+      await runMultiscan(configured);
+      const ledger = join(paths.output, "results.jsonl");
+      const before = await readFile(ledger, "utf8");
+      const [receipt] = await results(ledger);
+      const scanDir = receipt!["outputDir"] as string;
+      if (output === "malformed")
+        await writeFile(join(scanDir, "findings.json"), "");
+      else if (output === "schema-invalid")
+        await writeFile(join(scanDir, "scan-manifest.json"), "{}");
+      else if (output === "missing") await rm(join(scanDir, "findings.json"));
+      const artifactBytes = async () =>
+        Promise.all(
+          [
+            "scan-manifest.json",
+            "findings.json",
+            "coverage.json",
+            "report.md",
+          ].map(async (name) =>
+            readFile(join(scanDir, name)).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code === "ENOENT") return null;
+                throw error;
+              },
+            ),
+          ),
+        );
+      const savedArtifacts = await artifactBytes();
+      const schema = join(pluginPath, "schemas", "coverage.schema.json");
+      if (problem === "missing") await rm(schema);
+      else
+        await writeFile(
+          schema,
+          problem === "invalid JSON"
+            ? "{"
+            : problem === "async"
+              ? '{"$async":true,"type":"object"}'
+              : '{"type":"not-a-schema-type"}',
+        );
+      const recoverScan = mock(async () => undefined);
+      const resumed = runMultiscan({
+        ...configured,
+        ...(recovery ? { recoverScan } : {}),
+      });
+      await expect(resumed).rejects.toBeInstanceOf(
+        contracts.ContractSchemaError,
+      );
+      await expect(resumed).rejects.toThrow("coverage.schema.json");
+      expect(createSecurity).toHaveBeenCalledTimes(1);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(recoverScan).not.toHaveBeenCalled();
+      expect(await readFile(ledger, "utf8")).toBe(before);
+      expect(await artifactBytes()).toEqual(savedArtifacts);
+      expect(
+        await readdir(join(paths.output, "artifacts", "schema-error")),
+      ).toEqual(["attempt-1"]);
+      expect(
+        (await readdir(paths.output)).filter(
+          (name) => name === ".lock" || name.startsWith(".resume-plugin-"),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  test.each([
+    ["missing", false],
+    ["unsealed", false],
+    ["failed", false],
+    ["unsealed", true],
+  ] as const)(
+    "recovery handles rejected %s output with a newer attempt=%p",
+    async (integrity, newerAttempt) => {
+      const { paths } = await repositoryFixture("invalid-recovery");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run), { maxAttempts: 3 });
+      await runMultiscan(configured);
+      const [receipt] = await results(join(paths.output, "results.jsonl"));
+      const scanDir = receipt!["outputDir"] as string;
+      const coveragePath = join(scanDir, "coverage.json");
+      if (integrity === "missing") await rm(join(scanDir, "findings.json"));
+      else if (integrity === "unsealed") await appendFile(coveragePath, "\n");
+      else {
+        const manifestPath = join(scanDir, "scan-manifest.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        manifest.scan.status = "failed";
+        await writeFile(manifestPath, JSON.stringify(manifest));
+      }
+      const before = await readFile(coveragePath, "utf8");
+      const checkout = join(paths.output, "checkouts", "invalid-recovery");
+      await mkdir(checkout, { recursive: true, mode: 0o700 });
+      await writeFile(join(checkout, "retained.txt"), "Original checkout.");
+      const nextOutput = join(
+        paths.output,
+        "artifacts",
+        "invalid-recovery",
+        "attempt-2",
+      );
+      if (newerAttempt) await completedScan(nextOutput);
+      const recoverScan = mock(async (path: string) => ({
+        ...(await loadContract(path, { pluginRoot: PLUGIN_ROOT })),
+        cost: null,
+      }));
+      const summary = await runMultiscan({ ...configured, recoverScan });
+      expect(summary).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+      expect(recoverScan).toHaveBeenCalledTimes(newerAttempt ? 1 : 0);
+      if (newerAttempt)
+        expect(recoverScan).toHaveBeenCalledWith(
+          nextOutput,
+          expect.any(Object),
+        );
+      expect(run).toHaveBeenCalledTimes(newerAttempt ? 1 : 2);
+      expect(await readFile(coveragePath, "utf8")).toBe(before);
+      if (integrity === "missing")
+        await expect(
+          lstat(join(scanDir, "findings.json")),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
+        "Original checkout.",
+      );
+      expect((await results(summary.resultsPath)).at(-1)).toMatchObject({
+        status: "completed",
+        attempt: 2,
+      });
+    },
+  );
+
   test("knowledge failures do not hide a later real scan failure behind an older completed result", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "later-failure");
@@ -3141,7 +3942,10 @@ describe("multiscan", () => {
         completedScan(scanDir),
       );
       const config: MultiscanOptions["config"] = {
-        [field]: join(paths.root, "selected-runtime"),
+        [field]:
+          field === "pluginPath"
+            ? await customPlugin(paths.root, "directory")
+            : join(paths.root, "selected-runtime"),
       };
       const configured = options(paths, security, {
         config,

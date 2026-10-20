@@ -6,15 +6,16 @@ SARIF reports.
 
 ## Quick start
 
-Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com and an OpenAI API key
+Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com or GitHub Enterprise
+Cloud on `*.ghe.com`, and an OpenAI API key
 with access to the selected model. OpenAI is the default provider. See
 [Inference providers](#inference-providers) for Bedrock, OpenRouter, and Fireworks.
 
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
 Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
-The matching `action-vX.Y.Z` tag and distribution commit are listed in each
-product release after the CLI and Action have both passed release checks.
+The matching `action-vX.Y.Z` release lists the full distribution commit SHA
+and links to the product changelog after the Action has passed release checks.
 When using a fork, replace `openai` with the fork owner.
 
 This example requests Daybreak Blue. Use an API key from a project with Blue
@@ -76,6 +77,42 @@ with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
 This setup is specific to the Linux runner. Local macOS scans use the built-in
 Seatbelt sandbox and do not need Bubblewrap. See the
 [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
+
+## Supported GitHub hosts and checkout URLs
+
+The Action supports GitHub.com and GitHub Enterprise Cloud on `*.ghe.com`.
+Checkout origins can use HTTPS, SCP-style SSH (`USER@HOST:OWNER/REPO.git`),
+or an `ssh://` URL, including an explicit port 22. Repository names and hostnames
+are compared without regard to case; a `.git` suffix and trailing slash are optional.
+
+On GitHub.com, `ssh://git@ssh.github.com:443/OWNER/REPO.git` is also supported.
+GitHub does not offer this SSH-over-443 endpoint for enterprises on `ghe.com`;
+see [GitHub's SSH-over-HTTPS guidance](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
+
+### GitHub Enterprise Cloud
+
+The workflows in this guide also support GitHub Enterprise Cloud with data
+residency at `https://SUBDOMAIN.ghe.com`. The Action reads `GITHUB_SERVER_URL`
+from the runner and requires the checkout origin to match that host and
+`GITHUB_REPOSITORY`. No additional Action input or GitHub token is needed.
+Use a reviewed Action commit containing this support.
+
+Keep `persist-credentials: false` and use the triggering repository and revision.
+HTTPS origins work with the checkout step above. For SSH origins, GitHub uses
+the enterprise subdomain as the username, such as
+`example-enterprise@example-enterprise.ghe.com:example/repo.git`.
+See [GitHub's SSH guidance](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/network-details-for-ghecom#using-ssh-with-ghecom).
+
+Report artifacts use the runner's Actions artifact service. The separate
+`github/codeql-action/upload-sarif` step uses the enterprise's code scanning
+service and requires the permissions and availability described below.
+Enterprise policies must permit the referenced actions. For Bedrock OIDC,
+configure AWS trust for the enterprise issuer at
+`https://token.actions.SUBDOMAIN.ghe.com`; see
+[GitHub's feature differences](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/feature-overview-for-github-enterprise-cloud-with-data-residency).
+
+GitHub Enterprise Server remains unsupported. The Linux x64 runtime and
+sandbox requirements apply on both supported GitHub Cloud hosts.
 
 ## Inference providers
 
@@ -429,9 +466,10 @@ Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
 SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
 audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
-`runtime/package.json` is the installed CLI version source. Main keeps the last
-published CLI pin so its checks remain runnable while a release PR prepares the
-next product version. To upgrade that development pin, update it and regenerate
+`runtime/package.json` is the installed CLI version source. Main keeps an already
+published CLI baseline so its checks remain runnable while a release PR prepares
+the next product version. This development pin does not necessarily track the
+latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
 Releases use the product version from `sdk/typescript/package.json`. Before npm
@@ -445,12 +483,16 @@ runs the Action checks in a job with read-only repository permissions.
 A fresh publisher takes only the tested runtime lock, rebuilds
 from the same source, and verifies the bundle hashes without executing the CLI.
 It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`.
+same version as `npm-vX.Y.Z`. The companion Action release includes the manifest
+and SBOM before publication, lists the full distribution commit SHA, and links
+to the npm release's canonical changelog. It is never marked Latest.
 
 The Action distribution commit differs from the CLI source commit because the
 registry integrity lock is finalized after publication. Release metadata records
 both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm. Existing version tags are never moved.
+can be rerun without republishing npm or changing its immutable release assets.
+Recovery verifies existing Action assets and can finish a partial draft release.
+Existing version tags are never moved.
 See [the release process](../RELEASING.md) for the orchestration and recovery flow.
 
 <!-- prettier-ignore-start -->
@@ -471,7 +513,7 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `provider`             | `openai`                  | Inference provider, matching scan --provider: openai, openrouter, fireworks, or amazon-bedrock. Supply the selected provider's credentials to the step.                                                                      |
 | `model`                | Unset                     | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.                                         |
 | `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
-| `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
+| `effort`               | `xhigh`                   | Reasoning effort passed to Codex; supported values depend on the model and provider.                                                                                                                                         |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
 | `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
 | `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail.                                                                         |

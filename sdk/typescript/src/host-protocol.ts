@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { type Readable, Writable } from "node:stream";
-import { z } from "incur";
+import { z } from "zod";
 
 const rpcId = z.union([z.string(), z.number().int()]);
 const envelope = z.strictObject({ jsonrpc: z.literal("2.0") });

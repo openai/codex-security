@@ -714,7 +714,8 @@ async function testCoveragePublicationParity(root: string) {
         { reason: "Review route.", paths: ["\u0085"] },
       ];
     },
-    error: /safe repository-relative/,
+    // Either validation layer can reject the whitespace-only path first.
+    error: /safe repository-relative|Invalid string: must match pattern/,
   });
   await writeFile(
     path.join(output, "artifacts/Review.md"),

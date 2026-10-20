@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { main, runCodexSkillCommand } from "../src/cli.js";
+import type { Finding } from "../src/models.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -79,7 +80,8 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (["initialize", "account/login/start", "config/read"].includes(request.method)) send({ id: request.id, result: {} });
+  if (request.method === "experimentalFeature/list") send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: true }, { name: "api_key_cyber_access_programs", enabled: true }], nextCursor: null } });
   if (request.method === "thread/start") {
     assert.equal(request.params.sandbox, "workspace-write");
     send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite" } } });
@@ -199,19 +201,20 @@ lines.on("line", (line) => {
 
   test("rejects a verified saved-finding result when no files change", async () => {
     await using fixture = await repositoryFixture();
+    const finding = {
+      occurrenceId: "occ_1",
+      findingId: "csf_1",
+      title: "Synthetic finding",
+      severity: { level: "high" },
+      locations: [{ path: "app.ts", startLine: 1 }],
+    };
     const outcome = await fixture.patch(["--scan", "scan-1"], {
+      readSavedFindings: async () => [finding as Finding],
       onWorkbench: () => ({
         scan: {
           scanId: "scan-1",
           targetPath: fixture.directory,
-          findings: [
-            {
-              occurrenceId: "occ_1",
-              title: "Synthetic finding",
-              severity: { level: "high" },
-              locations: [{ path: "app.ts", startLine: 1 }],
-            },
-          ],
+          findings: [finding],
         },
       }),
       onCodex: (_args, output) => {
@@ -260,7 +263,7 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
-  if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (["initialize", "account/login/start", "config/read"].includes(request.method)) send({ id: request.id, result: {} });
   if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");

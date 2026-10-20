@@ -751,7 +751,7 @@ def _generic_surface_updates(
     eligible_receipt_sources: set[str],
     receipt_root: Path | None = None,
     receipt_warnings: list[str] | None = None,
-) -> tuple[set[int], list[tuple[str | None, dict[str, Any]]]]:
+) -> tuple[set[int], list[tuple[str | None, dict[str, Any], set[int]]]]:
     if not closed_deferred and not reopened_generic and receipt_root is None:
         return set(), []
 
@@ -780,7 +780,7 @@ def _generic_surface_updates(
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
     replaced: set[int] = set()
-    updates: list[tuple[str | None, dict[str, Any]]] = []
+    updates: list[tuple[str | None, dict[str, Any], set[int]]] = []
     # Current selections across all surfaces take precedence over historical refs.
     receipt_paths: dict[str, str] = {}
     retained_surfaces: dict[tuple[str | None, str], dict[str, Any]] = {}
@@ -956,15 +956,21 @@ def _generic_surface_updates(
                 _validate_schema_node(update, surface_schema, "coverage.surfaces")
             except ContractError:
                 continue
-            replaced.update(
+            replaced_sources = {
                 id(row)
                 for _, row in matches
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
+            }
+            replaced.update(replaced_sources)
+            existing = next(
+                (entry for entry in updates if entry[0] == owner and entry[1] == update), None
             )
-            if (owner, update) not in updates:
+            if existing is None:
                 receipt_paths.update(replacement_paths)
-                updates.append((owner, update))
+                updates.append((owner, update, replaced_sources))
+            else:
+                existing[2].update(replaced_sources)
     return replaced, updates
 
 
@@ -2002,8 +2008,10 @@ def merge_saved_results(
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
-        for owner, surface in surface_updates:
-            append_coverage_row(coverage["surfaces"], surface, owner, "surfaces")
+        for owner, surface, replaced_sources in surface_updates:
+            retained = append_coverage_row(coverage["surfaces"], surface, owner, "surfaces")
+            for source_id in replaced_sources & linked_surface_sources:
+                linked_surface_outputs[source_id] = retained
         for surface in coverage["surfaces"]:
             if isinstance(surface, dict):
                 surface.setdefault("receiptRefs", [])

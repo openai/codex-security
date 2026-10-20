@@ -524,7 +524,8 @@ def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path, context_reporti
             "SELECT cost_json FROM scans WHERE id = ?", (scan["scanId"],)
         ).fetchone()
     assert stored is not None
-    assert json.loads(stored[0]) == cost
+    assert json.loads(stored[0]) == {"cost": cost, "usage": listed["scans"][0]["usage"]}
+    assert listed["scans"][0]["usage"]["coverage"] == "unavailable"
 
 
 def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion(

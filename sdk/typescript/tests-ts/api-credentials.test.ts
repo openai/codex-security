@@ -29,7 +29,7 @@ describe("CodexSecurity orchestration", () => {
     "profile-providers-ambient",
     "profile-inherited-cwd",
     "profile-overridden-cwd",
-    "profile-strict",
+    "profile-policy-override",
     "null optional args",
     "null optional cwd",
   ])(
@@ -40,7 +40,7 @@ describe("CodexSecurity orchestration", () => {
       const profileProviders = profile && selection !== "profile";
       const inheritedCwd = selection === "profile-inherited-cwd";
       const overriddenCwd = selection === "profile-overridden-cwd";
-      const strict = selection === "profile-strict";
+      const policyOverride = selection === "profile-policy-override";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -85,7 +85,7 @@ describe("CodexSecurity orchestration", () => {
             }
           : definition;
       const overrides = {
-        ...(strict ? { approval_policy: "never" } : {}),
+        ...(policyOverride ? { approval_policy: "never" } : {}),
         ...(profile
           ? {
               profile: "review",
@@ -93,7 +93,7 @@ describe("CodexSecurity orchestration", () => {
                 review: {
                   model_provider: "synthetic.provider",
                   service_tier: "fast",
-                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(policyOverride ? { approval_policy: "on-request" } : {}),
                   ...(profileProviders
                     ? {
                         model_providers: {
@@ -217,8 +217,8 @@ describe("CodexSecurity orchestration", () => {
             "synthetic.provider",
           );
           expect(captured?.config?.["service_tier"]).toBe("fast");
-          if (strict)
-            expect(captured?.config?.["approval_policy"]).toBe("never");
+          if (policyOverride)
+            expect(captured?.config?.["approval_policy"]).toBe("on-request");
         } else {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),

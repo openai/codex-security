@@ -296,6 +296,7 @@ describe("plugin runtime preparation", () => {
       "OPENAI_API_KEY",
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
+      "CHEAPER_INFERENCE_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
       "AWS_ACCESS_KEY_ID",
       "AWS_SECRET_ACCESS_KEY",
@@ -2472,10 +2473,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     ]);
   });
 
-  test("upgrades a cached plugin without deleting persistent credentials", async () => {
+  test("upgrades the prior 0.1.25 bundle without deleting persistent credentials", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.4");
+    const previous = await plugin(join(root, "previous"), "0.1.25");
     const home = join(root, "home");
     const configPath = join(home, "config.toml");
     const marketplace = join(home, "sdk-marketplace");
@@ -2543,12 +2543,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
 
     expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "1.2.3",
+      "0.1.25",
     );
-    const upgraded = await bootstrapPlugin(home, next, options);
+    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
 
-    expect(upgraded.version).toBe("1.2.4");
-    expect(upgraded.installedRoot).toBe(join(pluginCache, "1.2.4"));
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.installedRoot).toBe(
+      join(pluginCache, BUNDLED_PLUGIN_VERSION),
+    );
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
       '{"token":"preserved"}\n',
     );
@@ -2558,7 +2560,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(await readFile(configPath, "utf8")).toContain(
       `[projects.${JSON.stringify(join(root, "unrelated-project"))}]`,
     );
-    expect(existsSync(join(pluginCache, "1.2.3"))).toBe(false);
+    expect(existsSync(join(pluginCache, "0.1.25"))).toBe(false);
     expect(calls).toEqual([
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
@@ -3841,8 +3843,9 @@ describe("runtime directories and plugin Python boundary", () => {
         const result = await outcome;
         if (kind === "unsafe") {
           expect(result.error).toMatchObject({
-            message:
+            message: expect.stringContaining(
               "Windows credential-home ancestor allows another identity to replace the directory",
+            ),
           });
           expect(attempts).toBe(1);
         } else {
@@ -3879,6 +3882,52 @@ describe("runtime directories and plugin Python boundary", () => {
       "Windows credential-home ancestor allows another identity to replace the directory",
     );
   });
+
+  test.each(["parent", "volume root"] as const)(
+    "identifies an Everyone-owned %s in streamed Windows ACL descriptors",
+    async (location) => {
+      const { home } = await credentialHome(false);
+      const sid = "S-1-5-21-111-222-333-1001";
+      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const ancestors = credentialAncestors(home, directory);
+      const rejected = location === "parent" ? dirname(home) : parse(home).root;
+      ancestors[location === "parent" ? 0 : ancestors.length - 1] =
+        `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
+
+      const failure = await inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
+        ],
+      }).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        `ancestor could not be trusted: ${rejected}.`,
+      );
+      expect((failure as Error).message).toContain(
+        "Windows credential ACL owner is not a trusted principal: S-1-1-0",
+      );
+      expect((failure as Error).cause).toMatchObject({
+        message:
+          "Windows credential ACL owner is not a trusted principal: S-1-1-0",
+      });
+      if (location === "volume root") {
+        expect((failure as Error).message).toContain(
+          "volume root is unsupported",
+        );
+        expect((failure as Error).message).toContain(
+          "another directory on the same volume will not resolve this",
+        );
+      } else {
+        expect((failure as Error).message).toContain(
+          "Choose a location outside this ancestor",
+        );
+        expect((failure as Error).message).not.toContain("volume root");
+      }
+    },
+  );
 
   test("rejects incomplete combined Windows credential ACL inspections", async () => {
     const { home } = await credentialHome(false);
@@ -4481,6 +4530,55 @@ describe("runtime directories and plugin Python boundary", () => {
         user,
       ).grantsCurrentUserAccess,
     ).toBe(false);
+  });
+
+  test("preserves the public Windows ACL diagnosis for long ancestor paths", async () => {
+    const root = await temporaryDirectory();
+    const ancestor = join(
+      root,
+      ...Array.from({ length: 8 }, (_, index) =>
+        `ancestor-${index}-`.padEnd(80, "x"),
+      ),
+    );
+    const home = join(ancestor, "codex-home");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const descriptor = `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
+    const failure = await requirePrivateCredentialHome(
+      await lstat(root),
+      home,
+      {
+        platform: "win32",
+        secureWindowsHome: async (path) => {
+          await inspectWindowsCredentialAclSnapshot(path, sid, {
+            command: process.execPath,
+            args: [
+              "--eval",
+              `process.stdout.write(${JSON.stringify(`${descriptor}\n`)})`,
+            ],
+          });
+        },
+      },
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "Unable to create a private Windows credential home",
+    );
+    expect((failure as Error).message).toContain(
+      `ancestor could not be trusted: ${ancestor}.`,
+    );
+    expect((failure as Error).message).toContain(
+      "owner is not a trusted principal: S-1-1-0",
+    );
+    expect((failure as Error).message).toContain(
+      "Choose a location outside this ancestor with trusted ownership and permissions.",
+    );
+    expect((failure as Error).cause).toMatchObject({
+      cause: {
+        message:
+          "Windows credential ACL owner is not a trusted principal: S-1-1-0",
+      },
+    });
   });
 
   test("preserves Windows ACL subprocess failures", async () => {
@@ -5838,6 +5936,51 @@ describe("runtime directories and plugin Python boundary", () => {
         ),
       ).toBe(output);
       expect(archived).toHaveLength(1);
+    },
+  );
+
+  test.each([
+    { name: "scan", prepare: prepareOutputDir },
+    { name: "registration", prepare: prepareScanRegistrationOutput },
+  ])(
+    "cleans up unnamed $name output after chmod failure",
+    async ({ prepare }) => {
+      for (const nonempty of [false, true]) {
+        const root = await temporaryDirectory();
+        const failure = new Error("Synthetic output chmod failure");
+        const originalChmod = fsPromises.chmod;
+        let allocated: string | undefined;
+        const umask = spyOn(process, "umask").mockReturnValue(0o777);
+        const chmodFailure = spyOn(fsPromises, "chmod").mockImplementation(
+          async (path, mode) => {
+            if (typeof path === "string" && dirname(path) === root) {
+              allocated = path;
+              expect(mode).toBe(0o700);
+              if (nonempty)
+                await writeFile(join(path, "keep.txt"), "keep me\n");
+              throw failure;
+            }
+            return originalChmod(path, mode);
+          },
+        );
+        try {
+          await expect(prepare(undefined, "repo", root)).rejects.toBe(failure);
+          expect(allocated).toBeDefined();
+          if (allocated === undefined)
+            throw new Error("Output was not allocated");
+          expect(await readdir(root)).toEqual(
+            nonempty ? [basename(allocated)] : [],
+          );
+          if (nonempty) {
+            expect(await readFile(join(allocated, "keep.txt"), "utf8")).toBe(
+              "keep me\n",
+            );
+          }
+        } finally {
+          chmodFailure.mockRestore();
+          umask.mockRestore();
+        }
+      }
     },
   );
 

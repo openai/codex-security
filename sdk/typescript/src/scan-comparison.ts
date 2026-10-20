@@ -615,6 +615,7 @@ async function startReadOnlyCodexThread(
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       features: {
+        cli_daybreak: effectiveFeatures?.["cli_daybreak"],
         api_key_cyber_access_programs:
           effectiveFeatures?.["api_key_cyber_access_programs"],
         api_key_model_discovery: effectiveFeatures?.["api_key_model_discovery"],

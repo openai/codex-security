@@ -246,6 +246,84 @@ def test_parent_only_task_remaps_anonymous_surface_links_once(tmp_path):
         assert surfaces["API"] != surfaces["Other"]
 
 
+@pytest.mark.parametrize("repair_only", [False, True])
+def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
+    surface = {
+        "label": "API",
+        "disposition": "no_issue_found" if repair_only else "needs_follow_up",
+        "receiptRefs": ["artifacts/missing.md"] if repair_only else [],
+    }
+    draft = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[surface],
+        deferred=[]
+        if repair_only
+        else [{"id": "review", "reason": "Review remains.", "surfaceIds": ["restored"]}],
+    )
+    source = worker(tmp_path, "first", draft)
+    output = Path(source["artifact_dir"])
+    older = copy.deepcopy(draft)
+    older["coverage"]["surfaces"][0]["id"] = "restored"
+    checkpoint = write_checkpoint(output / "checkpoints", older)
+    os.utime(checkpoint, ns=(50, 50))
+    parent = copy.deepcopy(draft)
+    parent["coverage"]["surfaces"][0].update(
+        id="first/0",
+        workerId="first",
+        receiptRefs=[
+            f"{output.relative_to(tmp_path).as_posix()}/{ref}" for ref in surface["receiptRefs"]
+        ],
+    )
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Parent review remains.", "surfaceIds": ["first/0"]}
+    ]
+    write_saved_parent(tmp_path, parent, 200)
+    replacement = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[
+            {
+                **surface,
+                "id": "restored",
+                "disposition": "no_issue_found",
+                "receiptRefs": ["artifacts/review.md"],
+            }
+        ],
+        closures=[] if repair_only else [{"id": "review", "reason": "Worker review completed."}],
+    )
+    checkpoint = write_checkpoint(output / "checkpoints", replacement)
+    os.utime(checkpoint, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    frozen = None
+    for _ in range(2):
+        warnings = []
+        result = saved.merge_saved_results(
+            tmp_path,
+            "coverage-scan",
+            saved_binding("deep_repository", repository="synthetic"),
+            [source],
+            warnings,
+            stopped=True,
+            reason="Source review stopped.",
+            project_worker_coverage=True,
+            frozen_source_digests=frozen,
+        )
+        assert result is not None
+        frozen = result[0]["scan"]["preservedSources"]
+        coverage = result[2]
+        assert [row["id"] for row in coverage["surfaces"]] == ["first/restored"]
+        task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == ["first/restored"]
+        assert (tmp_path / coverage["surfaces"][0]["receiptRefs"][0]).read_text() == (
+            "first source review\n"
+        )
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 def test_parent_only_task_links_to_surface_with_retained_finding_history(tmp_path):
     template = tmp_path / "template"
     template.mkdir()
@@ -501,7 +579,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         receipt_root=tmp_path,
         receipt_warnings=warnings,
     )
-    receipts = {row["id"]: row["receiptRefs"] for _, row in updates}
+    receipts = {row["id"]: row["receiptRefs"] for _, row, _ in updates}
     assert receipts == {"reader": [prefix + "new-review.md"], "writer": [prefix + "Review.md"]}
     assert any("duplicate artifact path" in warning for warning in warnings)
     scan = {
