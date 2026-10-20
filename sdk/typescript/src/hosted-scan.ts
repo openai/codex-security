@@ -18,7 +18,6 @@ import { CodexSecurity } from "./api.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
 import { normalizeRepository, repositoryRevision } from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
-import type { SuggestOwnersOptions } from "./suggest-owners.js";
 
 /** Hosted v2 mirrors repository/paths targets; only Standard scans are supported. */
 export const HostedScanInputSchema = z.strictObject({
@@ -174,7 +173,14 @@ function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
 export interface HostedScanOptions {
   executor: ScanExecutor;
   /** Host-owned, read-only inference for the optional owner stage. Never uses local credentials. */
-  ownerCodex?: SuggestOwnersOptions["codex"];
+  ownerCodex?: {
+    startThread(options: { model?: string; modelReasoningEffort?: string }): {
+      run(
+        input: string,
+        options: { outputSchema?: unknown; signal?: AbortSignal },
+      ): Promise<{ finalResponse: string }>;
+    };
+  };
   signal?: AbortSignal;
   onEvent?: (event: ScanExecutionEvent) => void;
 }

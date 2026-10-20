@@ -78,6 +78,8 @@ stage fails. Owner failure or cancellation does not invalidate sealed findings.
 The SDK host can pass `ownerCodex` in the options to execute read-only owner
 decisions using its own inference service. Without that callback, CODEOWNERS
 matches still work and findings that require inference report an owner error.
+The callback receives the model and reasoning effort in `startThread`, then
+the prompt, output schema, and cancellation signal in `run`.
 The CLI protocol does not provide an owner inference callback. Hosted owner
 enrichment never launches local Codex or selects local credentials.
 

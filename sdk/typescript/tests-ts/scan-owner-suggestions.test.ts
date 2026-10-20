@@ -35,49 +35,67 @@ async function fixture() {
   return { repository, result };
 }
 
-test("writes a v2 owner artifact beside unchanged sealed base artifacts", async () => {
-  const { repository, result } = await fixture();
-  const documents = {
-    "scan-manifest.json": result.manifest,
-    "findings.json": result.findings,
-    "coverage.json": result.coverage,
-  };
-  for (const [name, document] of Object.entries(documents))
-    await writeFile(join(result.scanDir, name), JSON.stringify(document));
-  const inference = mock(() => {
-    throw new Error("CODEOWNERS needs no inference");
-  });
-  const restore = mock(async (name: string, bytes: Uint8Array) => {
-    await writeFile(join(result.scanDir, name), bytes);
-  });
-  const path = await writeScanOwnerSuggestions(
-    repository,
-    result,
-    { restore },
-    {
-      codex: { startThread: inference },
-    },
-  );
-  const report = JSON.parse(await readFile(path, "utf8"));
-  expect(report).toMatchObject({
-    schemaVersion: 2,
-    revision: result.manifest.scan.target.revision,
-    results: [
+test.each(["git_revision", "git_diff"] as const)(
+  "writes a v2 owner artifact for %s beside unchanged sealed base artifacts",
+  async (kind) => {
+    const { repository, result } = await fixture();
+    const target = result.manifest.scan.target;
+    if (kind === "git_diff") {
+      const baseRevision = target.revision!;
+      await writeFile(
+        join(repository, "handler.ts"),
+        "export const value = 2;\n",
+      );
+      git(repository, "add", "handler.ts");
+      git(repository, "commit", "-qm", "Synthetic source change");
+      target.kind = kind;
+      delete target.revision;
+      target.baseRevision = baseRevision;
+      target.headRevision = git(repository, "rev-parse", "HEAD");
+    }
+    const revision = target.revision ?? target.headRevision;
+    const documents = {
+      "scan-manifest.json": result.manifest,
+      "findings.json": result.findings,
+      "coverage.json": result.coverage,
+    };
+    for (const [name, document] of Object.entries(documents))
+      await writeFile(join(result.scanDir, name), JSON.stringify(document));
+    const inference = mock(() => {
+      throw new Error("CODEOWNERS needs no inference");
+    });
+    const restore = mock(async (name: string, bytes: Uint8Array) => {
+      await writeFile(join(result.scanDir, name), bytes);
+    });
+    const path = await writeScanOwnerSuggestions(
+      repository,
+      result,
+      { restore },
       {
-        findingId: result.findings.findings[0]!.findingId,
-        occurrenceId: result.findings.findings[0]!.occurrenceId,
-        status: "identified",
-        owner: { kind: "person", email: "alex@example.test" },
+        codex: { startThread: inference },
       },
-    ],
-  });
-  expect(restore).toHaveBeenCalledTimes(1);
-  expect(inference).not.toHaveBeenCalled();
-  for (const [name, document] of Object.entries(documents))
-    expect(await readFile(join(result.scanDir, name), "utf8")).toBe(
-      JSON.stringify(document),
     );
-});
+    const report = JSON.parse(await readFile(path, "utf8"));
+    expect(report).toMatchObject({
+      schemaVersion: 2,
+      revision,
+      results: [
+        {
+          findingId: result.findings.findings[0]!.findingId,
+          occurrenceId: result.findings.findings[0]!.occurrenceId,
+          status: "identified",
+          owner: { kind: "person", email: "alex@example.test" },
+        },
+      ],
+    });
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(inference).not.toHaveBeenCalled();
+    for (const [name, document] of Object.entries(documents))
+      expect(await readFile(join(result.scanDir, name), "utf8")).toBe(
+        JSON.stringify(document),
+      );
+  },
+);
 
 test.each(["directory_snapshot", "git_worktree"] as const)(
   "does not attribute %s findings to committed HEAD",
