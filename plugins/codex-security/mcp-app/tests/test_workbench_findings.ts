@@ -325,11 +325,13 @@ test("mixed writers retain unchanged Python embeddings and replace supplied Node
   }
 });
 
-for (const [name, previousValue, value] of [
-  ["Python negative zero", "-0.0", 0],
-  ["Python exponent spelling", "1e+20", 1e20],
+for (const [name, previousValue, value, unchanged] of [
+  ["negative zero", "-0.0", 0, true],
+  ["exact exponent spelling", "1e+20", 1e20, true],
+  ["rounded exponent spelling", "1e+23", 1e23, true],
+  ["exact BigInt readback", "1e+23", 100000000000000000000000n, false],
 ] as const) {
-  test(`stored finding numeric equality retains ${name} and local cache`, async (t) => {
+  test(`stored finding numeric equality preserves Python ${name}`, async (t) => {
     const directory = await temporary.create("workbench-numeric-finding-");
     const path = join(directory, "workbench.sqlite3");
     const database = open(t, path);
@@ -355,14 +357,23 @@ for (const [name, previousValue, value] of [
     storeFindings(database, [item], "native-import");
     assert.equal(
       database.prepare("SELECT details_json FROM findings").get()!.details_json,
-      previous,
+      unchanged ? previous : stringifyJson(item.finding, 0),
     );
-    assert.deepEqual(
-      findPotentialDuplicates(database, "finding", undefined, {
-        finding: "prepared-key",
-      }).potentialDuplicates,
-      [],
+    const readback = listStoredFindings(database, { limit: 10, offset: 0 })
+      .findings[0].extensions as { measurement: number | bigint };
+    assert.equal(BigInt(readback.measurement), BigInt(value));
+    assert.equal(
+      database.prepare("SELECT cache_key FROM local_finding_embeddings").get()
+        ?.cache_key,
+      unchanged ? "prepared-key" : undefined,
     );
+    if (unchanged)
+      assert.deepEqual(
+        findPotentialDuplicates(database, "finding", undefined, {
+          finding: "prepared-key",
+        }).potentialDuplicates,
+        [],
+      );
     assert.equal(
       database.prepare("SELECT model FROM finding_embeddings").get()!.model,
       item.embedding.model,
@@ -387,7 +398,7 @@ const numericCases: readonly [string, string, unknown, boolean][] = [
     123456789012345678901234567890n,
     true,
   ],
-  ["unsafe integer exponent", "9007199254740993e0", 9007199254740993n, true],
+  ["unsafe integer exponent", "9007199254740993e0", 9007199254740993n, false],
   ["rounded unsafe integer", "1000000000000000000001e0", 1e21, false],
   ["precise fraction", "1.00000000000000001", 1, false],
   ["positive underflow", "1e-400", 0, false],

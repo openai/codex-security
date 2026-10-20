@@ -60,8 +60,20 @@ function storedFindingJsonMatches(previous: string, fresh: string): boolean {
     try {
       return JSON.parse(
         source,
-        (_key, value: unknown, context?: { source?: string }) =>
-          typeof value === "number" ? numberToken(context!.source!) : value,
+        (_key, value: unknown, context?: { source?: string }) => {
+          if (typeof value !== "number") return value;
+          const source = context!.source!;
+          const token = numberToken(source);
+          // parseJson preserves unsafe plain integer tokens as BigInt. Other
+          // spellings must expose the same precision before we retain their text.
+          const readback =
+            !Number.isSafeInteger(value) && !/^-?[0-9]+$/u.test(source)
+              ? Number.isFinite(value) && Number.isInteger(value)
+                ? numberToken(String(BigInt(value)))
+                : value
+              : token;
+          return [token, readback];
+        },
       );
     } catch (error) {
       if (error instanceof SyntaxError)
