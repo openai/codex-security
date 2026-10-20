@@ -25,7 +25,6 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
-  inlineToml,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
@@ -38,7 +37,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -570,15 +569,21 @@ async function startReadOnlyCodexThread(
     );
   }
   const sdkConfig = structuredCodexConfig(config);
-  const requestMetadata = {
-    ...(homeExecutionConfig["responses_api_metadata"] as
-      JsonObject | undefined),
-    ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
-    ...codexSecurityRequestMetadata(
-      runtimeOptions.surface,
-      runtimeOptions.command,
-    ),
-  };
+  const requestContext = codexSecurityRequestContext(
+    {
+      ...sdkConfig,
+      responses_api_metadata: {
+        ...(homeExecutionConfig["responses_api_metadata"] as
+          JsonObject | undefined),
+        ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+      },
+    },
+    {
+      surface: runtimeOptions.surface,
+      command: runtimeOptions.command,
+      providerResolved: sdkConfig["model_provider"] !== undefined,
+    },
+  );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
   const providerSettings = commandAuth ? providerConfig : (config ?? {});
@@ -594,8 +599,7 @@ async function startReadOnlyCodexThread(
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
-    // A single table preserves literal keys that the SDK would split on dots.
-    configOverrides: [`responses_api_metadata=${inlineToml(requestMetadata)}`],
+    configOverrides: [requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -615,6 +619,7 @@ async function startReadOnlyCodexThread(
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       features: {
+        cli_daybreak: effectiveFeatures?.["cli_daybreak"],
         api_key_cyber_access_programs:
           effectiveFeatures?.["api_key_cyber_access_programs"],
         api_key_model_discovery: effectiveFeatures?.["api_key_model_discovery"],

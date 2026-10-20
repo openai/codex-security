@@ -161,8 +161,13 @@ def archive_scan(
             archived_scan_dir.rmdir()
             scan_dir.rename(archived_scan_dir)
             moved = True
-            scan_dir.mkdir(mode=0o700)
-            scan_dir.chmod(0o700)
+            if os.name == "nt":
+                from windows_scan_local_files import create_directory_with_same_dacl
+
+                create_directory_with_same_dacl(scan_dir, archived_scan_dir)
+            else:
+                scan_dir.mkdir(mode=0o700)
+                scan_dir.chmod(0o700)
         if previous_scan is not None:
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",

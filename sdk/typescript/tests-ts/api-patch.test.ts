@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -300,8 +301,10 @@ describe("CodexSecurity headless patching", () => {
           model_reasoning_effort: "medium",
           features: { plugins: false },
           default_permissions: "codex_security_scan",
-          responses_api_metadata: { codex_security_surface: "sdk" },
         },
+      });
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
+        codex_security_surface: "sdk",
       });
       expect(captured.thread).not.toHaveProperty("sandboxMode");
       expect(captured.thread).not.toHaveProperty("networkAccessEnabled");
@@ -360,7 +363,9 @@ describe("CodexSecurity headless patching", () => {
     const { client, options, captured, codexHome } = await patchClient();
     await using security = client;
     await security.patch(options);
-    expect(parseToml(captured.codex!.configOverrides!.join("\n"))).toEqual({
+    expect(
+      parseToml(captured.codex!.configOverrides!.join("\n")),
+    ).toMatchObject({
       permissions: {
         codex_security_scan: {
           filesystem: {
@@ -417,7 +422,9 @@ describe("CodexSecurity headless patching", () => {
       ).toEqual({
         model_providers: { "synthetic.provider": provider },
       });
-      expect(parseToml(captured.codex!.configOverrides!.join("\n"))).toEqual({
+      expect(
+        parseToml(captured.codex!.configOverrides!.join("\n")),
+      ).toMatchObject({
         permissions: {
           codex_security_scan: {
             filesystem: {

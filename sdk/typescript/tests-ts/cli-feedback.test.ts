@@ -18,7 +18,7 @@ async function run(args: string[], deps = dependencies()) {
   return { code, stdout: stdout.text(), stderr: stderr.text() };
 }
 
-test("feedback selects the newest saved scan when an older scan is still running", async () => {
+test("feedback selects the newest saved scan when starts differ by a microsecond", async () => {
   const root = await temporaryDirectory("feedback-history-", true);
   try {
     const python = await resolvePluginPython();
@@ -52,7 +52,11 @@ test("feedback selects the newest saved scan when an older scan is still running
       scans.push({
         scanId: registered["scanId"] as string,
         status,
-        startedAt: `2026-01-0${index + 1}T00:00:00Z`,
+        startedAt: [
+          "2026-01-01T00:00:00Z",
+          "2026-01-01T00:00:00.000001Z",
+          "2026-01-02T00:00:00Z",
+        ][index]!,
       });
     }
     const seeded = spawnSync(
@@ -98,6 +102,53 @@ with sqlite3.connect(sys.argv[1]) as connection:
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([
+  ["2026-10-08T01:00:00Z", "2026-10-08T01:00:00.100000Z", 1],
+  ["2026-10-08T01:00:00.000001Z", "2026-10-08T01:00:00.000002Z", 1],
+  ["2026-10-08T01:00:00.1234567Z", "2026-10-08T01:00:00.1234568Z", 1],
+  ["2026-10-08T03:00:00.123400+02:00", "2026-10-08T01:00:00.123401Z", 1],
+  ["1969-12-31T23:59:59.000001Z", "1969-12-31T23:59:59.000002Z", 1],
+  ["2026-10-08T01:00:00.000000Z", "2026-10-08T01:00:00Z", 0],
+  ["2026-10-08T01:00:00.1000000Z", "2026-10-08T03:00:00.1+02:00", 0],
+  ["2026-10-08T01:00:00Z", "2026-10-08T01:00:00.000000000000000000001Z", 1],
+] as const)(
+  "feedback selects by exact start time: %s / %s",
+  async (first, second, selected) => {
+    const scans = [
+      { scanId: "z-first", startedAt: first, status: "running" },
+      { scanId: "a-second", startedAt: second, status: "failed" },
+    ];
+    const expected = scans[selected]!;
+    const calls: string[][] = [];
+    const deps = dependencies({
+      onWorkbench: (args): JsonObject => {
+        calls.push([...args]);
+        return args[0] === "list-scans"
+          ? { scans }
+          : { scan: scans.find((scan) => scan.scanId === args[2])! };
+      },
+    });
+    deps.sendFeedback = async ({ scan, includeLogs }) => {
+      expect(scan?.scanId).toBe(expected.scanId);
+      expect(includeLogs).toBe(true);
+      return {
+        feedbackId: "feedback-chronology",
+        scanId: scan!.scanId,
+        includedLogs: true,
+      };
+    };
+    const result = await run(
+      ["--reason", "Synthetic scan stopped", "--include-logs", "--json"],
+      deps,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout).scanId).toBe(expected.scanId);
+    expect(calls.map((args) => args[0])).toEqual(["list-scans", "get-scan"]);
+    expect(calls[1]).toEqual(["get-scan", "--scan-id", expected.scanId]);
+  },
+);
 
 test("feedback selects a scan prefix", async () => {
   const calls: string[][] = [];

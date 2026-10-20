@@ -424,6 +424,21 @@ The Action uses the CLI’s validated JSON result for findings and scan status.
 If the CLI exits without a usable result, the Action reports failure and leaves
 report paths empty; it does not recover unvalidated files from disk.
 
+### Request attribution
+
+The Action adds `codex_security_integration=github_action` and
+`codex_security_provider` (the configured provider family) through the CLI's existing
+`responses_api_metadata` setting. These accompany the CLI's request attribution
+on model requests supported by the provider. This attribution contains no
+repository, workflow, run, actor, credential, or finding data.
+Native managed configuration may override the provider selection before inference.
+
+The Action continues to set `analytics.enabled=false`. Request metadata is
+separate from native analytics and does not create an additional telemetry
+request or publish scan results to Codex Security Cloud. Requests sent to other
+providers do not establish OpenAI-side usage reporting. Summaries, annotations,
+and artifact uploads retain their existing controls.
+
 ## Troubleshooting
 
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`

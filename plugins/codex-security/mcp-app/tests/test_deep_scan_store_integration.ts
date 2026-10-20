@@ -39,6 +39,7 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
 await testFreeformFailureMessagesAgainstRealWorkbench();
+await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
@@ -226,6 +227,58 @@ function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
     });
     return JSON.parse(stdout);
   };
+}
+
+async function testWorkerRetryThreadsRemainInScanUsage() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-retry-usage-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const store = new WorkbenchDeepScanStore(runWorkbench);
+  try {
+    const threadId = "retry-owner";
+    const run = await store.begin({
+      targetPath,
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    await store.claimCoordinator({ scanId: run.scanId, threadId });
+    const worker = await createWorkerFixture(run, "retry", "discovery");
+    await store.updateWorker({ ...worker, status: "queued" });
+    await store.updateWorker({
+      ...worker,
+      status: "running",
+      threadId: "first-attempt",
+    });
+    const retried = {
+      ...worker,
+      attempt: 2,
+      status: "running" as const,
+      threadId: "retry-attempt",
+    };
+    await store.updateWorker(retried);
+    await store.updateWorker(retried);
+
+    const resumed = await new WorkbenchDeepScanStore(runWorkbench).get(
+      run.scanId,
+      threadId,
+    );
+    assert.equal(resumed.persistedWorkers.length, 1);
+    assert.equal(resumed.persistedWorkers[0].threadId, "retry-attempt");
+    assert.equal(resumed.persistedWorkers[0].attempt, 2);
+    const { scan } = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+    assert.deepEqual(scan.executionThreadIds, [
+      "first-attempt",
+      "retry-attempt",
+    ]);
+    assert.deepEqual(scan.threadIds, [
+      threadId,
+      "first-attempt",
+      "retry-attempt",
+    ]);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 async function testFreeformFailureMessagesAgainstRealWorkbench() {

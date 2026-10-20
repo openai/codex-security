@@ -1,4 +1,5 @@
 import type { JsonObject as JsonRecord } from "../types.js";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
@@ -49,6 +50,8 @@ type RuntimeConfigReadOptions = Pick<
   "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
 > & {
   readonly commandArgs?: readonly string[];
+  /** Full app-server invocation for callers that already constructed its arguments. */
+  readonly appServerArgs?: readonly string[];
   readonly providerConfigOverrides?: readonly string[];
 };
 
@@ -64,6 +67,74 @@ export async function readDeepScanRuntimeConfig(
     const config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
     return config;
+  });
+}
+
+/** Read native origins and ordered layers without starting a thread. */
+export async function readDeepScanRuntimeConfigWithOrigins(
+  options: RuntimeConfigReadOptions,
+): Promise<JsonRecord> {
+  return withPreflightClient(options, (client) =>
+    client.request("config/read", { cwd: options.cwd, includeLayers: true }),
+  );
+}
+
+export interface DeepScanParentTurn {
+  readonly threadId: string;
+  readonly turnId: string;
+}
+
+/** Read the program of the exact parent turn that invoked the plugin. */
+export async function readDeepScanParentCyberAccessProgram(
+  options: RuntimeConfigReadOptions & {
+    readonly parentTurn: DeepScanParentTurn;
+  },
+): Promise<CyberAccessProgram | undefined> {
+  return withPreflightClient(options, async (client) => {
+    let response: JsonRecord;
+    try {
+      response = await client.request("thread/read", {
+        threadId: options.parentTurn.threadId,
+        includeTurns: false,
+      });
+    } catch (error) {
+      const nativeError = record(
+        error instanceof Error ? error.cause : undefined,
+      );
+      // Ephemeral parent threads have no persisted rollout for this separate client.
+      if (
+        nativeError?.code === -32600 &&
+        nativeError.message ===
+          `thread not loaded: ${options.parentTurn.threadId}`
+      )
+        return undefined;
+      throw error;
+    }
+    const thread = record(response.thread);
+    if (
+      thread?.id !== options.parentTurn.threadId ||
+      typeof thread.path !== "string"
+    )
+      return undefined;
+    const input = createReadStream(thread.path, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = record(JSON.parse(line));
+        if (entry?.type !== "turn_context") continue;
+        const context = record(entry.payload);
+        if (context?.turn_id !== options.parentTurn.turnId) continue;
+        const program = context.cyber_access_program;
+        return typeof program === "string"
+          ? (program as CyberAccessProgram)
+          : undefined;
+      }
+      return undefined;
+    } finally {
+      lines.close();
+      input.destroy();
+    }
   });
 }
 
@@ -237,15 +308,19 @@ class AppServerPreflightClient {
   };
 
   constructor(private readonly options: RuntimeConfigReadOptions) {
-    const args: string[] = [...(options.commandArgs ?? [])];
-    for (const override of options.configOverrides) {
-      args.push("--config", override);
+    const args: string[] = [
+      ...(options.appServerArgs ?? options.commandArgs ?? []),
+    ];
+    if (options.appServerArgs === undefined) {
+      for (const override of options.configOverrides) {
+        args.push("--config", override);
+      }
+      // App-server loads credential-free metadata; exec reads private provider profiles.
+      for (const override of options.providerConfigOverrides ?? []) {
+        args.push("--config", override);
+      }
+      args.push("app-server", "--stdio");
     }
-    // App-server loads credential-free metadata; exec reads private provider profiles.
-    for (const override of options.providerConfigOverrides ?? []) {
-      args.push("--config", override);
-    }
-    args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
       cwd: options.cwd,
@@ -648,6 +723,7 @@ function jsonRpcPreflightError(
       subject(context) +
       " did not run." +
       (typeof error?.message === "string" ? "\n" + error.message : ""),
+    { cause: value },
   );
 }
 
