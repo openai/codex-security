@@ -6450,7 +6450,11 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
+  if (notice !== undefined) {
+    try {
+      errorOutput.write(formatUpdateNotice(notice));
+    } catch {}
+  }
   if (frameworkExit !== undefined) {
     if (policyFullOutput || structuredError) {
       if (exitCode === 0) exitCode = 2;
@@ -8795,16 +8799,15 @@ async function executeScan(
           )
         : arguments_.auth;
     if (typeof provider === "string") {
+      const providerConfiguration = (
+        resolvedConfiguration["model_providers"] as
+          Record<string, JsonObject> | undefined
+      )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration:
-          (
-            effectiveConfiguration["model_providers"] as
-              Record<string, JsonObject> | undefined
-          )?.[provider] ??
-          (isExternalModelProvider(provider)
-            ? EXTERNAL_CODEX_PROVIDERS[provider]
-            : undefined),
+        providerConfiguration: isExternalModelProvider(provider)
+          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
+          : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock

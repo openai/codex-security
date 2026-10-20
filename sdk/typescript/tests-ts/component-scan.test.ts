@@ -126,14 +126,23 @@ function finding(
   } as Finding;
 }
 
+function scope(repository: string, options: ScanOptions): string {
+  return String(
+    (options.target as string[]).map((path) =>
+      relative(repository, path).split(sep).join("/"),
+    ),
+  );
+}
+
 async function completed(
+  repository: string,
   options: ScanOptions,
-  findings = [finding(String(options.target))],
+  findings = [finding(scope(repository, options))],
   coverage?: "complete" | "partial",
   threatModelPath: string | null = null,
 ) {
   const original = fakeResult([], coverage);
-  const scanId = String(options.target);
+  const scanId = scope(repository, options);
   original.manifest.scan.id = scanId;
   original.findings.scanId = scanId;
   original.findings.findings = findings;
@@ -164,7 +173,8 @@ function client(
   run: (
     repository: string,
     options: ScanOptions,
-  ) => Promise<ScanResult> = async (_repository, options) => completed(options),
+  ) => Promise<ScanResult> = async (repository, options) =>
+    completed(repository, options),
   close = async () => {},
 ) {
   return () => ({
@@ -299,18 +309,19 @@ test("links independently scoped saved models including a failed component", asy
   try {
     summary = await scan(paths, {
       components: components.slice(0, 2),
-      createSecurity: client(async (_repository, options) => {
+      createSecurity: client(async (repository, options) => {
         await mkdir(options.outputDir!, { recursive: true });
-        const failed = String(options.target).includes("web");
+        const failed = scope(repository, options).includes("web");
         await writeFile(
           join(
             options.outputDir!,
             failed ? "THREAT_MODEL.md" : "threatmodel.md",
           ),
-          `# Model\n\nScope: ${String(options.target)}\n`,
+          `# Model\n\nScope: ${scope(repository, options)}\n`,
         );
         if (failed) throw new Error("Synthetic component failure");
         return completed(
+          repository,
           options,
           [],
           "complete",
@@ -401,12 +412,13 @@ test("bounds standard scans, continues after failure, and preserves partial resu
           scanPrompt: "Check access controls",
           maxCostUsd: 3,
         });
-        if (String(options.target) === "apps/api")
+        if (scope(repository, options) === "apps/api")
           throw new Error("Authorization: Bearer SYNTHETIC_SECRET_123");
         return await completed(
+          repository,
           options,
           undefined,
-          String(options.target) === "apps/web" ? "partial" : "complete",
+          scope(repository, options) === "apps/web" ? "partial" : "complete",
         );
       } finally {
         active--;
@@ -415,7 +427,9 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   });
   expect([peak, close.mock.calls.length]).toEqual([2, 2]);
   expect(seen.map(({ target }) => target)).toEqual(
-    components.map(({ paths }) => paths),
+    components.map(({ paths: scopes }) =>
+      scopes.map((scope) => join(paths.repository, scope)),
+    ),
   );
   expect(summary).toMatchObject({
     total: 3,
@@ -473,9 +487,9 @@ test("forwards scan events with their component identity without letting observe
     onProgress(receipt) {
       receipt.paths[0] = "changed-by-observer";
     },
-    createSecurity: client(async (_repository, options) => {
+    createSecurity: client(async (repository, options) => {
       expect(planned).toBe(true);
-      const target = String(options.target);
+      const target = scope(repository, options);
       options.onProgress?.({
         phase: "discovery",
         filesCompleted: 1,
@@ -509,7 +523,7 @@ test("forwards scan events with their component identity without letting observe
         started: 1,
       });
       options.onWarning?.("synthetic warning");
-      return completed(options);
+      return completed(repository, options);
     }),
   });
   expect(summary).toMatchObject({
@@ -569,7 +583,7 @@ test.each([
           environment:
             presentation === "ci" ? { CI: "true" } : { NO_COLOR: "1" },
         }),
-        createSecurity: client(async (_repository, options) => {
+        createSecurity: client(async (repository, options) => {
           expect(typeof options.onProgress).toBe("function");
           options.onProgress?.({
             phase: "validation",
@@ -592,7 +606,7 @@ test.each([
             outputTokens: 20,
             estimatedUsd: 0.00123,
           });
-          return completed(options);
+          return completed(repository, options);
         }),
       },
     );
@@ -683,8 +697,8 @@ test("CLI restores the dashboard and reports saved partial results on cancellati
     ],
     {
       ...dependencies({ currentDirectory: paths.root, signals }),
-      createSecurity: client(async (_repository, options) => {
-        const result = await completed(options);
+      createSecurity: client(async (repository, options) => {
+        const result = await completed(repository, options);
         signals.emit("SIGINT");
         return result;
       }),
@@ -724,8 +738,8 @@ test("merges confirmed root causes with complete evidence and the highest severi
   const summary = await scan(paths, {
     config,
     onDeduplicationStarted,
-    createSecurity: client(async (_repository, options) =>
-      completed(options, batches[batch++]),
+    createSecurity: client(async (repository, options) =>
+      completed(repository, options, batches[batch++]),
     ),
     matchFindings: matcher((input, options) => {
       inputs.push(input);
@@ -776,8 +790,10 @@ test("keeps uncertain findings separate even when their fingerprints match", asy
   const paths = await fixture();
   const summary = await scan(paths, {
     components: components.slice(0, 2),
-    createSecurity: client(async (_repository, options) =>
-      completed(options, [finding(String(options.target), "high", "same")]),
+    createSecurity: client(async (repository, options) =>
+      completed(repository, options, [
+        finding(scope(repository, options), "high", "same"),
+      ]),
     ),
     matchFindings: matcher(({ before, after }) => ({
       matches: [],
@@ -857,10 +873,11 @@ test.each([0, 1])(
     const paths = await fixture();
     const matchFindings = mock(rejecting("unexpected model call"));
     const summary = await scan(paths, {
-      createSecurity: client(async (_repository, options) =>
+      createSecurity: client(async (repository, options) =>
         completed(
+          repository,
           options,
-          populated && String(options.target) === "apps/web"
+          populated && scope(repository, options) === "apps/web"
             ? [finding("one")]
             : [],
         ),
@@ -885,9 +902,9 @@ test.each(["scan", "matching"])(
     await expect(
       scan(paths, {
         signal: controller.signal,
-        createSecurity: client(async (_repository, options) => {
+        createSecurity: client(async (repository, options) => {
           runs++;
-          const result = await completed(options);
+          const result = await completed(repository, options);
           if (phase === "scan") controller.abort();
           return result;
         }),
@@ -939,6 +956,54 @@ test("rejects escaped component paths and output inside the enclosing worktree",
       components: [{ name: "API", paths: ["api"] }],
     }),
   ).rejects.toThrow();
+});
+
+test("keeps literal component paths through planning and execution", async () => {
+  const name = "keeps literal component paths through planning and execution";
+  if (runTestInSubprocess(import.meta.path, name)) return;
+  const paths = await fixture();
+  const home = join(paths.repository, "home");
+  const os = { ...(await import("node:os")) };
+  mock.module("node:os", () => ({ ...os, homedir: () => home }));
+  const literals = ["~/src", "$HOME/src", "%HOME%/src", "space name"];
+  for (const path of ["home/src", ...literals]) {
+    await mkdir(join(paths.repository, path), { recursive: true });
+    await writeFile(join(paths.repository, path, "app.ts"), "export {};\n");
+  }
+  const proposed = {
+    components: literals.map((path) => ({ name: path, paths: [path] })),
+  };
+  const plan = await normalizeComponentPlan(paths.repository, proposed);
+  expect(plan).toEqual(proposed);
+  expect(await normalizeComponentPlan(paths.repository, plan)).toEqual(plan);
+  expect(
+    await normalizeComponentPlan(paths.repository, {
+      components: [{ name: "Aliases", paths: ["./~/src", "~/src"] }],
+    }),
+  ).toEqual({ components: [{ name: "Aliases", paths: ["~/src"] }] });
+  expect(await normalizeTarget(paths.repository, ["~/src"])).toMatchObject({
+    paths: ["home/src"],
+  });
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  const automatic = await planComponents(paths.repository, {
+    codex: fakeCodex(() => ({ components: [proposed.components[0]] })),
+  });
+  expect(automatic.components[0]).toEqual(proposed.components[0]);
+  const observed: (readonly string[])[] = [];
+  const summary = await scan(paths, {
+    components: plan.components,
+    createSecurity: client(async (repository, options) => {
+      const target = await normalizeTarget(repository, options.target!);
+      observed.push(target.paths);
+      expect(options.target).toEqual(
+        target.paths.map((path) => join(repository, path)),
+      );
+      return await completed(repository, options, []);
+    }),
+  });
+  expect(summary).toMatchObject({ completed: literals.length, failed: 0 });
+  expect(observed).toEqual(literals.map((path) => [path]));
+  expect(await json(summary.planPath)).toEqual(proposed);
 });
 
 test("component inventory uses the shared Git runner without fsmonitor callbacks", async () => {
@@ -1626,10 +1691,10 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
           planned = true;
           return { components: components.slice(0, 2) };
         },
-        createSecurity: client(async (_repository, options) => {
+        createSecurity: client(async (repository, options) => {
           expect(options.auth).toBe(auth);
           expect(options.cyberAccessProgram).toBe("daybreak_blue");
-          return completed(options);
+          return completed(repository, options);
         }),
         matchFindings: async (_input, options) => {
           expect(options?.auth).toBe(auth);
@@ -1862,8 +1927,8 @@ test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const createSecurity = mock((_value: unknown) => {
     return client(run)();
   });
-  const run = mock(async (_repository: string, options: ScanOptions) => {
-    return completed(options, [], "partial");
+  const run = mock(async (repository: string, options: ScanOptions) => {
+    return completed(repository, options, [], "partial");
   });
   const result = await cli(
     paths,
@@ -1887,7 +1952,7 @@ test("CLI forwards scan settings and accepts legacy scope notes", async () => {
     codexOverrides: { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
   });
   expect(run.mock.lastCall?.[1]).toMatchObject({
-    target: ["apps/api"],
+    target: [join(paths.repository, "apps/api")],
     mode: "standard",
     maxCostUsd: 2,
   });
