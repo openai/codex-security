@@ -2644,11 +2644,11 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("runs manually dispatched GitHub releases from trusted main", () => {
+  test("runs manually dispatched GitHub releases from the main commit selected for the run", () => {
     expect(githubReleaseWorkflow).toContain("workflow_dispatch:");
     expect(githubReleaseWorkflow).toContain("github.ref == 'refs/heads/main'");
     expect(githubReleaseWorkflow).toMatch(
-      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: refs\/heads\/main/u,
+      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: \$\{\{ github\.sha \}\}/u,
     );
   });
 
