@@ -10,6 +10,7 @@ const files = execFileSync(
     "ls-files",
     "-z",
     "--",
+    ".github/release-notes.md",
     ":(glob)sdk/typescript/**/*.md",
     ":(glob)examples/custom-validation/*.md",
     ":(glob)plugins/codex-security/native/*.md",
