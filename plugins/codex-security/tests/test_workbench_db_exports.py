@@ -745,8 +745,14 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     ),
     ids=("candidate-id", "blank-candidate-id", "report-id", "ledger-row-id"),
 )
+@pytest.mark.parametrize("replace_after_finalize", (False, True), ids=("saved", "replaced"))
 def test_deep_csv_export_adds_only_candidate_id_column(
-    tmp_path: Path, extensions: dict[str, str], expected_candidate_id: str
+    tmp_path: Path,
+    extensions: dict[str, str],
+    expected_candidate_id: str,
+    replace_after_finalize: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api,
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -776,8 +782,38 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     finding["extensions"] = extensions
     findings_path.write_text(json.dumps(findings_document))
 
-    scan_command(state_dir, "complete-scan", scan_id)
-    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    set_triage(
+        state_dir,
+        completed["findings"][0]["occurrenceId"],
+        "closed",
+        "--close-reason",
+        "wont_fix",
+        "--note",
+        "Accepted after review.",
+    )
+    if replace_after_finalize:
+        publication = workbench_api["publication"]
+        finalize = publication.finalize_scan
+
+        def replace_finalized_document(*args, **kwargs):
+            result = finalize(*args, **kwargs)
+            replacement = copy.deepcopy(result[1])
+            replacement["findings"][0]["extensions"] = {"candidateId": "DSS-replaced"}
+            replacement["findings"][0]["title"] = "Replaced title"
+            findings_path.write_text(json.dumps(replacement))
+            return result
+
+        monkeypatch.setattr(publication, "finalize_scan", replace_finalized_document)
+        with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection:
+            connection.row_factory = sqlite3.Row
+            exported = publication.export_findings(
+                workbench_api["_WORKBENCH_PUBLICATION_CONTEXT"],
+                connection,
+                SimpleNamespace(scan_id=scan_id, format="csv"),
+            )["export"]
+    else:
+        exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(exported["path"]).open(newline="") as source:
         reader = csv.DictReader(source)
         rows = list(reader)
@@ -801,6 +837,8 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == expected_candidate_id
     assert rows[0]["title"] == original_title
+    assert rows[0]["status"] == "closed"
+    assert rows[0]["close_reason"] == "wont_fix"
     assert "report_id" not in rows[0]
     assert "detailed_writeup" not in rows[0]
 
