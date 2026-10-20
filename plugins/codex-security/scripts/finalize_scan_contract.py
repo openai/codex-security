@@ -2787,7 +2787,10 @@ def write_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> None:
     sarif = build_sarif_projection(scan_dir, source_root, schema_dir)
-    _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
+    relative_path = EXPORT_PATHS["sarif"]
+    write_export_output(
+        scan_dir, scan_dir / relative_path, "sarif", _contract_json_bytes(relative_path, sarif)
+    )
 
 
 def csv_cell(value: Any) -> Any:

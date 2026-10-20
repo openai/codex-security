@@ -24,6 +24,7 @@ from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
+SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
 _WINDOWS = os.name == "nt"
 
 
@@ -447,10 +448,16 @@ def worktree_content_digest_for_context(
 ) -> str:
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    source_pathspecs = [
+        f":(literal){pathspec}",
+        ":(top,glob,exclude)**/.svn",
+        ":(top,glob,exclude)**/.svn/**",
+    ]
     tracked_ok = _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
+        "--no-literal-pathspecs",
         "diff",
         "--binary",
         "--full-index",
@@ -459,18 +466,19 @@ def worktree_content_digest_for_context(
         "--ignore-submodules=none",
         "HEAD",
         "--",
-        pathspec,
+        *source_pathspecs,
         git_dir=git_dir,
         work_tree=work_tree,
     )
     untracked = git_bytes(
         repository,
+        "--no-literal-pathspecs",
         "ls-files",
         "--others",
         "--exclude-standard",
         "-z",
         "--",
-        pathspec,
+        *source_pathspecs,
         git_dir=git_dir,
         work_tree=work_tree,
     )
@@ -673,6 +681,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     nested_worktrees: set[tuple[int, int]] = set()
     for entry in (entry for entry in listed.split(b"\0") if entry):
         relative = Path(os.fsdecode(entry[2:]))
+        if not SOURCE_METADATA_DIRECTORIES.isdisjoint(relative.parts):
+            continue
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -744,6 +754,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         while pending:
             children: list[Path] = []
             for path in pending:
+                if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(target).parts):
+                    continue
                 try:
                     path = _directory_link_boundary(target, path, linked_prefixes)
                     metadata = path.lstat()
@@ -764,7 +776,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                         continue
             candidates: dict[bytes, Path] = {}
             for path in children:
-                if os.path.normcase(path.name) == ".git":
+                if os.path.normcase(path.name) in SOURCE_METADATA_DIRECTORIES:
                     continue
                 try:
                     metadata = path.lstat()
@@ -812,7 +824,7 @@ def source_directory_snapshot_paths(
         parent = Path(directory)
         for name in directories[:]:
             path = parent / name
-            if name == ".git" or path in excluded:
+            if name in SOURCE_METADATA_DIRECTORIES or path in excluded:
                 directories.remove(name)
                 continue
             paths.append(path)
@@ -820,7 +832,9 @@ def source_directory_snapshot_paths(
             if getattr(path.lstat(), "st_reparse_tag", 0) & 0x20000000:
                 directories.remove(name)
         paths.extend(
-            parent / name for name in files if name != ".git" and parent / name not in excluded
+            parent / name
+            for name in files
+            if name not in SOURCE_METADATA_DIRECTORIES and parent / name not in excluded
         )
     return sorted(paths)
 
@@ -843,7 +857,7 @@ def directory_content_digest(
         else git_directory_snapshot_paths(target)
     )
     if paths is None:
-        paths = source_directory_snapshot_paths(target)
+        paths = source_directory_snapshot_paths(target, excluded)
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:

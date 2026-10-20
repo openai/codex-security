@@ -179,7 +179,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("separates writable scans from repository-scoped policy reads", () => {
+  test("separates writable scans from read-only policy permissions", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -210,7 +210,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
         codex_security_policy: {
           filesystem: {
-            ":minimal": "read",
+            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
           },
           network: { enabled: false },
@@ -241,19 +241,13 @@ describe("CodexSecurity preflight configuration", () => {
       },
       codex_security_policy: {
         filesystem: {
-          ":minimal": "read",
+          [process.platform === "win32" ? ":root" : ":minimal"]: "read",
           ":workspace_roots": "read",
+          [credentialHome]: { ".": "deny" },
         },
         network: { enabled: false },
       },
     });
-    const policyFilesystem = (
-      (config["permissions"] as JsonObject)[
-        "codex_security_policy"
-      ] as JsonObject
-    )["filesystem"] as JsonObject;
-    expect(policyFilesystem).not.toHaveProperty(":root");
-    expect(policyFilesystem).not.toHaveProperty(credentialHome);
   });
 
   test("preserves an explicitly requested strict approval policy", () => {

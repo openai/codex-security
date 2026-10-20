@@ -24,6 +24,7 @@ type Step = {
 };
 type Job = {
   steps: Step[];
+  env?: Record<string, string>;
   permissions?: Record<string, string>;
   needs?: string[];
   outputs?: Record<string, string>;
@@ -55,7 +56,9 @@ const reuse = script(
   "Reuse an existing immutable Action distribution",
 );
 const detect = script("release", "Detect Action release source");
+const detectContainer = script("release", "Detect container release source");
 const complete = script("complete", "Require completed release channels");
+const summarize = script("complete", "Summarize release channels");
 const publish = script("action", "Publish immutable Action tag and metadata");
 const directories: string[] = [];
 const version = "99.1.2";
@@ -883,7 +886,99 @@ test.each([
       INSTALL_RESULT: installResult,
       ACTION_RESULT: actionResult,
       HAS_ACTION: hasAction,
+      CONTAINER_RESULT: "success",
+      HAS_CONTAINER: "true",
     });
     expect(result.status === 0).toBe(succeeds);
+  },
+);
+
+test("detects container support from the release commit, not the automation checkout", () => {
+  const release = fixture();
+  release.write("Dockerfile", "FROM scratch\n");
+  const containerSource = release.commit("Add container");
+  expect(release.run(detectContainer).output).toBe("");
+  expect(
+    release.run(detectContainer, { RELEASE_SHA: containerSource }).output,
+  ).toBe("present=true\n");
+});
+
+test.each([
+  ["0.1.26", false],
+  ["0.4.0", false],
+  ["0.5.0", true],
+  ["0.10.0", true],
+  ["1.0.0", true],
+] as const)(
+  "preserves historical recovery before coordinated containers: %s",
+  (version, included) => {
+    const release = fixture();
+    release.write("Dockerfile", "FROM scratch\n");
+    release.updateJson("sdk/typescript/package.json", (value) => ({
+      ...value,
+      version,
+    }));
+    const source = release.commit("Add container source");
+    expect(
+      release.run(detectContainer, {
+        RELEASE_SHA: source,
+        RELEASE_VERSION: version,
+      }).output,
+    ).toBe(included ? "present=true\n" : "");
+  },
+);
+
+test.each([
+  ["success", "true", true],
+  ["failure", "true", false],
+  ["cancelled", "true", false],
+  ["skipped", "true", false],
+  ["skipped", "", true],
+] as const)(
+  "requires container publication when present: result=%s present=%s",
+  (containerResult, hasContainer, succeeds) => {
+    const release = fixture();
+    const result = release.run(complete, {
+      RELEASE_RESULT: "success",
+      INSTALL_RESULT: "success",
+      ACTION_RESULT: "success",
+      HAS_ACTION: "true",
+      CONTAINER_RESULT: containerResult,
+      HAS_CONTAINER: hasContainer,
+    });
+    expect(result.status === 0).toBe(succeeds);
+  },
+);
+
+test.each(["success", "failure", "cancelled", "skipped"])(
+  "reports the coordinated container result: %s",
+  (containerResult) => {
+    const release = fixture();
+    const summary = join(release.directory, "summary.md");
+    const result = release.run(summarize, {
+      GITHUB_STEP_SUMMARY: summary.replaceAll("\\", "/"),
+      GITHUB_SERVER_URL: "https://github.com",
+      GITHUB_REPOSITORY: "example/project",
+      RELEASE_RESULT: "success",
+      INSTALL_RESULT: "success",
+      ACTION_RESULT: "success",
+      HAS_ACTION: "true",
+      CONTAINER_RESULT: containerResult,
+      HAS_CONTAINER: "true",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const rows = readFileSync(summary, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("|"))
+      .map((line) => line.split("|").map((cell) => cell.trim()));
+    expect(rows.find((row) => row[1] === "Container image")?.[2]).toBe(
+      containerResult,
+    );
+    expect(
+      step("complete", "Summarize release channels")["continue-on-error"],
+    ).toBe(true);
+    expect(workflow.jobs["complete"]?.env?.["CONTAINER_RESULT"]).toBe(
+      "${{ needs.container.result }}",
+    );
   },
 );

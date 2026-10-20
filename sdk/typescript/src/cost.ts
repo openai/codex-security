@@ -58,7 +58,8 @@ interface ScanCostTrackerOptions {
   scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  /** Incomplete costs are measured subtotals, usable for spending limits only. */
+  onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
@@ -311,6 +312,9 @@ export class ScanCostTracker {
         this.#reportWorkerProgress(session);
       }
       const receipt = usages.get(threadId);
+      // A discovered thread without a receipt has unknown usage, not zero.
+      // Retain it so a parent-only subtotal cannot appear to be complete.
+      if (receipt === undefined) usages.set(threadId, null);
       if (
         session.usage !== null &&
         (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
@@ -322,18 +326,22 @@ export class ScanCostTracker {
       }
     }
     let usage: ScanTokenUsage | null = null;
+    let complete = true;
     for (const value of usages.values()) {
       if (value === null) {
-        this.#snapshot = { usage: null, cost: null };
-        return;
+        complete = false;
+        continue;
       }
       usage = addTokenUsage(usage, value);
     }
+    if (!complete) this.#snapshot = { usage: null, cost: null };
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
-    this.#snapshot = { usage, cost };
-    this.#reportUsage(usage);
-    this.#reportCost(cost);
+    if (complete) {
+      this.#snapshot = { usage, cost };
+      this.#reportUsage(usage);
+    }
+    this.#reportCost(cost, complete);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -375,12 +383,12 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null): void {
+  #reportCost(cost: ScanCost | null, complete = true): void {
     if (cost === null) return;
-    const signature = JSON.stringify(cost);
+    const signature = JSON.stringify([cost, complete]);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
-    this.#options.onCost?.(cost);
+    this.#options.onCost?.(cost, complete);
   }
 
   #reportUsage(usage: ScanTokenUsage | null): void {

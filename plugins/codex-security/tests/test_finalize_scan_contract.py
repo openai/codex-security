@@ -2409,8 +2409,8 @@ The extraction root is not enforced.
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
 
-    def test_preserves_literal_whitespace_repository_paths(self) -> None:
-        for path in (" ", "  ", "\u00a0"):
+    def test_preserves_literal_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
                 self.manifest["scan"]["scope"]["includePaths"] = [path]
                 self.coverage["includePaths"] = [path]
@@ -2435,7 +2435,7 @@ The extraction root is not enforced.
                 self.assertEqual(coverage["deferred"][0]["paths"], [path])
                 self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
                 self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
-                if path.isascii():
+                if path.isascii() and path.isspace():
                     self.assertIn(
                         f'- Included paths: `"{path}"`',
                         (self.scan_dir / "report.md").read_text(encoding="utf-8"),

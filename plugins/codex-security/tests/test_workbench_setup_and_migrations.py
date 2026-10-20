@@ -92,7 +92,8 @@ EXPECTED_MIGRATIONS = [
     (48, "share finding issue receipts across trackers"),
     (49, "index finding issue receipt ownership"),
     (50, "persist authorized source excerpt scopes"),
-    (51, "record severity classification review counts"),
+    (51, "preserve deep scan worker thread history"),
+    (52, "record severity classification review counts"),
 ]
 
 
