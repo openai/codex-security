@@ -45,6 +45,7 @@ function fixture() {
   const runs = new Map();
   const jobs = new Map();
   const deployments = new Map();
+  const errors = new Map();
   const comments = [];
   const requests = [];
   const pulls = [structuredClone(pull)];
@@ -58,6 +59,7 @@ function fixture() {
     },
     async request(method, path, body) {
       requests.push({ method, path, body });
+      if (errors.has(path)) throw errors.get(path);
       if (
         method === "POST" &&
         path === "actions/workflows/release-progress.yml/dispatches"
@@ -108,6 +110,7 @@ function fixture() {
     runs,
     jobs,
     deployments,
+    errors,
     comments,
     requests,
     pulls,
@@ -414,6 +417,76 @@ test("keeps one comment across CI, verification, and protected approval", async 
   );
   assert.equal((await f.update(2)).action, "unchanged");
   assert.equal(f.writes().length, 2);
+});
+
+test("continues a release backfill when saved workflow runs were deleted", async () => {
+  for (const deleted of [[1], [2], [3], [1, 2, 3]]) {
+    const f = fixture();
+    for (const [id, workflow] of [
+      [1, "node-ci"],
+      [2, "node-release"],
+      [3, "node-github-release"],
+    ]) {
+      f.runs.set(
+        id,
+        run(id, workflow, { status: "completed", conclusion: "success" }),
+      );
+      await f.update(id);
+    }
+    for (const id of deleted) {
+      f.runs.delete(id);
+      f.errors.set(
+        `actions/runs/${id}`,
+        Object.assign(new Error("Workflow run was deleted"), { status: 404 }),
+      );
+    }
+    f.runs.set(4, run(4, "node-github-release"));
+    assert.equal((await f.update(4)).action, "updated");
+    assert.equal(f.comments.length, 1);
+    assert.match(f.body(), /"node-github-release":4/u);
+    assert.match(f.body(), /Final release status \| Running/u);
+    if (deleted.includes(1))
+      assert.match(f.body(), /Post-merge CI \| Not recorded/u);
+    if (deleted.includes(2)) {
+      assert.match(f.body(), /npm release status \| Not recorded/u);
+      assert.match(f.body(), /Protected npm publication \| Not recorded/u);
+    }
+    f.requests.length = 0;
+    assert.equal((await f.update(4)).action, "unchanged");
+    for (const id of deleted)
+      assert.ok(!f.requests.some(({ path }) => path === `actions/runs/${id}`));
+  }
+});
+
+test("surfaces other errors while loading saved workflow runs", async () => {
+  for (const status of [401, 403, 500]) {
+    const f = fixture();
+    f.runs.set(1, run(1, "node-ci"));
+    await f.update(1);
+    const previous = f.body();
+    const error = Object.assign(new Error("Workflow run request failed"), {
+      status,
+    });
+    f.errors.set("actions/runs/1", error);
+    f.runs.set(2, run(2, "node-release"));
+    await assert.rejects(f.update(2), (caught) => caught === error);
+    assert.equal(f.body(), previous);
+    assert.equal(f.writes().length, 1);
+  }
+});
+
+test("does not ignore a missing incoming workflow run", async () => {
+  const f = fixture();
+  const error = Object.assign(new Error("Workflow run was deleted"), {
+    status: 404,
+  });
+  f.errors.set("actions/runs/1", error);
+  await assert.rejects(f.update(1), (caught) => caught === error);
+  await assert.rejects(
+    f.watch(1, () => assert.fail("must not poll a missing run")),
+    (caught) => caught === error,
+  );
+  assert.equal(f.writes().length, 0);
 });
 
 test("workflow results remain visible when no jobs start or every job is skipped", async () => {

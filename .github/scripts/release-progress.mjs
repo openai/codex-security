@@ -262,8 +262,12 @@ export async function updateReleaseProgress(github, runId) {
   const ids = saved ? JSON.parse(saved) : {};
   const runs = {};
   for (const name of workflows) {
-    if (ids[name])
+    if (!ids[name]) continue;
+    try {
       runs[name] = await github.request("GET", `actions/runs/${ids[name]}`);
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
   }
   const name = workflowName(incoming);
   const last = runs[name];
