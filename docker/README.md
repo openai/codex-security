@@ -82,9 +82,22 @@ and [package access settings](https://docs.github.com/en/packages/learn-github-p
 
 ## Publishing
 
-After merging to `main`, push `container-v<version>` matching the SDK package
-version or run `container-release` manually on `main`. Releases require a commit
-on protected `main`; pull requests only build and test.
+The coordinated `node-github-release` workflow calls `container-release` after
+verifying the published npm package and its installation. It supplies the npm
+release version and exact source commit; native binaries and Docker images are
+built from that source even when `main` has advanced. Approve the `container`
+environment deployment after validation. The coordinated release cannot finish
+successfully until the container has been published and verified.
+
+To backfill a missing image, dispatch `node-github-release` on `main` with the
+existing `npm-v<version>` tag. Standalone publication also supports pushing
+`container-v<version>` matching the SDK package version, or running
+`container-release` manually on `main`. Releases require a commit on protected
+`main`; pull requests only build and test.
+
+BuildKit provenance and OCI revision labels identify the source checkout. The
+GitHub attestation identifies the workflow run that built and promoted the image;
+for a coordinated backfill, that automation can be newer than the release source.
 
 If a release fails, fix the cause and rerun only failed jobs. Promotion retries
 require the existing stable version to reference the verified digest. If a newer
