@@ -18,7 +18,7 @@ const ROWS = [
   ROW,
   ROW.replace("occ_000000000000000000000001", "occ_000000000000000000000002"),
 ];
-const OCCURRENCE_IDS = ROWS.map((row) => row.split(",")[0]);
+const OCCURRENCE_IDS = ROWS.map((row) => row.split(",")[0]!);
 
 describe("findings CSV record endings", () => {
   test.each([false, true])(
