@@ -231,7 +231,15 @@ test.each(["directory", "zip"])(
         ],
         {
           encoding: "utf8",
-          env: { ...process.env, CODEX_SECURITY_TEST_TEMP: temporary },
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            CODEX_SECURITY_TEST_TEMP: temporary,
+            PSModulePath: join(system, "WindowsPowerShell", "v1.0", "Modules"),
+          },
           windowsHide: true,
         },
       );
