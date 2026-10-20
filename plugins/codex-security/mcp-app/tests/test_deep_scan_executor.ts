@@ -1393,6 +1393,8 @@ async function testWorkerRuntimeSettings() {
     "LD_LIBRARY_PATH",
     "DYLD_LIBRARY_PATH",
     "DYLD_FALLBACK_LIBRARY_PATH",
+    "TEMP",
+    "TMP",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
@@ -1403,6 +1405,9 @@ async function testWorkerRuntimeSettings() {
     delete process.env.SYNTHETIC_HEADER_VALUE;
     delete process.env.CODEX_SQLITE_HOME;
     for (const [configuration, expected] of cases) {
+      for (const [name, value] of saved) {
+        if (name === "TEMP" || name === "TMP") restoreEnv(name, value);
+      }
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
         true,
@@ -1464,6 +1469,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       );
       const providerHeaders = settings.map((_, index) =>
         index === 0 ? undefined : ` synthetic-header-${index}\t`,
+      );
+      const temporaryEnvironments = settings.map((_, index) => ({
+        TEMP: path.join(fixture.root, `temp-${index}`),
+        TMP: path.join(fixture.root, `tmp-${index}`),
+      }));
+      await Promise.all(
+        temporaryEnvironments.flatMap((environment) =>
+          Object.values(environment).map((directory) => mkdir(directory)),
+        ),
       );
       const workerConfigurations = Array.from(
         { length: settings.length },
@@ -1624,6 +1638,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       fixture.root,
                       `native-state-${index}`,
                     ),
+                    ...(index === 1
+                      ? { TMP: temporaryEnvironments[index].TEMP }
+                      : {}),
                   },
             authentication:
               index === 0
@@ -1870,6 +1887,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             executors.map((executor, index) => {
               // Snapshot each scan environment independently.
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+              Object.assign(process.env, temporaryEnvironments[index]);
               process.env.CODEX_SECURITY_STATE_DIR = path.join(
                 fixture.root,
                 `state-${index}`,
@@ -2017,6 +2035,22 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
+            assert.deepEqual(invocation.temporaryEnvironment, {
+              ...temporaryEnvironments[index],
+              ...(index === 1
+                ? { TMP: temporaryEnvironments[index].TEMP }
+                : {}),
+            });
+            for (const name of ["TEMP", "TMP"] as const) {
+              assert.equal(
+                process.env[name],
+                temporaryEnvironments.at(-1)![name],
+              );
+            }
+            assert.equal(
+              invocation.deepConfigPath,
+              workerConfigurations[index].workerConfigPath,
+            );
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
               path.join(fixture.root, `state-${index}`),
@@ -2275,6 +2309,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider,
               "worker preflight must use the same scan environment",
             );
+            const index = workerConfigurations.indexOf(selectedProvider);
+            assert.equal(preflight.codexHome, await realpath(codexHome));
+            assert.equal(
+              preflight.stateDirectory,
+              path.join(fixture.root, `state-${index}`),
+            );
+            assert.deepEqual(preflight.temporaryEnvironment, {
+              ...temporaryEnvironments[index],
+              ...(index === 1
+                ? { TMP: temporaryEnvironments[index].TEMP }
+                : {}),
+            });
             assert.equal(
               launch.environment!.CODEX_SECURITY_STATE_DIR,
               path.join(
