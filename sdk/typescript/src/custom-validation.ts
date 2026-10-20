@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
-import { requireScanFile } from "./contract.js";
+import { readScanFile, requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
@@ -200,10 +200,7 @@ export async function runCustomValidation(options: {
   const documents = await Promise.all(
     DOCUMENTS.map(async (name) =>
       JSON.parse(
-        await readFile(await requireScanFile(scanDir, name, name, signal), {
-          encoding: "utf8",
-          signal,
-        }),
+        (await readScanFile(scanDir, name, name, signal)).toString("utf8"),
       ),
     ),
   );

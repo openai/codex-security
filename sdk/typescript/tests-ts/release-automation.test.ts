@@ -729,12 +729,24 @@ describe("reviewed release note helpers", () => {
   });
 
   test("composes reviewed and generated notes deterministically", () => {
-    expect(composeReleaseNotes("Generated notes", "Reviewed summary")).toBe(
-      "<!-- codex-security-release-summary:start -->\n" +
-        "Reviewed summary\n" +
-        "<!-- codex-security-release-summary:end -->\n\n" +
-        "Generated notes",
-    );
+    const summary = "## Highlights\n\nReviewed summary";
+    const generated = [
+      "## What's Changed",
+      "",
+      "- A change ([#1](https://github.com/example/project/pull/1))",
+      "",
+      "## New Contributors",
+      "",
+      "- @contributor",
+    ].join("\n");
+    const notes = composeReleaseNotes(generated, summary);
+    expect(extractHistoricalReleaseSummary(notes)).toBe(summary);
+    expect(notes.indexOf(summary)).toBeLessThan(notes.indexOf("<details>"));
+    expect(notes).toContain(`</summary>\n\n${generated}\n\n</details>`);
+    expect(notes.match(/<details>/gu)).toHaveLength(1);
+    expect(
+      composeReleaseNotes(generated, extractHistoricalReleaseSummary(notes)),
+    ).toBe(notes);
     expect(composeReleaseNotes("Generated notes", null)).toBe(
       "Generated notes",
     );

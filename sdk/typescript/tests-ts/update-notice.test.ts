@@ -7,7 +7,7 @@ import {
   formatUpdateNotice,
   updateCommand,
 } from "../src/version.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { main } from "../src/cli.js";
 import { rejecting } from "./support/errors.js";
 import { responding } from "./support/responses.js";
@@ -310,5 +310,110 @@ describe("CLI update notice", () => {
       cliVersion: expect.any(String),
     });
     expect(stderr.text()).toBe("");
+  });
+
+  const notice = {
+    currentVersion: "0.1.0",
+    latestVersion: "0.2.0",
+    command: "synthetic update command",
+  };
+
+  test("preserves JSON output when formatting the update banner fails", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    let attempts = 0;
+    expect(
+      await runCli(
+        ["info", "--json"],
+        dependencies({
+          onUpdateCheck: resolving({
+            ...notice,
+            get command(): string {
+              attempts += 1;
+              throw new Error("Synthetic update formatting failure");
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(attempts).toBe(1);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      cliVersion: expect.any(String),
+    });
+    expect(stderr.text()).toBe("");
+  });
+
+  test.each([
+    ["success", 0, ""],
+    ["failure", 2, "Synthetic scan failure"],
+    ["SIGINT", 130, "Scan canceled by Ctrl-C."],
+    ["SIGTERM", 143, "Scan terminated by SIGTERM."],
+  ] as const)(
+    "preserves %s results when writing the update banner fails",
+    async (outcome, exitCode, message) => {
+      const stdout = capture();
+      const stderr = capture(true);
+      const signals = new FakeSignals();
+      let attempts = 0;
+      const write = stderr.stream.write;
+      stderr.stream.write = (chunk) => {
+        if (chunk.toString() === formatUpdateNotice(notice)) {
+          attempts += 1;
+          throw new Error("Synthetic update write failure");
+        }
+        return write(chunk);
+      };
+      const deps = dependencies({
+        signals,
+        onUpdateCheck: resolving(notice),
+        onRun: () => {
+          if (outcome === "SIGINT" || outcome === "SIGTERM")
+            signals.emit(outcome);
+          if (outcome === "failure") throw new Error(message);
+        },
+      });
+
+      expect(
+        await main(
+          outcome === "success" ? ["info", "--json"] : ["scan", ".", "--json"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(exitCode);
+      expect(attempts).toBe(1);
+      expect(JSON.parse(stdout.text())).toMatchObject(
+        outcome === "success"
+          ? { cliVersion: expect.any(String) }
+          : { status: "failed", code: "SCAN_FAILED", message },
+      );
+      if (outcome !== "success") expect(stderr.text()).toContain(message);
+      expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
+    },
+  );
+
+  test("still reports required stdout failures after an update banner failure", async () => {
+    const stderr = capture(true);
+    const write = stderr.stream.write;
+    stderr.stream.write = (chunk) => {
+      if (chunk.toString() === formatUpdateNotice(notice))
+        throw new Error("Synthetic update write failure");
+      return write(chunk);
+    };
+
+    expect(
+      await main(
+        ["info", "--json"],
+        {
+          write() {
+            throw new Error("Synthetic stdout failure");
+          },
+        },
+        stderr.stream,
+        dependencies({ onUpdateCheck: resolving(notice) }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Synthetic stdout failure");
+    expect(stderr.text()).not.toContain("Synthetic update write failure");
   });
 });
