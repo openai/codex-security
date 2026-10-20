@@ -24,6 +24,7 @@ type Step = {
 };
 type Job = {
   steps: Step[];
+  env?: Record<string, string>;
   permissions?: Record<string, string>;
   needs?: string[];
   outputs?: Record<string, string>;
@@ -57,6 +58,7 @@ const reuse = script(
 const detect = script("release", "Detect Action release source");
 const detectContainer = script("release", "Detect container release source");
 const complete = script("complete", "Require completed release channels");
+const summarize = script("complete", "Summarize release channels");
 const publish = script("action", "Publish immutable Action tag and metadata");
 const directories: string[] = [];
 const version = "99.1.2";
@@ -945,5 +947,38 @@ test.each([
       HAS_CONTAINER: hasContainer,
     });
     expect(result.status === 0).toBe(succeeds);
+  },
+);
+
+test.each(["success", "failure", "cancelled", "skipped"])(
+  "reports the coordinated container result: %s",
+  (containerResult) => {
+    const release = fixture();
+    const summary = join(release.directory, "summary.md");
+    const result = release.run(summarize, {
+      GITHUB_STEP_SUMMARY: summary.replaceAll("\\", "/"),
+      GITHUB_SERVER_URL: "https://github.com",
+      GITHUB_REPOSITORY: "example/project",
+      RELEASE_RESULT: "success",
+      INSTALL_RESULT: "success",
+      ACTION_RESULT: "success",
+      HAS_ACTION: "true",
+      CONTAINER_RESULT: containerResult,
+      HAS_CONTAINER: "true",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const rows = readFileSync(summary, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("|"))
+      .map((line) => line.split("|").map((cell) => cell.trim()));
+    expect(rows.find((row) => row[1] === "Container image")?.[2]).toBe(
+      containerResult,
+    );
+    expect(
+      step("complete", "Summarize release channels")["continue-on-error"],
+    ).toBe(true);
+    expect(workflow.jobs["complete"]?.env?.["CONTAINER_RESULT"]).toBe(
+      "${{ needs.container.result }}",
+    );
   },
 );

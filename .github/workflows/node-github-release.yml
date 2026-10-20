@@ -747,15 +747,36 @@ jobs:
     if: always()
     needs: [release, installed, action, container]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_RESULT: ${{ needs.release.result }}
+      INSTALL_RESULT: ${{ needs.installed.result }}
+      ACTION_RESULT: ${{ needs.action.result }}
+      HAS_ACTION: ${{ needs.release.outputs.has-action }}
+      CONTAINER_RESULT: ${{ needs.container.result }}
+      HAS_CONTAINER: ${{ needs.release.outputs.has-container }}
     steps:
-      - name: Require completed release channels
+      - name: Summarize release channels
+        continue-on-error: true
         env:
-          RELEASE_RESULT: ${{ needs.release.result }}
-          INSTALL_RESULT: ${{ needs.installed.result }}
-          ACTION_RESULT: ${{ needs.action.result }}
-          HAS_ACTION: ${{ needs.release.outputs.has-action }}
-          CONTAINER_RESULT: ${{ needs.container.result }}
-          HAS_CONTAINER: ${{ needs.release.outputs.has-container }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          {
+            printf '## Release publication status\n\n'
+            printf '| Channel | Result |\n| --- | --- |\n'
+            printf '| npm package and CLI GitHub release | %s |\n' "$RELEASE_RESULT"
+            printf '| Published package installation checks | %s |\n' "$INSTALL_RESULT"
+            printf '| GitHub Action release | %s |\n' "$ACTION_RESULT"
+            printf '| GitHub Marketplace | Not checked; publish and verify separately |\n'
+            printf '| Container image | %s |\n\n' "$CONTAINER_RESULT"
+            if [[ "$HAS_ACTION" == true && "$ACTION_RESULT" == success ]]; then
+              printf 'Marketplace: [edit the Action release](%s/%s/releases/edit/action-v%s) to publish or verify its listing.\n\n' \
+                "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
+            fi
+            printf 'See the [release process](%s/%s/blob/main/RELEASING.md#publish-to-github-marketplace) for Marketplace publication.\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require completed release channels
         run: |
           test "$RELEASE_RESULT" = success
           test "$INSTALL_RESULT" = success

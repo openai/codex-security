@@ -292,9 +292,15 @@ registry errors fail immediately.
 do not prepare a release by editing or committing files there.
 
 Monitor all three workflows and the final status in `node-github-release`.
-A release is complete when npm and GitHub publication, exact-version install
-checks, and applicable Action and container publication have succeeded. The
-protected npm publication gates and immutable `npm-vX.Y.Z` tag remain in place.
+The automated release is complete when npm and GitHub publication, exact-version
+install checks, and applicable Action and container publication have succeeded.
+The final job summarizes each result and identifies Marketplace publication as a
+separate step. A successful workflow does not confirm a Marketplace listing.
+The protected npm publication gates and immutable `npm-vX.Y.Z` tag remain in place.
+
+The npm package and CLI GitHub release become public before the installation and
+Action and container checks finish. Use the final workflow result before
+announcing that the automated release is complete.
 
 After the installed-package checks pass, `node-github-release` calls
 `container-release` with the verified npm version and source commit. Native
@@ -315,6 +321,33 @@ immutable tag checks pass. It does not rebuild or overwrite that version.
 Standalone `container-vX.Y.Z` and manual `container-release` triggers remain
 available.
 See [Container releases](docker/README.md) for publication and verification.
+
+## Publish to GitHub Marketplace
+
+Publishing the companion `action-vX.Y.Z` GitHub Release does not publish its
+Marketplace listing. Complete this step separately for each Action version
+that should appear in Marketplace:
+
+1. Wait for `node-github-release` to succeed for the version.
+2. Open the existing `action-vX.Y.Z` release and choose **Edit**. Select
+   **Publish this Action to the GitHub Marketplace**. Use the Action release,
+   whose tag contains the tested distribution, rather than the `npm-vX.Y.Z`
+   source release or a new tag on `main`.
+3. Confirm the metadata checks pass. The Marketplace display name comes from
+   `name` in the tagged `action.yml`, currently **OpenAI Codex Security**.
+   GitHub requires a globally unique Action name. If a released version's name
+   is rejected, correct the source metadata and publish a new version; do not
+   move an existing release tag.
+4. Select **Security** as the primary category and **Code review** as the
+   optional secondary category. Confirm the security contact and complete any
+   organization-owned Marketplace agreement requirements.
+5. Review the listing details, keep the Action release unmarked as **Latest**,
+   and choose **Update release**. Verify that the public Marketplace page links
+   to this repository and offers the intended `action-vX.Y.Z` version.
+
+Changing the Marketplace display name does not change the repository reference
+used by workflows or the npm package name. Existing releases retain their tagged
+metadata. See [GitHub's Marketplace publishing requirements](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/publish-in-github-marketplace).
 
 ## Verify
 
