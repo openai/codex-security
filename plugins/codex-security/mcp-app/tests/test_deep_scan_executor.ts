@@ -44,6 +44,7 @@ import type {
 } from "../src/deep-scan/types.js";
 import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_alias_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
+import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const { bundledCodexSdkEnvironment } = await importModule({
@@ -101,7 +102,16 @@ try {
   await testWorkerTerminalEvents();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
-  await testWorkerCyberAccessSettings();
+  await testWorkerCyberAccessSettings({
+    CodexSdkWorkerExecutor,
+    fakeCodexFixture,
+    parentSandbox: trustedParentSandbox,
+    workerRequest,
+    assertConfigOverrides,
+    assertReadOnlyWorkerPolicy,
+    assertWorkerSubagentPolicy,
+    restoreEnv,
+  });
   await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
   if (process.platform !== "win32") {
     await testDeepScanContextSnapshots({
@@ -2380,177 +2390,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ]),
             ),
-          );
-        }
-      }
-    }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    for (const [name, value] of saved) restoreEnv(name, value);
-  }
-}
-
-async function testWorkerCyberAccessSettings() {
-  const cases: {
-    name: string;
-    configuration: string;
-    program?: string;
-    serviceTier?: string;
-    features?: Record<string, boolean>;
-    configPath?: string;
-    executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
-  }[] = [
-    { name: "unset", configuration: "" },
-    {
-      name: "blue",
-      configuration:
-        'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
-      serviceTier: "fast",
-      program: "daybreak_blue",
-      features: {
-        api_key_cyber_access_programs: true,
-        api_key_model_discovery: true,
-      },
-    },
-    {
-      name: "explicit-false",
-      configuration:
-        'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
-      serviceTier: "flex",
-      program: "daybreak_blue",
-      features: {
-        api_key_cyber_access_programs: false,
-        api_key_model_discovery: false,
-      },
-    },
-    {
-      name: "other-program",
-      configuration:
-        'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
-      serviceTier: "fast",
-      program: "standard",
-      features: {
-        api_key_cyber_access_programs: true,
-        api_key_model_discovery: false,
-      },
-    },
-    {
-      name: "features-only",
-      configuration:
-        'service_tier = "fast"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = true\n',
-      serviceTier: "fast",
-      features: {
-        api_key_cyber_access_programs: false,
-        api_key_model_discovery: true,
-      },
-    },
-  ];
-  const saved = [
-    "CODEX_CLI_PATH",
-    "CODEX_HOME",
-    "CODEX_SECURITY_CONFIG_PATH",
-    "OPENAI_API_KEY",
-    "CODEX_API_KEY",
-  ].map((name) => [name, process.env[name]] as const);
-  const originalSpawn = childProcess.spawn;
-  const fixture = await fakeCodexFixture();
-  const promptPath = path.join(fixture.root, "prompt.md");
-  const launches: { args: readonly string[]; markerPath: string }[] = [];
-  try {
-    delete process.env.OPENAI_API_KEY;
-    process.env.CODEX_API_KEY = "synthetic-worker-api-key";
-    process.env.CODEX_CLI_PATH = process.execPath;
-    process.env.CODEX_HOME = fixture.root;
-    await writeFile(promptPath, "CAPTURE_SYNTHETIC_OPENAI_AUTH");
-    childProcess.spawn = ((
-      command: string,
-      args: readonly string[],
-      options: SpawnOptions,
-    ) => {
-      const markerPath = path.join(
-        fixture.root,
-        `cyber-${launches.length}.json`,
-      );
-      const environment = {
-        ...options!.env,
-        FAKE_CODEX_MARKER: markerPath,
-        FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
-      };
-      launches.push({ args, markerPath });
-      return originalSpawn(command, [fixture.executablePath, ...args], {
-        ...options,
-        env: environment,
-      });
-    }) as typeof childProcess.spawn;
-    syncBuiltinESMExports();
-    for (const testCase of cases) {
-      testCase.configPath = path.join(fixture.root, `${testCase.name}.toml`);
-      await writeFile(testCase.configPath, testCase.configuration);
-      testCase.executor = new CodexSdkWorkerExecutor({
-        model: testCase.name,
-        parentSandbox: trustedParentSandbox,
-      });
-    }
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-        launches.length = 0;
-        await Promise.all(
-          cases.map((testCase) => {
-            // Each scan captures its own config before its asynchronous launch.
-            process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
-            return testCase.executor!.run(
-              workerRequest(promptPath, fixture.root, { kind, resumeThreadId }),
-            );
-          }),
-        );
-        const workerLaunches = launches.filter(
-          ({ args }) => args[0] === "exec",
-        );
-        assert.equal(workerLaunches.length, cases.length);
-        for (const { name, program, serviceTier, features = {} } of cases) {
-          const launch = workerLaunches.find(
-            ({ args }) => args[args.indexOf("--model") + 1] === name,
-          );
-          const invocation = await readJson(launch!.markerPath);
-          assert.deepEqual(
-            invocation.argv.filter((arg: string) =>
-              arg.startsWith("service_tier="),
-            ),
-            serviceTier === undefined
-              ? []
-              : [`service_tier=${JSON.stringify(serviceTier)}`],
-          );
-          if (program === undefined) {
-            assert.equal(
-              invocation.argv.includes("--cyber-access-program"),
-              false,
-            );
-          } else {
-            assertFlagPair(invocation.argv, "--cyber-access-program", program);
-          }
-          assertConfigOverrides(invocation.argv, {
-            "features.api_key_cyber_access_programs":
-              features.api_key_cyber_access_programs,
-            "features.api_key_model_discovery":
-              features.api_key_model_discovery,
-          });
-          assert.equal(
-            invocation.openaiAuthentication.CODEX_API_KEY,
-            "synthetic-worker-api-key",
-          );
-          assert.equal(
-            invocation.argv.includes("resume"),
-            resumeThreadId !== undefined,
-          );
-          assertReadOnlyWorkerPolicy(invocation.argv);
-          assertWorkerSubagentPolicy(invocation.argv, 0);
-        }
-        // Running coordinators and their resumed workers retain their own settings.
-        for (const { configPath } of cases) {
-          await writeFile(
-            configPath!,
-            '[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
           );
         }
       }

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
+import { appServerCyberAccessProgram } from "./cli-daybreak.js";
+import { withCodexPreflightLock } from "./provider-profile.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
@@ -45,7 +47,11 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify, stripVTControlCharacters } from "node:util";
+import {
+  isDeepStrictEqual,
+  promisify,
+  stripVTControlCharacters,
+} from "node:util";
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
@@ -352,7 +358,7 @@ const MATCHING_MODEL_OPTIONS = modelOptions(
   "Matching reasoning effort (default: medium).",
 );
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
+  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
   codex: z
     .array(optionValue("--codex"))
@@ -1041,6 +1047,7 @@ interface SkillCommandOutput {
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
+    readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
 }
@@ -1083,6 +1090,8 @@ interface SkillRunOptions {
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
   serviceTier?: JsonValue;
+  daybreakFeatures?: JsonObject;
+  cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -1335,7 +1344,7 @@ export async function runCodexSkillCommand(
       const overrides = parseToml(
         stringifyToml(output.codexOverrides ?? {}),
       ) as JsonObject;
-      const config = deepMerge(ambientConfig, overrides);
+      const config = deepMerge(structuredClone(ambientConfig), overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
@@ -1462,7 +1471,7 @@ export async function runCodexSkillCommand(
         releaseCredentialHome =
           await acquireCodexSecurityCredentialHomeLock(codexHome);
         let credentialsAvailable: boolean;
-        const ambientConfig = await readCodexHomeConfig(selected);
+        const ambientAuthConfig = await readCodexHomeConfig(selected);
         credentialConfig = await readCodexHomeConfig({
           ...selected,
           CODEX_HOME: codexHome,
@@ -1473,7 +1482,7 @@ export async function runCodexSkillCommand(
           "projects",
           "project_root_markers",
         ]) {
-          const value = ambientConfig[key];
+          const value = ambientAuthConfig[key];
           if (value === undefined) delete credentialConfig[key];
           else credentialConfig[key] = value;
         }
@@ -1513,6 +1522,32 @@ export async function runCodexSkillCommand(
           output.auth,
           provider,
         );
+        if (output.appServer !== undefined) {
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(
+            DEFAULT_DEPENDENCIES,
+            controller,
+          );
+          try {
+            args = [
+              ...args,
+              ...(await skillDaybreakConfigOverrides(
+                args,
+                command,
+                selected,
+                directory,
+                ambientConfig,
+                controller.signal,
+              )),
+            ];
+          } catch (error) {
+            if (controller.signal.aborted)
+              return controller.signal.reason === "SIGINT" ? 130 : 143;
+            throw error;
+          } finally {
+            removeSignals();
+          }
+        }
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
@@ -1632,16 +1667,11 @@ export async function runCodexSkillCommand(
                 output.appServer === undefined
                   ? undefined
                   : {
+                      ...output.appServer,
                       apiKey,
                       modelProvider,
                       onThreadStarted: releaseCredentialHome,
-                      directory: output.appServer.directory,
-                      prompt: output.appServer.prompt,
-                      threadSource: output.appServer.threadSource,
                       input: invocation.stdin!,
-                      sandbox: output.appServer.sandbox,
-                      externalSandbox: output.appServer.externalSandbox,
-                      onEvent: output.appServer.onEvent,
                     },
               ),
               new Promise<undefined>((resolve) => {
@@ -1729,6 +1759,97 @@ export async function runCodexSkillCommand(
   } finally {
     await releaseCredentialHome?.();
   }
+}
+
+/**
+ * Stored auth switches homes. Native origins preserve ambient settings at
+ * app-server startup, where model discovery gates cannot be set per thread.
+ */
+async function skillDaybreakConfigOverrides(
+  args: readonly string[],
+  command: CodexCommand,
+  environment: NodeJS.ProcessEnv,
+  directory: string,
+  ambientConfig: JsonObject,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const ambientFeatures = isJsonObject(ambientConfig["features"])
+    ? ambientConfig["features"]
+    : {};
+  const settings: [string, JsonValue | undefined][] = [
+    ["daybreak", ambientConfig["daybreak"]],
+    ...[
+      "cli_daybreak",
+      "api_key_cyber_access_programs",
+      "api_key_model_discovery",
+    ].map((key): [string, JsonValue | undefined] => [
+      `features.${key}`,
+      ambientFeatures[key],
+    ]),
+  ];
+  if (settings.every(([, value]) => value === undefined)) return [];
+  const nativeEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  const native = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
+  const response = (await withCodexPreflightLock(
+    nativeEnvironment,
+    signal,
+    () =>
+      native.readDeepScanRuntimeConfigWithOrigins({
+        codexPath: command.command,
+        appServerArgs: args,
+        cwd: directory,
+        configOverrides: [],
+        env: nativeEnvironment,
+        signal,
+        context: "helper",
+      }),
+  )) as JsonObject;
+  const origins = response["origins"];
+  const layers = response["layers"];
+  const malformed = () =>
+    new CodexSecurityError(
+      "Codex did not return configuration origins for Daybreak settings.",
+    );
+  if (!isJsonObject(origins) || !Array.isArray(layers)) throw malformed();
+  const userLayer = layers.findIndex((layer) => {
+    const name = isJsonObject(layer) ? layer["name"] : undefined;
+    return (
+      isJsonObject(name) && name["type"] === "user" && name["profile"] == null
+    );
+  });
+  if (userLayer === -1) throw malformed();
+  const overrides: string[] = [];
+  for (const [key, value] of settings) {
+    if (value === undefined) continue;
+    const origin = origins[key];
+    if (origin !== undefined) {
+      if (!isJsonObject(origin) || !isJsonObject(origin["name"]))
+        throw malformed();
+      const layer = layers.findIndex(
+        (entry) =>
+          isJsonObject(entry) &&
+          isDeepStrictEqual(entry["name"], origin["name"]),
+      );
+      if (layer === -1) throw malformed();
+      // Native returns layers from highest to lowest priority. Ambient values
+      // replace the user-home fallback without overriding project or CLI choices.
+      if (layer < userLayer) continue;
+    }
+    overrides.push("--config", `${key}=${inlineToml(value)}`);
+  }
+  return overrides;
 }
 
 export async function main(
@@ -7545,6 +7666,7 @@ async function runSkill(
         key !== "model_reasoning_effort" &&
         key !== "model_provider" &&
         key !== "model_providers" &&
+        key !== "daybreak" &&
         !(
           key === "analytics" &&
           isJsonObject(value) &&
@@ -7553,7 +7675,7 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, daybreak, and analytics.enabled overrides.",
     );
   }
   if (options.serviceTier !== undefined)
@@ -7788,6 +7910,12 @@ async function runSkill(
       ...(options.serviceTier === undefined
         ? []
         : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
+      ...(overrides["daybreak"] === undefined
+        ? []
+        : ["--config", `daybreak=${inlineToml(overrides["daybreak"])}`]),
+      ...Object.entries(options.daybreakFeatures ?? {}).flatMap(
+        ([key, value]) => ["--config", `features.${key}=${inlineToml(value)}`],
+      ),
       ...codex
         .filter(
           (value) =>
@@ -7861,6 +7989,9 @@ async function runSkill(
               prompt,
               threadSource,
               ...(options.externalSandbox ? { externalSandbox: true } : {}),
+              ...(options.cyberAccessProgram === undefined
+                ? {}
+                : { cyberAccessProgram: options.cyberAccessProgram }),
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
@@ -7886,6 +8017,7 @@ export async function readSkillCommandOutput(
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
+    readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
 ): Promise<{
@@ -7900,6 +8032,17 @@ export async function readSkillCommandOutput(
   let turnId: string | undefined;
   let completed = false;
   let sandboxUnavailable = false;
+  let config: JsonObject = {};
+  let model: string;
+  let provider: string;
+  let daybreakRequestId = 0;
+  let daybreakRequest:
+    | {
+        id: string;
+        resolve: (result: JsonObject) => void;
+        reject: (error: Error) => void;
+      }
+    | undefined;
   const externalSandbox = appServer?.externalSandbox
     ? { type: "externalSandbox", networkAccess: "enabled" }
     : undefined;
@@ -7907,17 +8050,50 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const startTurn = (): void => {
-    send({
-      id: 3,
-      method: "turn/start",
-      params: {
-        threadId: threadId!,
-        ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
-        input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
+    const selected = appServer?.cyberAccessProgram;
+    const program =
+      selected === undefined
+        ? appServerCyberAccessProgram(
+            config,
+            model,
+            provider,
+            threadId!,
+            (method, params) =>
+              new Promise<JsonObject>((resolve, reject) => {
+                const id = `daybreak-${daybreakRequestId++}`;
+                daybreakRequest = { id, resolve, reject };
+                send({ id, method, params });
+              }),
+          )
+        : Promise.resolve(
+            selected === "daybreak_blue"
+              ? "daybreakBlue"
+              : selected === "daybreak_red"
+                ? "daybreakRed"
+                : selected,
+          );
+    void program.then(
+      (cyberAccessProgram) => {
+        send({
+          id: 3,
+          method: "turn/start",
+          params: {
+            threadId: threadId!,
+            ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
+            ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
+            input: [
+              { type: "text", text: appServer!.prompt, text_elements: [] },
+            ],
+          },
+        });
       },
-    });
+      (failure: unknown) => {
+        error = errorMessage(failure);
+        appServer?.input.end();
+      },
+    );
   };
-  const startThread = (config?: JsonObject): void => {
+  const startThread = (threadConfig?: JsonObject): void => {
     if (appServer === undefined) return;
     send({
       id: 2,
@@ -7932,7 +8108,8 @@ export async function readSkillCommandOutput(
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
-        ...(config === undefined ? {} : { config }),
+        ...(config["daybreak"] === true ? { daybreakEnabled: true } : {}),
+        ...(threadConfig === undefined ? {} : { config: threadConfig }),
       },
     });
   };
@@ -7940,7 +8117,10 @@ export async function readSkillCommandOutput(
     send({
       id: 1,
       method: "initialize",
-      params: { clientInfo: { name: "codex-security", version: VERSION } },
+      params: {
+        clientInfo: { name: "codex-security", version: VERSION },
+        capabilities: { experimentalApi: true },
+      },
     });
   }
 
@@ -7966,6 +8146,18 @@ export async function readSkillCommandOutput(
         } catch {}
       }
       if (value["id"] !== undefined) {
+        if (value["id"] === daybreakRequest?.id) {
+          const pending = daybreakRequest;
+          daybreakRequest = undefined;
+          if (value["error"] !== undefined) {
+            pending.reject(
+              new Error((value["error"] as { message: string }).message),
+            );
+          } else {
+            pending.resolve(value["result"] as JsonObject);
+          }
+          continue;
+        }
         if (typeof value["method"] === "string") {
           send({
             id: value["id"] as string | number,
@@ -7987,26 +8179,35 @@ export async function readSkillCommandOutput(
               continue;
             }
           }
-          if (appServer.sandbox === "read-only") {
-            if (appServer.directory === undefined) {
-              error =
-                "Codex did not receive the repository directory required for read-only verification.";
-              appServer.input.end();
-              continue;
-            }
-            send({
-              id: 4,
-              method: "config/read",
-              params: {
-                cwd: appServer.directory,
-                includeLayers: true,
-              },
-            });
-          } else {
-            startThread();
+          if (
+            appServer.sandbox === "read-only" &&
+            appServer.directory === undefined
+          ) {
+            error =
+              "Codex did not receive the repository directory required for read-only verification.";
+            appServer.input.end();
+            continue;
           }
-        } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
+          send({
+            id: 4,
+            method: "config/read",
+            params: {
+              ...(appServer.directory === undefined
+                ? {}
+                : { cwd: appServer.directory }),
+              includeLayers: appServer.sandbox === "read-only",
+            },
+          });
+        } else if (value["id"] === 4) {
           const result = value["result"];
+          config =
+            isJsonObject(result) && isJsonObject(result["config"])
+              ? (result["config"] as JsonObject)
+              : {};
+          if (appServer.sandbox !== "read-only") {
+            startThread();
+            continue;
+          }
           const layers =
             typeof result === "object" && result !== null && "layers" in result
               ? result.layers
@@ -8069,8 +8270,12 @@ export async function readSkillCommandOutput(
           const result = value["result"] as {
             thread: { id: string };
             sandbox: JsonObject;
+            model: string;
+            modelProvider: string;
           };
           threadId = result.thread.id;
+          model = result.model;
+          provider = result.modelProvider;
           if (
             appServer.threadSource === CODEX_SECURITY_THREAD_SOURCES.remediation
           ) {
@@ -8419,6 +8624,8 @@ async function executeScan(
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let patchServiceTier: JsonValue | undefined;
+  let patchDaybreak: JsonValue = false;
+  let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8445,8 +8652,20 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    patchServiceTier =
-      resolveCodexProfile(effectiveConfiguration)["service_tier"] ?? "default";
+    const resolvedConfiguration = resolveCodexProfile(effectiveConfiguration);
+    patchServiceTier = resolvedConfiguration["service_tier"] ?? "default";
+    patchDaybreak = resolvedConfiguration["daybreak"] ?? false;
+    const features = resolvedConfiguration["features"];
+    patchDaybreakFeatures = Object.fromEntries(
+      [
+        "cli_daybreak",
+        "api_key_cyber_access_programs",
+        "api_key_model_discovery",
+      ].map((key) => [
+        key,
+        isJsonObject(features) ? (features[key] ?? true) : true,
+      ]),
+    );
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
@@ -9187,6 +9406,7 @@ async function executeScan(
           codex: [
             `model=${JSON.stringify(effectiveModel)}`,
             `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            `daybreak=${inlineToml(patchDaybreak)}`,
             ...(patchAnalyticsOverride === undefined
               ? []
               : [patchAnalyticsOverride]),
@@ -9197,6 +9417,8 @@ async function executeScan(
         {
           ...providerOptions,
           serviceTier: patchServiceTier,
+          daybreakFeatures: patchDaybreakFeatures,
+          cyberAccessProgram: arguments_.cyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,

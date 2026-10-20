@@ -54,6 +54,8 @@ describe("delegated scan attribution", () => {
               : "gpt-5.6-sol"
             : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
+          const daybreak =
+            endpointSource === "unset" ? undefined : surface === "cli";
           const endpoint =
             endpointSource === "unset"
               ? undefined
@@ -93,6 +95,14 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                ...(daybreak === undefined || endpointSource === "profile-only"
+                  ? {}
+                  : {
+                      daybreak:
+                        endpointSource === "profile-override"
+                          ? !daybreak
+                          : daybreak,
+                    }),
                 analytics: { enabled: surface === "sdk" },
                 responses_api_metadata: {
                   custom_attribution: surface,
@@ -107,10 +117,15 @@ describe("delegated scan attribution", () => {
                   ? {
                       profile: "selected",
                       profiles: {
-                        selected:
-                          profileEndpoint === undefined
+                        selected: {
+                          ...(profileEndpoint === undefined
                             ? {}
-                            : { openai_base_url: profileEndpoint },
+                            : { openai_base_url: profileEndpoint }),
+                          ...(endpointSource === "profile-only" ||
+                          endpointSource === "profile-override"
+                            ? { daybreak }
+                            : {}),
+                        },
                         unselected: {
                           openai_base_url: "https://unused.example.test/v1",
                         },
@@ -199,6 +214,7 @@ describe("delegated scan attribution", () => {
                       expect(options.config?.["openai_base_url"]).toBe(
                         endpoint,
                       );
+                      expect(options.config?.["daybreak"]).toBe(daybreak);
                       expect(options.config).toMatchObject({
                         features,
                         ...(model === undefined ? {} : { model }),
@@ -247,6 +263,7 @@ describe("delegated scan attribution", () => {
                         const workerRuntime = deepConfig[
                           "worker_runtime"
                         ] as Record<string, unknown>;
+                        expect(workerRuntime["daybreak"]).toBe(daybreak);
                         if (endpoint === undefined)
                           expect(workerRuntime).not.toHaveProperty(
                             "openai_base_url",
@@ -260,6 +277,7 @@ describe("delegated scan attribution", () => {
                         features,
                         ...(model === undefined ? {} : { model }),
                       });
+                      expect(runtimeConfig["daybreak"]).toBe(daybreak);
                       expect(initialConfig).not.toContain("openai_base_url");
                       expect(initialConfig).not.toContain("synthetic-password");
                       if (program === undefined) {

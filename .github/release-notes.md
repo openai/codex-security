@@ -4,7 +4,7 @@
 
 ## Highlights
 
-No release highlights have been drafted yet.
+- preserve Daybreak settings across scans and remediation ([#1740](https://github.com/openai/codex-security/pull/1740))
 
 <!-- release-section: highlights:end -->
 

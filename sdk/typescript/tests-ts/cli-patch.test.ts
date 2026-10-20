@@ -797,6 +797,8 @@ describe("scan and patch workflow", () => {
           "--codex",
           "analytics.enabled=false",
           "--codex",
+          "daybreak=true",
+          "--codex",
           'model_provider="synthetic.gateway"',
           "--codex",
           'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
@@ -807,6 +809,7 @@ describe("scan and patch workflow", () => {
             expect(args).toContain('model="gpt-6.1-sol"');
             expect(args).toContain('model_reasoning_effort="max"');
             expect(args).toContain("analytics.enabled=false");
+            expect(args).toContain("daybreak=true");
             expect(args).toContain('model_provider="synthetic.gateway"');
             expect(output?.modelProvider).toBe("synthetic.gateway");
             expect(output?.codexOverrides).toMatchObject({
