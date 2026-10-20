@@ -384,19 +384,19 @@ def list_unmatched_scan_pairs(
     ).fetchone()
     selected = [
         scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-        )
+        for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
         if _same_repository(scan, requested)
     ]
 
+    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+
     available = []
-    for scan in selected:
+    for selected_index, scan in enumerate(selected):
         try:
             read_coverage(scan)
         except SystemExit:
             continue
-        available.append(scan)
+        available.append((selected_index, scan))
 
     saved_pairs = {
         (row["before_scan_id"], row["after_scan_id"])
@@ -406,10 +406,10 @@ def list_unmatched_scan_pairs(
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
-    for index, after in enumerate(available):
+    for index, (selected_index, after) in enumerate(available):
         previous = [
             before
-            for before in available[:index]
+            for _, before in available[:index]
             if args.force or (before["id"], after["id"]) not in saved_pairs
         ]
         skipped += index - len(previous)
@@ -429,11 +429,7 @@ def list_unmatched_scan_pairs(
                 ]
         known_groups = _known_finding_groups(
             known_links,
-            {
-                scan["id"]
-                for scan in selected
-                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
-            },
+            {scan["id"] for scan in selected[: selected_index + 1]},
         )
         batches.append(
             {

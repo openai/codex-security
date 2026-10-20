@@ -967,6 +967,103 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
     ]
 
 
+@pytest.mark.parametrize(
+    ("before_started", "after_started"),
+    [
+        ("2026-01-02T00:15:00+02:00", "2026-01-01T21:00:00-02:00"),
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00.000001Z"),
+        ("2026-01-01t02:00:00.000000+02:00", "2026-01-01T00:00:00Z"),
+    ],
+)
+def test_automatic_matching_orders_instants_and_preserves_directed_cache(
+    tmp_path: Path, before_started: str, after_started: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    before, after = sorted(
+        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
+        key=lambda scan: scan["scanId"],
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [(before_started, before["scanId"]), (after_started, after["scanId"])],
+        )
+    save_scan_matches(state_dir, after, before)
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert pending["skippedPairs"] == 0
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [after["scanId"]]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [before["scanId"]]
+
+    save_scan_matches(state_dir, before, after)
+    cached = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert cached["batches"] == []
+    assert cached["skippedPairs"] == 1
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert forced == pending
+
+
+def test_automatic_matching_keeps_unavailable_history_without_future_links(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    earlier, unavailable, current, future = (
+        create_cli_scan(
+            state_dir, tmp_path / "results", repository, identity_anchor=f"archive-check-{index}"
+        )
+        for index in range(4)
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            [
+                ("2026-01-01T00:00:00Z", earlier["scanId"]),
+                ("2026-01-01T03:00:00+02:00", unavailable["scanId"]),
+                ("2026-01-01T02:00:00Z", current["scanId"]),
+                ("2026-01-01T00:30:00-03:00", future["scanId"]),
+            ],
+        )
+    findings = [
+        get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
+        for scan in (unavailable, current, future)
+    ]
+    for before, after, before_finding, after_finding in (
+        (unavailable, current, findings[0], findings[1]),
+        (current, future, findings[1], findings[2]),
+    ):
+        save_scan_matches(
+            state_dir,
+            before,
+            after,
+            confirmed_match(before_finding["occurrenceId"], after_finding["occurrenceId"]),
+        )
+    shutil.rmtree(unavailable["scanDir"])
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert (pending["scanCount"], pending["unavailableScans"], pending["skippedPairs"]) == (4, 1, 1)
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [
+        current["scanId"],
+        future["scanId"],
+    ]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [earlier["scanId"]]
+    assert pending["batches"][0]["knownFindingGroups"] == [
+        sorted(finding["findingId"] for finding in findings[:2])
+    ]
+    assert pending["batches"][1]["knownFindingGroups"] == [
+        sorted(finding["findingId"] for finding in findings)
+    ]
+
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert (forced["scanCount"], forced["unavailableScans"], forced["skippedPairs"]) == (4, 1, 0)
+    assert all("knownFindingGroups" not in batch for batch in forced["batches"])
+
+
 def test_list_unmatched_scan_pairs_skips_unavailable_scan_artifacts(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

@@ -204,6 +204,21 @@ export function bindImportedFindings(
   });
 }
 
+function exportedCsvNewline(source: string): "\r\n" | "\r" | "\n" | undefined {
+  const start = source.startsWith("\uFEFF") ? 1 : 0;
+  for (const columns of [CSV_COLUMNS, REQUIRED_CSV_COLUMNS]) {
+    const header = columns.join(",");
+    if (!source.startsWith(header, start)) continue;
+    const end = start + header.length;
+    for (const newline of ["\r\n", "\r", "\n"] as const) {
+      // Require the exporter's first cell: skipped empty records can make
+      // other mixed-ending CSV valid under Papa's existing auto-detection.
+      if (source.startsWith(`${newline}occ_`, end)) return newline;
+    }
+  }
+  return undefined;
+}
+
 export function parseFindingsCsv(source: string): CsvFindingRow[] {
   const {
     data: rows,
@@ -212,6 +227,7 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
   } = Papa.parse<Record<string, string>>(source, {
     header: true,
     delimiter: ",",
+    newline: exportedCsvNewline(source),
     skipEmptyLines: "greedy",
     transform: decodeExportedCsvCell,
   });

@@ -1452,7 +1452,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
-        { model: "fixture-future-model", reasoningEffort: "future-effort" },
+        {
+          model: 'fixture-"future"\\模型',
+          reasoningEffort: 'future-"effort"\\強度\u007f',
+        },
         // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
@@ -1545,6 +1548,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeProfile === undefined
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
+          const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
@@ -1553,6 +1557,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...trustedParentSandboxWithDenials.literalFilesystemDenies,
               deepPath,
               codexHome,
+              literalDeniedPath,
             ],
             globScanMaxDepth: trustedParentSandboxWithDenials.globScanMaxDepth,
           };
@@ -1604,6 +1609,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ...deniedWorkerPermissionProfile.filesystem,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
+                [literalDeniedPath]: { ".": "deny" },
               },
             },
             provider,
@@ -2086,12 +2092,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               path.join(fixture.root, `cache-${index} `),
             );
             assert.deepEqual(
-              invocation.argv.filter((arg: string) =>
-                arg.startsWith("model_reasoning_effort="),
-              ),
-              reasoningEffort === undefined
-                ? []
-                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
+              nativeConfigOverrides(invocation.argv)
+                .filter((override) =>
+                  override.startsWith("model_reasoning_effort="),
+                )
+                .map((override) => parseToml(override).model_reasoning_effort),
+              reasoningEffort === undefined ? [] : [reasoningEffort],
             );
             if (model === undefined) {
               assert.equal(invocation.argv.includes("--model"), false);

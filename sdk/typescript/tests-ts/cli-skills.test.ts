@@ -1182,6 +1182,7 @@ describe("CLI skill commands", () => {
         ["gpt-6-astra", "max"],
         ["gpt-6.1-sol", "max"],
         ["synthetic-future-model", "synthetic-future-effort"],
+        ['synthetic-"model"\\雪\u007f', 'future-"effort"\\雪\u007f'],
       ] as const) {
         let invocation: readonly string[] = [];
         const stderr = captureCli(main, "stderr");
@@ -1218,8 +1219,16 @@ describe("CLI skill commands", () => {
           ),
           stderr.text(),
         ).toBe(0);
-        expect(invocation).toContain(`model="${model}"`);
-        expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
+        expect(
+          parseToml(invocation.find((value) => value.startsWith("model="))!),
+        ).toEqual({ model });
+        expect(
+          parseToml(
+            invocation.find((value) =>
+              value.startsWith("model_reasoning_effort="),
+            )!,
+          ),
+        ).toEqual({ model_reasoning_effort: effort });
       }
 
       for (const [options, message] of [

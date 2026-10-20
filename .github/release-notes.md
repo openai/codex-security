@@ -21,6 +21,10 @@
 - preserve CODEOWNERS token grammar ([#1787](https://github.com/openai/codex-security/pull/1787))
 - stabilize Python discovery and native worker tests ([#1793](https://github.com/openai/codex-security/pull/1793))
 - retain finding details with own JSON keys ([#1780](https://github.com/openai/codex-security/pull/1780))
+- order automatic matches by scan start time ([#1779](https://github.com/openai/codex-security/pull/1779))
+- preserve literal TOML override strings ([#1792](https://github.com/openai/codex-security/pull/1792))
+- preserve validation behavior for malformed scan usage ([#1781](https://github.com/openai/codex-security/pull/1781))
+- preserve record endings in large finding exports ([#1785](https://github.com/openai/codex-security/pull/1785))
 
 <!-- release-section: highlights:end -->
 

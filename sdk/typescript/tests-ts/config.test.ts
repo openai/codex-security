@@ -6,6 +6,7 @@ import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
   inlineToml,
+  quoteTomlString,
   modelProviderConfigOverride,
   resolveCodexProfile,
   scanModelConfiguration,
@@ -32,6 +33,34 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test("inline Codex overrides preserve literal keys and string values", () => {
+  const metadata = {
+    "literal.key": "value.with.dots",
+    'quote"slash\\雪': 'quote"slash\\雪',
+    "control\u007fkey": "control\u0000\b\t\n\f\r\u007fvalue",
+  };
+  expect(parse(`responses_api_metadata=${inlineToml(metadata)}`)).toEqual({
+    responses_api_metadata: metadata,
+  });
+  expect(
+    parse(
+      `permissions=${inlineToml({
+        review: { filesystem: { "path.with.dots/雪\u007f": "deny" } },
+      })}`,
+    ),
+  ).toEqual({
+    permissions: {
+      review: { filesystem: { "path.with.dots/雪\u007f": "deny" } },
+    },
+  });
+  for (const value of ["\ud800", "\udc00"]) {
+    expect(() => parse(`model=${quoteTomlString(value)}`)).toThrow();
+    expect(() =>
+      parse(`metadata=${inlineToml({ [value]: "literal" })}`),
+    ).toThrow();
+  }
+});
 
 test("inline Codex overrides omit optional null fields like the file writer", async () => {
   for (const value of [null, { args: ["fixture", null] }]) {
