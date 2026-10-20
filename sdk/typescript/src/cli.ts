@@ -6726,9 +6726,14 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
+    // Saved scopes contain literal repository names, not home-relative inputs.
     target:
       paths.length > 0
-        ? paths
+        ? paths.map((path) =>
+            path === "~" || path.startsWith("~/") || path.startsWith("~\\")
+              ? `./${path}`
+              : path,
+          )
         : kind === "refs"
           ? DiffTarget.refs({ base: reference!, head: head ?? "HEAD" })
           : kind === "working_tree"
