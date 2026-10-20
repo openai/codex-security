@@ -31,6 +31,7 @@
 - reject non-finite values in retained scan drafts ([#1783](https://github.com/openai/codex-security/pull/1783))
 - publish containers with coordinated npm releases ([#1796](https://github.com/openai/codex-security/pull/1796))
 - clarify Marketplace publication and channel status ([#1797](https://github.com/openai/codex-security/pull/1797))
+- preserve literal CSV paths, candidate IDs, and notes ([#1786](https://github.com/openai/codex-security/pull/1786))
 
 <!-- release-section: highlights:end -->
 
