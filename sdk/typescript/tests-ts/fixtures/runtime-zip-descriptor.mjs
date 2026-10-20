@@ -40,6 +40,8 @@ function afterRead(buffer, bytesRead) {
     bytesRead >= 4 &&
     buffer.readUInt32LE(0) === 0x02014b50
   ) {
+    // Move the open archive aside so replacement also works on Windows.
+    fs.renameSync(archive, join(root, "checked.zip"));
     fs.renameSync(
       join(
         root,
@@ -136,8 +138,8 @@ try {
   failure = error;
 }
 if (scenario.startsWith("replace-")) {
+  if (failure !== undefined) throw failure;
   assert.equal(replaced, true);
-  assert.equal(failure, undefined);
   const manifest = JSON.parse(
     fs.readFileSync(join(result, ".codex-plugin/plugin.json"), "utf8"),
   );
