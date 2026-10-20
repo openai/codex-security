@@ -37,6 +37,7 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
+      "owner-suggestions",
       "max-cost",
       "max-time",
       "show-cost",

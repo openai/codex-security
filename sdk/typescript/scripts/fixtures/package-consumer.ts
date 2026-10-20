@@ -314,12 +314,25 @@ export async function hostedScan(
 ): Promise<HostedScanResult> {
   const options: HostedScanOptions = {
     executor,
+    ownerCodex: {
+      startThread(options) {
+        options.model satisfies string | undefined;
+        options.modelReasoningEffort satisfies string | undefined;
+        return {
+          async run(input, options) {
+            input satisfies string;
+            options.signal satisfies AbortSignal | undefined;
+            return { finalResponse: "{}" };
+          },
+        };
+      },
+    },
     signal,
     onEvent(event) {
       event.type satisfies "progress" | "activity";
     },
   };
-  return await runHostedScan(input, options);
+  return await runHostedScan({ ...input, ownerSuggestions: true }, options);
 }
 
 const localOptions: ScanOptions = {

@@ -74,6 +74,18 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
+Set `ownerSuggestions: true` on the input to generate the optional
+`owner-suggestions.json` after sealing the base scan. The completed receipt
+includes that artifact when available, or `ownerSuggestionsError` if the owner
+stage fails. Owner failure or cancellation does not invalidate sealed findings.
+The SDK host can pass `ownerCodex` in the options to execute read-only owner
+decisions using its own inference service. Without that callback, CODEOWNERS
+matches still work and findings that require inference report an owner error.
+The callback receives the model and reasoning effort in `startThread`, then
+the prompt, output schema, and cancellation signal in `run`.
+The CLI protocol does not provide an owner inference callback. Hosted owner
+enrichment never launches local Codex or selects local credentials.
+
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
 uses the existing `ScanProgress` type; activity uses `ScanActivity`. Progress may

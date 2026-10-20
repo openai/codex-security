@@ -81,6 +81,9 @@ describe("CLI help", () => {
     expect(option(text, "--codex")).toContain("<key=value>");
     expect(option(text, "--codex")).toMatch(/repeat/iu);
     expect(option(text, "--max-cost")).toContain("<usd>");
+    expect(option(text, "--owner-suggestions")).toContain(
+      "owner-suggestions.json",
+    );
     expect(option(text, "--mode")).toContain("<mode>");
     expect(option(text, "--mode")).toContain("standard");
     expect(option(text, "--mode")).toContain("deep");
