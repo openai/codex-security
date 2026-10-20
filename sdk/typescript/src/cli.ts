@@ -4394,7 +4394,7 @@ export async function main(
                 signal === "SIGINT" || signal === "SIGTERM"
                   ? options.findingsUrl === undefined
                     ? "Deduplication canceled. Completed local preparation is saved for retry."
-                    : "Deduplication canceled. Findings are unchanged."
+                    : "Deduplication canceled. Remote writes may have completed."
                   : diagnosticValue(error)
               }\n`,
             );

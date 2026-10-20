@@ -317,7 +317,9 @@ required-source-access blockers are not retried. Refusals are not retried or
 sent to another model. If candidate retrieval or review still fails, the
 operation fails without posting groups.
 A failed group-write request may already have committed; resubmitting the same
-memberships does not create duplicate groups. Non-cancellation review failures
+memberships does not create duplicate groups. Cancellation can also arrive after
+a write completes; it does not mean that remote findings are unchanged. Completed
+workflow stages remain saved even when cancellation is reported. Non-cancellation review failures
 throw `DeduplicationReviewError`, with diagnostic text and `metadata` for the
 stage, model, category, attempt count, and reason.
 
