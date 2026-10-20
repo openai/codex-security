@@ -1,11 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   runCustomValidation,
   type CustomValidationResult,
@@ -29,6 +37,7 @@ import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
@@ -194,6 +203,128 @@ async function* responseEvents(
 }
 
 describe("custom validation", () => {
+  test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
+    "rejects %s replacement before opening the provisional document",
+    async (name) => {
+      const title = `rejects ${name} replacement before opening the provisional document`;
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const f = await fixture();
+      const path = join(f.scanDir, name);
+      const files = await import("node:fs/promises");
+      const original = files.realpath;
+      let replaced = false;
+      const resolving = spyOn(files, "realpath").mockImplementation((async (
+        ...args: Parameters<typeof original>
+      ) => {
+        const canonical = await original(...args);
+        if (args[0] === path && !replaced) {
+          replaced = true;
+          await rename(path, `${path}.original`);
+          await writeFile(path, await readFile(`${path}.original`));
+        }
+        return canonical;
+      }) as typeof original);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      try {
+        await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
+          "expected the checked regular file",
+        );
+        expect(replaced).toBe(true);
+        expect(run).not.toHaveBeenCalled();
+      } finally {
+        resolving.mockRestore();
+      }
+    },
+  );
+
+  test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
+    "reads the checked %s descriptor after pathname replacement",
+    async (name) => {
+      const title = `reads the checked ${name} descriptor after pathname replacement`;
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const f = await fixture();
+      const path = join(f.scanDir, name);
+      const files = await import("node:fs/promises");
+      const original = files.open;
+      let checked: FileHandle | undefined;
+      const opening = spyOn(files, "open").mockImplementation(
+        async (...args) => {
+          const file = await original(...args);
+          if (args[0] === path) {
+            const read = file.readFile.bind(file);
+            spyOn(file, "readFile").mockImplementation((async (
+              ...args: Parameters<typeof read>
+            ) => {
+              checked = file;
+              await rename(path, `${path}.original`);
+              await writeFile(path, "not JSON");
+              return read(...args);
+            }) as typeof read);
+          }
+          return file;
+        },
+      );
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      try {
+        await runCustomValidation({ ...f, run });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(checked).toBeDefined();
+        expect(checked!.fd).toBe(-1);
+      } finally {
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each(["malformed", "directory"])(
+    "rejects a %s provisional document before invoking validation",
+    async (kind) => {
+      const f = await fixture();
+      const path = join(f.scanDir, "findings.json");
+      if (kind === "malformed") await writeFile(path, "not JSON");
+      else {
+        await rm(path);
+        await mkdir(path);
+      }
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
+        kind === "malformed" ? /JSON/ : /regular non-symlink file/,
+      );
+      expect(run).not.toHaveBeenCalled();
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects provisional documents from a scan owned by another user",
+    async () => {
+      const title =
+        "rejects provisional documents from a scan owned by another user";
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const f = await fixture();
+      const files = await import("node:fs/promises");
+      const original = files.lstat;
+      const inspecting = spyOn(files, "lstat").mockImplementation((async (
+        ...args: Parameters<typeof original>
+      ) => {
+        const metadata = await original(...args);
+        if (args[0] === f.scanDir)
+          Object.defineProperty(metadata, "uid", {
+            value: process.geteuid!() + 1,
+          });
+        return metadata;
+      }) as typeof original);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      try {
+        await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
+          "must be owned by the current user",
+        );
+        expect(run).not.toHaveBeenCalled();
+      } finally {
+        inspecting.mockRestore();
+      }
+    },
+  );
+
   test("applies dispositions and assessments without changing source identity", async () => {
     const f = await fixture(4);
     const output = result(
