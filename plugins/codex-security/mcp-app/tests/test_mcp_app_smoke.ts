@@ -1094,6 +1094,10 @@ try {
   assertNoError(initialized);
   assert.equal(initialized.result.serverInfo.name, "codex-security");
   assert.equal(initialized.result.serverInfo.title, "Codex Security");
+  assert.equal(
+    initialized.result.serverInfo.version,
+    (await readJson(mcpAppRoot, "package.json")).version,
+  );
   assert.equal(initialized.result.capabilities.resources, undefined);
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],

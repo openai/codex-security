@@ -103,6 +103,7 @@ interface Message {
 function transientCodexError(info: unknown): boolean {
   if (
     info === "usageLimitExceeded" ||
+    info === "rateLimitExceeded" ||
     info === "serverOverloaded" ||
     info === "internalServerError"
   )

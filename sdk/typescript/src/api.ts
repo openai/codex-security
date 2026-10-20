@@ -4315,7 +4315,9 @@ export class CodexSecurity {
     try {
       throwIfAborted(signal);
       bootstrapWorkspace = await createIsolatedHome(
-        temporaryRoot,
+        // Windows sandboxes can grant replacement rights on TEMP. Keep private
+        // staging beside the validated home, outside it so ZIP plugins are readable.
+        process.platform === "win32" ? dirname(codexHome) : temporaryRoot,
         validateLocation,
       );
       await requirePrivateCredentialHome(
