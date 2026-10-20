@@ -135,13 +135,22 @@ def test_worker_links_follow_final_ids_without_redirecting_parent_links(
         assert tasks["parent-review"]["surfaceIds"] == [parent_id]
 
 
-def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pending_work(tmp_path):
+@pytest.mark.parametrize("receipt", [None, "artifacts/./review.md", "artifacts//review.md"])
+def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pending_work(
+    tmp_path, receipt
+):
     surface = {"id": "api", "label": "API", "disposition": "needs_follow_up"}
+    if receipt is not None:
+        surface["receiptRefs"] = [receipt]
     task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
     draft = saved_draft("coverage-scan", complete=True, surfaces=[surface], deferred=[task])
     source = worker(tmp_path, "first", draft)
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"] = [{**surface, "id": "first/api", "workerId": "first"}]
+    if receipt is not None:
+        parent["coverage"]["surfaces"][0]["receiptRefs"] = [
+            f"artifacts/deep_discovery/workers/first/output/{receipt}"
+        ]
     parent["coverage"]["deferred"] = [
         {**task, "id": "first/review", "surfaceIds": ["first/api"], "workerId": "first"}
     ]
@@ -161,7 +170,11 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
     os.utime(head, ns=(400, 400))
-    result = recover(tmp_path, [source])[2]
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    documents = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=documents[0]["scan"]["preservedSources"])
+    assert replay[2] == documents[2]
+    result = documents[2]
     assert [row["id"] for row in result["deferred"]] == ["scan-stopped"]
     assert result["surfaces"] == [
         {
@@ -169,9 +182,14 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
             "id": "first/api",
             "workerId": "first",
             "disposition": "no_issue_found",
-            "receiptRefs": [],
+            "receiptRefs": (
+                ["artifacts/deep_discovery/workers/first/output/artifacts/review.md"]
+                if receipt is not None
+                else []
+            ),
         }
     ]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
 @pytest.mark.parametrize("earlier_identity", [None, "restored"])

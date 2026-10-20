@@ -1035,7 +1035,18 @@ def _project_worker_coverage_row(item: Any, worker_id: str | None, field: str) -
 
 def _coverage_comparison_row(row: Any, field: str) -> Any:
     if field == "surfaces" and isinstance(row, dict):
-        return {"receiptRefs": [], **row}
+        row = {"receiptRefs": [], **row}
+        if isinstance(row["receiptRefs"], list):
+            refs = []
+            for ref in row["receiptRefs"]:
+                if isinstance(ref, str):
+                    try:
+                        ref = _require_portable_relative_path(ref, "Saved coverage receipt")
+                    except ContractError:
+                        pass  # Leave malformed refs to the existing per-record recovery.
+                refs.append(ref)
+            row["receiptRefs"] = refs
+        return row
     if field == "openQuestions":
         coverage = {"openQuestions": [copy.deepcopy(row)]}
         _normalize_unsealed_open_questions(coverage)
