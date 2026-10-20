@@ -5587,7 +5587,7 @@ export async function main(
           if (exitCode === 0) exitCode = 2;
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
-          if (!structuredOutput) return;
+          if (!structuredOutput) throw error;
           structuredError = true;
           const failure = {
             code:
