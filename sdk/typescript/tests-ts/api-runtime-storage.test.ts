@@ -242,11 +242,7 @@ test.each(["directory", "zip"])(
     if (process.platform === "win32") {
       const grant = spawnSync(
         join(process.env["SystemRoot"]!, "System32", "icacls.exe"),
-        [
-          temporary,
-          "/grant",
-          "*S-1-5-21-111111111-222222222-333333333-1001:(OI)(CI)(M,DC)",
-        ],
+        [temporary, "/grant", "*S-1-1-0:(OI)(CI)(M,DC)"],
         { encoding: "utf8", windowsHide: true },
       );
       expect(grant.status, grant.stderr).toBe(0);
