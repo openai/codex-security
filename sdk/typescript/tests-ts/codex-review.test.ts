@@ -190,7 +190,13 @@ const transportCases: {
   windowsConfig?: JsonObject;
   expectedWindowsSandbox?: string;
   surface?: CodexSecuritySurface;
+  permissionPathSuffix?: string;
 }[] = [
+  {
+    scenario: "correction",
+    name: "literal permission paths",
+    permissionPathSuffix: "literal.path-雪\u007f-",
+  },
   {
     scenario: "recover-server-error",
     name: "CLI attribution survives a retried review session",
@@ -264,12 +270,15 @@ for (const {
   windowsConfig,
   expectedWindowsSandbox,
   surface,
+  permissionPathSuffix = "",
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
     const checkout = await temporaryDirectory("codex-review-source-", true);
-    const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
+    const ghConfig = await mkdtemp(
+      join(tmpdir(), `codex-review-gh-${permissionPathSuffix}`),
+    );
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
     let starts = 0;
@@ -562,12 +571,17 @@ for (const {
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );
-      expect(permissions).toContain(
-        `${JSON.stringify(resolve(modelHome))}="deny"`,
-      );
-      expect(permissions).toContain(
-        `${JSON.stringify(resolve(ghConfig))}="deny"`,
-      );
+      expect(parse(permissions!)).toMatchObject({
+        permissions: {
+          codex_security_review: {
+            extends: ":read-only",
+            filesystem: {
+              [resolve(modelHome)]: "deny",
+              [resolve(ghConfig)]: "deny",
+            },
+          },
+        },
+      });
       if (scenario !== "cancel") {
         const messages = parseJsonLines<{
           method?: string;

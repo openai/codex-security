@@ -1,4 +1,6 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import {
   chmod,
   link,
@@ -44,6 +46,7 @@ import {
   stageResult,
 } from "./support/security-policy.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
@@ -281,29 +284,27 @@ describe("CodexSecurity policy API", () => {
       expect(f.configuration()!.config!["default_permissions"]).toBe(
         "codex_security_policy",
       );
-      expect(parseToml(overrides.join("\n"))).toEqual({
-        permissions: {
-          codex_security_scan: {
-            filesystem: {
-              ":root": "read",
-              ":workspace_roots": "write",
-              [await realpath(f.runtime.codexHome)]: { ".": "deny" },
-              [f.runtime.deepScanConfigPath!]: { ".": "deny" },
-            },
+      expect(parseToml(overrides.join("\n"))["permissions"]).toEqual({
+        codex_security_scan: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [await realpath(f.runtime.codexHome)]: { ".": "deny" },
+            [f.runtime.deepScanConfigPath!]: { ".": "deny" },
           },
-          codex_security_policy: {
-            filesystem: {
-              [process.platform === "win32" ? ":root" : ":minimal"]: "read",
-              ":workspace_roots": "read",
-              ...Object.fromEntries(
-                readPaths.map((path) => [path, { ".": "read" }]),
-              ),
-              [await realpath(f.runtime.codexHome)]: { ".": "deny" },
-              ...(process.platform === "win32"
-                ? { [f.ambientCredentialsGlob]: "deny" }
-                : {}),
-              [f.runtime.deepScanConfigPath!]: { ".": "deny" },
-            },
+        },
+        codex_security_policy: {
+          filesystem: {
+            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
+            ":workspace_roots": "read",
+            ...Object.fromEntries(
+              readPaths.map((path) => [path, { ".": "read" }]),
+            ),
+            [await realpath(f.runtime.codexHome)]: { ".": "deny" },
+            ...(process.platform === "win32"
+              ? { [f.ambientCredentialsGlob]: "deny" }
+              : {}),
+            [f.runtime.deepScanConfigPath!]: { ".": "deny" },
           },
         },
       });
@@ -1482,9 +1483,10 @@ describe("CodexSecurity policy API", () => {
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
     });
-    expect(f.configuration()?.config?.["responses_api_metadata"]).toMatchObject(
-      { codex_security_surface: "cli", codex_security_command: "policy" },
-    );
+    expect(requestMetadata(f.configuration()?.configOverrides)).toMatchObject({
+      codex_security_surface: "cli",
+      codex_security_command: "policy",
+    });
     expect(f.configuration()?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
       f.repository,
     );
@@ -1818,6 +1820,55 @@ describe("CodexSecurity policy API", () => {
     ).toContain("src/service.ts:1");
     expect(await readdir(f.repository)).toEqual([]);
     await f.security.close();
+  });
+
+  test("stops a policy stage at its measured budget while worker usage is missing", async () => {
+    let interruptedStage: SecurityPolicyStage | undefined;
+    const f = await setup({
+      stream: async function* (stage, signal) {
+        yield { type: "thread.started", thread_id: `policy-${stage}` };
+        yield { type: "turn.started" };
+        if (!signal.aborted) await once(signal, "abort");
+        interruptedStage = stage;
+        throw signal.reason;
+      },
+    });
+    await writeSession(f.runtime.codexHome, "policy-architecture", {
+      input_tokens: 3_000,
+      output_tokens: 0,
+    });
+    await writeSession(
+      f.runtime.codexHome,
+      "policy-worker",
+      {},
+      { parent: "policy-architecture" },
+    );
+    const costs = mock();
+    const cancellation = new AbortController();
+    const timeout = setTimeout(
+      () => cancellation.abort(new Error("Policy budget was not enforced.")),
+      5_000,
+    );
+    try {
+      await expect(
+        f.security.generatePolicy(f.repository, {
+          outputDir: f.outputDir,
+          maxCostUsd: 0.004,
+          signal: cancellation.signal,
+          onCost: costs,
+        }),
+      ).rejects.toThrow("exceeded its $0.004 cost limit");
+      expect(interruptedStage).toBe("architecture");
+      expect(f.threads).toHaveLength(1);
+      expect(costs).not.toHaveBeenCalled();
+      await expect(
+        readFile(join(f.outputDir, "project-spec.md")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(f.repository)).toEqual([]);
+    } finally {
+      clearTimeout(timeout);
+      await f.security.close();
+    }
   });
 
   test("optional observer failures do not stop policy generation", async () => {

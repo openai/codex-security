@@ -20,6 +20,21 @@ function mockUpload(t, implementation) {
   }));
 }
 
+function captureOutput(t) {
+  let output = '';
+  const write = process.stdout.write;
+  // Expected failure diagnostics must not become annotations on the test job.
+  t.mock.method(process.stdout, 'write', (chunk, encodingOrCallback, callback) => {
+    // The Node test runner also sends binary reporter events through stdout.
+    if (typeof chunk !== 'string') return write.call(process.stdout, chunk, encodingOrCallback, callback);
+    output += chunk;
+    if (typeof encodingOrCallback === 'function') encodingOrCallback();
+    else if (typeof callback === 'function') callback();
+    return true;
+  });
+  return () => output;
+}
+
 test('missing stream arguments retain their names and TypeError', () => {
   assert.throws(() => compose(), {
     name: 'TypeError',
@@ -88,6 +103,7 @@ test('remote upload failures cancel the source stream', { timeout: 5000 }, async
 });
 
 test('archive errors reject upload without an uncaught error or rejection', { timeout: 5000 }, async t => {
+  const output = captureOutput(t);
   const create = archiver.create;
   let archive;
   t.mock.method(archiver, 'create', (...args) => {
@@ -106,6 +122,8 @@ test('archive errors reject upload without an uncaught error or rejection', { ti
   await setImmediate();
   assert.equal(source.destroyed, true);
   assert.equal(archive.destroyed, true);
+  assert.match(output(), /^::error::An error has occurred while creating the zip file for upload$/m);
+  assert.ok(output().includes(`Error: ${failure.message}`));
 });
 
 test('a completed ZIP archive still uploads successfully', { timeout: 5000 }, async t => {
@@ -125,6 +143,7 @@ test('a completed ZIP archive still uploads successfully', { timeout: 5000 }, as
 });
 
 test('archive errors during file registration reach the returned stream', { timeout: 5000 }, async t => {
+  const output = captureOutput(t);
   const create = archiver.create;
   const failure = new Error('Synthetic archive source failure');
   t.mock.method(archiver, 'create', (...args) => {
@@ -143,4 +162,6 @@ test('archive errors during file registration reach the returned stream', { time
     stats: { isSymbolicLink: () => false },
   }]);
   await assert.rejects(uploadToBlobStorage(uploadUrl, source, 'application/zip'), error => error === failure);
+  assert.match(output(), /^::error::An error has occurred while creating the zip file for upload$/m);
+  assert.ok(output().includes(`Error: ${failure.message}`));
 });

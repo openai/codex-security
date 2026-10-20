@@ -16,6 +16,14 @@ import { copyCompletedScan } from './fixtures.js';
 type Scenario = 'schedule' | 'pr' | 'policy-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
 
+function assertAttribution(args: readonly string[], provider: string): void {
+  assert.deepEqual(args.flatMap((arg, index) => arg === '--codex' ? [args[index + 1]] : []), [
+    'analytics.enabled=false',
+    'responses_api_metadata.codex_security_integration="github_action"',
+    `responses_api_metadata.codex_security_provider="${provider}"`,
+  ]);
+}
+
 function outputValues(text: string): Record<string, string> {
   const values: Record<string, string> = {};
   const lines = text.split(/\r?\n/u);
@@ -187,6 +195,7 @@ test('PR severity failure retains SARIF outputs despite unrelated scope notes', 
 
 test('scheduled complete report-only scan succeeds', async (t) => {
   const app = await harness(t); const result = await app.run();
+  assertAttribution(result.args, 'openai');
   assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
   assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
   assert.equal(result.outputs['analysis-ref'], 'refs/heads/main');
@@ -239,6 +248,7 @@ test('Deep scans forward their budget and publish completed reports with cleanup
   const app = await harness(t);
   app.setInput('mode', 'deep'); app.setInput('max-time-hours', '1.5');
   const result = await app.run();
+  assertAttribution(result.args, 'openai');
   assert.equal(result.args[result.args.indexOf('--mode') + 1], 'deep');
   assert.equal(result.args[result.args.indexOf('--max-time-hours') + 1], '1.5');
   assert.equal(result.exitCode, 0); assert.equal(result.cleanups, 1);
@@ -281,6 +291,7 @@ for (const mode of ['standard', 'deep']) {
     assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
     assert.equal(result.outputs['sarif-upload-ready'], 'true');
     assert.equal(result.args[result.args.indexOf('--provider') + 1], 'amazon-bedrock');
+    assertAttribution(result.args, 'amazon-bedrock');
     assert.equal(result.args[result.args.indexOf('--auth') + 1], 'auto');
     assert.equal(result.environment.AWS_ACCESS_KEY_ID, 'synthetic-access-key');
     assert.equal(result.environment.AWS_SECRET_ACCESS_KEY, 'synthetic-secret-key');
@@ -301,6 +312,7 @@ for (const [provider, key] of [['openrouter', 'OPENROUTER_API_KEY'], ['fireworks
     const result = await app.run();
     assert.equal(result.exitCode, 0); assert.equal(result.outputs['scan-status'], 'completed');
     assert.equal(result.args[result.args.indexOf('--provider') + 1], provider);
+    assertAttribution(result.args, provider);
     assert.equal(result.args[result.args.indexOf('--auth') + 1], 'api-key');
     assert.equal(result.environment[key], expectedKey);
     for (const other of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN'])

@@ -55632,7 +55632,14 @@ function scanArguments(inputs, target, resultsDirectory) {
     "--format",
     "json"
   ];
-  args.push("--codex", "analytics.enabled=false");
+  args.push(
+    "--codex",
+    "analytics.enabled=false",
+    "--codex",
+    'responses_api_metadata.codex_security_integration="github_action"',
+    "--codex",
+    `responses_api_metadata.codex_security_provider=${JSON.stringify(inputs.provider)}`
+  );
   for (const path6 of inputs.paths) args.push(`--path=./${path6}`);
   const options = [
     ["--cyber-access-program", inputs.cyberAccessProgram],

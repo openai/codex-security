@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
@@ -292,13 +293,7 @@ describe("CLI skill commands", () => {
           "--config",
           'approval_policy="never"',
           "--config",
-          'responses_api_metadata.codex_security_surface="cli"',
-          "--config",
-          `responses_api_metadata.codex_security_command=${JSON.stringify(command)}`,
-          "--config",
-          `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
-          "--config",
-          `responses_api_metadata.codex_security_plugin_version=${JSON.stringify((await pluginMetadata(PLUGIN_ROOT)).version)}`,
+          expect.stringMatching(/^responses_api_metadata=\{/u),
           ...(command === "patch"
             ? []
             : [
@@ -312,6 +307,16 @@ describe("CLI skill commands", () => {
                 "-",
               ]),
         ]);
+        expect(requestMetadata(invocation!)).toEqual({
+          codex_security_surface: "cli",
+          codex_security_command: command,
+          codex_security_package_version: VERSION,
+          codex_security_plugin_version: (await pluginMetadata(PLUGIN_ROOT))
+            .version,
+          ...(command === "validate"
+            ? { codex_security_provider: "openai" }
+            : {}),
+        });
         if (command === "validate") {
           expect(prompt).toContain(
             await filesystem.readFile(
@@ -1177,6 +1182,7 @@ describe("CLI skill commands", () => {
         ["gpt-6-astra", "max"],
         ["gpt-6.1-sol", "max"],
         ["synthetic-future-model", "synthetic-future-effort"],
+        ['synthetic-"model"\\雪\u007f', 'future-"effort"\\雪\u007f'],
       ] as const) {
         let invocation: readonly string[] = [];
         const stderr = captureCli(main, "stderr");
@@ -1213,8 +1219,16 @@ describe("CLI skill commands", () => {
           ),
           stderr.text(),
         ).toBe(0);
-        expect(invocation).toContain(`model="${model}"`);
-        expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
+        expect(
+          parseToml(invocation.find((value) => value.startsWith("model="))!),
+        ).toEqual({ model });
+        expect(
+          parseToml(
+            invocation.find((value) =>
+              value.startsWith("model_reasoning_effort="),
+            )!,
+          ),
+        ).toEqual({ model_reasoning_effort: effort });
       }
 
       for (const [options, message] of [
@@ -1494,6 +1508,32 @@ process.stdout.write(JSON.stringify({
       "validate failed with exit code 7.",
     );
   });
+
+  test.each([7, 130, 143])(
+    "retains validation output and returned status %i without a success envelope",
+    async (status) => {
+      for (const flags of [
+        ["--full-output"],
+        ["--format", "yaml", "--full-output"],
+        ["--token-count"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["validate", "Synthetic finding", ...flags],
+            dependencies({
+              onCodex: (_args, output) => {
+                output?.stdout.write("Partial assessment.\n");
+                return status;
+              },
+            }),
+          ),
+        ).toBe(status);
+        expect(stdout.text()).toBe("Partial assessment.\n");
+        expect(stderr.text()).toBe("");
+      }
+    },
+  );
 
   test("escapes native validation launch failures at the CLI boundary", async () => {
     const directory = await temporaryDirectory("validation-launch-failure-");

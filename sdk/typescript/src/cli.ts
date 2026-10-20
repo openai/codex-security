@@ -96,7 +96,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
-import type { DeepScanProgress } from "./deep-progress.js";
+import type { DeepScanProgress } from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -146,6 +146,7 @@ import {
   mergeCodexOverrides,
   hasCommandAuth,
   inlineToml,
+  quoteTomlString,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   resolveCodexProfile,
@@ -212,6 +213,7 @@ import {
   checkScanPublication,
   forceTerminatePublicationProcesses as terminatePublishers,
   publishScan,
+  publishScanInternal,
   type CheckScanPublicationOptions,
   type PublishScanProgress,
   type PublishScanResult,
@@ -249,7 +251,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -274,6 +276,7 @@ import {
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
+  scanProgressCount,
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
@@ -1102,6 +1105,8 @@ interface SkillRunOptions {
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
+  requestMetadata?: JsonObject;
+  otel?: JsonObject;
   patchArtifact?: {
     path: string;
     repository: string;
@@ -1188,7 +1193,11 @@ interface CliDependencies {
     command: "git" | "gh" | "glab",
     args: readonly string[],
     repository: string,
-    options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
+    options?: {
+      trim?: boolean;
+      environment?: NodeJS.ProcessEnv;
+      input?: string;
+    },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
   bulkScan?: BulkScanDiscoveryDependencies;
@@ -1207,6 +1216,32 @@ interface CliDependencies {
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
+
+export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
+  async (command, args, repository, options) => {
+    const executable = await resolveTrustedExecutable(
+      command,
+      process.env,
+      repository,
+    );
+    if (executable === null) {
+      throw new CodexSecurityError(
+        `${command} is not available on a trusted PATH.`,
+      );
+    }
+    const result = execFile(executable.executable, [...args], {
+      cwd: repository,
+      env: { ...executable.environment, ...options?.environment },
+      windowsHide: true,
+      maxBuffer: Infinity,
+    });
+    if (options?.input !== undefined) {
+      result.child.stdin?.on("error", () => {});
+      result.child.stdin?.end(options.input);
+    }
+    const { stdout } = await result;
+    return options?.trim === false ? stdout : stdout.trim();
+  };
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
@@ -1268,24 +1303,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       environment,
       input,
     ),
-  runRepositoryCommand: async (command, args, repository, options) => {
-    const executable = await resolveTrustedExecutable(
-      command,
-      process.env,
-      repository,
-    );
-    if (executable === null) {
-      throw new CodexSecurityError(
-        `${command} is not available on a trusted PATH.`,
-      );
-    }
-    const { stdout } = await execFile(executable.executable, [...args], {
-      cwd: repository,
-      env: { ...executable.environment, ...options?.environment },
-      windowsHide: true,
-    });
-    return options?.trim === false ? stdout : stdout.trim();
-  },
+  runRepositoryCommand,
   exportFindings: runArtifactExport,
   runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
     const environment = {
@@ -2539,11 +2557,12 @@ export async function main(
       ),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
-          errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
+          const error = new CodexSecurityError(
+            "Markdown output is not supported for scan results.",
           );
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
-          return;
+          throw error;
         }
         let scanId: string | undefined;
         try {
@@ -3314,27 +3333,28 @@ export async function main(
         }
         let result;
         try {
-          result = await (dependencies.publishScan ?? publishScan)(
-            resolveCliPath(currentDirectory, scanDir),
-            {
-              ...destination!,
-              ...(options.findingId.length === 0
-                ? {}
-                : { findingIds: options.findingId }),
-              ...(selectedScans[0]?.scanId === undefined
-                ? {}
-                : { expectedScanId: selectedScans[0].scanId }),
-              dryRun: options.dryRun,
-              signal: controller.signal,
-              ...(options.skipExisting ? { skipExisting: true } : {}),
-              ...(options.dryRun
-                ? {}
-                : {
-                    onProgress: (event: PublishScanProgress) =>
-                      progress.observe(event),
-                  }),
-            },
-          );
+          result = await (
+            dependencies.publishScan ??
+            ((directory, options) =>
+              publishScanInternal(directory, options, { surface: "cli" }))
+          )(resolveCliPath(currentDirectory, scanDir), {
+            ...destination!,
+            ...(options.findingId.length === 0
+              ? {}
+              : { findingIds: options.findingId }),
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
+            dryRun: options.dryRun,
+            signal: controller.signal,
+            ...(options.skipExisting ? { skipExisting: true } : {}),
+            ...(options.dryRun
+              ? {}
+              : {
+                  onProgress: (event: PublishScanProgress) =>
+                    progress.observe(event),
+                }),
+          });
         } finally {
           progress.stop();
         }
@@ -3364,6 +3384,7 @@ export async function main(
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           exitCode = 2;
         }
+        if (cloudBatch === undefined) throw error;
         return cloudBatch;
       } finally {
         removeSignalListeners();
@@ -3393,7 +3414,7 @@ export async function main(
         return { ...result };
       } catch (error) {
         reportPublicationError(error, controller.signal.reason);
-        return undefined;
+        throw error;
       } finally {
         removeSignals();
       }
@@ -3475,7 +3496,7 @@ export async function main(
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
-        return undefined;
+        throw error;
       } finally {
         removeSignals();
       }
@@ -3841,11 +3862,12 @@ export async function main(
         if (options.host)
           throw new CodexSecurityError("Use scan --host alone.");
         if (format === "md") {
-          errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
+          const error = new CodexSecurityError(
+            "Markdown output is not supported for scan results.",
           );
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
-          return;
+          throw error;
         }
         let outcome: ScanOutcome;
         try {
@@ -4009,7 +4031,7 @@ export async function main(
         } catch (error) {
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
-          return undefined;
+          throw error;
         }
       },
     })
@@ -4077,7 +4099,7 @@ export async function main(
             `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          return undefined;
+          throw error;
         } finally {
           removeSignals();
         }
@@ -4185,7 +4207,7 @@ export async function main(
             `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          return undefined;
+          throw error;
         } finally {
           removeSignals();
         }
@@ -4613,6 +4635,7 @@ export async function main(
           stopDashboard();
           exitCode = interruptedExitCode(controller.signal) ?? 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         } finally {
           stopDashboard();
           signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
@@ -4916,6 +4939,7 @@ export async function main(
               ? 130
               : 2);
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         } finally {
           removeSignals();
         }
@@ -5039,34 +5063,27 @@ export async function main(
             sourceRoot,
             pythonPath: options.python,
           };
-          try {
-            const prepared = await resolveArtifactExportOutput(
-              arguments_,
-              dependencies.currentDirectory(),
-            );
-            const contents = await dependencies.exportFindings(
-              prepared,
-              output,
-            );
-            if (arguments_.output === "-") {
-              if (contents !== undefined) {
-                await writeCliOutput(output, Buffer.from(contents));
-              }
-            } else {
-              errorOutput.write(
-                `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-              );
+          const prepared = await resolveArtifactExportOutput(
+            arguments_,
+            dependencies.currentDirectory(),
+          );
+          const contents = await dependencies.exportFindings(prepared, output);
+          if (arguments_.output === "-") {
+            if (contents !== undefined) {
+              await writeCliOutput(output, Buffer.from(contents));
             }
-            exitCode = 0;
-          } catch (error) {
-            errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-            exitCode = 2;
+          } else {
+            errorOutput.write(
+              `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
+            );
           }
+          exitCode = 0;
         } catch (error) {
           if (exitCode !== 2) {
             errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           }
           exitCode = 2;
+          throw error;
         }
       },
     })
@@ -5139,9 +5156,11 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         } finally {
           await knowledgeBase?.cleanup();
         }
+        if (exitCode !== 0) frameworkExit = exitCode;
       },
     })
     .command("verify-fix", {
@@ -5299,6 +5318,7 @@ export async function main(
               );
               if (exitCode !== 0) {
                 if (exitCode !== 130 && exitCode !== 143) exitCode = 2;
+                frameworkExit = exitCode;
                 return undefined;
               }
 
@@ -5344,7 +5364,8 @@ export async function main(
             };
           }
           for (const result of results) {
-            output.write(
+            await writeCliOutput(
+              output,
               `${result.status.toUpperCase()} ${safePatchText(result.id)}: ${safePatchText(result.evidence)}\n`,
             );
           }
@@ -5352,7 +5373,7 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
-          return undefined;
+          throw error;
         }
       },
     })
@@ -5643,7 +5664,7 @@ export async function main(
               validationPrompt,
             },
           );
-          if (!jsonOutput) output.write(report.text());
+          if (!jsonOutput) await writeCliOutput(output, report.text());
           const files = await changedPatchFiles(
             repository,
             patchBase,
@@ -5707,7 +5728,7 @@ export async function main(
           if (exitCode === 0) exitCode = 2;
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
-          if (!structuredOutput) return;
+          if (!structuredOutput) throw error;
           structuredError = true;
           const failure = {
             code:
@@ -5889,6 +5910,7 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         }
       },
     })
@@ -5931,9 +5953,21 @@ export async function main(
             scanId: string;
             startedAt: string;
           }[];
-          scanId = scans.toSorted((a, b) =>
-            b.startedAt.localeCompare(a.startedAt),
-          )[0]?.scanId;
+          let latest:
+            { scanId: string; timestamp: number; fraction: string } | undefined;
+          for (const scan of scans) {
+            const timestamp = Date.parse(scan.startedAt);
+            const fraction =
+              scan.startedAt.match(/\.\d{3}(\d*[1-9])/u)?.[1] ?? "";
+            if (
+              latest === undefined ||
+              timestamp > latest.timestamp ||
+              (timestamp === latest.timestamp && fraction > latest.fraction)
+            ) {
+              latest = { scanId: scan.scanId, timestamp, fraction };
+            }
+          }
+          scanId = latest?.scanId;
         }
         const scan =
           scanId === undefined
@@ -7303,7 +7337,7 @@ async function snapshotPatchDirectory(
     for (const entry of await readdir(join(repository, directory), {
       withFileTypes: true,
     })) {
-      if (entry.name === ".git") continue;
+      if (entry.name === ".git" || entry.name === ".svn") continue;
       const path = directory ? `${directory}/${entry.name}` : entry.name;
       const absolute = join(repository, path);
       if (entry.isDirectory()) {
@@ -7476,14 +7510,58 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
 ): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
-  const environment = { GIT_INDEX_FILE: join(root, "index") };
+  const environment = {
+    GIT_INDEX_FILE: join(root, "index"),
+    GIT_LITERAL_PATHSPECS: "0",
+  };
+  const sourcePathspecs = [
+    "--",
+    ":/",
+    ":(top,glob,exclude)**/.svn",
+    ":(top,glob,exclude)**/.svn/**",
+  ];
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository, {
       environment,
     });
   try {
-    await run(["read-tree", "HEAD"]);
-    await run(["--literal-pathspecs", "add", "--all"]);
+    let hasHead = true;
+    try {
+      await run(["rev-parse", "--verify", "--quiet", "HEAD"]);
+    } catch (error) {
+      if (!isJsonObject(error) || error["code"] !== 1) throw error;
+      // An unborn symbolic HEAD has no commit; malformed refs still fail.
+      await run(["symbolic-ref", "--quiet", "HEAD"]);
+      hasHead = false;
+    }
+    if (hasHead) {
+      await run(["read-tree", "HEAD"]);
+    } else {
+      // Preserve tracked paths, including ignored and intent-to-add files, without
+      // copying cached stat data or flags that can hide working-tree changes.
+      // Git's quoted format preserves raw filename bytes through string transport.
+      const entries = await dependencies.runRepositoryCommand(
+        "git",
+        [
+          "-c",
+          "core.quotePath=true",
+          "ls-files",
+          "--stage",
+          "--full-name",
+          ...sourcePathspecs,
+        ],
+        repository,
+        { trim: false, environment: { GIT_LITERAL_PATHSPECS: "0" } },
+      );
+      await run(["read-tree", "--empty"]);
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["-c", "core.ignorestat=false", "update-index", "--index-info"],
+        repository,
+        { environment, input: entries },
+      );
+    }
+    await run(["add", "--all", ...sourcePathspecs]);
     return await run(["write-tree"]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -7895,6 +7973,26 @@ async function runSkill(
   const threadSource = patch
     ? CODEX_SECURITY_THREAD_SOURCES.remediation
     : CODEX_SECURITY_THREAD_SOURCES.validation;
+  const requestContext = codexSecurityRequestContext(
+    {
+      ...effectiveOverrides,
+      ...(options.requestMetadata === undefined
+        ? {}
+        : { responses_api_metadata: options.requestMetadata }),
+    },
+    {
+      surface: "cli",
+      command: assess
+        ? "assess-patch-risk"
+        : verify
+          ? "verify-fix"
+          : patch
+            ? "patch"
+            : "validate",
+      pluginVersion,
+      providerResolved: provider !== undefined || validate,
+    },
+  );
   return dependencies.runCodex(
     [
       ...(appServer
@@ -7904,9 +8002,9 @@ async function runSkill(
       "plugins",
       ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
       "--config",
-      `model=${JSON.stringify(model)}`,
+      `model=${quoteTomlString(model)}`,
       "--config",
-      `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      `model_reasoning_effort=${quoteTomlString(reasoningEffort)}`,
       ...(options.serviceTier === undefined
         ? []
         : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
@@ -7922,6 +8020,9 @@ async function runSkill(
             value.startsWith("analytics.") || value.startsWith("analytics="),
         )
         .flatMap((value) => ["--config", value]),
+      ...(options.otel === undefined
+        ? []
+        : ["--config", `otel=${inlineToml(options.otel)}`]),
       ...(provider === undefined
         ? []
         : ["--config", `model_provider=${JSON.stringify(provider)}`]),
@@ -7936,22 +8037,8 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      ...Object.entries(
-        codexSecurityRequestMetadata(
-          "cli",
-          assess
-            ? "assess-patch-risk"
-            : verify
-              ? "verify-fix"
-              : patch
-                ? "patch"
-                : "validate",
-          pluginVersion,
-        ),
-      ).flatMap(([key, value]) => [
-        "--config",
-        `responses_api_metadata.${key}=${JSON.stringify(value)}`,
-      ]),
+      "--config",
+      requestContext.configOverride,
       ...(options.safetyIdentifier === undefined
         ? []
         : [
@@ -8624,6 +8711,8 @@ async function executeScan(
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let patchServiceTier: JsonValue | undefined;
+  let patchRequestMetadata: JsonObject | undefined;
+  let patchOtel: JsonObject | undefined;
   let patchDaybreak: JsonValue = false;
   let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
@@ -8667,10 +8756,19 @@ async function executeScan(
       ]),
     );
     const provider = scanModelProvider(effectiveConfiguration);
-    const analytics = effectiveConfiguration["analytics"];
+    const analytics = resolvedConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
+    patchRequestMetadata = {
+      ...codexSecurityRequestContext(resolvedConfiguration, {
+        surface: "cli",
+        command: "scan",
+        mode: arguments_.mode,
+      }).metadata,
+    };
+    const otel = resolvedConfiguration["otel"];
+    if (isJsonObject(otel)) patchOtel = otel;
     auth =
       !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
@@ -8772,10 +8870,12 @@ async function executeScan(
         details.push(
           `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
         );
-      } else if (fileProgress !== null && fileProgress.filesTotal > 0) {
-        details.push(
-          `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
-        );
+      } else if (fileProgress !== null) {
+        const count = scanProgressCount(fileProgress);
+        if (count.total > 0)
+          details.push(
+            `${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}`,
+          );
       }
       const tokens =
         runningCost !== null
@@ -9008,7 +9108,7 @@ async function executeScan(
           ? dashboard?.recordDetails.bind(dashboard)
           : undefined,
       onProgress: (update) => {
-        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
+        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}:${update.reviewItems?.completed}:${update.reviewItems?.total}`;
         if (key === lastProgressUpdate) return;
         lastProgressUpdate = key;
         fileProgress = update;
@@ -9022,8 +9122,9 @@ async function executeScan(
         }
         if (progress === null) return;
         progress.stopTimer();
+        const count = scanProgressCount(update);
         progress.stage(
-          `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
+          `Scan phase: ${phase}${count.total === 0 ? "" : ` (${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")} ${count.label})`}.`,
         );
         progress.startTimer(runningMessage());
       },
@@ -9404,8 +9505,8 @@ async function executeScan(
         selected,
         {
           codex: [
-            `model=${JSON.stringify(effectiveModel)}`,
-            `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            `model=${quoteTomlString(effectiveModel)}`,
+            `model_reasoning_effort=${quoteTomlString(effectiveReasoningEffort)}`,
             `daybreak=${inlineToml(patchDaybreak)}`,
             ...(patchAnalyticsOverride === undefined
               ? []
@@ -9417,6 +9518,8 @@ async function executeScan(
         {
           ...providerOptions,
           serviceTier: patchServiceTier,
+          requestMetadata: patchRequestMetadata,
+          otel: patchOtel,
           daybreakFeatures: patchDaybreakFeatures,
           cyberAccessProgram: arguments_.cyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
@@ -9895,7 +9998,8 @@ function componentScanEventLine(
 ): string | null {
   if (event.type === "progress") {
     const progress = event.value;
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
+    const count = scanProgressCount(progress);
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);

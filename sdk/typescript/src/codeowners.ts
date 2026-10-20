@@ -14,7 +14,7 @@ export interface CodeownersRule {
 export function parseCodeowners(source: string): CodeownersRule[] {
   const rules: CodeownersRule[] = [];
   for (const [index, line] of source.split(/\r?\n/u).entries()) {
-    const value = line.trim();
+    const value = line.trimStart();
     if (!value || value.startsWith("#")) continue;
     const token = /^(?:\\.|[^\s])+/u.exec(value)![0];
     const matches = codeownersPattern(token);
@@ -28,7 +28,7 @@ export function parseCodeowners(source: string): CodeownersRule[] {
     const owners: CodeownerIdentity[] = [];
     let valid = true;
     for (const handle of handles) {
-      if (/^@[a-z\d](?:[a-z\d_-]*[a-z\d])?(?:\/[a-z\d_.-]+)?$/iu.test(handle)) {
+      if (/^@[a-z\d](?:[a-z\d_-]*[a-z\d])?(?:\/[a-z\d_.-]+)?$/i.test(handle)) {
         owners.push(
           handle.includes("/")
             ? { kind: "group", provider: "github", handle: handle.slice(1) }
