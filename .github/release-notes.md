@@ -7,6 +7,7 @@
 - preserve Daybreak settings across scans and remediation ([#1740](https://github.com/openai/codex-security/pull/1740))
 - support the elevated Windows sandbox ([#1741](https://github.com/openai/codex-security/pull/1741))
 - refresh scan progress from saved state ([#1757](https://github.com/openai/codex-security/pull/1757))
+- support unborn Git worktrees and ignore SVN metadata ([#1552](https://github.com/openai/codex-security/pull/1552))
 
 <!-- release-section: highlights:end -->
 

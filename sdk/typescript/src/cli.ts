@@ -1189,7 +1189,11 @@ interface CliDependencies {
     command: "git" | "gh" | "glab",
     args: readonly string[],
     repository: string,
-    options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
+    options?: {
+      trim?: boolean;
+      environment?: NodeJS.ProcessEnv;
+      input?: string;
+    },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
   bulkScan?: BulkScanDiscoveryDependencies;
@@ -1208,6 +1212,32 @@ interface CliDependencies {
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
+
+export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
+  async (command, args, repository, options) => {
+    const executable = await resolveTrustedExecutable(
+      command,
+      process.env,
+      repository,
+    );
+    if (executable === null) {
+      throw new CodexSecurityError(
+        `${command} is not available on a trusted PATH.`,
+      );
+    }
+    const result = execFile(executable.executable, [...args], {
+      cwd: repository,
+      env: { ...executable.environment, ...options?.environment },
+      windowsHide: true,
+      maxBuffer: Infinity,
+    });
+    if (options?.input !== undefined) {
+      result.child.stdin?.on("error", () => {});
+      result.child.stdin?.end(options.input);
+    }
+    const { stdout } = await result;
+    return options?.trim === false ? stdout : stdout.trim();
+  };
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
@@ -1269,24 +1299,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       environment,
       input,
     ),
-  runRepositoryCommand: async (command, args, repository, options) => {
-    const executable = await resolveTrustedExecutable(
-      command,
-      process.env,
-      repository,
-    );
-    if (executable === null) {
-      throw new CodexSecurityError(
-        `${command} is not available on a trusted PATH.`,
-      );
-    }
-    const { stdout } = await execFile(executable.executable, [...args], {
-      cwd: repository,
-      env: { ...executable.environment, ...options?.environment },
-      windowsHide: true,
-    });
-    return options?.trim === false ? stdout : stdout.trim();
-  },
+  runRepositoryCommand,
   exportFindings: runArtifactExport,
   runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
     const environment = {
@@ -7304,7 +7317,7 @@ async function snapshotPatchDirectory(
     for (const entry of await readdir(join(repository, directory), {
       withFileTypes: true,
     })) {
-      if (entry.name === ".git") continue;
+      if (entry.name === ".git" || entry.name === ".svn") continue;
       const path = directory ? `${directory}/${entry.name}` : entry.name;
       const absolute = join(repository, path);
       if (entry.isDirectory()) {
@@ -7477,14 +7490,58 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
 ): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
-  const environment = { GIT_INDEX_FILE: join(root, "index") };
+  const environment = {
+    GIT_INDEX_FILE: join(root, "index"),
+    GIT_LITERAL_PATHSPECS: "0",
+  };
+  const sourcePathspecs = [
+    "--",
+    ":/",
+    ":(top,glob,exclude)**/.svn",
+    ":(top,glob,exclude)**/.svn/**",
+  ];
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository, {
       environment,
     });
   try {
-    await run(["read-tree", "HEAD"]);
-    await run(["--literal-pathspecs", "add", "--all"]);
+    let hasHead = true;
+    try {
+      await run(["rev-parse", "--verify", "--quiet", "HEAD"]);
+    } catch (error) {
+      if (!isJsonObject(error) || error["code"] !== 1) throw error;
+      // An unborn symbolic HEAD has no commit; malformed refs still fail.
+      await run(["symbolic-ref", "--quiet", "HEAD"]);
+      hasHead = false;
+    }
+    if (hasHead) {
+      await run(["read-tree", "HEAD"]);
+    } else {
+      // Preserve tracked paths, including ignored and intent-to-add files, without
+      // copying cached stat data or flags that can hide working-tree changes.
+      // Git's quoted format preserves raw filename bytes through string transport.
+      const entries = await dependencies.runRepositoryCommand(
+        "git",
+        [
+          "-c",
+          "core.quotePath=true",
+          "ls-files",
+          "--stage",
+          "--full-name",
+          ...sourcePathspecs,
+        ],
+        repository,
+        { trim: false, environment: { GIT_LITERAL_PATHSPECS: "0" } },
+      );
+      await run(["read-tree", "--empty"]);
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["-c", "core.ignorestat=false", "update-index", "--index-info"],
+        repository,
+        { environment, input: entries },
+      );
+    }
+    await run(["add", "--all", ...sourcePathspecs]);
     return await run(["write-tree"]);
   } finally {
     await rm(root, { recursive: true, force: true });
