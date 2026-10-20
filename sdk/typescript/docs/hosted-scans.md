@@ -83,8 +83,19 @@ decisions using its own inference service. Without that callback, CODEOWNERS
 matches still work and findings that require inference report an owner error.
 The callback receives the model and reasoning effort in `startThread`, then
 the prompt, output schema, and cancellation signal in `run`.
-The CLI protocol does not provide an owner inference callback. Hosted owner
-enrichment never launches local Codex or selects local credentials.
+The CLI bridges that callback using sequential `owner.infer` requests after the
+base scan is sealed. Each request includes `requestId`, `scanId`, `version`,
+`repository`, `revision`, `scope`, `identity`, `model`, `reasoningEffort`, `prompt`,
+and `schema` (the expected JSON output schema). Reply with the same JSON-RPC ID
+and the structured decision as `result`, or an `error` when inference fails.
+The host must validate the frozen scan identity and model settings, bound owner
+inference independently, and keep its usage separate from scan execution usage.
+An owner inference error is recorded in the owner report without failing the
+completed scan. Run cancellation during inference sends `owner.cancel` with
+`{requestId}`; the host must settle that request with its outcome before the CLI
+returns the sealed scan receipt. Owner requests are never resubmitted by the
+transport. Existing hosts that omit `ownerSuggestions` receive no owner requests.
+Hosted owner enrichment never launches local Codex or selects local credentials.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
