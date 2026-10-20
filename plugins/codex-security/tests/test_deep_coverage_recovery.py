@@ -194,8 +194,9 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
 
 @pytest.mark.parametrize("earlier_identity", [None, "restored"])
 @pytest.mark.parametrize("colliding_candidate", [False, True])
+@pytest.mark.parametrize("selected_checkpoint", [False, True])
 def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
-    tmp_path, earlier_identity, colliding_candidate
+    tmp_path, earlier_identity, colliding_candidate, selected_checkpoint
 ):
     surface = {"label": "API", "disposition": "needs_follow_up"}
     surfaces = [surface]
@@ -211,6 +212,13 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
         older["coverage"]["surfaces"][-1]["id"] = earlier_identity
         checkpoint = write_checkpoint(Path(source["artifact_dir"]) / "checkpoints", older)
         os.utime(checkpoint, ns=(50, 50))
+    if selected_checkpoint:
+        output = Path(source["artifact_dir"])
+        checkpoint = write_checkpoint(output / "checkpoints", draft)
+        os.utime(checkpoint, ns=(300, 300))
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(400, 400))
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][-1].update(id=published_id, workerId="first")
     if colliding_candidate:
@@ -219,7 +227,7 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
         {"id": "parent-review", "reason": "Review remains.", "surfaceIds": [published_id]}
     ]
     write_saved_parent(tmp_path, parent, 200)
-    originals = {p: p.read_bytes() for p in tmp_path.rglob("result.json")}
+    originals = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     result = recover(tmp_path, [source])
     replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
     assert replay[2] == result[2]

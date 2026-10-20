@@ -1170,15 +1170,12 @@ def _prepare_worker_coverage_recovery(
                     for row in rows:
                         if not isinstance(row, dict) or not isinstance(row.get("id"), str):
                             continue
-                        source = next(
-                            (
-                                original
-                                for aggregate, original in surface_sources
-                                if aggregate == _coverage_comparison_row(row, field)
-                            ),
-                            None,
-                        )
-                        if source is None:
+                        matching_sources = [
+                            original
+                            for aggregate, original in surface_sources
+                            if aggregate == _coverage_comparison_row(row, field)
+                        ]
+                        if not matching_sources:
                             continue
                         for task in tasks if isinstance(tasks, list) else []:
                             if (
@@ -1186,7 +1183,9 @@ def _prepare_worker_coverage_recovery(
                                 and isinstance(task.get("surfaceIds"), list)
                                 and row["id"] in task["surfaceIds"]
                             ):
-                                surface_links.append((task, row["id"], source))
+                                surface_links.extend(
+                                    (task, row["id"], source) for source in matching_sources
+                                )
                 draft["coverage"][field] = [
                     row
                     for row in rows
