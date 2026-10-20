@@ -53,7 +53,8 @@ export function updateCommand(
     path.includes("/pnpm/global/") ||
     path.includes("/.bun/install/global/") ||
     path.includes("/.yarn/global/") ||
-    path.includes("/yarn/global/");
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/");
 
   if (agent.startsWith("pnpm/") || path.includes("/.pnpm/")) {
     return `pnpm add${global ? " -g" : ""} ${PACKAGE_NAME}@latest`;
@@ -61,7 +62,8 @@ export function updateCommand(
   if (
     agent.startsWith("yarn/") ||
     path.includes("/.yarn/") ||
-    path.includes("/yarn/global/")
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/")
   ) {
     return `yarn${global ? " global" : ""} add ${PACKAGE_NAME}@latest`;
   }

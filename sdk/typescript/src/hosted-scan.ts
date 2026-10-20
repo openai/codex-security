@@ -30,7 +30,7 @@ export const HostedScanInputSchema = z.strictObject({
   outputDirectory: z.string().min(1),
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
-  reasoningEffort: z.enum(["low", "medium", "high", "xhigh"]),
+  reasoningEffort: z.string(),
   identity: z.strictObject({
     runId: z.string().min(1),
     attemptId: z.string().min(1),
@@ -107,7 +107,7 @@ export function normalizeHostedPaths(
 /** Validate every path at the frozen commit before registering a scan/executing. */
 async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
   const scope = { paths: normalizeHostedPaths(input.scope?.paths) };
-  const repository = await normalizeRepository(input.repository);
+  const repository = await normalizeRepository(input.repository, signal);
   if ((await repositoryRevision(repository, signal)) !== input.revision)
     throw new HostedScanPreparationError(
       "revision_mismatch",
