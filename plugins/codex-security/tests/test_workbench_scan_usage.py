@@ -217,6 +217,26 @@ def _rollout(
     return rollout.resolve()
 
 
+def _allowance_event(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
+    return _event(
+        timestamp,
+        "event_msg",
+        {
+            "type": "token_count",
+            "info": None,
+            "rate_limits": {
+                "limit_id": limit,
+                "primary": {
+                    "used_percent": percent,
+                    "window_minutes": 10080,
+                    "resets_at": 1800000000,
+                },
+                "secondary": None,
+            },
+        },
+    )
+
+
 def _response_event(
     timestamp: datetime,
     thread_id: str,
@@ -1225,6 +1245,7 @@ def test_completion_preserves_explicit_legacy_cost(
                     _token_event(
                         counted, 115, 6, cached_input_tokens=100 if delayed_cache_counts else 0
                     ),
+                    _allowance_event(counted, 6),
                 ],
             )
         },
@@ -1250,6 +1271,7 @@ def test_completion_preserves_explicit_legacy_cost(
         environment=fixture.environment,
     )["scan"]
     assert completed["cost"] == cost
+    assert completed["usage"]["accountRateLimits"][0]["primary"]["usedPercent"] == 6
     if delayed_cache_counts:
         assert completed["usage"]["coverage"] == "unavailable"
         assert completed["usage"]["warnings"] == ["token_breakdown_unavailable"]
@@ -1945,41 +1967,23 @@ def test_worker_discovery_matches_platform_path_spelling(
     assert warnings == set()
 
 
+@pytest.mark.parametrize("parent_measured", [False, True])
 @pytest.mark.parametrize("worker_measured", [False, True])
 def test_completion_uses_latest_account_snapshot_across_owned_sessions(
-    tmp_path: Path, worker_measured: bool
+    tmp_path: Path, parent_measured: bool, worker_measured: bool
 ) -> None:
     fixture = _start_scan(tmp_path)
     first = fixture.started_at + timedelta(microseconds=1)
     latest = first + timedelta(microseconds=1)
 
-    def allowance(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
-        return _event(
-            timestamp,
-            "event_msg",
-            {
-                "type": "token_count",
-                "info": None,
-                "rate_limits": {
-                    "limit_id": limit,
-                    "primary": {
-                        "used_percent": percent,
-                        "window_minutes": 10080,
-                        "resets_at": 1800000000,
-                    },
-                    "secondary": None,
-                },
-            },
-        )
-
     parent = _rollout(
         tmp_path,
         "scan-parent",
         [
-            _token_event(first, 10, 3),
-            allowance(first, 6),
-            allowance(first, 2, "another-limit"),
-            allowance(first + timedelta(days=1), 99),
+            *([_token_event(first, 10, 3)] if parent_measured else []),
+            _allowance_event(first, 6),
+            _allowance_event(first, 2, "another-limit"),
+            _allowance_event(first + timedelta(days=1), 99),
         ],
     )
     worker = _rollout(
@@ -1987,12 +1991,12 @@ def test_completion_uses_latest_account_snapshot_across_owned_sessions(
         "worker",
         [
             *([_token_event(first, 20, 5)] if worker_measured else []),
-            allowance(latest, 69),
-            allowance(first, 6),
+            _allowance_event(latest, 69),
+            _allowance_event(first, 6),
         ],
         parent_thread_id="scan-parent",
     )
-    unrelated = _rollout(tmp_path, "unrelated", [allowance(latest, 100)])
+    unrelated = _rollout(tmp_path, "unrelated", [_allowance_event(latest, 100)])
     _state_graph(
         fixture.environment,
         {
@@ -2005,13 +2009,24 @@ def test_completion_uses_latest_account_snapshot_across_owned_sessions(
 
     completed = _complete_scan(fixture)
     usage = completed["scan"]["usage"]
-    assert usage["coverage"] == ("complete" if worker_measured else "partial")
-    assert usage["totalTokens"] == (38 if worker_measured else 13)
-    assert usage["byRole"]["workers"]["threadCount"] == int(worker_measured)
-    if not worker_measured:
-        assert usage["missingThreadCount"] == 1
+    measured = int(parent_measured) + int(worker_measured)
+    assert usage["coverage"] == (
+        "complete" if measured == 2 else "partial" if measured else "unavailable"
+    )
+    assert usage["threadCount"] == measured
+    if measured:
+        assert usage["totalTokens"] == 13 * parent_measured + 25 * worker_measured
+        assert usage["byRole"]["parent"]["threadCount"] == int(parent_measured)
+        assert usage["byRole"]["workers"]["threadCount"] == int(worker_measured)
+        assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == first
+        if measured == 1:
+            assert usage["missingThreadCount"] == 1
+    else:
+        assert not set(_counts(0, 0, 0)).intersection(usage)
+        assert "byRole" not in usage
+        assert "tokensUpdatedAt" not in usage
+    if measured < 2:
         assert usage["warnings"] == ["token_record_missing", "token_usage_unavailable"]
-    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == first
     limits = {item["limitId"]: item for item in usage["accountRateLimits"]}
     assert limits["codex"] == {
         "limitId": "codex",
@@ -2020,6 +2035,80 @@ def test_completion_uses_latest_account_snapshot_across_owned_sessions(
         "secondary": None,
     }
     assert limits["another-limit"]["primary"]["usedPercent"] == 2
+    assert (
+        scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]["usage"]
+        == usage
+    )
+
+
+def test_host_final_usage_saves_allowances_before_token_receipts(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    arguments = ("--thread-id", "scan-parent", "--turn-id", "turn-scan-parent")
+    initial = _complete_scan(fixture, *arguments)["scan"]["usage"]
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [_allowance_event(fixture.started_at, 6)],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    pending = scan_command(
+        fixture.state_dir,
+        "finalize-scan-usage",
+        fixture.scan_id,
+        *arguments,
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert pending["coverage"] == "unavailable"
+    assert pending["completion"] == initial["completion"]
+    assert not set(_counts(0, 0, 0)).intersection(pending)
+    assert pending["accountRateLimits"][0]["primary"]["usedPercent"] == 6
+    assert (
+        scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]["usage"]
+        == pending
+    )
+
+    with parent.open("a", encoding="utf-8") as output:
+        receipt = _response_event(fixture.started_at, "scan-parent", "final-response", 10, 2)
+        output.write(f"{json.dumps(receipt)}\n")
+    finalized = scan_command(
+        fixture.state_dir,
+        "finalize-scan-usage",
+        fixture.scan_id,
+        *arguments,
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert finalized["totalTokens"] == 12
+    assert finalized["completion"]["finalized"] is True
+    assert finalized["accountRateLimits"] == pending["accountRateLimits"]
+
+
+@pytest.mark.parametrize("limits", [{"limitId": "codex"}, [{"limitId": "codex"}]])
+def test_completion_validates_account_snapshots_without_token_usage(
+    tmp_path: Path, limits: object
+) -> None:
+    fixture = _start_scan(tmp_path)
+    usage = {
+        "coverage": "unavailable",
+        "source": "codex_rollout",
+        "threadCount": 0,
+        "accountRateLimits": limits,
+    }
+    rejected = scan_command(
+        fixture.state_dir,
+        "complete-scan",
+        fixture.scan_id,
+        "--cost-json",
+        json.dumps({"usage": usage}),
+        environment=fixture.environment,
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "invalid measured token usage" in rejected["stderr"]
 
 
 @pytest.mark.parametrize("terminal", [None, "task_complete", "turn_aborted"])

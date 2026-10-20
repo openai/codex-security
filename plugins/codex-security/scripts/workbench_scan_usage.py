@@ -183,14 +183,18 @@ def collect_scan_usage(
     if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
     if not measured_thread_ids:
-        return _unavailable_usage("token_usage_unavailable", warnings=warnings)
+        return _unavailable_usage(
+            "token_usage_unavailable", warnings=warnings, rate_limits=rate_limits
+        )
 
     if any(
         usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
         or usage["totalTokens"] != usage["inputTokens"] + usage["outputTokens"]
         for usage in by_role.values()
     ):
-        return _unavailable_usage("token_breakdown_unavailable", warnings=warnings)
+        return _unavailable_usage(
+            "token_breakdown_unavailable", warnings=warnings, rate_limits=rate_limits
+        )
 
     if completed_turn_id is not None and tokens_updated_at is not None:
         stopped_at = max(stopped_at, tokens_updated_at)
@@ -930,13 +934,21 @@ def _timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 
 
-def _unavailable_usage(reason: str, *, warnings: set[str] | None = None) -> dict[str, Any]:
-    return {
+def _unavailable_usage(
+    reason: str,
+    *,
+    warnings: set[str] | None = None,
+    rate_limits: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "coverage": "unavailable",
         "source": "codex_rollout",
         "threadCount": 0,
         "warnings": sorted({reason, *(warnings or set())}),
     }
+    if rate_limits:
+        result["accountRateLimits"] = [rate_limits[key] for key in sorted(rate_limits)]
+    return result
 
 
 def _reject_nonstandard_json_number(value: str) -> None:
