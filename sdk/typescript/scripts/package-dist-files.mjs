@@ -111,6 +111,7 @@ const distModules = [
   "server/storage",
   "targets",
   "thread-source",
+  "timestamps",
   "trusted-executable",
   "value",
   "version",
