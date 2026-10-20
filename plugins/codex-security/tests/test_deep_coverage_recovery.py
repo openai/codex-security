@@ -245,6 +245,56 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
     assert all(p.read_bytes() == contents for p, contents in originals.items())
 
 
+@pytest.mark.parametrize("anonymous_first", [False, True])
+@pytest.mark.parametrize("checkpoint", ["none", "same", "updated"])
+def test_parent_only_task_keeps_link_to_explicit_worker_surface(
+    tmp_path, anonymous_first, checkpoint
+):
+    anonymous = {"candidateId": "api", "label": "Anonymous", "disposition": "needs_follow_up"}
+    explicit = {"id": "api", "label": "Explicit", "disposition": "needs_follow_up"}
+    draft = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[anonymous, explicit] if anonymous_first else [explicit, anonymous],
+    )
+    source = worker(tmp_path, "first", draft)
+    parent = copy.deepcopy(draft)
+    for index, surface in enumerate(parent["coverage"]["surfaces"]):
+        surface.update(id=f"first/{surface.get('id', index)}", workerId="first")
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Review explicit surface.", "surfaceIds": ["first/api"]}
+    ]
+    write_saved_parent(tmp_path, parent, 200)
+    expected_label = "Explicit"
+    if checkpoint != "none":
+        selected = copy.deepcopy(draft)
+        if checkpoint == "updated":
+            expected_label = "Updated explicit review"
+            next(row for row in selected["coverage"]["surfaces"] if row.get("id") == "api")[
+                "label"
+            ] = expected_label
+        output = Path(source["artifact_dir"])
+        selected_path = write_checkpoint(output / "checkpoints", selected)
+        os.utime(selected_path, ns=(300, 300))
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": selected_path.name}))
+        os.utime(head, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+
+    assert replay[2] == result[2]
+    for documents in (result, replay):
+        surfaces = {row["label"]: row for row in documents[2]["surfaces"]}
+        assert len(surfaces) == 2
+        assert surfaces[expected_label]["id"] != surfaces["Anonymous"]["id"]
+        task = next(row for row in documents[2]["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == [surfaces[expected_label]["id"]]
+        assert "workerId" not in task
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 @pytest.mark.parametrize("colliding_parent", [False, True])
 def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_parent):
     surface = {"label": "Worker review", "disposition": "needs_follow_up"}
@@ -1215,7 +1265,17 @@ def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, un
 
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
-    "metadata", ["valid", "missing-label", "invalid-label", "disposition", "receipt", "empty-id"]
+    "metadata",
+    [
+        "valid",
+        "anonymous",
+        "anonymous-candidate",
+        "missing-label",
+        "invalid-label",
+        "disposition",
+        "receipt",
+        "empty-id",
+    ],
 )
 def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, reverse, metadata):
     current_name, historical_name = (
@@ -1227,7 +1287,11 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
         "disposition": "no_issue_found",
         "receiptRefs": [f"artifacts/{current_name}"],
     }
-    if metadata == "empty-id":
+    if metadata in {"anonymous", "anonymous-candidate"}:
+        selected.pop("id")
+        if metadata == "anonymous-candidate":
+            selected["candidateId"] = "selected"
+    elif metadata == "empty-id":
         selected["id"] = ""
     elif metadata == "missing-label":
         selected.pop("label")
@@ -1289,6 +1353,30 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
         assert "first/selected" not in rows
         assert any("Skipped malformed coverage surface" in warning for warning in warnings)
     else:
-        assert rows[f"first/{selected['id']}"]["receiptRefs"] == [prefix + current_name]
+        selected_row = next(row for row in rows.values() if row["label"] == selected["label"])
+        assert selected_row["receiptRefs"] == [prefix + current_name]
+        if metadata in {"anonymous", "anonymous-candidate"}:
+            assert selected_row["disposition"] == "no_issue_found"
     assert set(rows["first/writer"]["receiptRefs"]) == expected
+    replay_warnings = []
+    replay = saved.merge_saved_results(
+        tmp_path,
+        "coverage-scan",
+        saved_binding("deep_repository", repository="synthetic"),
+        [source],
+        replay_warnings,
+        stopped=True,
+        reason="Source review stopped.",
+        project_worker_coverage=True,
+        frozen_source_digests=documents[0]["scan"]["preservedSources"],
+    )
+    assert replay is not None
+    finalizer._recover_unsealed_coverage(
+        replay[2],
+        Path(saved.__file__).resolve().parent.parent / "schemas",
+        tmp_path,
+        replay_warnings,
+        [],
+    )
+    assert replay[2] == documents[2]
     assert all(path.read_bytes() == content for path, content in originals.items())

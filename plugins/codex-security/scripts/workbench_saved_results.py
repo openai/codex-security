@@ -785,6 +785,7 @@ def _generic_surface_updates(
     receipt_paths: dict[str, str] = {}
     retained_surfaces: dict[tuple[str | None, str], dict[str, Any]] = {}
     if receipt_root is not None:
+        receipt_surfaces: list[tuple[str | None, dict[str, Any]]] = []
         for key, matches in saved_surfaces.items():
             retained = [
                 match for match in matches if surface_is_retained(match[0], key[0], match[1])
@@ -793,9 +794,21 @@ def _generic_surface_updates(
                 continue
             latest_surface = max(retained, key=lambda match: source_order[match[0]])[1]
             retained_surfaces[key] = latest_surface
+            receipt_surfaces.append((key[0], latest_surface))
+        for relative, draft, owner in sources:
+            rows = draft["coverage"].get("surfaces", [])
+            for row in rows if isinstance(rows, list) else []:
+                if (
+                    isinstance(row, dict)
+                    and "id" not in row
+                    and surface_is_retained(relative, owner, row)
+                ):
+                    receipt_surfaces.append((owner, row))
+        for owner, latest_surface in receipt_surfaces:
             # Recovery repairs disposition and receipts before validating row
             # metadata. A row discarded there cannot reserve a receipt spelling.
-            metadata = _project_worker_coverage_row(latest_surface, key[0], "surfaces")
+            metadata = _project_worker_coverage_row(latest_surface, owner, "surfaces")
+            metadata.setdefault("id", _saved_coverage_id(metadata))
             metadata.update(disposition="needs_follow_up", receiptRefs=[])
             try:
                 _require_str(metadata, "id", "coverage.surfaces")
@@ -1155,7 +1168,7 @@ def _prepare_worker_coverage_recovery(
                 surface_sources.extend(
                     (aggregate, row)
                     for aggregate, row in zip(aggregate_rows, rows)
-                    if isinstance(aggregate, dict) and isinstance(row, dict) and "id" not in row
+                    if isinstance(aggregate, dict) and isinstance(row, dict)
                 )
     # A canonical aggregate contains copies of the same worker evidence. Let
     # the existing per-worker chronology reconcile those originals exactly once.
