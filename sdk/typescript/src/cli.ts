@@ -4191,7 +4191,18 @@ export async function main(
               ? await (
                   dependencies.classifyScanSeverity ??
                   classifyScanSeverityInternal
-                )(options.scan, settings, dependencies, "cli")
+                )(
+                  options.scan,
+                  settings,
+                  {
+                    currentDirectory: () => currentDirectory,
+                    ...(dependencies.runWorkbench ===
+                    DEFAULT_DEPENDENCIES.runWorkbench
+                      ? {}
+                      : { runWorkbench: dependencies.runWorkbench }),
+                  },
+                  "cli",
+                )
               : await (
                   dependencies.classifyScanDirectorySeverity ??
                   classifyScanDirectorySeverityInternal

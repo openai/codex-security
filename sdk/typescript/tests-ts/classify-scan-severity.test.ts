@@ -25,6 +25,7 @@ import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -35,8 +36,8 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 const destination = { destination: "linear", teamId: "team-example" } as const;
 afterEach(cleanup);
 
-async function fixture(scanId?: string) {
-  const root = await temporaryDirectory();
+async function fixture(scanId?: string, savedRoot?: string) {
+  const root = savedRoot ?? (await temporaryDirectory());
   const scanDirectory = join(root, "scan");
   await copyCompletedScanFixture(scanDirectory);
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
@@ -88,6 +89,51 @@ async function fixture(scanId?: string) {
     findings: document.findings,
     scanId: manifest.scan.id,
   };
+}
+
+async function savedFixture() {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const caller = join(root, "caller");
+  const scanDirectory = join(root, "scan");
+  for (const directory of [repository, caller, scanDirectory])
+    await mkdir(directory, { mode: 0o700 });
+  const environment = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    HOME: root,
+    USERPROFILE: root,
+    CODEX_HOME: join(root, "codex"),
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    CODEX_SECURITY_NO_UPDATE_NOTICE: "1",
+  };
+  const python = await resolvePluginPython({ environment });
+  const workbench = { environment, python, pluginRoot: PLUGIN_ROOT };
+  const registered = await runWorkbench(workbench, [
+    "register-cli-scan",
+    "--repository",
+    repository,
+    "--scan-dir",
+    scanDirectory,
+    "--recipe-json",
+    JSON.stringify({
+      config: {},
+      mode: "standard",
+      repository,
+      target: { kind: "repository", paths: [] },
+    }),
+  ]);
+  const scanId = registered["scanId"] as string;
+  const artifacts = await fixture(scanId, root);
+  const path = join(scanDirectory, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(path, "utf8"));
+  delete manifest.scan.sealedAt;
+  delete manifest.scan.artifacts;
+  manifest.scan.target.kind = "directory_snapshot";
+  delete manifest.scan.target.revision;
+  await writeFile(path, JSON.stringify(manifest));
+  await runWorkbench(workbench, ["complete-scan", "--scan-id", scanId]);
+  return { ...artifacts, environment, repository, caller, python };
 }
 
 function classifier(finding: Finding, excluded = false) {
@@ -203,6 +249,127 @@ await classifyScanDirectorySeverity(${JSON.stringify(scanDirectory)}, { environm
   );
   expect(result.status, result.stderr).toBe(0);
   await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+for (const surface of ["SDK", "CLI"]) {
+  test.skipIf(process.platform === "win32")(
+    `saved severity ${surface} lookup rejects target Python before probing`,
+    async () => {
+      const f = await savedFixture();
+      const marker = join(f.root, "python-probed");
+      const executable = join(f.repository, "python3");
+      await writeFile(
+        executable,
+        `#!/bin/sh\nprintf probed > '${marker.replaceAll("'", "'\\''")}'\nprintf "codex-security-python-ok\\n"\n`,
+        { mode: 0o700 },
+      );
+      const python =
+        surface === "CLI" ? join(f.root, "linked-python") : executable;
+      if (surface === "CLI") await symlink(executable, python);
+      const environment = {
+        ...f.environment,
+        PYTHON: python,
+      };
+      if (surface === "SDK") {
+        const failure = await classifyScanSeverityInternal(
+          f.scanId,
+          { environment },
+          { currentDirectory: () => f.caller },
+        ).catch((error: unknown) => error);
+        await expect(readFile(marker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        expect(failure).toMatchObject({
+          message: expect.stringContaining(
+            "PYTHON interpreter is unavailable or unusable",
+          ),
+        });
+      } else {
+        const cli = new URL("../src/cli.ts", import.meta.url);
+        const result = spawnSync(
+          process.execPath,
+          [
+            "--eval",
+            `const { main } = await import(${JSON.stringify(cli.href)});
+process.exitCode = await main(["classify-severity", "--scan", ${JSON.stringify(f.scanId.slice(0, 8))}, "--json"]);`,
+          ],
+          { cwd: f.caller, encoding: "utf8", env: environment },
+        );
+        await expect(readFile(marker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        expect(result.status, result.stderr).toBe(2);
+        expect(result.stderr).toContain(
+          "PYTHON interpreter is unavailable or unusable",
+        );
+      }
+      await expect(
+        readFile(join(f.scanDirectory, "severity-classification.json")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+}
+
+test.each(["id", "prefix", "latest", "missing target"])(
+  "saved severity supports %s without modifying sealed inputs or the environment",
+  async (selection) => {
+    const f = await savedFixture();
+    const environment = Object.freeze({ ...f.environment, PYTHON: f.python });
+    const before = await readFile(join(f.scanDirectory, "scan-manifest.json"));
+    if (selection === "missing target")
+      await rm(f.repository, { recursive: true });
+    const result = await classifyScanSeverityInternal(
+      selection === "latest"
+        ? "latest"
+        : selection === "prefix"
+          ? f.scanId.slice(0, 8)
+          : f.scanId,
+      { environment, expectedScanId: f.scanId },
+      {
+        currentDirectory: () =>
+          selection === "latest" ? f.repository : f.caller,
+      },
+    );
+    expect(result.scanId).toBe(f.scanId);
+    expect(result.assessments).toHaveLength(f.findings.length);
+    expect(await readFile(join(f.scanDirectory, "scan-manifest.json"))).toEqual(
+      before,
+    );
+    expect(environment).toEqual({ ...f.environment, PYTHON: f.python });
+  },
+);
+
+test("saved severity protects repository and caller tools across concurrent lookups", async () => {
+  const results = await Promise.allSettled(
+    (["repository", "caller"] as const).map(async (location) => {
+      const f = await savedFixture();
+      const marker = join(f.root, "node-probed");
+      await writeFile(
+        join(f[location], process.platform === "win32" ? "node.exe" : "node"),
+        process.platform === "win32"
+          ? "synthetic invalid executable"
+          : '#!/bin/sh\nprintf probed > "$NODE_MARKER"\nexit 91\n',
+        { mode: 0o700 },
+      );
+      const result = await classifyScanSeverityInternal(
+        f.scanId,
+        {
+          environment: {
+            ...f.environment,
+            PYTHON: f.python,
+            PATH: [f[location], dirname(Bun.which("node")!)].join(delimiter),
+            NODE_MARKER: marker,
+          },
+        },
+        { currentDirectory: () => f.caller },
+      );
+      expect(result.scanId).toBe(f.scanId);
+      expect(result.assessments).toHaveLength(f.findings.length);
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    }),
+  );
+  for (const result of results)
+    if (result.status === "rejected") throw result.reason;
 });
 
 function recordingClassifier() {

@@ -44,7 +44,10 @@ export async function savedScanWorkbench(
     signal?: AbortSignal;
   },
 ): Promise<
-  SavedScanDependencies["runWorkbench"] & { environment: ProcessEnvironment }
+  SavedScanDependencies["runWorkbench"] & {
+    environment: ProcessEnvironment;
+    readonly protectedRoots: readonly string[];
+  }
 > {
   options.signal?.throwIfAborted();
   const environment: ProcessEnvironment = workbenchEnvironment(
@@ -157,7 +160,10 @@ export async function savedScanWorkbench(
     }
     return result;
   };
-  return Object.assign(workbench, { environment });
+  return Object.assign(workbench, {
+    environment,
+    protectedRoots: [options.currentDirectory, ...protectedRoots],
+  });
 }
 
 async function readTargets(
