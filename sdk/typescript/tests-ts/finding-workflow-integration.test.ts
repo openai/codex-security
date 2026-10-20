@@ -490,7 +490,7 @@ test.each(["acknowledged", "interrupted", "without workflow"])(
       outcome === "interrupted" ? { groups } : undefined,
     );
     const reviewCalls = reviewer.reviewPair.mock.calls.length;
-    expect(
+    expect<unknown>(
       await deduplicateScanInternal(document.scanId, options, dependencies),
     ).toEqual(saved.result);
     expect(reviewer.reviewPair).toHaveBeenCalledTimes(reviewCalls);
@@ -551,7 +551,7 @@ test.each(["complete", "cached"])(
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]![0].pathname).toBe("/v1/bulk/findings");
-    expect(
+    expect<unknown>(
       await deduplicateScanInternal(document.scanId, options, {
         environment,
         runWorkbench: history,
