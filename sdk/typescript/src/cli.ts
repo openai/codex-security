@@ -6519,7 +6519,14 @@ async function runScanImport(
   try {
     const result = await (dependencies.importScan ?? importScan)(
       { ...options, signal: controller.signal },
-      { environment: dependencies.environment },
+      {
+        environment: dependencies.environment,
+        onWarning: (warning) => {
+          errorOutput.write(
+            `codex-security: warning: ${diagnosticValue(warning)}\n`,
+          );
+        },
+      },
     );
     if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
     try {

@@ -32,6 +32,36 @@ function importDependencies() {
 }
 
 describe("scan import", () => {
+  test.each(["completed", "failed"] as const)(
+    "reports cleanup warnings without changing a %s import outcome",
+    async (outcome) => {
+      const { deps } = importDependencies();
+      deps.importScan = async (_options, settings) => {
+        settings?.onWarning?.("Synthetic scratch cleanup failure");
+        if (outcome === "failed") throw new Error("Synthetic import failure");
+        return fakeResult(["high", "high"]);
+      };
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scan", "import", "--json", "findings.json", "--format", "json"],
+          deps,
+        ),
+      ).toBe(outcome === "failed" ? 2 : 0);
+      expect(stderr.text()).toContain(
+        "codex-security: warning: Synthetic scratch cleanup failure",
+      );
+      if (outcome === "failed") {
+        expect(stderr.text()).toContain("Synthetic import failure");
+      } else {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { id: "scan" } },
+        });
+        expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
+      }
+    },
+  );
+
   test.each(["csv", "json"] as const)(
     "imports --%s while --format json controls output",
     async (format) => {
