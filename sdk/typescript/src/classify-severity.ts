@@ -1,4 +1,4 @@
-import { SCAN_SEVERITIES } from "./scan-settings.js";
+import { defaultSeverityRubric } from "./default-severity-rubric.js";
 import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
@@ -13,6 +13,8 @@ import {
   severityDecisionSchema as decisionSchema,
   severityReviewInstructions,
   parseSeverityDecision,
+  reviewSeverity,
+  classificationRunsSchema,
 } from "./severity-review.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 
@@ -33,8 +35,10 @@ export interface ClassifySeverityOptions extends Pick<
   | "signal"
   | "workingDirectory"
 > {
-  /** Classification policy. Omit to inherit existing severity without a model call. */
+  /** Classification policy override. Omit to use the built-in severity rubric. */
   rubricPath?: string;
+  /** Independent reviews per finding: integer 1–10, default 3. */
+  classificationRuns?: number;
   /** Supporting evidence, separate from classification policy. */
   knowledgeBasePaths?: readonly string[];
   /** @internal Test client for the shared read-only runtime. */
@@ -50,6 +54,8 @@ export interface SeverityAssessment extends z.infer<typeof decisionSchema> {
 export interface SeverityClassification {
   schemaVersion: 1;
   assessedAt: string;
+  /** Absent on legacy results whose review count was not recorded. */
+  classificationRuns?: number;
   rubricSha256: string | null;
   knowledgeBaseSha256: string | null;
   assessments: SeverityAssessment[];
@@ -65,7 +71,6 @@ export interface SeverityClassificationCheckpoint {
   ): Promise<void>;
 }
 
-const levelSchema = z.enum(SCAN_SEVERITIES);
 const textSchema = z
   .string()
   .min(1)
@@ -75,6 +80,7 @@ const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 export const severityClassificationSchema = z.strictObject({
   schemaVersion: z.literal(1),
   assessedAt: z.string().datetime(),
+  classificationRuns: classificationRunsSchema.optional(),
   rubricSha256: digestSchema.nullable(),
   knowledgeBaseSha256: digestSchema.nullable(),
   assessments: z.array(
@@ -102,6 +108,9 @@ export async function classifySeverityInternal(
   checkpoint?: SeverityClassificationCheckpoint,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
+  const classificationRuns = classificationRunsSchema
+    .default(3)
+    .parse(options.classificationRuns);
   const ids = new Set<string>();
   for (const finding of findings) {
     if (!finding.findingId?.trim() || ids.has(finding.findingId)) {
@@ -113,15 +122,16 @@ export async function classifySeverityInternal(
   }
   const rubric =
     options.rubricPath === undefined
-      ? null
+      ? [defaultSeverityRubric]
       : await readDocuments([options.rubricPath], options.signal);
   const knowledge = options.knowledgeBasePaths?.length
     ? await readDocuments(options.knowledgeBasePaths, options.signal)
     : null;
   const result: SeverityClassification = {
     schemaVersion: 1,
+    classificationRuns,
     assessedAt: new Date().toISOString(),
-    rubricSha256: rubric === null ? null : workflowDigest(rubric),
+    rubricSha256: workflowDigest(rubric),
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
@@ -137,31 +147,14 @@ export async function classifySeverityInternal(
       result.assessments.push(previous);
       continue;
     }
-    let decision: z.infer<typeof decisionSchema>;
-    if (rubric === null) {
-      const parsed = levelSchema.safeParse(finding.severity?.level);
-      if (!parsed.success) {
-        throw new CodexSecurityError(
-          `Finding ${finding.findingId} has no existing severity; supply a rubric.`,
-        );
-      }
-      decision = {
-        findingId: finding.findingId,
-        decision: "assessed",
-        level: parsed.data,
-        rubricLabel: null,
-        rationale:
-          finding.severity?.rationale?.trim() ||
-          "Inherited the finding's existing severity.",
-        confidence: null,
-        reviewTrigger: finding.severity?.changeConditions?.trim() || null,
-      };
-    } else {
+    const prompt = [
+      severityReviewInstructions,
+      JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
+    ].join("\n\n");
+    const decision = await reviewSeverity(async () => {
+      options.signal?.throwIfAborted();
       const response = await runReadOnlyCodex(
-        [
-          severityReviewInstructions,
-          JSON.stringify({ rubric, knowledgeBase: knowledge, finding }),
-        ].join("\n\n"),
+        prompt,
         z.toJSONSchema(decisionSchema),
         options,
         {
@@ -172,22 +165,20 @@ export async function classifySeverityInternal(
       );
       options.signal?.throwIfAborted();
       try {
-        decision = parseSeverityDecision(
-          JSON.parse(response),
-          finding.findingId,
-        );
+        return parseSeverityDecision(JSON.parse(response), finding.findingId);
       } catch (error) {
         throw new CodexSecurityError(
           "Severity classification returned an invalid assessment.",
           { cause: error },
         );
       }
-    }
+    }, classificationRuns);
+    options.signal?.throwIfAborted();
     const assessment: SeverityAssessment = {
       ...decision,
       occurrenceId: finding.occurrenceId ?? null,
       inputSha256,
-      source: rubric === null ? "existing-severity" : "rubric",
+      source: "rubric",
     };
     await checkpoint?.save(finding, assessment, result);
     result.assessments.push(assessment);

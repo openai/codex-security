@@ -2481,23 +2481,37 @@ describe("CLI", () => {
   });
 
   test("rejects CSV stdout when JSON output is requested", async () => {
-    const exportFindings = mock(resolving(new Uint8Array()));
-    const { stdout, stderr, runCli } = createCliTest(main);
+    for (const exportFormat of [
+      ["--export-format", "csv"],
+      ["--export-format=csv"],
+      ["--exportFormat", "csv"],
+      ["--exportFormat=csv"],
+    ]) {
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format=json"],
+        ["--format", "jsonl"],
+        ["--format=jsonl"],
+      ]) {
+        const exportFindings = mock(resolving(new Uint8Array()));
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies();
+        deps.exportFindings = exportFindings;
 
-    const deps = dependencies();
-    deps.exportFindings = exportFindings;
-
-    expect(
-      await runCli(
-        ["export", "scan", "--export-format", "csv", "--output", "-", "--json"],
-        deps,
-      ),
-    ).toBe(2);
-    expect(exportFindings).not.toHaveBeenCalled();
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain(
-      "CSV stdout cannot be combined with JSON output",
-    );
+        expect(
+          await runCli(
+            ["export", "scan", ...exportFormat, "--output", "-", ...format],
+            deps,
+          ),
+        ).toBe(2);
+        expect(exportFindings).not.toHaveBeenCalled();
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          "CSV stdout cannot be combined with JSON output",
+        );
+      }
+    }
   });
 
   test("prints export help without initializing Codex", async () => {
