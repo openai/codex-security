@@ -1984,7 +1984,9 @@ export async function main(
     return incurError({ code, message: outcome.error, exitCode });
   };
   const runImport = (options: ImportScanOptions) =>
-    runScanImport(options, errorOutput, dependencies);
+    withTerminalErrorsHandled(errorOutput, () =>
+      runScanImport(options, errorOutput, dependencies),
+    );
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
