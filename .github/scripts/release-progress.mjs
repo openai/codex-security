@@ -183,7 +183,8 @@ export function renderProgress(
 }
 
 function workflowName(run) {
-  return workflows.find((name) => run.path === `.github/workflows/${name}.yml`);
+  const path = run.path?.split("@", 1)[0];
+  return workflows.find((name) => path === `.github/workflows/${name}.yml`);
 }
 
 async function releaseCommit(github, run) {

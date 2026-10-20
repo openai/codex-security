@@ -155,6 +155,25 @@ test("accepts stable version-bump titles with breaking-change markers", async ()
   }
 });
 
+test("recognizes ref-qualified workflow paths for progress and observation", async () => {
+  for (const workflow of ["node-ci", "node-release", "node-github-release"]) {
+    const f = fixture();
+    const input = run(1, workflow, {
+      status: "completed",
+      conclusion: "failure",
+    });
+    input.path += `@${input.head_branch}`;
+    f.runs.set(1, input);
+    assert.equal((await f.update(1)).action, "created");
+    assert.ok(f.body().includes(`"${workflow}":1`));
+    await f.watch(1, () => assert.fail("must not poll a completed run"));
+    assert.equal(
+      f.requests.filter(({ path }) => path.endsWith("/dispatches")).length,
+      workflow === "node-ci" ? 0 : 1,
+    );
+  }
+});
+
 test("queued or cancelled duplicates cannot hide an active protected approval", async () => {
   for (const [workflow, environment, jobName] of [
     ["node-release", "npm", "verify"],
@@ -599,6 +618,13 @@ test("does not overwrite human comments containing the marker", async () => {
 test("rejects workflow lookalikes and publication runs outside main or stable tags", async () => {
   for (const input of [
     run(1, "node-ci", { path: ".github/workflows/unrelated.yml" }),
+    run(1, "node-ci", { path: ".github/workflows/unrelated.yml@main" }),
+    run(2, "node-release", {
+      path: ".github/workflows/node-release.yml.bak@npm-v99.1.2",
+    }),
+    run(3, "node-github-release", {
+      path: "elsewhere/node-github-release.yml@main",
+    }),
     run(2, "node-release", { event: "pull_request", head_branch: "feature" }),
     run(2, "node-release", { head_branch: "main" }),
     run(3, "node-github-release", { head_branch: "feature" }),
@@ -607,6 +633,9 @@ test("rejects workflow lookalikes and publication runs outside main or stable ta
     const f = fixture();
     f.runs.set(input.id, input);
     assert.equal((await f.update(input.id)).action, "ignored");
+    await f.watch(input.id, () =>
+      assert.fail("must not poll an unrelated run"),
+    );
     assert.equal(f.writes().length, 0);
   }
 });
