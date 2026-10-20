@@ -32,8 +32,9 @@ def worker(root: Path, name: str, draft: dict):
     return saved_discovery_worker(output, name, 1)
 
 
-def recover(root, workers, *, project=False, frozen=None):
-    warnings = []
+def recover(root, workers, *, project=False, frozen=None, warnings=None):
+    expected_warnings = warnings is not None
+    warnings = [] if warnings is None else warnings
     result = saved.merge_saved_results(
         root,
         "coverage-scan",
@@ -50,7 +51,8 @@ def recover(root, workers, *, project=False, frozen=None):
     finalizer._recover_unsealed_coverage(
         result[2], Path(saved.__file__).resolve().parent.parent / "schemas", root, warnings, []
     )
-    assert not warnings
+    if not expected_warnings:
+        assert not warnings
     return result
 
 
@@ -194,14 +196,17 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
 
 @pytest.mark.parametrize("old_label", ["Older review", "Earlier review"])
 @pytest.mark.parametrize("selected_parent", [False, True])
-def test_parent_surface_fallback_uses_current_snapshot(tmp_path, old_label, selected_parent):
+@pytest.mark.parametrize("complete_worker", [False, True])
+def test_parent_surface_fallback_uses_current_snapshot(
+    tmp_path, old_label, selected_parent, complete_worker
+):
     current_surface = {
         "id": "api",
         "label": "Current review",
         "disposition": "needs_follow_up",
         "receiptRefs": ["artifacts/new.md"],
     }
-    current = saved_draft("coverage-scan", complete=True, surfaces=[current_surface])
+    current = saved_draft("coverage-scan", complete=complete_worker, surfaces=[current_surface])
     source = worker(tmp_path, "first", current)
     output = Path(source["artifact_dir"])
     older = copy.deepcopy(current)
@@ -233,7 +238,8 @@ def test_parent_surface_fallback_uses_current_snapshot(tmp_path, old_label, sele
     finding = json.loads((template / "findings.json").read_text())["findings"][0]
     finding["provenance"].update(workerId="first", candidateId="api")
     selected = write_checkpoint(
-        output / "checkpoints", saved_draft("coverage-scan", complete=True, findings=[finding])
+        output / "checkpoints",
+        saved_draft("coverage-scan", complete=complete_worker, findings=[finding]),
     )
     os.utime(selected, ns=(300, 300))
     head = output / "checkpoint-head.json"
@@ -247,12 +253,88 @@ def test_parent_surface_fallback_uses_current_snapshot(tmp_path, old_label, sele
     assert replay[2] == result[2]
     for documents in (result, replay):
         assert len(documents[1]["findings"]) == 1
-        assert len(documents[2]["surfaces"]) == 1
-        surface = documents[2]["surfaces"][0]
-        assert surface["label"] == "Current review"
+        assert len(documents[2]["surfaces"]) == (1 if complete_worker else 2)
+        surface = next(row for row in documents[2]["surfaces"] if row["label"] == "Current review")
         assert (tmp_path / surface["receiptRefs"][0]).read_text() == "new evidence\n"
         task = next(row for row in documents[2]["deferred"] if row["id"] == "parent-review")
         assert task["surfaceIds"] == [surface["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("mode", ["fallback", "worker-replacement", "no-task"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_fallback_receipts_take_precedence_over_historical_repairs(tmp_path, mode, reverse):
+    current_name, historical_name = (
+        ("review.md", "Review.md") if reverse else ("Review.md", "review.md")
+    )
+    surface = {
+        "id": "api",
+        "label": "Current review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [f"artifacts/{current_name}"],
+    }
+    writer = {
+        **surface,
+        "id": "writer",
+        "label": "Other review",
+        "receiptRefs": ["artifacts/other.md"],
+    }
+    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface, writer])
+    source = worker(tmp_path, "first", draft)
+    output = Path(source["artifact_dir"])
+    prefix = output.relative_to(tmp_path).as_posix() + "/artifacts/"
+    for name in [current_name, historical_name, "other.md", "replacement.md"]:
+        (output / "artifacts" / name).write_text(f"{name} evidence\n")
+    older = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[
+            {**writer, "receiptRefs": [f"artifacts/{historical_name}", "artifacts/missing.md"]}
+        ],
+    )
+    checkpoint = write_checkpoint(output / "checkpoints", older)
+    os.utime(checkpoint, ns=(50, 50))
+    parent = copy.deepcopy(draft)
+    for row in parent["coverage"]["surfaces"]:
+        row.update(
+            id=f"first/{row['id']}",
+            workerId="first",
+            receiptRefs=[prefix + ref.rsplit("/", 1)[1] for ref in row["receiptRefs"]],
+        )
+    parent["coverage"]["deferred"] = (
+        []
+        if mode == "no-task"
+        else [{"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}]
+    )
+    write_saved_parent(tmp_path, parent, 200)
+    selected_surfaces = [writer]
+    if mode == "worker-replacement":
+        selected_surfaces.append({**surface, "receiptRefs": ["artifacts/replacement.md"]})
+    selected = write_checkpoint(
+        output / "checkpoints",
+        saved_draft("coverage-scan", complete=True, surfaces=selected_surfaces),
+    )
+    os.utime(selected, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    warnings = []
+    result = recover(tmp_path, [source], warnings=warnings)
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"], warnings=[])
+    assert replay[2] == result[2]
+    rows = {row["id"]: row for row in result[2]["surfaces"]}
+    expected = {prefix + "other.md"}
+    if mode != "fallback":
+        expected.add(prefix + historical_name)
+    assert set(rows["first/writer"]["receiptRefs"]) == expected
+    if mode != "no-task":
+        assert rows["first/api"]["disposition"] == "no_issue_found"
+        name = current_name if mode == "fallback" else "replacement.md"
+        assert rows["first/api"]["receiptRefs"] == [prefix + name]
+    else:
+        assert "first/api" not in rows
+    assert any("missing.md" in warning for warning in warnings)
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
@@ -362,10 +444,17 @@ def test_parent_only_task_keeps_link_to_explicit_worker_surface(
 @pytest.mark.parametrize("colliding_parent", [False, True])
 @pytest.mark.parametrize("anonymous", [False, True])
 @pytest.mark.parametrize(
-    "task_kind,updated", [("parent", False), ("worker", False), ("worker", True), ("both", True)]
+    "task_kind,updated,anonymous_task",
+    [
+        ("parent", False, False),
+        ("worker", False, False),
+        ("worker", True, False),
+        ("both", True, False),
+        ("worker", False, True),
+    ],
 )
 def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
-    tmp_path, anonymous, colliding_parent, task_kind, updated
+    tmp_path, anonymous, colliding_parent, task_kind, updated, anonymous_task
 ):
     surface = {
         "label": "Worker review",
@@ -377,7 +466,7 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
     worker_tasks = (
         [
             {
-                "id": "review",
+                **({} if anonymous_task else {"id": "review"}),
                 "reason": "Worker review remains.",
                 "surfaceIds": ["0" if anonymous else "api"],
             }
@@ -396,7 +485,12 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
         receiptRefs=[f"{output.relative_to(tmp_path).as_posix()}/artifacts/review.md"],
     )
     parent["coverage"]["deferred"] = [
-        {**task, "id": "first/review", "workerId": "first", "surfaceIds": [parent_id]}
+        {
+            **task,
+            "id": "first/0" if anonymous_task else "first/review",
+            "workerId": "first",
+            "surfaceIds": [parent_id],
+        }
         for task in worker_tasks
     ]
     if task_kind != "worker":
@@ -440,8 +534,9 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
             assert tasks["parent-review"]["surfaceIds"] == [retained["id"]]
             assert "workerId" not in tasks["parent-review"]
         if task_kind != "parent":
-            assert tasks["first/review"]["surfaceIds"] == [retained["id"]]
-            assert tasks["first/review"]["reason"] == selected_tasks[0]["reason"]
+            task = next(row for row in tasks.values() if row.get("workerId") == "first")
+            assert task["surfaceIds"] == [retained["id"]]
+            assert task["reason"] == selected_tasks[0]["reason"]
         assert (tmp_path / retained["receiptRefs"][0]).read_text() == "first source review\n"
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
