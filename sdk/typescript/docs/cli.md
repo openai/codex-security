@@ -1283,16 +1283,31 @@ codex-security classify-severity --scan latest --rubric /path/to/policy.md --jso
 codex-security classify-severity --scan-dir /path/to/completed-scan --json
 ```
 
-For repository-free canonical records, use `classify-severity --records` alone.
+For repository-free canonical records, use `classify-severity --records` (optionally with `--runs N`).
 The [records protocol](classify-severity-records.md) accepts immutable Markdown and
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` inherits original severity without model calls. Rubrics and
-repeatable `--knowledge-base` context accept text, PDF, DOCX, and directories.
-Each finding is classified in a separate read-only turn using its report and
-supplied context, without tools or source inspection. `--model` and `--effort`
-override Codex's configured model and the default medium effort.
+Omitting `--rubric` runs classification with the [built-in severity rubric](../src/default-severity-rubric.ts).
+It evaluates attacker access, boundary crossing, additional harm, and evidence for
+Critical, High, Medium, Low, and Informational findings. Confidence remains separate
+from severity; missing proof alone does not justify a downgrade. An explicit
+`--rubric` replaces the default policy completely. Rubrics and repeatable
+`--knowledge-base` context accept text, PDF, DOCX, and directories.
+Each finding is classified three times by default. `--runs N` accepts
+an integer from 1 through 10; SDK options use `classificationRuns` with the same
+default and bounds. Each review runs in an independent read-only turn using the
+same report, rubric, and supplied context, without tools or source inspection.
+The most common normalized severity wins; the highest among tied top counts wins
+(`critical` > `high` > `medium` > `low` > `informational`). Exclusion is a separate
+vote: exclusions can win by count, but lose ties to assessed severities. The first answer matching the winner supplies its label, rationale,
+confidence, and review trigger. All requested reviews must succeed; failures or invalid
+answers fail that finding without saving a partial vote. This uses the requested number of model
+calls per uncached finding (three by default), including when no custom rubric is supplied, and
+requires the same Codex authentication and model access as custom classification.
+Codex retains usage for each independent turn. There is no fallback to scanner
+severity if classification fails.
+`--model` and `--effort` override Codex's configured model and the default medium effort.
 
 Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
 the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
@@ -1300,10 +1315,17 @@ missing facts that could change the result. Exclusions have a null level.
 Finding/occurrence IDs and input hashes bind each assessment to its evidence.
 
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
-matching evidence, rubric, and context hashes; failed/canceled runs keep completed
-work. Use `--reprocess` to replace assessments, including when changing only model
-or effort. A successful run also writes `severity-classification.json`, but
-publication reads the database. Original findings and sealed artifacts remain
+matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed
+work. Default-rubric assessments use `source: "rubric"` and a content hash; former
+no-rubric inherited assessments have no rubric hash and are automatically
+reclassified on the next classification run. Changes to the bundled policy or
+switching between default and custom policies also invalidate matching checkpoints.
+The result and checkpoint record `classificationRuns`; changing the count, or
+reusing an older checkpoint with no recorded count, triggers fresh classification.
+Older results remain readable; publication does not silently run a model.
+Use `--reprocess` to replace assessments, including when changing only model
+or effort. A successful
+run also writes `severity-classification.json`, but publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
 Repeat `--finding-id ID` for a subset from the selected scan. Dedupe's
@@ -1374,8 +1396,9 @@ await publishScan(scanDirectory, {
 ```
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
-evidence/metadata. Imported reports may lack severity or occurrence IDs; missing
-severity requires a rubric. Scan wrappers persist checkpoints (including for
+evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
+`rubricPath` uses the built-in policy even when a scanner severity is present.
+Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and
 publication. Older JSON-only assessments need reclassification once. All

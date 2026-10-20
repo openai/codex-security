@@ -425,5 +425,14 @@
       "CREATE TRIGGER record_deep_scan_worker_thread_insert\nAFTER INSERT ON deep_scan_workers\nWHEN NEW.sdk_thread_id IS NOT NULL\nBEGIN\n    INSERT OR IGNORE INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\n    VALUES (NEW.scan_id, NEW.id, NEW.sdk_thread_id);\nEND;",
       "CREATE TRIGGER record_deep_scan_worker_thread_update\nAFTER UPDATE OF sdk_thread_id ON deep_scan_workers\nWHEN NEW.sdk_thread_id IS NOT NULL\nBEGIN\n    INSERT OR IGNORE INTO deep_scan_worker_threads (scan_id, worker_id, sdk_thread_id)\n    VALUES (NEW.scan_id, NEW.id, NEW.sdk_thread_id);\nEND;"
     ]
+  },
+  {
+    "version": 52,
+    "name": "record severity classification review counts",
+    "statements": [
+      "ALTER TABLE finding_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_classifications ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);"
+    ]
   }
 ]
