@@ -10,14 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event.action == 'edited' && github.event.changes.body != null && github.event.changes.title == null && github.event.changes.base == null && '-body-edit' || '' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate-title:
-    if: >-
-      github.event.action != 'edited' || github.event.changes.body == null ||
-      github.event.changes.title != null || github.event.changes.base != null
     name: validate pull request
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -474,8 +471,7 @@ jobs:
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
   required-test:
-    # Skipped metadata checks must not replace required source check results.
-    name: ${{ github.event.action == 'edited' && github.event.changes.body != null && github.event.changes.title == null && github.event.changes.base == null && 'body edit / ' || '' }}${{ matrix.os }} / node-22
+    name: ${{ matrix.os }} / node-22
     needs:
       [
         validate-title,
@@ -489,9 +485,7 @@ jobs:
         plugin-source,
         container-validate,
       ]
-    if: >-
-      always() && (github.event.action != 'edited' || github.event.changes.body == null ||
-      github.event.changes.title != null || github.event.changes.base != null)
+    if: always()
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -593,11 +587,9 @@ jobs:
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
   windows:
-    name: ${{ github.event.action == 'edited' && github.event.changes.body != null && github.event.changes.title == null && github.event.changes.base == null && 'body edit / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
-    if: >-
-      always() && (github.event.action != 'edited' || github.event.changes.body == null ||
-      github.event.changes.title != null || github.event.changes.base != null)
+    if: always()
     needs:
       [
         validate-title,
