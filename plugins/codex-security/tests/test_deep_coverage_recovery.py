@@ -296,6 +296,63 @@ def test_parent_only_task_keeps_link_to_explicit_worker_surface(
 
 
 @pytest.mark.parametrize("colliding_parent", [False, True])
+@pytest.mark.parametrize("anonymous", [False, True])
+def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
+    tmp_path, anonymous, colliding_parent
+):
+    surface = {
+        "label": "Worker review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/review.md"],
+    }
+    if not anonymous:
+        surface["id"] = "api"
+    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface])
+    source = worker(tmp_path, "first", draft)
+    output = Path(source["artifact_dir"])
+    parent_id = "first/0" if anonymous else "first/api"
+    parent = copy.deepcopy(draft)
+    parent["coverage"]["surfaces"][0].update(
+        id=parent_id,
+        workerId="first",
+        receiptRefs=[f"{output.relative_to(tmp_path).as_posix()}/artifacts/review.md"],
+    )
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Parent review remains.", "surfaceIds": [parent_id]}
+    ]
+    if colliding_parent:
+        parent["coverage"]["surfaces"].append(
+            {
+                "id": parent_id,
+                "label": "Independent parent review",
+                "disposition": "needs_follow_up",
+            }
+        )
+    write_saved_parent(tmp_path, parent, 200)
+    selected = write_checkpoint(output / "checkpoints", saved_draft("coverage-scan", complete=True))
+    os.utime(selected, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+
+    assert replay[2] == result[2]
+    for documents in (result, replay):
+        coverage = documents[2]
+        retained = next(row for row in coverage["surfaces"] if row["label"] == "Worker review")
+        assert len(coverage["surfaces"]) == 1 + colliding_parent
+        assert retained["id"] == parent_id + ("-2" if colliding_parent else "")
+        task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
+        assert task["surfaceIds"] == [retained["id"]]
+        assert "workerId" not in task
+        assert (tmp_path / retained["receiptRefs"][0]).read_text() == "first source review\n"
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("colliding_parent", [False, True])
 def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_parent):
     surface = {"label": "Worker review", "disposition": "needs_follow_up"}
     draft = saved_draft("coverage-scan", complete=True, surfaces=[surface])
@@ -345,6 +402,44 @@ def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_par
             other = next(row for row in coverage["deferred"] if row["id"] == "unrelated-review")
             assert other["surfaceIds"] == ["first/restored"]
     assert all(p.read_bytes() == contents for p, contents in originals.items())
+
+
+def test_parent_link_recovery_leaves_malformed_collection_for_existing_finalizer(tmp_path):
+    draft = saved_draft(
+        "coverage-scan",
+        complete=True,
+        surfaces=[{"id": "api", "label": "API", "disposition": "needs_follow_up"}],
+    )
+    source = worker(tmp_path, "first", draft)
+    parent = copy.deepcopy(draft)
+    parent["coverage"]["surfaces"][0].update(id="first/api", workerId="first")
+    parent["coverage"]["deferred"] = [
+        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}
+    ]
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", parent)
+    os.utime(checkpoint, ns=(150, 150))
+    parent["coverage"]["surfaces"] = {"malformed": True}
+    write_saved_parent(tmp_path, parent, 200)
+    output = Path(source["artifact_dir"])
+    selected = write_checkpoint(output / "checkpoints", saved_draft("coverage-scan", complete=True))
+    os.utime(selected, ns=(300, 300))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(400, 400))
+
+    result = saved.merge_saved_results(
+        tmp_path,
+        "coverage-scan",
+        saved_binding("deep_repository", repository="synthetic"),
+        [source],
+        [],
+        stopped=True,
+        reason="Source review stopped.",
+    )
+
+    assert result is not None
+    assert result[2]["surfaces"] == {"malformed": True}
+    assert any(row["id"] == "parent-review" for row in result[2]["deferred"])
 
 
 def test_parent_only_task_remaps_anonymous_surface_links_once(tmp_path):

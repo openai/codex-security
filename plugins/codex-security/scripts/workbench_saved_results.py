@@ -1099,7 +1099,7 @@ def _prepare_worker_coverage_recovery(
     parent: dict[str, Any] | None,
     *,
     enabled: bool,
-) -> tuple[bool, list[tuple[dict[str, Any], str, dict[str, Any]]]]:
+) -> tuple[bool, list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]]]:
     """Put bound worker evidence in parent coordinates without changing source files."""
     workers = {owner for _, _, owner in sources if owner is not None}
     parents = [draft for _, draft, owner in sources if owner is None]
@@ -1127,7 +1127,7 @@ def _prepare_worker_coverage_recovery(
         return False, []
     projected: dict[str, list[Any]] = {field: [] for field in fields}
     surface_sources: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    surface_links: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
+    surface_links: list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]] = []
     for relative, draft, owner in sources:
         if owner is None:
             continue
@@ -1198,7 +1198,7 @@ def _prepare_worker_coverage_recovery(
                                 and row["id"] in task["surfaceIds"]
                             ):
                                 surface_links.extend(
-                                    (task, row["id"], source) for source in matching_sources
+                                    (task, row["id"], source, row) for source in matching_sources
                                 )
                 draft["coverage"][field] = [
                     row
@@ -1491,7 +1491,7 @@ def merge_saved_results(
         sources, parent, enabled=project_worker_coverage
     )
     # Keep the actual retained row even when recovery adds previous findings.
-    linked_surface_sources = {id(surface) for _, _, surface in surface_links}
+    linked_surface_sources = {id(surface) for _, _, surface, _ in surface_links}
     linked_surface_outputs: dict[int, dict[str, Any]] = {}
     worker_row_owners: dict[int, str] = {}
     worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
@@ -2365,7 +2365,7 @@ def merge_saved_results(
     # another surface, so only the final surface ID can be used for its links.
     retained_surface_links: dict[int, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
     output_tasks = coverage.get("deferred", [])
-    for task, published_id, surface in surface_links:
+    for task, published_id, surface, _ in surface_links:
         retained_surface = linked_surface_outputs.get(id(surface))
         if (
             retained_surface is None
@@ -2383,6 +2383,17 @@ def merge_saved_results(
             if retained_task == task:
                 _, links = retained_surface_links.setdefault(id(retained_task), (retained_task, {}))
                 links[published_id] = retained_surface
+    # A newer worker checkpoint may omit a surface still needed by a retained
+    # parent task. Restore its parent copy only when no worker replacement survived.
+    for task, published_id, _, parent_surface in surface_links:
+        for retained_task in output_tasks if isinstance(output_tasks, list) else []:
+            if retained_task != task:
+                continue
+            _, links = retained_surface_links.setdefault(id(retained_task), (retained_task, {}))
+            if published_id not in links and isinstance(coverage.get("surfaces"), list):
+                links[published_id] = append_coverage_row(
+                    coverage["surfaces"], parent_surface, None, "surfaces"
+                )
     if project_worker_coverage:
         worker_surfaces: dict[tuple[str, str], dict[str, Any]] = {}
         named_surface_outputs = {

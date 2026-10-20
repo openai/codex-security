@@ -63,6 +63,9 @@ try {
     "linked-candidate",
   ] as const)
     await testCurrentReceiptSelectionBeforeArchivedHistory(root, resolution);
+  for (const candidate of [false, true])
+    for (const reverse of [false, true])
+      await testCurrentAnonymousReceiptSelection(root, candidate, reverse);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
 } finally {
@@ -1459,6 +1462,118 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
   assert.equal(
     await readFile(path.join(archive, "result.json"), "utf8"),
     original,
+  );
+}
+
+async function testCurrentAnonymousReceiptSelection(
+  root: string,
+  candidate: boolean,
+  reverse: boolean,
+) {
+  const selectedRef = reverse ? "artifacts/Review.md" : "artifacts/review.md";
+  const historicalRef = reverse ? "artifacts/review.md" : "artifacts/Review.md";
+  const old = draft([], {
+    complete: true,
+    coverage: {
+      explicitExclusions: [],
+      surfaces: [
+        {
+          id: "writer",
+          label: "Retained review",
+          disposition: "needs_follow_up",
+          receiptRefs: [historicalRef],
+        },
+      ],
+      deferred: [
+        { id: "review", reason: "Review remains.", surfaceIds: ["writer"] },
+      ],
+    },
+  });
+  const worker = await createWorker(
+    path.join(root, `anonymous-receipt-${candidate}-${reverse}`),
+    "first",
+    old,
+  );
+  const output = path.dirname(worker.resultPath);
+  await mkdir(path.join(output, "artifacts"));
+  await writeFile(path.join(output, historicalRef), "Historical review.\n");
+  await writeFile(
+    path.join(output, selectedRef),
+    "Current anonymous review.\n",
+  );
+  await writeFile(
+    path.join(output, "artifacts/replacement.md"),
+    "Replacement review.\n",
+  );
+  const originalReceipts = await Promise.all(
+    [selectedRef, historicalRef].map((ref) => readFile(path.join(output, ref))),
+  );
+  const context = {
+    root: output,
+    repoRoot: root,
+    layout: "worker" as const,
+    scanId,
+  };
+  await saveScanDraftCheckpoint(context, old, false);
+  const checkpoints = await readdir(path.join(output, "checkpoints"));
+  const originals = await Promise.all(
+    checkpoints.map((name) => readFile(path.join(output, "checkpoints", name))),
+  );
+  const current = draft([], {
+    complete: true,
+    coverage: {
+      explicitExclusions: [],
+      deferred: [],
+      resolvedDeferred: [{ id: "review", reason: "Review completed." }],
+      surfaces: [
+        {
+          id: "writer",
+          label: "Retained review",
+          disposition: "no_issue_found",
+          receiptRefs: ["artifacts/replacement.md"],
+        },
+        {
+          ...(candidate ? { candidateId: "anonymous" } : {}),
+          label: "Current anonymous review",
+          disposition: "no_issue_found",
+          receiptRefs: [selectedRef],
+        },
+      ],
+    },
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await recordCodexSecurityWorkerScanDraft(context, current);
+    const accepted = await validateDiscoveryArtifacts(
+      worker.artifacts,
+      worker.resultPath,
+      scanId,
+    );
+    assert.equal(accepted.coverage.surfaces.length, 2);
+    const selected = accepted.coverage.surfaces.find(
+      (row: JsonObject) => row.label === "Current anonymous review",
+    );
+    assert.deepEqual(selected.receiptRefs, [selectedRef]);
+    assert.equal(selected.disposition, "no_issue_found");
+    const writer = accepted.coverage.surfaces.find(
+      (row: JsonObject) => row.id === "writer",
+    );
+    assert.deepEqual(writer.receiptRefs, ["artifacts/replacement.md"]);
+  }
+  assert.deepEqual(
+    await Promise.all(
+      checkpoints.map((name) =>
+        readFile(path.join(output, "checkpoints", name)),
+      ),
+    ),
+    originals,
+  );
+  assert.deepEqual(
+    await Promise.all(
+      [selectedRef, historicalRef].map((ref) =>
+        readFile(path.join(output, ref)),
+      ),
+    ),
+    originalReceipts,
   );
 }
 
