@@ -9,6 +9,8 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { Writable } from "node:stream";
+import { setImmediate } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
@@ -165,6 +167,12 @@ describe("optional publication diagnostics", () => {
       throw new Error("Output stream failed.");
     }),
   });
+  const failingAsyncOutput = () =>
+    new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() => callback(new Error("Output stream failed.")));
+      },
+    });
 
   test.each([
     ["scan", undefined],
@@ -332,6 +340,135 @@ describe("optional publication diagnostics", () => {
     ).toBe(2);
     expect(stdout.write).toHaveBeenCalledTimes(1);
     expect(stderr.text()).toContain("Output stream failed.");
+  });
+
+  test.each([false, true])(
+    "retains publication receipts when warning output fails asynchronously (partial: %p)",
+    async (partial) => {
+      const receipt = {
+        ...publicationResult(
+          partial
+            ? [{ findingId: "finding-2", error: "Issue creation failed." }]
+            : [],
+        ),
+        warnings: ["Receipt storage failed."],
+      };
+      const deps = dependencies();
+      deps.publishScan = async () => receipt;
+      const stdout = capture();
+      const stderr = failingAsyncOutput();
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr,
+          deps,
+        ),
+      ).toBe(partial ? 2 : 0);
+      await setImmediate();
+      expect(JSON.parse(stdout.text())).toEqual(receipt);
+      expect(stderr.listenerCount("error")).toBe(0);
+    },
+  );
+
+  test.each(["SIGINT", "SIGTERM"] as const)(
+    "preserves canceled checks when diagnostics fail asynchronously: %s",
+    async (signal) => {
+      const signals = new FakeSignals();
+      const deps = dependencies({ signals });
+      deps.checkScanPublication = async () => {
+        signals.emit(signal);
+        throw new Error("Publication failed.");
+      };
+      const stdout = capture();
+      const stderr = failingAsyncOutput();
+      expect(
+        await main(
+          [
+            "publish",
+            "check",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr,
+          deps,
+        ),
+      ).toBe(signal === "SIGINT" ? 130 : 143);
+      await setImmediate();
+      expect(stdout.text()).toBe("");
+      expect(stderr.listenerCount("error")).toBe(0);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    },
+  );
+
+  test("retains the Cloud batch receipt when diagnostics fail asynchronously", async () => {
+    const deps = dependencies();
+    const directories = ["scan-one", "scan-two", "scan-three"].map((path) =>
+      resolve(deps.currentDirectory(), path),
+    );
+    const receipt = { scanId: "scan-1", findingIds: [], findingCount: 0 };
+    const attempts: string[] = [];
+    deps.publishScanToCloud = async (directory) => {
+      attempts.push(directory);
+      if (directory === directories[1]) throw new Error("Upload failed.");
+      await setImmediate();
+      return receipt;
+    };
+    const stdout = capture();
+    const stderr = failingAsyncOutput();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--to",
+          "cloud",
+          "--json",
+          ...directories.flatMap((directory) => ["--scan-dir", directory]),
+        ],
+        stdout.stream,
+        stderr,
+        deps,
+      ),
+    ).toBe(2);
+    await setImmediate();
+    expect(attempts).toEqual(directories);
+    expect(JSON.parse(stdout.text())).toEqual({
+      results: [directories[0], directories[2]].map((scanDir) => ({
+        scanDir,
+        ...receipt,
+      })),
+      failed: [{ scanDir: directories[1], error: "Upload failed." }],
+      notAttempted: [],
+    });
+    expect(stderr.listenerCount("error")).toBe(0);
+  });
+
+  test("still fails when required publication output fails asynchronously", async () => {
+    const deps = dependencies();
+    deps.publishScan = async () => publicationResult();
+    const stdout = failingAsyncOutput();
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    await setImmediate();
+    expect(stderr.text()).toContain("Output stream failed.");
+    expect(stdout.listenerCount("error")).toBe(0);
   });
 });
 
