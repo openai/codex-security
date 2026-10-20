@@ -297,8 +297,11 @@ def test_parent_only_task_keeps_link_to_explicit_worker_surface(
 
 @pytest.mark.parametrize("colliding_parent", [False, True])
 @pytest.mark.parametrize("anonymous", [False, True])
+@pytest.mark.parametrize(
+    "task_kind,updated", [("parent", False), ("worker", False), ("worker", True), ("both", True)]
+)
 def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
-    tmp_path, anonymous, colliding_parent
+    tmp_path, anonymous, colliding_parent, task_kind, updated
 ):
     surface = {
         "label": "Worker review",
@@ -307,7 +310,18 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
     }
     if not anonymous:
         surface["id"] = "api"
-    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface])
+    worker_tasks = (
+        [
+            {
+                "id": "review",
+                "reason": "Worker review remains.",
+                "surfaceIds": ["0" if anonymous else "api"],
+            }
+        ]
+        if task_kind != "parent"
+        else []
+    )
+    draft = saved_draft("coverage-scan", complete=True, surfaces=[surface], deferred=worker_tasks)
     source = worker(tmp_path, "first", draft)
     output = Path(source["artifact_dir"])
     parent_id = "first/0" if anonymous else "first/api"
@@ -318,8 +332,13 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
         receiptRefs=[f"{output.relative_to(tmp_path).as_posix()}/artifacts/review.md"],
     )
     parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Parent review remains.", "surfaceIds": [parent_id]}
+        {**task, "id": "first/review", "workerId": "first", "surfaceIds": [parent_id]}
+        for task in worker_tasks
     ]
+    if task_kind != "worker":
+        parent["coverage"]["deferred"].append(
+            {"id": "parent-review", "reason": "Parent review remains.", "surfaceIds": [parent_id]}
+        )
     if colliding_parent:
         parent["coverage"]["surfaces"].append(
             {
@@ -329,7 +348,14 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
             }
         )
     write_saved_parent(tmp_path, parent, 200)
-    selected = write_checkpoint(output / "checkpoints", saved_draft("coverage-scan", complete=True))
+    selected_tasks = [
+        {**task, "reason": "Updated worker review." if updated else task["reason"]}
+        for task in worker_tasks
+    ]
+    selected = write_checkpoint(
+        output / "checkpoints",
+        saved_draft("coverage-scan", complete=True, deferred=selected_tasks),
+    )
     os.utime(selected, ns=(300, 300))
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": selected.name}))
@@ -345,9 +371,13 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
         retained = next(row for row in coverage["surfaces"] if row["label"] == "Worker review")
         assert len(coverage["surfaces"]) == 1 + colliding_parent
         assert retained["id"] == parent_id + ("-2" if colliding_parent else "")
-        task = next(row for row in coverage["deferred"] if row["id"] == "parent-review")
-        assert task["surfaceIds"] == [retained["id"]]
-        assert "workerId" not in task
+        tasks = {row["id"]: row for row in coverage["deferred"]}
+        if task_kind != "worker":
+            assert tasks["parent-review"]["surfaceIds"] == [retained["id"]]
+            assert "workerId" not in tasks["parent-review"]
+        if task_kind != "parent":
+            assert tasks["first/review"]["surfaceIds"] == [retained["id"]]
+            assert tasks["first/review"]["reason"] == selected_tasks[0]["reason"]
         assert (tmp_path / retained["receiptRefs"][0]).read_text() == "first source review\n"
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
@@ -1365,6 +1395,7 @@ def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, un
         "valid",
         "anonymous",
         "anonymous-candidate",
+        "duplicate-id",
         "missing-label",
         "invalid-label",
         "disposition",
@@ -1402,10 +1433,20 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
         "disposition": "no_issue_found",
         "receiptRefs": ["artifacts/replacement.md"],
     }
-    accepted = saved_draft("coverage-scan", complete=True, surfaces=[selected, writer])
+    surfaces = [selected, writer]
+    if metadata == "duplicate-id":
+        surfaces.insert(
+            0,
+            {
+                **selected,
+                "label": "Independent selected review",
+                "receiptRefs": ["artifacts/other.md"],
+            },
+        )
+    accepted = saved_draft("coverage-scan", complete=True, surfaces=surfaces)
     source = worker(tmp_path, "first", accepted)
     output = Path(source["artifact_dir"])
-    for name in [current_name, historical_name, "replacement.md"]:
+    for name in [current_name, historical_name, "replacement.md", "other.md"]:
         (output / "artifacts" / name).write_text(f"Evidence from {name}.\n")
     history = saved_draft(
         "coverage-scan",
@@ -1450,7 +1491,7 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
     else:
         selected_row = next(row for row in rows.values() if row["label"] == selected["label"])
         assert selected_row["receiptRefs"] == [prefix + current_name]
-        if metadata in {"anonymous", "anonymous-candidate"}:
+        if metadata in {"anonymous", "anonymous-candidate", "duplicate-id"}:
             assert selected_row["disposition"] == "no_issue_found"
     assert set(rows["first/writer"]["receiptRefs"]) == expected
     replay_warnings = []
