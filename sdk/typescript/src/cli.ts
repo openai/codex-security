@@ -6152,7 +6152,9 @@ export async function main(
       argv.some(
         (value, index) =>
           value === "--export-format=csv" ||
-          (value === "--export-format" && argv[index + 1] === "csv"),
+          value === "--exportFormat=csv" ||
+          ((value === "--export-format" || value === "--exportFormat") &&
+            argv[index + 1] === "csv"),
       )
     ) {
       return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
