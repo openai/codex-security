@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
+import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { importSource } from "./import-module.ts";
 import {
   DeepScanCoordinatorRegistry,
@@ -65,12 +67,13 @@ for (const route of ["mcp", "file"] as const) {
     run.dispatchedCount = 1;
     let reducerCalls = 0;
     const start = registry.start.bind(registry);
-    registry.start = (options) =>
+    registry.start = (options: CoordinatorOptions) =>
       start({
         ...options,
         executor: {
-          async run(request) {
+          async run(request: CodexWorkerRequest) {
             assert.equal(request.kind, "dedup");
+            assert.ok(request.artifactContext);
             reducerCalls += 1;
             const input = { scanId: run.scanId, findings: [source] };
             if (route === "mcp") {
@@ -88,7 +91,7 @@ for (const route of ["mcp", "file"] as const) {
           },
         },
       });
-    const staged = [];
+    const staged: { draft: string; checkpoint: string }[] = [];
     const context = draftFixture(run.scanDir, "deep").context;
     const { coordinator } = await startDeepScanEngine({
       run,
@@ -115,11 +118,10 @@ for (const route of ["mcp", "file"] as const) {
         if (args[0] === "preserve-scan-results") return {};
         assert.equal(args[0], "write-scan-draft");
         staged.push({
-          draft: JSON.parse(
-            await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
-          ),
-          checkpoint: JSON.parse(
-            await readFile(args[args.indexOf("--checkpoint-path") + 1], "utf8"),
+          draft: await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
+          checkpoint: await readFile(
+            args[args.indexOf("--checkpoint-path") + 1],
+            "utf8",
           ),
         });
         return {};
@@ -129,11 +131,13 @@ for (const route of ["mcp", "file"] as const) {
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(reducerCalls, 1);
     assert.equal(staged.length, 1);
-    assert.equal(staged[0].draft.manifest.scan.threatModel.measurement, null);
-    assert.equal(staged[0].checkpoint.threatModel.measurement, null);
+    const draft = JSON.parse(staged[0].draft);
+    const checkpoint = JSON.parse(staged[0].checkpoint);
+    assert.equal(draft.manifest.scan.threatModel.measurement, null);
+    assert.equal(checkpoint.threatModel.measurement, null);
     const selectedPath = store.dedupCommits.at(-1)!.resultManifestPath;
-    assert.equal(staged[0].draft.deepScanPublication.resultPath, selectedPath);
-    const retained = staged[0].checkpoint.findings[0];
+    assert.equal(draft.deepScanPublication.resultPath, selectedPath);
+    const retained = checkpoint.findings[0];
     assert.equal(
       retained.provenance.sourceFindings[0].finding.extensions.measurement,
       null,
