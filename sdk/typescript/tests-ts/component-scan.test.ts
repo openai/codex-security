@@ -989,7 +989,7 @@ test("keeps literal component paths through planning and execution", async () =>
     codex: fakeCodex(() => ({ components: [proposed.components[0]] })),
   });
   expect(automatic.components[0]).toEqual(proposed.components[0]);
-  const observed: string[][] = [];
+  const observed: (readonly string[])[] = [];
   const summary = await scan(paths, {
     components: plan.components,
     createSecurity: client(async (repository, options) => {
