@@ -22,6 +22,7 @@ import {
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { requireFiniteNumbers } from "./helpers/json.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
@@ -116,6 +117,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
             trustedScope.filePaths as string[] | undefined,
           )
         : reconciled.findings;
+    // Coordinator publication also carries retained historical payloads.
+    if (finalDeepDraft && publication === undefined)
+      requireFiniteNumbers({ ...parsed, findings: scopedFindings });
     const findings = buildFindings(scopedFindings, context.mode);
     const coverage = buildCoverage(
       context,
@@ -345,6 +349,7 @@ async function preserveScanDraft(
   previousDigest: string;
   warnings?: string[];
 }> {
+  requireFiniteNumbers(input);
   const warnings: string[] = [];
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
@@ -1998,7 +2003,7 @@ export async function getCodexSecurityCompletedScan(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
     value === "." ||
     value.startsWith("/") ||

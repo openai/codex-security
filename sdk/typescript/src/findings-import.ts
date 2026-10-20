@@ -30,7 +30,10 @@ const csvFindingRowSchema = z
       .string()
       .optional()
       .transform((value) =>
-        value === undefined || value.trim() === "" ? undefined : value,
+        value === undefined ||
+        (value.trim() === "" && !value.includes("\uFEFF"))
+          ? undefined
+          : value,
       ),
     title: requiredCsvText("title"),
     summary: requiredCsvText("summary"),
@@ -54,7 +57,9 @@ const csvFindingRowSchema = z
       .transform((value) => (value === "" ? undefined : value)),
     note: z
       .string()
-      .transform((value) => (value.trim() === "" ? undefined : value)),
+      .transform((value) =>
+        value.trim() === "" && !value.includes("\uFEFF") ? undefined : value,
+      ),
     remediation: requiredCsvText("remediation"),
     path: z.string().refine(safeFindingPath, {
       error: "has an invalid path",
@@ -341,7 +346,7 @@ function validCsvLine(value: string): boolean {
 
 function safeFindingPath(value: string): boolean {
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     value === "." ||
     isAbsolute(value) ||
     /^[A-Za-z]:/u.test(value) ||

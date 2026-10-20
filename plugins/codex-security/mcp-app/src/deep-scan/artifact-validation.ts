@@ -9,6 +9,7 @@ import {
 } from "../coverage-publication.js";
 import { artifactSchemaDocuments } from "../artifact-contracts.js";
 import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
+import { requireFiniteNumbers } from "../helpers/json.js";
 import {
   parsePersistedScanDraft,
   preserveFindingDetails,
@@ -232,6 +233,18 @@ export function reconcileDeepReduction(
   discoveries: DeepReductionSources["discoveries"],
   previous: DeepReductionInput | null,
 ): DeepReductionInput {
+  // Check retained fresh data before merging historical sources. The host
+  // replaces submitted sourceFindings with the original source payloads below.
+  requireFiniteNumbers({
+    ...input,
+    findings: input.findings.map((finding) => ({
+      ...finding,
+      provenance: {
+        ...(finding.provenance as JsonObject),
+        sourceFindings: undefined,
+      },
+    })),
+  });
   const result = structuredClone(input);
   for (const source of [
     ...discoveries.map((discovery) => discovery.result),
