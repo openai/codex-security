@@ -1,7 +1,8 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -40,7 +41,7 @@ for (const scenario of [
         const fifo = spawnSync("mkfifo", [join(root, "replacement.fifo")]);
         expect(fifo.status, fifo.stderr?.toString()).toBe(0);
       }
-      const child = spawnSync(
+      const child = await promisify(execFile)(
         process.execPath,
         [
           fileURLToPath(
@@ -51,8 +52,6 @@ for (const scenario of [
         ],
         { encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" },
       );
-      expect(child.error, child.stderr).toBeUndefined();
-      expect(child.status, child.stderr).toBe(0);
       expect(JSON.parse(child.stdout)).toEqual({ scenario, passed: true });
     },
   );
