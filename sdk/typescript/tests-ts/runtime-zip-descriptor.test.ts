@@ -8,7 +8,6 @@ import { strToU8, zipSync } from "fflate";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures("runtime-zip-");
-const execFileAsync = promisify(execFile);
 afterEach(cleanup);
 
 for (const scenario of [
@@ -42,7 +41,7 @@ for (const scenario of [
         const fifo = spawnSync("mkfifo", [join(root, "replacement.fifo")]);
         expect(fifo.status, fifo.stderr?.toString()).toBe(0);
       }
-      const child = await execFileAsync(
+      const child = await promisify(execFile)(
         process.execPath,
         [
           fileURLToPath(

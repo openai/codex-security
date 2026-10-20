@@ -417,7 +417,11 @@ async function deduplicateResolvedScan(
     await client.storeDedupeGroups(result.duplicateGroups);
     return result;
   };
-  return workflow ? await workflow.run("dedupe", dedupe) : await dedupe();
+  const result = workflow
+    ? await workflow.run("dedupe", dedupe)
+    : await dedupe();
+  options.signal?.throwIfAborted();
+  return result;
 }
 
 async function modelConfigurationForReview(

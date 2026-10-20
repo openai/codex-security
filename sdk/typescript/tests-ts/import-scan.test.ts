@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import { ScanInterruptedError } from "../src/errors.js";
@@ -166,6 +166,93 @@ async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
     summaries: string[];
   }>;
 }
+
+test.each(["completed", "failed", "interrupted", "preview"] as const)(
+  "scratch cleanup failure preserves the %s import outcome",
+  async (outcome) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `scratch cleanup failure preserves the ${outcome} import outcome`,
+      )
+    )
+      return;
+    const context = await fixture();
+    const controller = new AbortController();
+    const primaryError = new Error("Synthetic import failure");
+    const warnings: string[] = [];
+    const originalRm = filesystem.rm;
+    const removing = spyOn(filesystem, "rm").mockImplementation(
+      async (path, options) => {
+        if (basename(String(path)).startsWith("codex-security-import-")) {
+          roots.track(String(path));
+          throw new Error("Synthetic scratch cleanup failure");
+        }
+        return await originalRm(path, options);
+      },
+    );
+    try {
+      const operation = importScan(
+        {
+          ...context.options,
+          dryRun: outcome === "preview",
+          signal: controller.signal,
+        },
+        {
+          ...context.dependencies,
+          onWarning: async (message) => {
+            warnings.push(message);
+            throw new Error("Synthetic warning observer failure");
+          },
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "prepare-scan-completion" && outcome === "failed")
+              throw primaryError;
+            const result = await runWorkbench(options, args, input);
+            if (args[0] === "register-cli-scan" && outcome === "interrupted")
+              controller.abort(primaryError);
+            return result;
+          },
+        },
+      );
+      if (outcome === "failed")
+        await expect(operation).rejects.toBe(primaryError);
+      else if (outcome === "interrupted") {
+        await expect(operation).rejects.toMatchObject({
+          name: "ScanInterruptedError",
+          cause: primaryError,
+        });
+      } else if (outcome === "preview") {
+        expect(await operation).toMatchObject({
+          dryRun: true,
+          findingCount: 2,
+        });
+      } else {
+        const result = completed(await operation);
+        expect(result.findings.findings).toHaveLength(2);
+        expect(
+          (await loadContract(result.scanDir, { pluginRoot: PLUGIN_ROOT }))
+            .manifest.scan.id,
+        ).toBe(result.manifest.scan.id);
+      }
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("Synthetic scratch cleanup failure");
+      if (outcome === "preview") {
+        await expect(stat(context.stateDirectory)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        const scans = await storedScans(context);
+        expect(scans).toHaveLength(1);
+        expect(scans[0]!.status).toBe(
+          outcome === "completed" ? "complete" : "failed",
+        );
+        if (outcome === "completed") expect(scans[0]!.occurrence_count).toBe(2);
+      }
+    } finally {
+      removing.mockRestore();
+    }
+  },
+);
 
 test("a rejected import registration keeps existing output in place", async () => {
   const context = await fixture();

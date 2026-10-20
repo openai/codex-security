@@ -377,7 +377,7 @@ test.each([
         ],
         [
           ["--findings-url", "http://127.0.0.1:3000"],
-          "Deduplication canceled. Findings are unchanged.",
+          "Deduplication canceled. Remote writes may have completed.",
         ],
       ] as const) {
         const signals = new FakeSignals();

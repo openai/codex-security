@@ -434,6 +434,134 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
   });
 });
 
+test.each(["acknowledged", "interrupted", "without workflow"])(
+  "observes cancellation after the final group write (%s) without losing durable state",
+  async (outcome) => {
+    const { environment, document, history } = await fixtureWithFindings(2);
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation during group write");
+    const options = {
+      ...(outcome === "without workflow" ? {} : { workflowId: "final-write" }),
+      findingsUrl: "http://synthetic.test",
+    };
+    const groups = [
+      document.findings.map((finding) => finding.findingId).sort(),
+    ];
+    const writes: string[][][] = [];
+    const reviewer = {
+      screen: mock(async (findings: readonly Finding[]) => ({
+        decisions: Object.fromEntries(
+          findings.slice(1).map(screeningRecommendation),
+        ),
+      })),
+      reviewPair: mock(async () => sameRecommendation),
+    };
+    const dependencies = {
+      environment,
+      runWorkbench: history,
+      reviewer,
+      fetch: async (url: URL, init: RequestInit) => {
+        if (!url.pathname.endsWith("/dedupe-groups"))
+          return await findingFetch(document)(url);
+        writes.push(JSON.parse(init.body as string).groups);
+        if (writes.length === 1) {
+          controller.abort(reason);
+          if (outcome === "interrupted") throw reason;
+        }
+        return Response.json([]);
+      },
+    };
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        dependencies,
+      ),
+    ).rejects.toThrow(reason.message);
+    expect(writes).toEqual([groups]);
+    if (options.workflowId === undefined) return;
+    const workflow = new FindingWorkflow(options.workflowId, environment);
+    const saved = (await workflow.get())!.stages.dedupe;
+    expect(saved.status).toBe(
+      outcome === "interrupted" ? "failed" : "completed",
+    );
+    expect(saved.result).toMatchObject({ duplicateGroups: groups });
+    expect(saved.pendingWrite).toEqual(
+      outcome === "interrupted" ? { groups } : undefined,
+    );
+    const reviewCalls = reviewer.reviewPair.mock.calls.length;
+    expect<unknown>(
+      await deduplicateScanInternal(document.scanId, options, dependencies),
+    ).toEqual(saved.result);
+    expect(reviewer.reviewPair).toHaveBeenCalledTimes(reviewCalls);
+    expect(writes).toHaveLength(outcome === "interrupted" ? 2 : 1);
+    expect((await workflow.get())!.stages.dedupe).toEqual({
+      status: "completed",
+      result: saved.result,
+    });
+  },
+);
+
+test.each(["complete", "cached"])(
+  "observes final cancellation for a %s workflow without group writes",
+  async (phase) => {
+    const { environment, document, history } = await fixtureWithFindings(0);
+    const controller = new AbortController();
+    const reason = new Error(
+      "Synthetic cancellation after workflow completion",
+    );
+    const options = {
+      workflowId: "empty-canceled",
+      findingsUrl: "http://synthetic.test",
+    };
+    const fetch = mock(findingFetch(document));
+    if (phase === "cached")
+      await deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench: history,
+        fetch,
+      });
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        {
+          environment,
+          fetch,
+          runWorkbench: async (args, input) => {
+            const result = await history(args, input);
+            const payload = input ? JSON.parse(input) : {};
+            if (
+              payload.stage === "dedupe" &&
+              payload.action === (phase === "cached" ? "begin" : "complete")
+            )
+              controller.abort(reason);
+            return result;
+          },
+        },
+      ),
+    ).rejects.toThrow(reason.message);
+    const saved = (await new FindingWorkflow(
+      options.workflowId,
+      environment,
+    ).get())!.stages.dedupe;
+    expect(saved).toMatchObject({
+      status: "completed",
+      result: { duplicateGroups: [] },
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]![0].pathname).toBe("/v1/bulk/findings");
+    expect<unknown>(
+      await deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench: history,
+        fetch,
+      }),
+    ).toEqual(saved.result);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  },
+);
+
 test("does not write workflow metadata into sealed artifacts", async () => {
   const { scanDir, environment } = await fixture();
   await expect(

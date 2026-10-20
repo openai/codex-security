@@ -87,6 +87,40 @@ ${script}
   return JSON.parse(result.stdout);
 }
 
+test("retries runtime initialization after shared and repeated failures", async () => {
+  const { store, environment } = await fixture();
+  const stateDirectory = environment.CODEX_SECURITY_STATE_DIR;
+  environment.CODEX_SECURITY_STATE_DIR += "\ninvalid";
+  const failures = await Promise.allSettled([
+    store.initialize(),
+    store.list({ limit: 10, offset: 0 }),
+    store.listDedupeGroups("synthetic-finding"),
+  ]);
+  expect(failures.every((result) => result.status === "rejected")).toBe(true);
+  const reasons = failures.map((result) =>
+    result.status === "rejected" ? result.reason : undefined,
+  );
+  expect(reasons.every((reason) => reason === reasons[0])).toBe(true);
+  await expect(store.initialize()).rejects.toThrow("control or line-separator");
+  environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
+  await Promise.all([store.initialize(), store.initialize()]);
+  expect(await store.list({ limit: 10, offset: 0 })).toMatchObject({
+    findings: [],
+  });
+});
+
+test("keeps resolved runtime options cached after a database command fails", async () => {
+  const { store, environment } = await fixture();
+  await store.initialize();
+  environment.CODEX_SECURITY_STATE_DIR += "\ninvalid";
+  await expect(
+    store.storeDedupeGroups([[finding(1).findingId, finding(2).findingId]]),
+  ).rejects.toMatchObject({ code: "finding_conflict" });
+  expect(await store.list({ limit: 10, offset: 0 })).toMatchObject({
+    findings: [],
+  });
+});
+
 test("persists complete findings, repository associations, pages, and idempotent groups atomically", async () => {
   const { store, environment } = await fixture();
   await store.initialize();
