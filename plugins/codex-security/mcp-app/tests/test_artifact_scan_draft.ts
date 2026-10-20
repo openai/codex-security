@@ -2513,6 +2513,41 @@ try {
     ...incompleteCodeEvidence,
     code: "extract_archive_entry(untrusted_entry, output_path)",
   };
+  for (const literalPath of ["\u2028", "\u2029", " ", "\u00A0", "\uFEFF"]) {
+    const literalRoot = path.join(
+      root,
+      `literal-path-${literalPath.codePointAt(0)}`,
+    );
+    await mkdir(literalRoot);
+    const { context: literalContext } = draftFixture(literalRoot, "standard");
+    const literalFinding = {
+      ...finding,
+      locations: [{ ...finding.locations[0], path: literalPath }],
+      codeEvidence: [{ ...completeCodeEvidence, path: literalPath }],
+    };
+    await recordCodexSecurityScanDraft(literalContext, {
+      ...input,
+      findings: [literalFinding],
+    });
+    assert.equal(
+      (await readJson(literalRoot, "findings.json")).findings[0].locations[0]
+        .path,
+      literalPath,
+    );
+    await recordCodexSecurityScanDraft(literalContext, {
+      ...input,
+      findings: [{ ...literalFinding, summary: "Updated finding summary." }],
+    });
+    const reloaded = draftApi.parseCanonicalScanDraft({
+      scanId,
+      manifest: await readJson(literalRoot, "scan-manifest.json"),
+      findings: await readJson(literalRoot, "findings.json"),
+      coverage: await readJson(literalRoot, "coverage.json"),
+    });
+    assert.equal(reloaded.findings[0].summary, "Updated finding summary.");
+    assert.equal(reloaded.findings[0].locations[0].path, literalPath);
+    assert.equal(reloaded.findings[0].codeEvidence[0].path, literalPath);
+  }
   const evidencedFinding = {
     ...finding,
     codeEvidence: [completeCodeEvidence],
