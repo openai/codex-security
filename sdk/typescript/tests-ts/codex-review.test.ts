@@ -129,6 +129,7 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
+  "rate-limit-turn": "Rate limit reached",
   "server-error": "Provider temporarily unavailable",
   "connection-error": "Provider stream disconnected",
   "unauthorized-turn": "Authentication required",
@@ -153,6 +154,7 @@ const failureReasons: Record<string, string> = {
 const retriedFailures = new Set([
   "text-only",
   "failed-turn",
+  "rate-limit-turn",
   "server-error",
   "connection-error",
   "invalid-json",
@@ -162,6 +164,7 @@ const retriedFailures = new Set([
 ]);
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
+  "recover-rate-limit-code": "rate-limit-turn",
   "recover-server-error": "server-error",
   "recover-connection-error": "connection-error",
   "recover-process-exit": "exit",
@@ -173,6 +176,7 @@ const modelFailures = new Set([
   "policy-turn-code",
   "policy-turn",
   "failed-turn",
+  "rate-limit-turn",
   "server-error",
   "connection-error",
   "unauthorized-turn",

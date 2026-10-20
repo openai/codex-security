@@ -2,7 +2,8 @@
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the
 canonical changelog. Under the current process, each new release combines a
-short, reviewed summary with a categorized list of merged pull requests.
+short, reviewed summary with an expandable categorized list of merged pull
+requests.
 Historical releases may contain generated notes only. The release tag and npm
 package use the same stable version: `npm-vX.Y.Z` and
 `@openai/codex-security@X.Y.Z`. Releases whose source includes the GitHub Action
@@ -158,6 +159,28 @@ The committed `.github/release-notes.md` is authoritative. The updater
 drafts highlights from merged titles and lists marked breaking changes for
 migration review; it does not infer migration instructions from source code.
 Review and refine these suggestions before releasing.
+
+Keep the published notes easy to scan:
+
+- Start with a short overview and the main user-facing highlights. Use bold
+  topic labels to make the bullets easy to skim. Put secondary improvements
+  in a `<details>` block when they would crowd out upgrade guidance.
+- Keep breaking changes and required upgrade actions visible. Long migration
+  procedures can go in a clearly named `<details>` block under the relevant
+  upgrade note. Keep code fences, tables, and lists intact.
+- Keep each prose paragraph or list item on one source line. GitHub Releases
+  renders source newlines as visible breaks, including those before links.
+  The release-note Prettier override uses `proseWrap: "never"`, and the SDK
+  format check includes this file.
+- Leave the complete PR inventory to the publisher. It appends the generated
+  notes, contributor credits, and comparison link in an **All changes**
+  disclosure after the reviewed summary. Releases without a reviewed summary
+  keep their generated notes visible.
+
+Preview both the release list and the individual release in GitHub. Check
+paragraph flow, inline links, tables, code examples, and expanded details.
+Edits to an already published release do not change its immutable tagged
+source; rerunning publication uses that tagged summary again.
 
 - Edit the highlights or upgrade notes on the release PR branch. Keep the
   surrounding `release-section` comments if you want to retain section

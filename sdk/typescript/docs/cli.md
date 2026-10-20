@@ -905,9 +905,12 @@ Preserve existing state, then choose a private `CODEX_SECURITY_STATE_DIR` outsid
 the rejected ancestor and the repository, with a full ancestor chain that passes
 the same checks. If the volume root is rejected, another directory on that
 volume cannot resolve it; use a separately provisioned volume with trusted
-ancestry. Temporary bootstrap homes also need trusted ancestry: set `TEMP` and
-`TMP` to a private directory on that volume before launching the CLI. Do not
-change the system volume's owner or ACL to make a scan run. If no suitable
+ancestry. On Windows, local runtime bootstrap directories are created beside
+`codex-home` in the state directory and removed when the SDK client closes.
+They use the same trusted ancestry checks, so sandbox write permissions on
+`TEMP` do not prevent runtime preparation. `TEMP`, `TMP`, and scan output
+locations are unchanged. Do not change the system volume's owner or ACL to
+make a scan run. If no suitable
 location is available, this layout cannot provision credentials safely under
 the current checks. Sign in again if needed; a new state directory has separate
 scan history and does not migrate credentials or reports from the old state
@@ -1507,6 +1510,9 @@ scan and custom-validation prompts when the original used them:
 ```bash
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md
 ```
+
+Saved path scopes remain relative to the repository. Names such as `~` and
+`~/source.ts` are replayed literally; they do not select the home directory.
 
 A rerun creates a new scan. When the original has saved input identities, the
 rerun reports changes to the scan instructions or knowledge base. `scans show`

@@ -744,6 +744,15 @@ def test_projection_distinguishes_repeated_spaces_from_ordinary_path_spacing() -
     assert '- Included paths: `"a  b"`, a b, `" "`, `"  "`' in markdown
 
 
+def test_projection_keeps_printable_non_ascii_in_quoted_paths() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["docs/Résumé, final.md", "docs/a\u202eb, c.md"]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"docs/Résumé, final.md"`, `"docs/a\\u202eb, c.md"`' in markdown
+
+
 def test_projection_includes_exact_target_identity() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"].update(

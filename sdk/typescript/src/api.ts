@@ -4315,7 +4315,9 @@ export class CodexSecurity {
     try {
       throwIfAborted(signal);
       bootstrapWorkspace = await createIsolatedHome(
-        temporaryRoot,
+        // Windows sandboxes can grant replacement rights on TEMP. Keep private
+        // staging beside the validated home, outside it so ZIP plugins are readable.
+        process.platform === "win32" ? dirname(codexHome) : temporaryRoot,
         validateLocation,
       );
       await requirePrivateCredentialHome(
@@ -5657,7 +5659,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
     };
   } else if (modelProvider === "amazon-bedrock") {
-    const providers = config["model_providers"];
+    const providers = resolved["model_providers"];
     const provider = isRecord(providers) ? providers[modelProvider] : undefined;
     const aws = isRecord(provider) ? provider["aws"] : undefined;
     if (isRecord(aws)) {

@@ -26,6 +26,7 @@ export class SeverityStore {
     private readonly environment: NodeJS.ProcessEnv,
     private readonly scanDirectory: string,
     private readonly signal?: AbortSignal,
+    private readonly protectedRoots: readonly string[] = [],
   ) {}
 
   checkpoint(
@@ -119,6 +120,7 @@ export class SeverityStore {
       environment,
       protectedRoot: [
         this.scanDirectory,
+        ...this.protectedRoots,
         ...(await gitProtectionRoots(process.cwd(), this.signal)),
         ...(await gitProtectionRoots(this.scanDirectory, this.signal)),
       ],

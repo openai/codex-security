@@ -640,21 +640,14 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("preserves safe Bedrock provider settings in profile-selected scan recipes", () => {
-    const config = scanPreflightCodexConfig({
-      model_provider: "openai",
-      profile: "bedrock",
-      profiles: {
-        bedrock: {
-          model: "openai.gpt-5.6-luna",
-          model_provider: "amazon-bedrock",
-        },
-      },
-      model_providers: {
+  test.each(["root", "profile", "merged"] as const)(
+    "preserves safe Bedrock provider settings from %s in scan recipes",
+    (source) => {
+      const providers = {
         "amazon-bedrock": {
           aws: {
             region: "us-east-2",
-            profile: "security-prod",
+            profile: "scan-profile",
             access_key_id: "synthetic-aws-access-key",
             secret_access_key: "synthetic-aws-secret-key",
             session_token: "synthetic-aws-session-token",
@@ -663,25 +656,46 @@ describe("CodexSecurity preflight configuration", () => {
           api_key: "synthetic-provider-key",
         },
         openrouter: { api_key: "synthetic-unrelated-key" },
-      },
-    });
+      };
+      const selectedProviders = structuredClone(providers);
+      if (source === "merged") {
+        providers["amazon-bedrock"].aws.region = "us-west-2";
+        delete (selectedProviders["amazon-bedrock"].aws as JsonObject)[
+          "profile"
+        ];
+      }
+      const config = scanPreflightCodexConfig({
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+            ...(source === "root"
+              ? {}
+              : { model_providers: selectedProviders }),
+          },
+        },
+        ...(source === "profile" ? {} : { model_providers: providers }),
+      });
 
-    expect(config).toEqual({
-      model_provider: "openai",
-      profile: "bedrock",
-      profiles: {
-        bedrock: {
-          model: "openai.gpt-5.6-luna",
-          model_provider: "amazon-bedrock",
+      expect(config).toEqual({
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+          },
         },
-      },
-      model_providers: {
-        "amazon-bedrock": {
-          aws: { region: "us-east-2", profile: "security-prod" },
+        model_providers: {
+          "amazon-bedrock": {
+            aws: { region: "us-east-2", profile: "scan-profile" },
+          },
         },
-      },
-    });
-    expect(scanModelProvider(config)).toBe("amazon-bedrock");
-    expect(JSON.stringify(config)).not.toContain("synthetic-");
-  });
+      });
+      expect(scanModelProvider(config)).toBe("amazon-bedrock");
+      expect(JSON.stringify(config)).not.toContain("synthetic-");
+    },
+  );
 });
