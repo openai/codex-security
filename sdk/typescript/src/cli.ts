@@ -3498,154 +3498,163 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, options, format, formatExplicit, error: incurError }) {
-      if (
-        argv.includes("--full-output") &&
-        format !== "json" &&
-        format !== "jsonl"
-      ) {
-        structuredError = true;
-        exitCode = 2;
-        return incurError({
-          code: "INVALID_ARGUMENTS",
-          message:
-            "Finding imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
-          exitCode,
-        });
-      }
-      const controller = new AbortController();
-      const removeSignals = listenForAbort(dependencies, controller);
-      const structured = formatExplicit && format !== "toon";
-      const humanSummary =
-        format === "toon" &&
-        !formatExplicit &&
-        !argv.some((argument) => OUTPUT_OPTION.test(argument));
-      let lastProgress = "";
-      const onProgress = (event: ExternalPublicationProgress) => {
-        if (errorOutput.isTTY !== true) return;
-        const step = event.total
-          ? Math.floor((event.completed * 10) / event.total)
-          : 0;
-        const key = `${event.phase}:${step}`;
-        if (key === lastProgress) return;
-        lastProgress = key;
-        const labels = {
-          reading: "Reading selected findings",
-          discovering: "Checking Cloud account and repository",
-          preparing: "Preparing findings",
-          waiting: "Waiting for publication access",
-          uploading: "Acknowledged findings",
-          verifying: "Verifying imported findings",
-        };
-        errorOutput.write(
-          `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,
-        );
-      };
-      try {
-        const prepared = await prepareExternalPublication(
-          resolveCliPath(dependencies.currentDirectory(), args.file),
-          options,
-          {
-            environment: dependencies.environment,
-            fetch: dependencies.cloudFetch,
-            signal: controller.signal,
-            onProgress,
-          },
-        );
-        const { preview } = prepared;
-        const showPreview = () => {
-          errorOutput.write(
-            `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
-          );
-          if (preview.cloudUrl)
-            errorOutput.write(
-              `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
-            );
-          for (const excluded of preview.excluded)
-            errorOutput.write(
-              `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
-            );
-          errorOutput.write(
-            `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
-          );
-          const severities = new Map<string, number>();
-          for (const finding of preview.findings)
-            severities.set(
-              finding.evidence.severity,
-              (severities.get(finding.evidence.severity) ?? 0) + 1,
-            );
-          errorOutput.write(
-            `Severities: ${[...severities].map(([severity, count]) => `${severity}: ${count}`).join("  ")}\n`,
-          );
-          for (const finding of preview.findings.slice(0, 5))
-            errorOutput.write(
-              `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
-            );
-          if (preview.findings.length > 5)
-            errorOutput.write(
-              `Showing 5 of ${preview.findings.length} findings.\n`,
-            );
-          errorOutput.write(
-            "Use --dry-run --format json to inspect all normalized findings and the complete evidence before uploading.\n",
-          );
-        };
-        if (!structured) showPreview();
-        if (options.dryRun) {
-          if (humanSummary)
-            renderedOutput = "Dry run complete. No findings uploaded.\n";
-          return { ...preview, dryRun: true };
-        }
-        if (!options.yes) {
-          const prompt =
-            dependencies.externalPublicationPrompt ??
-            createTerminalPrompt(errorOutput);
-          if (!prompt.isInteractive())
-            throw new CodexSecurityError(
-              "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
-            );
-          if (structured) showPreview();
-          if (
-            !(await prompt.confirm(
-              `Publish these ${preview.findings.length} findings${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
-              false,
-              controller.signal,
-            ))
-          ) {
-            if (humanSummary) renderedOutput = "No findings published.\n";
-            return { published: false, preview };
-          }
-        }
-        const result = await prepared.publish();
-        if (result.status === "partial") exitCode = 1;
-        if (humanSummary)
-          renderedOutput = renderExternalPublicationSummary(result);
-        else if (!structured)
-          errorOutput.write(renderExternalPublicationSummary(result));
-        return { ...result };
-      } catch (error) {
+      return await withTerminalErrorsHandled(errorOutput, async () => {
+        const writeDiagnostic = (message: string): void =>
+          notify(() => errorOutput.write(message));
         if (
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl")
-        )
-          failedResultOutput = {
-            format,
-            code: "IMPORT_FAILED",
-            message: diagnosticValue(error),
-          };
-        reportPublicationError(
-          diagnosticValue(error),
-          controller.signal.aborted ? controller.signal.reason : undefined,
-        );
-        if (error instanceof ExternalPublicationError) {
-          if (humanSummary)
-            renderedOutput = renderExternalPublicationSummary(error.result);
-          return { ...error.result };
+          format !== "json" &&
+          format !== "jsonl"
+        ) {
+          structuredError = true;
+          exitCode = 2;
+          return incurError({
+            code: "INVALID_ARGUMENTS",
+            message:
+              "Finding imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
+            exitCode,
+          });
         }
-        return structured
-          ? { status: "failed", error: diagnosticValue(error) }
-          : undefined;
-      } finally {
-        removeSignals();
-      }
+        const controller = new AbortController();
+        const removeSignals = listenForAbort(dependencies, controller);
+        const structured = formatExplicit && format !== "toon";
+        const humanSummary =
+          format === "toon" &&
+          !formatExplicit &&
+          !argv.some((argument) => OUTPUT_OPTION.test(argument));
+        let lastProgress = "";
+        const onProgress = (event: ExternalPublicationProgress) => {
+          if (errorOutput.isTTY !== true) return;
+          const step = event.total
+            ? Math.floor((event.completed * 10) / event.total)
+            : 0;
+          const key = `${event.phase}:${step}`;
+          if (key === lastProgress) return;
+          lastProgress = key;
+          const labels = {
+            reading: "Reading selected findings",
+            discovering: "Checking Cloud account and repository",
+            preparing: "Preparing findings",
+            waiting: "Waiting for publication access",
+            uploading: "Acknowledged findings",
+            verifying: "Verifying imported findings",
+          };
+          writeDiagnostic(
+            `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,
+          );
+        };
+        try {
+          const prepared = await prepareExternalPublication(
+            resolveCliPath(dependencies.currentDirectory(), args.file),
+            options,
+            {
+              environment: dependencies.environment,
+              fetch: dependencies.cloudFetch,
+              signal: controller.signal,
+              onProgress,
+            },
+          );
+          const { preview } = prepared;
+          const showPreview = () => {
+            writeDiagnostic(
+              `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+            );
+            if (preview.cloudUrl)
+              writeDiagnostic(
+                `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
+              );
+            for (const excluded of preview.excluded)
+              writeDiagnostic(
+                `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
+              );
+            writeDiagnostic(
+              `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
+            );
+            const severities = new Map<string, number>();
+            for (const finding of preview.findings)
+              severities.set(
+                finding.evidence.severity,
+                (severities.get(finding.evidence.severity) ?? 0) + 1,
+              );
+            writeDiagnostic(
+              `Severities: ${[...severities].map(([severity, count]) => `${severity}: ${count}`).join("  ")}\n`,
+            );
+            for (const finding of preview.findings.slice(0, 5))
+              writeDiagnostic(
+                `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
+              );
+            if (preview.findings.length > 5)
+              writeDiagnostic(
+                `Showing 5 of ${preview.findings.length} findings.\n`,
+              );
+            writeDiagnostic(
+              "Use --dry-run --format json to inspect all normalized findings and the complete evidence before uploading.\n",
+            );
+          };
+          if (!structured) showPreview();
+          if (options.dryRun) {
+            if (humanSummary)
+              renderedOutput = "Dry run complete. No findings uploaded.\n";
+            return { ...preview, dryRun: true };
+          }
+          if (!options.yes) {
+            const prompt =
+              dependencies.externalPublicationPrompt ??
+              createTerminalPrompt(errorOutput);
+            if (!prompt.isInteractive())
+              throw new CodexSecurityError(
+                "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
+              );
+            if (structured) showPreview();
+            if (
+              !(await prompt.confirm(
+                `Publish these ${preview.findings.length} findings${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
+                false,
+                controller.signal,
+              ))
+            ) {
+              if (humanSummary) renderedOutput = "No findings published.\n";
+              return { published: false, preview };
+            }
+          }
+          const result = await prepared.publish();
+          if (result.status === "partial") exitCode = 1;
+          if (humanSummary)
+            renderedOutput = renderExternalPublicationSummary(result);
+          else if (!structured)
+            writeDiagnostic(renderExternalPublicationSummary(result));
+          return { ...result };
+        } catch (error) {
+          if (
+            argv.includes("--full-output") &&
+            (format === "json" || format === "jsonl")
+          )
+            failedResultOutput = {
+              format,
+              code: "IMPORT_FAILED",
+              message: diagnosticValue(error),
+            };
+          reportPublicationError(
+            diagnosticValue(error),
+            controller.signal.aborted ? controller.signal.reason : undefined,
+          );
+          if (error instanceof ExternalPublicationError) {
+            if (humanSummary)
+              renderedOutput = renderExternalPublicationSummary(error.result);
+            return { ...error.result };
+          }
+          const failure = { status: "failed", error: diagnosticValue(error) };
+          if (
+            (format === "json" || format === "jsonl") &&
+            !argv.includes("--full-output") &&
+            argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
+          )
+            filteredScanFailure = { format, data: failure };
+          return structured ? failure : undefined;
+        } finally {
+          removeSignals();
+        }
+      });
     },
   });
   publication.command("check", {

@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
@@ -28,7 +29,7 @@ import {
   readVendorFindings,
   readVendorFindingsForPublication,
 } from "../src/wiz-findings.js";
-import { dependencies } from "./cli-fixtures.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import roundtripFixtures from "./fixtures/wiz-details-roundtrip.json" with { type: "json" };
 
@@ -699,6 +700,38 @@ for (const [root, record, kind] of [
     );
   });
 }
+
+test.each(["synchronous", "asynchronous"] as const)(
+  "approved finding publication survives %s diagnostic stream failures",
+  async (failure) => {
+    const f = await cloudFixture(envelope("sastFindings", [sast]));
+    const stdout = capture();
+    const stderr = Object.assign(
+      new Writable({
+        write(_chunk, _encoding, callback) {
+          callback(new Error("Synthetic diagnostic stream failure"));
+        },
+      }),
+      { isTTY: true },
+    );
+    if (failure === "synchronous")
+      stderr.write = () => {
+        throw new Error("Synthetic diagnostic stream failure");
+      };
+    const code = await main(
+      [...f.command.slice(0, -2), "--yes"],
+      stdout.stream,
+      stderr,
+      f.cliDeps,
+    );
+    expect(code).toBe(0);
+    expect(f.posts).toHaveLength(1);
+    expect(f.reports.get("sast:occurrence-1")!.assessment).toEqual({
+      state: "not_assessed",
+    });
+    expect(stdout.text()).toContain("1");
+  },
+);
 
 test("a wrong source repository stops raw and normalized imports before source lookup or upload", async () => {
   const other = {
@@ -1412,6 +1445,30 @@ test("Node resumes the same uncertain publication across locales and Unicode key
 });
 
 for (const format of ["json", "jsonl"] as const) {
+  test(`failed ${format} preparation preserves diagnostics under success-field filtering`, async () => {
+    const f = await cloudFixture(envelope("sastFindings", [sast]));
+    await rm(f.file);
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        [
+          ...f.command.slice(0, -2),
+          "--format",
+          format,
+          "--filter-output",
+          "counts",
+          "--yes",
+        ],
+        f.cliDeps,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("ENOENT"),
+    });
+    expect(f.calls).toEqual([]);
+  });
+
   test(`failed ${format} full-output imports emit failure envelopes`, async () => {
     const f = await cloudFixture(envelope("sastFindings", [sast]));
     await writeFile(f.file, "{");
