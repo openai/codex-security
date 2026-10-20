@@ -3,7 +3,7 @@ import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import { withCodexPreflightLock } from "./provider-profile.js";
-import { isNonEmptyString, parseJson } from "./value.js";
+import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
 
 import {
@@ -2765,10 +2765,12 @@ export async function main(
           ? "Publication canceled by Ctrl-C."
           : "Publication terminated by SIGTERM.";
       const recovery = error === signal ? "" : ` ${diagnosticValue(error)}`;
-      errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+      notify(() => errorOutput.write(`codex-security: ${reason}${recovery}\n`));
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
-      errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+      notify(() =>
+        errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`),
+      );
       exitCode = 2;
     }
   };
@@ -2911,7 +2913,9 @@ export async function main(
           error === undefined || (error === signal && !cloudRequestStarted)
             ? ""
             : ` ${diagnosticValue(publicationErrorMessage(error))}`;
-        errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+        notify(() =>
+          errorOutput.write(`codex-security: ${reason}${recovery}\n`),
+        );
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
       };
@@ -3284,8 +3288,10 @@ export async function main(
                 });
                 if (controller.signal.aborted) throw error;
                 exitCode = 2;
-                errorOutput.write(
-                  `codex-security: ${diagnosticValue(scanId ?? directory)}: ${diagnosticValue(message)}\n`,
+                notify(() =>
+                  errorOutput.write(
+                    `codex-security: ${diagnosticValue(scanId ?? directory)}: ${diagnosticValue(message)}\n`,
+                  ),
                 );
               }
             }
@@ -3363,7 +3369,11 @@ export async function main(
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {
             if (typeof warning !== "string") continue;
-            errorOutput.write(`codex-security: ${diagnosticValue(warning)}\n`);
+            notify(() =>
+              errorOutput.write(
+                `codex-security: ${diagnosticValue(warning)}\n`,
+              ),
+            );
           }
         }
         if (
@@ -3382,7 +3392,9 @@ export async function main(
         return { ...result };
       } catch (error) {
         if (!finishCancellation(error)) {
-          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+          notify(() =>
+            errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`),
+          );
           exitCode = 2;
         }
         if (cloudBatch === undefined) throw error;

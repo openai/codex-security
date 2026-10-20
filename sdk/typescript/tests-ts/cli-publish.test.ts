@@ -158,6 +158,183 @@ function publicationResult(
   };
 }
 
+describe("optional publication diagnostics", () => {
+  const failingOutput = () => ({
+    isTTY: false,
+    write: mock(() => {
+      throw new Error("Output stream failed.");
+    }),
+  });
+
+  test.each([
+    ["scan", undefined],
+    ["scan", "SIGINT"],
+    ["scan", "SIGTERM"],
+    ["check", undefined],
+    ["check", "SIGINT"],
+    ["check", "SIGTERM"],
+  ] as const)(
+    "preserves %s failure status when diagnostics throw: %p",
+    async (command, signal) => {
+      const signals = new FakeSignals();
+      const deps = dependencies({ signals });
+      const failure = async () => {
+        if (signal !== undefined) signals.emit(signal);
+        throw new Error("Publication failed.");
+      };
+      deps.publishScan = failure;
+      deps.checkScanPublication = failure;
+      const stdout = capture();
+      const stderr = failingOutput();
+      expect(
+        await main(
+          [
+            "publish",
+            command,
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr,
+          deps,
+        ),
+      ).toBe(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2);
+      expect(stderr.write).toHaveBeenCalledTimes(1);
+      expect(stdout.text()).toBe("");
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    },
+  );
+
+  test.each([false, true])(
+    "retains publication receipts when warning output throws (partial: %p)",
+    async (partial) => {
+      const receipt = {
+        ...publicationResult(
+          partial
+            ? [{ findingId: "finding-2", error: "Issue creation failed." }]
+            : [],
+        ),
+        warnings: ["Receipt storage failed."],
+      };
+      const deps = dependencies();
+      deps.publishScan = async () => receipt;
+      const stdout = capture();
+      const stderr = failingOutput();
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr,
+          deps,
+        ),
+      ).toBe(partial ? 2 : 0);
+      expect(JSON.parse(stdout.text())).toEqual(receipt);
+      expect(stderr.write).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("continues a Cloud batch after its failure diagnostic throws", async () => {
+    const deps = dependencies();
+    const directories = ["scan-one", "scan-two", "scan-three"].map((path) =>
+      resolve(deps.currentDirectory(), path),
+    );
+    const receipt = { scanId: "scan-1", findingIds: [], findingCount: 0 };
+    const attempts: string[] = [];
+    deps.publishScanToCloud = async (directory) => {
+      attempts.push(directory);
+      if (directory === directories[1]) throw new Error("Upload failed.");
+      return receipt;
+    };
+    const stdout = capture();
+    const stderr = failingOutput();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--to",
+          "cloud",
+          "--json",
+          ...directories.flatMap((directory) => ["--scan-dir", directory]),
+        ],
+        stdout.stream,
+        stderr,
+        deps,
+      ),
+    ).toBe(2);
+    expect(attempts).toEqual(directories);
+    expect(JSON.parse(stdout.text())).toEqual({
+      results: [directories[0], directories[2]].map((scanDir) => ({
+        scanDir,
+        ...receipt,
+      })),
+      failed: [{ scanDir: directories[1], error: "Upload failed." }],
+      notAttempted: [],
+    });
+    expect(stderr.write).toHaveBeenCalledTimes(1);
+  });
+
+  test("preserves cancellation when a custom result arrives before its diagnostic throws", async () => {
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.publishScanToCustom = async () => {
+      signals.emit("SIGINT");
+      return {
+        scanId: "scan-1",
+        repositoryId: "repository",
+        findingIds: [],
+        findingCount: 0,
+      };
+    };
+    const stdout = capture();
+    const stderr = failingOutput();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          "--to",
+          "custom",
+          "--findings-url",
+          "http://localhost:3000",
+          "--json",
+        ],
+        stdout.stream,
+        stderr,
+        deps,
+      ),
+    ).toBe(130);
+    expect(stdout.text()).toBe("");
+    expect(stderr.write).toHaveBeenCalledTimes(1);
+  });
+
+  test("still fails when required publication output throws", async () => {
+    const deps = dependencies();
+    deps.publishScan = async () => publicationResult();
+    const stdout = failingOutput();
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stdout.write).toHaveBeenCalledTimes(1);
+    expect(stderr.text()).toContain("Output stream failed.");
+  });
+});
+
 describe("publish scan to custom", () => {
   test("uses a workflow's exact scan without changing the publication receipt", async () => {
     const [scanDir] = await publicationScanDirectories(1);
