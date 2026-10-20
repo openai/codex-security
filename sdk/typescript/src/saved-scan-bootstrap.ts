@@ -368,8 +368,8 @@ async function latestTargets(
         ${columns.has("target_id") ? "scans.target_id" : "scans.target_path"} AS target_id
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
       WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
-      ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
-        scans.started_at DESC, scans.id`,
+      ORDER BY MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
+        julianday(upper(scans.started_at)) DESC, scans.id`,
   );
   for (const scan of scans) {
     signal?.throwIfAborted();

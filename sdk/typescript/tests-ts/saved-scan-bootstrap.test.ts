@@ -1133,6 +1133,54 @@ connection.close()
   });
 }
 
+test.each([
+  ["offsets", "2026-08-01T03:00:00+02:00", "2026-08-01T01:30:00Z"],
+  ["fractional seconds", "2026-08-01T01:00:00Z", "2026-08-01T01:00:00.100000Z"],
+])(
+  "latest orders timestamps chronologically with %s",
+  async (_, older, newer) => {
+    const f = await fixture();
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      for (const [scan, timestamp] of [
+        [f.first, older],
+        [f.second, newer],
+      ] as const) {
+        db.query(
+          "UPDATE scans SET updated_at = ?, started_at = ? WHERE id = ?",
+        ).run(timestamp, timestamp, scan.scanId);
+        db.query(
+          "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
+        ).run(timestamp, scan.scanId);
+      }
+      async function latest() {
+        const workbench = await savedScanWorkbench("latest", {
+          environment: { ...f.environment, PYTHON: f.python },
+          pluginRoot: PLUGIN_ROOT,
+          currentDirectory: f.repository,
+        });
+        return (
+          await resolveCompletedScan("latest", {
+            currentDirectory: () => f.repository,
+            runWorkbench: workbench,
+          })
+        ).scanId;
+      }
+      expect(await latest()).toBe(f.second.scanId);
+      // Equal updates fall back to the scans' chronological start times.
+      db.query("UPDATE scans SET updated_at = '2099-01-01T00:00:00Z'").run();
+      db.query(
+        "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z'",
+      ).run();
+      expect(await latest()).toBe(f.second.scanId);
+    } finally {
+      db.close();
+    }
+  },
+);
+
 test("latest follows progress timestamps and excludes canceled scans", async () => {
   const f = await fixture();
   const db = new Database(
