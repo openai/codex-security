@@ -4,6 +4,7 @@ import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import { withCodexPreflightLock } from "./provider-profile.js";
 import { isNonEmptyString, parseJson } from "./value.js";
+import { compareTimestamps } from "./timestamps.js";
 
 import {
   execFile as execFileCallback,
@@ -5964,18 +5965,13 @@ export async function main(
             scanId: string;
             startedAt: string;
           }[];
-          let latest:
-            { scanId: string; timestamp: number; fraction: string } | undefined;
+          let latest: (typeof scans)[number] | undefined;
           for (const scan of scans) {
-            const timestamp = Date.parse(scan.startedAt);
-            const fraction =
-              scan.startedAt.match(/\.\d{3}(\d*[1-9])/u)?.[1] ?? "";
             if (
               latest === undefined ||
-              timestamp > latest.timestamp ||
-              (timestamp === latest.timestamp && fraction > latest.fraction)
+              compareTimestamps(scan.startedAt, latest.startedAt) > 0
             ) {
-              latest = { scanId: scan.scanId, timestamp, fraction };
+              latest = scan;
             }
           }
           scanId = latest?.scanId;
