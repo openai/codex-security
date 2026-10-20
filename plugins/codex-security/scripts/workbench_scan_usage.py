@@ -885,7 +885,8 @@ def _usage_counts(usage: object) -> dict[str, int] | None:
     input_tokens = usage.get("input_tokens")
     cached_input_tokens = usage.get("cached_input_tokens", 0)
     if (
-        cache_write == 0
+        type(cache_write) is int
+        and cache_write == 0
         and type(legacy_cache_write) is int
         and legacy_cache_write > 0
         and type(input_tokens) is int
@@ -929,9 +930,9 @@ def _timestamp(value: object) -> datetime | None:
             if value.endswith("Z")
             else datetime.fromisoformat(value)
         )
-    except ValueError:
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 
 
 def _unavailable_usage(

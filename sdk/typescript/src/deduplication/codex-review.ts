@@ -299,7 +299,7 @@ export class CodexReviewRunner {
         "--config",
         'default_permissions="codex_security_review"',
         "--config",
-        `permissions.codex_security_review={extends=":read-only",filesystem={${[...privatePaths].map((path) => `${JSON.stringify(path)}="deny"`).join(",")}}}`,
+        `permissions.codex_security_review={extends=":read-only",filesystem=${inlineToml(Object.fromEntries([...privatePaths].map((path) => [path, "deny"])))}}`,
         "--config",
         `windows=${inlineToml(executionConfig["windows"] ?? DEFAULT_CODEX_CONFIG["windows"]!)}`,
       );

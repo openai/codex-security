@@ -30,6 +30,12 @@ export function workerTelemetryFixture(
               index % 2 === 0 ? "openai" : "amazon-bedrock",
             custom_tag: `synthetic-scan-${index}`,
             "team.tag": `literal-key-${index}`,
+            ...(index === 1 || index === 4
+              ? {
+                  "literal.key": `scan-${index}"\\雪\u007f`,
+                  'quote"\\雪\u007f': `literal-key-${index}`,
+                }
+              : {}),
             ...(mergeProfileTelemetry
               ? {
                   root_only: "native-root",

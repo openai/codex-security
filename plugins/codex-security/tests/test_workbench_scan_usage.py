@@ -667,7 +667,17 @@ def test_native_usage_continues_cumulative_baseline_when_recovering_same_turn(
 
 
 @pytest.mark.parametrize(
-    "failure", ["invalid_usage", "invalid_timestamp", "missing_receipt", "truncated"]
+    "failure",
+    [
+        "invalid_usage",
+        "invalid_timestamp",
+        "timestamp_underflow",
+        "timestamp_overflow",
+        "boolean_cache_write",
+        "float_cache_write",
+        "missing_receipt",
+        "truncated",
+    ],
 )
 def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, failure: str) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
@@ -677,6 +687,15 @@ def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, fai
         second["payload"]["usage"] = {}
     elif failure == "invalid_timestamp":
         del second["timestamp"]
+    elif failure == "timestamp_underflow":
+        second["timestamp"] = "0001-01-01T00:00:00+00:01"
+    elif failure == "timestamp_overflow":
+        second["timestamp"] = "9999-12-31T23:59:59-00:01"
+    elif failure in {"boolean_cache_write", "float_cache_write"}:
+        second["payload"]["usage"].update(
+            cache_write_input_tokens=False if failure == "boolean_cache_write" else 0.0,
+            cache_write_tokens=1,
+        )
     events = [second] if failure == "missing_receipt" else [first, second]
     parent = _rollout(tmp_path, "scan-parent", events)
     if failure == "truncated":
@@ -801,6 +820,96 @@ def test_scan_usage_helper_preserves_cached_token_totals(
     assert snapshot({"info": {"total_token_usage": usage}}) == _counts(
         120, 30, 15, cache_write_input_tokens=12
     )
+
+
+@pytest.mark.parametrize(
+    ("canonical", "legacy", "expected"),
+    [(0, 12, 12), (0, 0, 0), (5, 12, 5), (False, 12, None), (0.0, 12, None)],
+)
+def test_scan_usage_helper_requires_integer_cache_write_placeholder(
+    canonical: object, legacy: int, expected: int | None
+) -> None:
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    usage = {
+        "input_tokens": 120,
+        "cached_input_tokens": 30,
+        "cache_write_input_tokens": canonical,
+        "cache_write_tokens": legacy,
+        "output_tokens": 15,
+        "total_tokens": 135,
+    }
+
+    assert helper["_usage_counts"](usage) == (
+        None if expected is None else _counts(120, 30, 15, cache_write_input_tokens=expected)
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0001-01-01T00:00:00+00:01", None),
+        ("9999-12-31T23:59:59-00:01", None),
+        ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00+00:00"),
+        ("9999-12-31T23:59:59Z", "9999-12-31T23:59:59+00:00"),
+        ("2026-01-01T01:00:00+01:00", "2026-01-01T00:00:00+00:00"),
+        ("2026-01-01T00:00:00", None),
+    ],
+)
+def test_scan_usage_timestamp_handles_utc_boundaries(value: str, expected: str | None) -> None:
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+    assert helper["_timestamp"](value) == (
+        datetime.fromisoformat(expected) if expected is not None else None
+    )
+
+
+@pytest.mark.parametrize("amount", [10**400, -(10**400)])
+@pytest.mark.parametrize("measured", [False, True])
+def test_scan_cost_preserves_diagnostics_for_overflowing_amount(
+    workbench_api, amount: int, measured: bool
+) -> None:
+    cost = {
+        "model": "fixture-model",
+        "inputTokens": 120,
+        "cachedInputTokens": 30,
+        "cacheWriteInputTokens": 12,
+        "outputTokens": 15,
+        "estimatedUsd": amount,
+    }
+    value = (
+        {
+            "usage": {
+                "coverage": "complete",
+                "source": "codex_rollout",
+                "threadCount": 1,
+                **_counts(120, 30, 15),
+            },
+            "cost": cost,
+        }
+        if measured
+        else cost
+    )
+    expected = (
+        "Scan cost includes invalid measured token usage."
+        if measured
+        else "Scan cost must include a model, nonnegative token counts, and an estimated USD amount."
+    )
+    with pytest.raises(SystemExit) as error:
+        workbench_api["parse_scan_cost"](json.dumps(value))
+    assert str(error.value) == expected
+    cost["estimatedUsd"] = 0.5
+    assert json.loads(workbench_api["parse_scan_cost"](json.dumps(value))) == value
+
+
+@pytest.mark.parametrize("coverage", [[], {}])
+def test_scan_cost_preserves_diagnostics_for_non_scalar_coverage(workbench_api, coverage) -> None:
+    value = {"usage": {"coverage": coverage, "source": "codex_rollout", "threadCount": 0}}
+    with pytest.raises(SystemExit) as error:
+        workbench_api["parse_scan_cost"](json.dumps(value))
+    assert str(error.value) == "Scan cost includes invalid measured token usage."
 
 
 @pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])

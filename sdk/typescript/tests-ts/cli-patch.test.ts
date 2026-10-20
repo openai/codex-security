@@ -1345,9 +1345,9 @@ describe("scan and patch workflow", () => {
         "--auth",
         "chatgpt",
         "--model",
-        "gpt-5.6-terra",
+        'synthetic-"model"\\雪\u007f',
         "--effort",
-        "high",
+        'future-"effort"\\雪\u007f',
         "--json",
       ],
       {
@@ -1368,8 +1368,16 @@ describe("scan and patch workflow", () => {
       },
     );
     expect(chatgpt.exitCode).toBe(0);
-    expect(invocation).toContain('model="gpt-5.6-terra"');
-    expect(invocation).toContain('model_reasoning_effort="high"');
+    expect(
+      parseToml(invocation.find((value) => value.startsWith("model="))!),
+    ).toEqual({ model: 'synthetic-"model"\\雪\u007f' });
+    expect(
+      parseToml(
+        invocation.find((value) =>
+          value.startsWith("model_reasoning_effort="),
+        )!,
+      ),
+    ).toEqual({ model_reasoning_effort: 'future-"effort"\\雪\u007f' });
     expect(authentication).toBe("chatgpt");
 
     const attributed = await runWorkflow(
