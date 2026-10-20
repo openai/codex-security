@@ -28,6 +28,8 @@
 - honor cancellation around embedding callbacks ([#1789](https://github.com/openai/codex-security/pull/1789))
 - resolve stdin context after argument parsing ([#1784](https://github.com/openai/codex-security/pull/1784))
 - compare stored numeric JSON exactly ([#1788](https://github.com/openai/codex-security/pull/1788))
+- reject non-finite values in retained scan drafts ([#1783](https://github.com/openai/codex-security/pull/1783))
+- publish containers with coordinated npm releases ([#1796](https://github.com/openai/codex-security/pull/1796))
 
 <!-- release-section: highlights:end -->
 

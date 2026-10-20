@@ -1,6 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import { escapeControls, parseJson, stringifyJson } from "../helpers/json";
+import {
+  escapeControls,
+  parseJson,
+  requireFiniteNumbers,
+  stringifyJson,
+} from "../helpers/json";
 import { requireSqliteText } from "./database";
 import { transaction } from "./transaction";
 
@@ -18,15 +23,6 @@ export interface EmbeddedFinding {
 }
 
 class FindingConflict extends Error {}
-
-function requireFiniteNumbers(value: unknown): void {
-  if (typeof value === "number" && !Number.isFinite(value))
-    throw new TypeError(
-      "Stored finding JSON cannot contain non-finite numbers.",
-    );
-  if (value !== null && typeof value === "object")
-    for (const item of Object.values(value)) requireFiniteNumbers(item);
-}
 
 // The fresh document comes from stringifyJson after the command's finite-number
 // check. Keep this comparison private: it is not equality for arbitrary JSON pairs.

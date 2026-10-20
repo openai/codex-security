@@ -2,6 +2,11 @@ name: native-unix
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Source commit to build; defaults to the calling workflow commit.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -43,6 +48,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - name: Set up TypeScript tools
         uses: ./.github/actions/setup-tools
@@ -120,7 +126,7 @@ jobs:
       - name: Upload verified native artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-platform-${{ matrix.artifact }}-${{ github.sha }}
+          name: native-platform-${{ matrix.artifact }}-${{ inputs.ref || github.sha }}
           path: |
             plugins/codex-security/native/dist/*/*.node
             plugins/codex-security/native/dist/THIRD_PARTY_NOTICES.txt
