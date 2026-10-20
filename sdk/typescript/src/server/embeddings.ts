@@ -85,8 +85,10 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
   ): Promise<void> {
     let response: Response;
     try {
+      this.signal?.throwIfAborted();
       const apiKey =
         typeof this.apiKey === "function" ? await this.apiKey() : this.apiKey;
+      this.signal?.throwIfAborted();
       if (!apiKey) throw new Error("Missing embedding credentials");
       response = await this.request(this.url, {
         method: "POST",

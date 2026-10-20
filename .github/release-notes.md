@@ -25,6 +25,9 @@
 - preserve literal TOML override strings ([#1792](https://github.com/openai/codex-security/pull/1792))
 - preserve validation behavior for malformed scan usage ([#1781](https://github.com/openai/codex-security/pull/1781))
 - preserve record endings in large finding exports ([#1785](https://github.com/openai/codex-security/pull/1785))
+- honor cancellation around embedding callbacks ([#1789](https://github.com/openai/codex-security/pull/1789))
+- resolve stdin context after argument parsing ([#1784](https://github.com/openai/codex-security/pull/1784))
+- compare stored numeric JSON exactly ([#1788](https://github.com/openai/codex-security/pull/1788))
 
 <!-- release-section: highlights:end -->
 
