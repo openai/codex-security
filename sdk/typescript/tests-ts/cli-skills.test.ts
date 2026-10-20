@@ -1500,6 +1500,32 @@ process.stdout.write(JSON.stringify({
     );
   });
 
+  test.each([7, 130, 143])(
+    "retains validation output and returned status %i without a success envelope",
+    async (status) => {
+      for (const flags of [
+        ["--full-output"],
+        ["--format", "yaml", "--full-output"],
+        ["--token-count"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["validate", "Synthetic finding", ...flags],
+            dependencies({
+              onCodex: (_args, output) => {
+                output?.stdout.write("Partial assessment.\n");
+                return status;
+              },
+            }),
+          ),
+        ).toBe(status);
+        expect(stdout.text()).toBe("Partial assessment.\n");
+        expect(stderr.text()).toBe("");
+      }
+    },
+  );
+
   test("escapes native validation launch failures at the CLI boundary", async () => {
     const directory = await temporaryDirectory("validation-launch-failure-");
     try {

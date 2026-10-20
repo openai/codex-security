@@ -2556,11 +2556,12 @@ export async function main(
       ),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
-          errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
+          const error = new CodexSecurityError(
+            "Markdown output is not supported for scan results.",
           );
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
-          return;
+          throw error;
         }
         let scanId: string | undefined;
         try {
@@ -3382,6 +3383,7 @@ export async function main(
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           exitCode = 2;
         }
+        if (cloudBatch === undefined) throw error;
         return cloudBatch;
       } finally {
         removeSignalListeners();
@@ -3411,7 +3413,7 @@ export async function main(
         return { ...result };
       } catch (error) {
         reportPublicationError(error, controller.signal.reason);
-        return undefined;
+        throw error;
       } finally {
         removeSignals();
       }
@@ -3493,7 +3495,7 @@ export async function main(
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
-        return undefined;
+        throw error;
       } finally {
         removeSignals();
       }
@@ -3859,11 +3861,12 @@ export async function main(
         if (options.host)
           throw new CodexSecurityError("Use scan --host alone.");
         if (format === "md") {
-          errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
+          const error = new CodexSecurityError(
+            "Markdown output is not supported for scan results.",
           );
+          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
-          return;
+          throw error;
         }
         let outcome: ScanOutcome;
         try {
@@ -4027,7 +4030,7 @@ export async function main(
         } catch (error) {
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           exitCode = 2;
-          return undefined;
+          throw error;
         }
       },
     })
@@ -4095,7 +4098,7 @@ export async function main(
             `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          return undefined;
+          throw error;
         } finally {
           removeSignals();
         }
@@ -4203,7 +4206,7 @@ export async function main(
             `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          return undefined;
+          throw error;
         } finally {
           removeSignals();
         }
@@ -4631,6 +4634,7 @@ export async function main(
           stopDashboard();
           exitCode = interruptedExitCode(controller.signal) ?? 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         } finally {
           stopDashboard();
           signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
@@ -4934,6 +4938,7 @@ export async function main(
               ? 130
               : 2);
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         } finally {
           removeSignals();
         }
@@ -5057,34 +5062,27 @@ export async function main(
             sourceRoot,
             pythonPath: options.python,
           };
-          try {
-            const prepared = await resolveArtifactExportOutput(
-              arguments_,
-              dependencies.currentDirectory(),
-            );
-            const contents = await dependencies.exportFindings(
-              prepared,
-              output,
-            );
-            if (arguments_.output === "-") {
-              if (contents !== undefined) {
-                await writeCliOutput(output, Buffer.from(contents));
-              }
-            } else {
-              errorOutput.write(
-                `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-              );
+          const prepared = await resolveArtifactExportOutput(
+            arguments_,
+            dependencies.currentDirectory(),
+          );
+          const contents = await dependencies.exportFindings(prepared, output);
+          if (arguments_.output === "-") {
+            if (contents !== undefined) {
+              await writeCliOutput(output, Buffer.from(contents));
             }
-            exitCode = 0;
-          } catch (error) {
-            errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-            exitCode = 2;
+          } else {
+            errorOutput.write(
+              `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
+            );
           }
+          exitCode = 0;
         } catch (error) {
           if (exitCode !== 2) {
             errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
           }
           exitCode = 2;
+          throw error;
         }
       },
     })
@@ -5157,9 +5155,11 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         } finally {
           await knowledgeBase?.cleanup();
         }
+        if (exitCode !== 0) frameworkExit = exitCode;
       },
     })
     .command("verify-fix", {
@@ -5317,6 +5317,7 @@ export async function main(
               );
               if (exitCode !== 0) {
                 if (exitCode !== 130 && exitCode !== 143) exitCode = 2;
+                frameworkExit = exitCode;
                 return undefined;
               }
 
@@ -5371,7 +5372,7 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
-          return undefined;
+          throw error;
         }
       },
     })
@@ -5726,7 +5727,7 @@ export async function main(
           if (exitCode === 0) exitCode = 2;
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
-          if (!structuredOutput) return;
+          if (!structuredOutput) throw error;
           structuredError = true;
           const failure = {
             code:
@@ -5908,6 +5909,7 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          throw error;
         }
       },
     })

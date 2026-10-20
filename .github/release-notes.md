@@ -17,6 +17,7 @@
 - await required patch and verification output ([#1777](https://github.com/openai/codex-security/pull/1777))
 - reject non-finite numbers before storage ([#1773](https://github.com/openai/codex-security/pull/1773))
 - read scan counts and latest scans together ([#1771](https://github.com/openai/codex-security/pull/1771))
+- avoid success output after command failures ([#1775](https://github.com/openai/codex-security/pull/1775))
 
 <!-- release-section: highlights:end -->
 
