@@ -96,7 +96,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
-import type { DeepScanProgress } from "./deep-progress.js";
+import type { DeepScanProgress } from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -274,6 +274,7 @@ import {
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
+  scanProgressCount,
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
@@ -8772,10 +8773,12 @@ async function executeScan(
         details.push(
           `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
         );
-      } else if (fileProgress !== null && fileProgress.filesTotal > 0) {
-        details.push(
-          `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
-        );
+      } else if (fileProgress !== null) {
+        const count = scanProgressCount(fileProgress);
+        if (count.total > 0)
+          details.push(
+            `${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}`,
+          );
       }
       const tokens =
         runningCost !== null
@@ -9008,7 +9011,7 @@ async function executeScan(
           ? dashboard?.recordDetails.bind(dashboard)
           : undefined,
       onProgress: (update) => {
-        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
+        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}:${update.reviewItems?.completed}:${update.reviewItems?.total}`;
         if (key === lastProgressUpdate) return;
         lastProgressUpdate = key;
         fileProgress = update;
@@ -9022,8 +9025,9 @@ async function executeScan(
         }
         if (progress === null) return;
         progress.stopTimer();
+        const count = scanProgressCount(update);
         progress.stage(
-          `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
+          `Scan phase: ${phase}${count.total === 0 ? "" : ` (${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")} ${count.label})`}.`,
         );
         progress.startTimer(runningMessage());
       },
@@ -9895,7 +9899,8 @@ function componentScanEventLine(
 ): string | null {
   if (event.type === "progress") {
     const progress = event.value;
-    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
+    const count = scanProgressCount(progress);
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count.label === "reviews" ? "Reviews" : "Files"}: ${count.completed.toLocaleString("en-US")}/${count.total.toLocaleString("en-US")}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);

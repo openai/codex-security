@@ -43,6 +43,7 @@ import {
   type ScanProgress,
   type ScanSessionEvent,
   type ScanWorkerEvent,
+  type ScanWorkerStatus,
   ScanInterruptedError,
 } from "../src/index.js";
 import {
@@ -3505,6 +3506,280 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("keeps hosted executor progress authoritative", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+    const savedProgress = Promise.withResolvers<JsonObject>();
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "high",
+        },
+      },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 8 };
+          }
+          if (args[0] === "get-scan") return await savedProgress.promise;
+          return mockWorkbench(args, input);
+        },
+        hostedScan: {
+          context: {
+            repository,
+            revision: "deadbeef",
+            scope: { paths: ["."] },
+            identity: { runId: "run", attemptId: "attempt", buildId: "build" },
+          },
+          onEvent(event) {
+            if (event.type === "progress") updates.push(event.progress);
+          },
+          executor: {
+            async run(_request, { onEvent }) {
+              onEvent?.({
+                type: "progress",
+                progress: {
+                  phase: "validation",
+                  filesCompleted: 8,
+                  filesTotal: 8,
+                },
+              });
+              savedProgress.resolve({
+                scan: {
+                  progress: {
+                    phase: "discovery",
+                    coverage: { filesTotal: 8, closedRows: 0, worklistRows: 8 },
+                  },
+                },
+              });
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              throw new Error("hosted execution failed");
+            },
+          },
+        },
+      },
+    );
+    const python = spyOn(runtime, "resolvePluginPython").mockResolvedValue(
+      "/managed/python",
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+        }),
+      ).rejects.toThrow("hosted execution failed");
+      expect(
+        updates.map(({ phase, filesCompleted }) => [phase, filesCompleted]),
+      ).toEqual([
+        ["preflight", 0],
+        ["validation", 8],
+      ]);
+    } finally {
+      python.mockRestore();
+      await client.close();
+    }
+  });
+
+  test.each([false, true])(
+    "stops polling before follow-up (failed=%p)",
+    async (primaryFails) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const statuses: ScanWorkerStatus[] = [];
+      const warnings: string[] = [];
+      let progressSignal: AbortSignal | undefined;
+      let turns = 0;
+      const status = {
+        kind: "dispatch",
+        phase: "validation",
+        planned: 2,
+        started: 2,
+      } as const;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 1 };
+          }
+          if (args[0] === "get-scan") {
+            progressSignal ??= options.signal;
+            return {
+              scan: {
+                progress: {
+                  phase: "reporting",
+                  coverage: { filesTotal: 1, closedRows: 1, worklistRows: 1 },
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          if (++turns === 1) {
+            if (primaryFails) return { events: failedEvents() };
+            await copyCompletedScan(root);
+            return { events: completedEvents() };
+          }
+          expect(progressSignal?.aborted).toBe(true);
+          return {
+            events: completedEvents(
+              "thread-1",
+              (async function* (): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "item.completed",
+                  item: {
+                    id: "follow-up-dispatch",
+                    type: "agent_message",
+                    text: `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(status)}`,
+                  },
+                };
+              })(),
+            ),
+          };
+        }, "thread-1"),
+      });
+      try {
+        const result = client.run(repository, {
+          postScanPrompt: "Review the synthetic fix.",
+          onProgress() {},
+          onWorkerStatus: (update) => statuses.push(update),
+          onWarning: (warning) => warnings.push(warning),
+        });
+        if (primaryFails)
+          await expect(result).rejects.toThrow("Could not draft fixes.");
+        else await result;
+        expect(turns).toBe(2);
+        expect(warnings).toEqual([]);
+        expect(statuses).toEqual(primaryFails ? [] : [status]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    "marker-free",
+    "late marker",
+    "late worker",
+    "unavailable",
+    "malformed",
+  ])(
+    "routes saved scan progress without replacing scan errors (%s)",
+    async (scenario) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const warnings: string[] = [];
+      const observerErrors: string[] = [];
+      const workerStatuses: unknown[] = [];
+      let failNextProgressRead = scenario === "unavailable";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 8 };
+          }
+          if (args[0] === "get-scan") {
+            if (failNextProgressRead) {
+              failNextProgressRead = false;
+              throw new Error("progress read failed");
+            }
+            return {
+              scan: {
+                progress: {
+                  phase: "validation",
+                  coverage: {
+                    filesTotal: 8,
+                    closedRows: scenario === "malformed" ? -1 : 11,
+                    worklistRows: 13,
+                  },
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => ({
+          events: (async function* (): AsyncGenerator<ThreadEvent> {
+            if (scenario === "late marker") {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "late-discovery-update",
+                  type: "agent_message",
+                  text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+                },
+              };
+            }
+            if (scenario === "late worker") {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "late-worker-dispatch",
+                  type: "agent_message",
+                  text: 'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"file_review","planned":2,"started":2}',
+                },
+              };
+            }
+            throw new Error("original scan failure");
+          })(),
+        })),
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            onProgress: (progress) => {
+              updates.push(progress);
+              if (progress.reviewItems !== undefined)
+                throw new Error("presenter failed");
+            },
+            onWarning: (warning) => warnings.push(warning),
+            onWorkerStatus: (status) => workerStatuses.push(status),
+            onObserverError: (observer) => observerErrors.push(observer),
+          }),
+        ).rejects.toThrow("original scan failure");
+        expect(updates[0]).toEqual({
+          phase: "preflight",
+          filesCompleted: 0,
+          filesTotal: 8,
+        });
+        expect(workerStatuses).toEqual([]);
+        if (["marker-free", "late marker", "late worker"].includes(scenario)) {
+          expect(updates[1]).toEqual({
+            phase: "validation",
+            filesCompleted: 0,
+            filesTotal: 8,
+            reviewItems: { completed: 11, total: 13 },
+          });
+          if (scenario === "late marker") {
+            expect(updates.at(-1)).toEqual({
+              ...updates[1]!,
+              filesCompleted: 3,
+            });
+          }
+          expect(warnings).toEqual([]);
+          expect(observerErrors).toEqual(
+            Array(updates.length - 1).fill("onProgress"),
+          );
+        } else {
+          expect(updates).toHaveLength(1);
+          expect(observerErrors).toEqual([]);
+          expect(warnings).toEqual([
+            scenario === "unavailable"
+              ? "Could not track scan progress: progress read failed"
+              : "Could not track scan progress: Codex Security workbench returned invalid scan progress.",
+          ]);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test.each([true, "false", null])(
     "routes durable Deep progress without replacing scan errors (consolidating=%p)",
     async (consolidating) => {
@@ -4118,116 +4393,157 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("normalizes worker progress while streaming related session events", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const updates: ScanProgress[] = [];
-    const sessionEvents: ScanSessionEvent[] = [];
-    const workers: ScanWorkerEvent[] = [];
-    const observerErrors: ScanObserverName[] = [];
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "register-cli-scan"
-          ? { ...mockScanRegistration(args, input), scopeFileCount: 1_258 }
-          : mockWorkbench(args, input),
-      createCodex: codexFactory(async () => {
-        await copyCompletedScan(root);
-        await Promise.all([
-          writeUsageSession(codexHome, "thread-1", usage),
-          writeUsageSession(codexHome, "worker-thread", usage, {
-            parent: "thread-1",
-            parentField: "parent_thread_id",
-          }),
-          writeUsageSession(codexHome, "unrelated-thread", usage),
-        ]);
-        const marker = (
-          phase: ScanProgress["phase"],
-          filesCompleted: number,
-          filesTotal: number,
-        ): string =>
-          `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-            phase,
-            filesCompleted,
-            filesTotal,
-          })}`;
-        for (const [threadId, text] of [
-          ["worker-thread", marker("discovery", 3, 1_249)],
-          ["worker-thread", marker("discovery", 2, 2)],
-          ["worker-thread", marker("discovery", 7, 1_259)],
-          ["unrelated-thread", marker("discovery", 7, 1_258)],
-          ["worker-thread", marker("discovery", 1_250, 1_249)],
-          ["worker-thread", marker("discovery", 1_249, 1_249)],
-          ["worker-thread", marker("validation", 1_249, 1_249)],
-        ] as const) {
-          await appendFile(
-            join(
-              codexHome,
-              "sessions",
-              "2026",
-              "07",
-              "26",
-              `rollout-${threadId}.jsonl`,
-            ),
-            `${JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                status: "completed",
-                output: [
-                  { type: "input_text", text: "Reviewed file batch." },
-                  { type: "input_text", text },
-                ],
+  test.each([false, true])(
+    "normalizes worker counts using the parent phase (validation dispatch: %p)",
+    async (parentDispatch) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const sessionEvents: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
+      const observerErrors: ScanObserverName[] = [];
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan")
+            return {
+              ...mockScanRegistration(args, input),
+              scopeFileCount: 1_258,
+            };
+          if (args[0] === "get-scan")
+            return {
+              scan: {
+                progress: {
+                  phase: "discovery",
+                  coverage: {
+                    filesTotal: 1_258,
+                    closedRows: 0,
+                    worklistRows: 0,
+                  },
+                },
               },
-            })}\n`,
-          );
-        }
-        return { events: completedEvents() };
-      }),
-    });
+            };
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          await Promise.all([
+            writeUsageSession(codexHome, "thread-1", usage),
+            writeUsageSession(codexHome, "worker-thread", usage, {
+              parent: "thread-1",
+              parentField: "parent_thread_id",
+            }),
+            writeUsageSession(codexHome, "unrelated-thread", usage),
+          ]);
+          const marker = (
+            phase: ScanProgress["phase"],
+            filesCompleted: number,
+            filesTotal: number,
+          ): string =>
+            `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+              phase,
+              filesCompleted,
+              filesTotal,
+            })}`;
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (parentDispatch) {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "parent-validation-dispatch",
+                  type: "agent_message",
+                  text: 'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"validation","planned":2,"started":2}',
+                },
+              };
+            }
+            for (const [threadId, text] of [
+              ["worker-thread", marker("discovery", 3, 1_249)],
+              ["worker-thread", marker("discovery", 2, 2)],
+              ["worker-thread", marker("discovery", 7, 1_259)],
+              ["unrelated-thread", marker("discovery", 7, 1_258)],
+              ["worker-thread", marker("discovery", 1_250, 1_249)],
+              ["worker-thread", marker("discovery", 1_249, 1_249)],
+              ["worker-thread", marker("validation", 1_249, 1_249)],
+            ] as const) {
+              await appendFile(
+                join(
+                  codexHome,
+                  "sessions",
+                  "2026",
+                  "07",
+                  "26",
+                  `rollout-${threadId}.jsonl`,
+                ),
+                `${JSON.stringify({
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    status: "completed",
+                    output: [
+                      { type: "input_text", text: "Reviewed file batch." },
+                      { type: "input_text", text },
+                    ],
+                  },
+                })}\n`,
+              );
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
 
-    const result = await client.run(repository, {
-      onProgress: (progress) => updates.push(progress),
-      onWorkerEvent: (event) => workers.push(event),
-      onSessionEvent: (event) => {
-        sessionEvents.push(event);
-        if (sessionEvents.length === 1) {
-          throw new Error("session observer exploded");
-        }
-      },
-      onObserverError: (observer) => observerErrors.push(observer),
-    });
+      const result = await client.run(repository, {
+        onProgress: (progress) => updates.push(progress),
+        onWorkerEvent: (event) => workers.push(event),
+        onSessionEvent: (event) => {
+          sessionEvents.push(event);
+          if (sessionEvents.length === 1) {
+            throw new Error("session observer exploded");
+          }
+        },
+        onObserverError: (observer) => observerErrors.push(observer),
+      });
 
-    expect(result.threadId).toBe("thread-1");
-    expect(updates).toEqual([
-      { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 1_249, filesTotal: 1_258 },
-      { phase: "validation", filesCompleted: 1_249, filesTotal: 1_258 },
-    ]);
-    expect(sessionEvents).toHaveLength(10);
-    expect(
-      new Set(
-        sessionEvents.map(
-          ({ threadId, parentThreadId }) => `${threadId}:${parentThreadId}`,
+      expect(result.threadId).toBe("thread-1");
+      expect(updates).toEqual([
+        { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+        {
+          phase: "discovery",
+          filesCompleted: 0,
+          filesTotal: 1_258,
+          reviewItems: { completed: 0, total: 0 },
+        },
+        ...[3, 1_249, 1_249].map<ScanProgress>((filesCompleted) => ({
+          phase: parentDispatch ? "validation" : "discovery",
+          filesCompleted,
+          filesTotal: 1_258,
+          reviewItems: { completed: 0, total: 0 },
+        })),
+      ]);
+      expect(sessionEvents).toHaveLength(10);
+      expect(
+        new Set(
+          sessionEvents.map(
+            ({ threadId, parentThreadId }) => `${threadId}:${parentThreadId}`,
+          ),
         ),
-      ),
-    ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
-    expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
-    expect(
-      new Set(
-        sessionEvents
-          .filter((event) => event.threadId === "worker-thread")
-          .map((event) => event.worker),
-      ),
-    ).toEqual(new Set([1]));
-    expect(observerErrors).toEqual(["onSessionEvent"]);
-    await client.close();
-  });
+      ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
+      expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+      expect(
+        new Set(
+          sessionEvents
+            .filter((event) => event.threadId === "worker-thread")
+            .map((event) => event.worker),
+        ),
+      ).toEqual(new Set([1]));
+      expect(observerErrors).toEqual(["onSessionEvent"]);
+      await client.close();
+    },
+  );
 
   test.each(["none", "sync", "async"] as const)(
     "observes workers before scan completion with %s observer errors",
@@ -4544,6 +4860,7 @@ describe("CodexSecurity orchestration", () => {
       let modelCalled = false;
       let matchingTurns = 0;
       let observedSingleTurn: boolean | undefined;
+      let progressSignal: AbortSignal | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
       const managedProvider = {
@@ -4676,12 +4993,11 @@ describe("CodexSecurity orchestration", () => {
                 : {}),
             },
           })),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
+          runWorkbench: async (options, args, input): Promise<JsonObject> => {
             commands.push(args);
+            if (args[0] === "get-scan") {
+              progressSignal ??= options.signal;
+            }
             if (args[0] === "get-scan-feedback") {
               return {
                 scanId: "scan_example_001",
@@ -4701,6 +5017,7 @@ describe("CodexSecurity orchestration", () => {
               };
             }
             if (args[0] === "list-global-findings") {
+              expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
               if (failure === "dismissed" || failure === "managed") {
                 return {
@@ -4843,6 +5160,7 @@ describe("CodexSecurity orchestration", () => {
         const result = await client.run(repository, {
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
+          onProgress() {},
           onWarning: (message) => warnings.push(message),
         });
         expect(result.threadId).toBe("thread-1");
