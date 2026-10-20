@@ -10,11 +10,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event.action == 'edited' && github.event.changes.body != null && github.event.changes.title == null && github.event.changes.base == null && '-body-edit' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate-title:
+    if: >-
+      github.event.action != 'edited' || github.event.changes.body == null ||
+      github.event.changes.title != null || github.event.changes.base != null
     name: validate pull request
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -406,9 +409,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: plugins/codex-security/pyproject.toml
+          cache-dependency-path: plugins/codex-security/requirements-test.txt
       - name: Install Python test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+        run: python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
       - name: Install ripgrep
         if: runner.os == 'Linux'
         run: |
@@ -466,9 +469,13 @@ jobs:
       - name: Test secret discovery eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+      - name: Test workflow routing eval contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
   required-test:
-    name: ${{ matrix.os }} / node-22
+    # Skipped metadata checks must not replace required source check results.
+    name: ${{ github.event.action == 'edited' && github.event.changes.body != null && github.event.changes.title == null && github.event.changes.base == null && 'body edit / ' || '' }}${{ matrix.os }} / node-22
     needs:
       [
         validate-title,
@@ -482,7 +489,9 @@ jobs:
         plugin-source,
         container-validate,
       ]
-    if: always()
+    if: >-
+      always() && (github.event.action != 'edited' || github.event.changes.body == null ||
+      github.event.changes.title != null || github.event.changes.base != null)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -503,7 +512,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [validate-title, package]
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -584,9 +593,11 @@ jobs:
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
   windows:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: ${{ github.event.action == 'edited' && github.event.changes.body != null && github.event.changes.title == null && github.event.changes.base == null && 'body edit / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
-    if: always()
+    if: >-
+      always() && (github.event.action != 'edited' || github.event.changes.body == null ||
+      github.event.changes.title != null || github.event.changes.base != null)
     needs:
       [
         validate-title,

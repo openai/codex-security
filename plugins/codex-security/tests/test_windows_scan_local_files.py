@@ -38,6 +38,27 @@ def test_accepts_normal_scan_local_path() -> None:
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
+def test_directory_acl_copy_does_not_create_from_a_missing_source(tmp_path: Path) -> None:
+    destination = tmp_path / "replacement"
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.create_directory_with_same_dacl(destination, tmp_path / "missing")
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
+def test_directory_acl_copy_does_not_reuse_an_existing_destination(tmp_path: Path) -> None:
+    source = tmp_path / "original"
+    destination = tmp_path / "replacement"
+    source.mkdir()
+    destination.mkdir()
+    marker = destination / "retained.txt"
+    marker.write_text("synthetic retained data", encoding="utf-8")
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.create_directory_with_same_dacl(destination, source)
+    assert marker.read_text(encoding="utf-8") == "synthetic retained data"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
 def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path) -> None:
     scan_dir = tmp_path / "scan"

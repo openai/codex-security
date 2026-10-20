@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
+import { appServerCyberAccessProgram } from "./cli-daybreak.js";
+import { withCodexPreflightLock } from "./provider-profile.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
@@ -45,7 +47,11 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify, stripVTControlCharacters } from "node:util";
+import {
+  isDeepStrictEqual,
+  promisify,
+  stripVTControlCharacters,
+} from "node:util";
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
@@ -109,6 +115,11 @@ import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runRecordsProtocol } from "./deduplication/records-protocol.js";
+import { runHostRecordsProtocol } from "./host-records-protocol.js";
+import {
+  classifySeverityRecords,
+  type ClassifySeverityRecordsInput,
+} from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
@@ -231,6 +242,7 @@ import {
   sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
+  type PluginPythonOptions,
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
@@ -303,7 +315,7 @@ import {
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
-import { resolveDeepScanConfig } from "./deep-config.js";
+import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
@@ -352,7 +364,7 @@ const MATCHING_MODEL_OPTIONS = modelOptions(
   "Matching reasoning effort (default: medium).",
 );
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, or analytics.enabled=false.';
+  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
   codex: z
     .array(optionValue("--codex"))
@@ -389,7 +401,13 @@ const PROJECT_CONFIG_OPTION = optionValue("--config")
   );
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .enum([
+    "openai",
+    "openrouter",
+    "fireworks",
+    "cheaperinference",
+    "amazon-bedrock",
+  ])
   .default("openai")
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
@@ -1065,6 +1083,7 @@ interface SkillCommandOutput {
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
+    readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
 }
@@ -1107,6 +1126,8 @@ interface SkillRunOptions {
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
   serviceTier?: JsonValue;
+  daybreakFeatures?: JsonObject;
+  cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -1212,11 +1233,13 @@ interface CliDependencies {
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   importScan?: typeof importScan;
+  readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
     args: readonly string[],
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1301,7 +1324,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
+  runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1311,6 +1334,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         python: await resolvePluginPython({
           configuredPath: pythonPath,
           environment,
+          protectedRoot,
           signal,
         }),
         pluginRoot: await bundledPluginRoot(),
@@ -1357,7 +1381,7 @@ export async function runCodexSkillCommand(
       const overrides = parseToml(
         stringifyToml(output.codexOverrides ?? {}),
       ) as JsonObject;
-      const config = deepMerge(ambientConfig, overrides);
+      const config = deepMerge(structuredClone(ambientConfig), overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
       const providerConfiguration =
@@ -1484,7 +1508,7 @@ export async function runCodexSkillCommand(
         releaseCredentialHome =
           await acquireCodexSecurityCredentialHomeLock(codexHome);
         let credentialsAvailable: boolean;
-        const ambientConfig = await readCodexHomeConfig(selected);
+        const ambientAuthConfig = await readCodexHomeConfig(selected);
         credentialConfig = await readCodexHomeConfig({
           ...selected,
           CODEX_HOME: codexHome,
@@ -1495,7 +1519,7 @@ export async function runCodexSkillCommand(
           "projects",
           "project_root_markers",
         ]) {
-          const value = ambientConfig[key];
+          const value = ambientAuthConfig[key];
           if (value === undefined) delete credentialConfig[key];
           else credentialConfig[key] = value;
         }
@@ -1535,6 +1559,32 @@ export async function runCodexSkillCommand(
           output.auth,
           provider,
         );
+        if (output.appServer !== undefined) {
+          const controller = new AbortController();
+          const removeSignals = listenForAbort(
+            DEFAULT_DEPENDENCIES,
+            controller,
+          );
+          try {
+            args = [
+              ...args,
+              ...(await skillDaybreakConfigOverrides(
+                args,
+                command,
+                selected,
+                directory,
+                ambientConfig,
+                controller.signal,
+              )),
+            ];
+          } catch (error) {
+            if (controller.signal.aborted)
+              return controller.signal.reason === "SIGINT" ? 130 : 143;
+            throw error;
+          } finally {
+            removeSignals();
+          }
+        }
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
@@ -1654,16 +1704,11 @@ export async function runCodexSkillCommand(
                 output.appServer === undefined
                   ? undefined
                   : {
+                      ...output.appServer,
                       apiKey,
                       modelProvider,
                       onThreadStarted: releaseCredentialHome,
-                      directory: output.appServer.directory,
-                      prompt: output.appServer.prompt,
-                      threadSource: output.appServer.threadSource,
                       input: invocation.stdin!,
-                      sandbox: output.appServer.sandbox,
-                      externalSandbox: output.appServer.externalSandbox,
-                      onEvent: output.appServer.onEvent,
                     },
               ),
               new Promise<undefined>((resolve) => {
@@ -1753,6 +1798,97 @@ export async function runCodexSkillCommand(
   }
 }
 
+/**
+ * Stored auth switches homes. Native origins preserve ambient settings at
+ * app-server startup, where model discovery gates cannot be set per thread.
+ */
+async function skillDaybreakConfigOverrides(
+  args: readonly string[],
+  command: CodexCommand,
+  environment: NodeJS.ProcessEnv,
+  directory: string,
+  ambientConfig: JsonObject,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const ambientFeatures = isJsonObject(ambientConfig["features"])
+    ? ambientConfig["features"]
+    : {};
+  const settings: [string, JsonValue | undefined][] = [
+    ["daybreak", ambientConfig["daybreak"]],
+    ...[
+      "cli_daybreak",
+      "api_key_cyber_access_programs",
+      "api_key_model_discovery",
+    ].map((key): [string, JsonValue | undefined] => [
+      `features.${key}`,
+      ambientFeatures[key],
+    ]),
+  ];
+  if (settings.every(([, value]) => value === undefined)) return [];
+  const nativeEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  const native = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
+  const response = (await withCodexPreflightLock(
+    nativeEnvironment,
+    signal,
+    () =>
+      native.readDeepScanRuntimeConfigWithOrigins({
+        codexPath: command.command,
+        appServerArgs: args,
+        cwd: directory,
+        configOverrides: [],
+        env: nativeEnvironment,
+        signal,
+        context: "helper",
+      }),
+  )) as JsonObject;
+  const origins = response["origins"];
+  const layers = response["layers"];
+  const malformed = () =>
+    new CodexSecurityError(
+      "Codex did not return configuration origins for Daybreak settings.",
+    );
+  if (!isJsonObject(origins) || !Array.isArray(layers)) throw malformed();
+  const userLayer = layers.findIndex((layer) => {
+    const name = isJsonObject(layer) ? layer["name"] : undefined;
+    return (
+      isJsonObject(name) && name["type"] === "user" && name["profile"] == null
+    );
+  });
+  if (userLayer === -1) throw malformed();
+  const overrides: string[] = [];
+  for (const [key, value] of settings) {
+    if (value === undefined) continue;
+    const origin = origins[key];
+    if (origin !== undefined) {
+      if (!isJsonObject(origin) || !isJsonObject(origin["name"]))
+        throw malformed();
+      const layer = layers.findIndex(
+        (entry) =>
+          isJsonObject(entry) &&
+          isDeepStrictEqual(entry["name"], origin["name"]),
+      );
+      if (layer === -1) throw malformed();
+      // Native returns layers from highest to lowest priority. Ambient values
+      // replace the user-home fallback without overriding project or CLI choices.
+      if (layer < userLayer) continue;
+    }
+    overrides.push("--config", `${key}=${inlineToml(value)}`);
+  }
+  return overrides;
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
@@ -1760,7 +1896,9 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   if (
-    (((argv[0] === "dedupe" || argv[0] === "validate") &&
+    (((argv[0] === "dedupe" ||
+      argv[0] === "validate" ||
+      argv[0] === "classify-severity") &&
       argv.includes("--records")) ||
       (argv[0] === "scan" &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
@@ -1786,11 +1924,23 @@ export async function main(
           : argv[0] === "validate"
             ? runValidationRecordsProtocol
             : runRecordsProtocol;
-      const code = await runProtocol(
-        dependencies.recordsInput ?? process.stdin,
-        output,
-        controller.signal,
-      );
+      const code =
+        argv[0] === "classify-severity"
+          ? await runHostRecordsProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
+              (value, options) =>
+                classifySeverityRecords(
+                  value as ClassifySeverityRecordsInput,
+                  options,
+                ),
+              controller.signal,
+            )
+          : await runProtocol(
+              dependencies.recordsInput ?? process.stdin,
+              output,
+              controller.signal,
+            );
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -1858,10 +2008,17 @@ export async function main(
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
+        await dependencies.runWorkbench(
+          args,
+          undefined,
+          undefined,
+          pythonPath,
+          protectedRoot,
+        ),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -1873,6 +2030,7 @@ export async function main(
     count = 1,
     status: "complete" | "any" = "complete",
     pythonPath?: string,
+    protectedRoot?: PluginPythonOptions["protectedRoot"],
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       workbenchArgs("list-scans", {
@@ -1892,6 +2050,7 @@ export async function main(
         return value;
       },
       pythonPath,
+      protectedRoot,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
@@ -3834,6 +3993,7 @@ export async function main(
           mode: ScanSettingsSchema.shape.mode.describe(
             "Scan mode (default: standard); deep supports repository and path targets.",
           ),
+          maxTime: ScanSettingsSchema.shape.maxTimeMinutes,
           ...DEEP_SCAN_OPTION_SCHEMAS,
           ...modelOptions(
             `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
@@ -3939,6 +4099,7 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
+              maxTimeMinutes: options.maxTime,
               codexOverrides: parseCodexOverrides(
                 options.codex,
                 options.model,
@@ -4149,11 +4310,17 @@ export async function main(
       },
     })
     .command("classify-severity", {
-      description: "Assess severity for saved findings.",
-      hint: "Use --rubric to classify findings with a policy. The assessment is saved separately.",
+      description: "Assess severity for saved findings or canonical records.",
+      hint: "Use --rubric for saved findings or --records alone for host-provided classification.",
       destructive: true,
       mcp: false,
       options: z.object({
+        records: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; use alone.",
+          ),
         reprocess: z
           .boolean()
           .default(false)
@@ -4190,6 +4357,10 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ options }) {
+        if (options.records)
+          throw new CodexSecurityError(
+            "Use classify-severity --records alone.",
+          );
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
@@ -4545,6 +4716,7 @@ export async function main(
             directory,
           );
           const settings = resolved.options;
+          deepScanOptions(settings);
           if (settings.outputDir === undefined)
             throw new ConfigurationError(
               "--output-dir or output.directory is required for component scans.",
@@ -4785,21 +4957,6 @@ export async function main(
             currentDirectory,
           );
           const settings = resolved.options;
-          // A CSV row may choose a different mode; resolve the same file for both
-          // modes so inactive deep defaults remain available to deep rows.
-          const scanOptionsByMode =
-            project === undefined
-              ? undefined
-              : Object.fromEntries(
-                  SCAN_MODES.map((mode) => [
-                    mode,
-                    resolveScanSettings(
-                      project,
-                      { ...overrides, mode },
-                      currentDirectory,
-                    ).options,
-                  ]),
-                );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -4832,6 +4989,19 @@ export async function main(
             inputPath = resolveCliPath(currentDirectory, args.input);
             outputDir = settings.outputDir;
           }
+          const scanOptionsByMode =
+            project === undefined
+              ? undefined
+              : Object.fromEntries(
+                  SCAN_MODES.map((mode) => [
+                    mode,
+                    resolveScanSettings(
+                      project,
+                      { ...overrides, mode },
+                      currentDirectory,
+                    ).options,
+                  ]),
+                );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -5051,11 +5221,21 @@ export async function main(
             options.artifact,
             options.exportFormat,
           );
+          const sourceRoot =
+            options.sourceRoot === undefined
+              ? undefined
+              : resolveCliPath(currentDirectory, options.sourceRoot);
+          const protectedRoot =
+            sourceRoot === undefined
+              ? undefined
+              : [currentDirectory, sourceRoot];
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
             const scanId =
               options.scan ??
-              (await latestScans(1, "complete", options.python))?.[0]?.scanId;
+              (
+                await latestScans(1, "complete", options.python, protectedRoot)
+              )?.[0]?.scanId;
             if (scanId === undefined) return;
             scanDir = await resolveSavedArtifactDirectory(
               scanId,
@@ -5067,6 +5247,7 @@ export async function main(
                   undefined,
                   undefined,
                   options.python,
+                  protectedRoot,
                 ),
             );
           }
@@ -5081,10 +5262,7 @@ export async function main(
                     currentDirectory,
                     options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
                   ),
-            sourceRoot:
-              options.sourceRoot === undefined
-                ? undefined
-                : resolveCliPath(currentDirectory, options.sourceRoot),
+            sourceRoot,
             pythonPath: options.python,
           };
           try {
@@ -6030,6 +6208,7 @@ export async function main(
           dependencies,
         );
         const resolved = resolveScanSettings(project, {}, directory);
+        deepScanOptions(resolved.options);
         const codex = await mergedCodexConfig(resolved.config);
         const deep =
           resolved.options.mode === "deep"
@@ -6671,6 +6850,14 @@ async function prepareScanArgumentsFromRecipe(
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
+  const maxTimeMinutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
+    recipe["maxTimeMinutes"],
+  );
+  if (!maxTimeMinutes.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid investigation time limit.",
+    );
+  }
   if (!deepScan.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid deep scan settings.",
@@ -6753,6 +6940,7 @@ async function prepareScanArgumentsFromRecipe(
       : { ...config, approval_policy: "never" },
     failureSeverity: threshold.data,
     maxCostUsd,
+    maxTimeMinutes: maxTimeMinutes.data,
     dryRun: false,
     parentScanId,
     ...(recipe["mock"] === true ? { mock: true } : {}),
@@ -7026,11 +7214,62 @@ async function selectSavedFindings(
       "The requested finding does not belong to the selected scan.",
     );
   }
+  const fullFindings =
+    selected.length === 0
+      ? []
+      : await (dependencies.readSavedFindings ?? readSavedFindings)(
+          scan.scanId,
+          dependencies.runWorkbench,
+        );
+  const byOccurrence = new Map(
+    fullFindings.map((finding) => [finding.occurrenceId, finding]),
+  );
   return {
     repository: scan.targetPath,
     scanId: scan.scanId,
-    findings: selected,
+    findings: selected.map((finding) => {
+      const full = byOccurrence.get(finding.occurrenceId);
+      if (full === undefined || full.findingId !== finding.findingId) {
+        throw new CodexSecurityError(
+          `Finding ${finding.occurrenceId} is missing from the saved scan artifacts.`,
+        );
+      }
+      const hydrated = { ...finding, ...full };
+      // Sealed artifacts supply evidence; the workbench owns live and derived state.
+      for (const key of [
+        "createdAt",
+        "triage",
+        "remediationState",
+        "matches",
+        "knownSince",
+        "knownScanIds",
+        "related",
+        "sourceExcerpt",
+        "artifactPaths",
+      ]) {
+        if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
+        else delete hydrated[key];
+      }
+      return hydrated;
+    }),
   };
+}
+
+async function readSavedFindings(
+  scanId: string,
+  workbench: CliDependencies["runWorkbench"],
+): Promise<readonly Finding[]> {
+  const directory = await resolveSavedArtifactDirectory(
+    scanId,
+    "findings",
+    "json",
+    workbench,
+  );
+  const { findings } = await loadContract(directory, {
+    pluginRoot: await bundledPluginRoot(),
+    expectedScanId: scanId,
+  });
+  return findings.findings;
 }
 
 function patchExitCode(patches: readonly FindingPatch[]): number {
@@ -7653,6 +7892,7 @@ async function runSkill(
         key !== "model_reasoning_effort" &&
         key !== "model_provider" &&
         key !== "model_providers" &&
+        key !== "daybreak" &&
         !(
           key === "analytics" &&
           isJsonObject(value) &&
@@ -7661,7 +7901,7 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, daybreak, and analytics.enabled overrides.",
     );
   }
   if (options.serviceTier !== undefined)
@@ -7896,6 +8136,12 @@ async function runSkill(
       ...(options.serviceTier === undefined
         ? []
         : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
+      ...(overrides["daybreak"] === undefined
+        ? []
+        : ["--config", `daybreak=${inlineToml(overrides["daybreak"])}`]),
+      ...Object.entries(options.daybreakFeatures ?? {}).flatMap(
+        ([key, value]) => ["--config", `features.${key}=${inlineToml(value)}`],
+      ),
       ...codex
         .filter(
           (value) =>
@@ -7969,6 +8215,9 @@ async function runSkill(
               prompt,
               threadSource,
               ...(options.externalSandbox ? { externalSandbox: true } : {}),
+              ...(options.cyberAccessProgram === undefined
+                ? {}
+                : { cyberAccessProgram: options.cyberAccessProgram }),
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
@@ -7994,6 +8243,7 @@ export async function readSkillCommandOutput(
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
+    readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
 ): Promise<{
@@ -8008,6 +8258,17 @@ export async function readSkillCommandOutput(
   let turnId: string | undefined;
   let completed = false;
   let sandboxUnavailable = false;
+  let config: JsonObject = {};
+  let model: string;
+  let provider: string;
+  let daybreakRequestId = 0;
+  let daybreakRequest:
+    | {
+        id: string;
+        resolve: (result: JsonObject) => void;
+        reject: (error: Error) => void;
+      }
+    | undefined;
   const externalSandbox = appServer?.externalSandbox
     ? { type: "externalSandbox", networkAccess: "enabled" }
     : undefined;
@@ -8015,17 +8276,50 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const startTurn = (): void => {
-    send({
-      id: 3,
-      method: "turn/start",
-      params: {
-        threadId: threadId!,
-        ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
-        input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
+    const selected = appServer?.cyberAccessProgram;
+    const program =
+      selected === undefined
+        ? appServerCyberAccessProgram(
+            config,
+            model,
+            provider,
+            threadId!,
+            (method, params) =>
+              new Promise<JsonObject>((resolve, reject) => {
+                const id = `daybreak-${daybreakRequestId++}`;
+                daybreakRequest = { id, resolve, reject };
+                send({ id, method, params });
+              }),
+          )
+        : Promise.resolve(
+            selected === "daybreak_blue"
+              ? "daybreakBlue"
+              : selected === "daybreak_red"
+                ? "daybreakRed"
+                : selected,
+          );
+    void program.then(
+      (cyberAccessProgram) => {
+        send({
+          id: 3,
+          method: "turn/start",
+          params: {
+            threadId: threadId!,
+            ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
+            ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
+            input: [
+              { type: "text", text: appServer!.prompt, text_elements: [] },
+            ],
+          },
+        });
       },
-    });
+      (failure: unknown) => {
+        error = errorMessage(failure);
+        appServer?.input.end();
+      },
+    );
   };
-  const startThread = (config?: JsonObject): void => {
+  const startThread = (threadConfig?: JsonObject): void => {
     if (appServer === undefined) return;
     send({
       id: 2,
@@ -8040,7 +8334,8 @@ export async function readSkillCommandOutput(
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
-        ...(config === undefined ? {} : { config }),
+        ...(config["daybreak"] === true ? { daybreakEnabled: true } : {}),
+        ...(threadConfig === undefined ? {} : { config: threadConfig }),
       },
     });
   };
@@ -8048,7 +8343,10 @@ export async function readSkillCommandOutput(
     send({
       id: 1,
       method: "initialize",
-      params: { clientInfo: { name: "codex-security", version: VERSION } },
+      params: {
+        clientInfo: { name: "codex-security", version: VERSION },
+        capabilities: { experimentalApi: true },
+      },
     });
   }
 
@@ -8074,6 +8372,18 @@ export async function readSkillCommandOutput(
         } catch {}
       }
       if (value["id"] !== undefined) {
+        if (value["id"] === daybreakRequest?.id) {
+          const pending = daybreakRequest;
+          daybreakRequest = undefined;
+          if (value["error"] !== undefined) {
+            pending.reject(
+              new Error((value["error"] as { message: string }).message),
+            );
+          } else {
+            pending.resolve(value["result"] as JsonObject);
+          }
+          continue;
+        }
         if (typeof value["method"] === "string") {
           send({
             id: value["id"] as string | number,
@@ -8095,26 +8405,35 @@ export async function readSkillCommandOutput(
               continue;
             }
           }
-          if (appServer.sandbox === "read-only") {
-            if (appServer.directory === undefined) {
-              error =
-                "Codex did not receive the repository directory required for read-only verification.";
-              appServer.input.end();
-              continue;
-            }
-            send({
-              id: 4,
-              method: "config/read",
-              params: {
-                cwd: appServer.directory,
-                includeLayers: true,
-              },
-            });
-          } else {
-            startThread();
+          if (
+            appServer.sandbox === "read-only" &&
+            appServer.directory === undefined
+          ) {
+            error =
+              "Codex did not receive the repository directory required for read-only verification.";
+            appServer.input.end();
+            continue;
           }
-        } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
+          send({
+            id: 4,
+            method: "config/read",
+            params: {
+              ...(appServer.directory === undefined
+                ? {}
+                : { cwd: appServer.directory }),
+              includeLayers: appServer.sandbox === "read-only",
+            },
+          });
+        } else if (value["id"] === 4) {
           const result = value["result"];
+          config =
+            isJsonObject(result) && isJsonObject(result["config"])
+              ? (result["config"] as JsonObject)
+              : {};
+          if (appServer.sandbox !== "read-only") {
+            startThread();
+            continue;
+          }
           const layers =
             typeof result === "object" && result !== null && "layers" in result
               ? result.layers
@@ -8177,8 +8496,12 @@ export async function readSkillCommandOutput(
           const result = value["result"] as {
             thread: { id: string };
             sandbox: JsonObject;
+            model: string;
+            modelProvider: string;
           };
           threadId = result.thread.id;
+          model = result.model;
+          provider = result.modelProvider;
           if (
             appServer.threadSource === CODEX_SECURITY_THREAD_SOURCES.remediation
           ) {
@@ -8527,11 +8850,14 @@ async function executeScan(
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let patchServiceTier: JsonValue | undefined;
+  let patchDaybreak: JsonValue = false;
+  let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
   let failure: unknown;
   try {
+    deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
     const target = arguments_.target;
@@ -8552,8 +8878,20 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    patchServiceTier =
-      resolveCodexProfile(effectiveConfiguration)["service_tier"] ?? "default";
+    const resolvedConfiguration = resolveCodexProfile(effectiveConfiguration);
+    patchServiceTier = resolvedConfiguration["service_tier"] ?? "default";
+    patchDaybreak = resolvedConfiguration["daybreak"] ?? false;
+    const features = resolvedConfiguration["features"];
+    patchDaybreakFeatures = Object.fromEntries(
+      [
+        "cli_daybreak",
+        "api_key_cyber_access_programs",
+        "api_key_model_discovery",
+      ].map((key) => [
+        key,
+        isJsonObject(features) ? (features[key] ?? true) : true,
+      ]),
+    );
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
@@ -9294,6 +9632,7 @@ async function executeScan(
           codex: [
             `model=${JSON.stringify(effectiveModel)}`,
             `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
+            `daybreak=${inlineToml(patchDaybreak)}`,
             ...(patchAnalyticsOverride === undefined
               ? []
               : [patchAnalyticsOverride]),
@@ -9304,6 +9643,8 @@ async function executeScan(
         {
           ...providerOptions,
           serviceTier: patchServiceTier,
+          daybreakFeatures: patchDaybreakFeatures,
+          cyberAccessProgram: arguments_.cyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
@@ -9601,11 +9942,14 @@ async function readDeepScanStop(
   const elapsedHours =
     (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
   if (elapsedHours >= maxTimeHours) {
+    let maxTimeMinutes = maxTimeHours * 60;
+    const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
+    if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
-      reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,
+      reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
       nextStep:
         maxTimeHours < 96
-          ? "To scan further, rerun with a higher --max-time-hours."
+          ? `To scan further, rerun with --max-time greater than ${maxTimeMinutes}.`
           : "To scan a smaller part of the repository, rerun with --path.",
     };
   }

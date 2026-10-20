@@ -50,6 +50,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -320,6 +321,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "FIREWORKS_API_KEY",
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
   ],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [
@@ -869,7 +877,8 @@ describe("CodexSecurity orchestration", () => {
           "workbench usage captured",
         );
         expect(measured).toMatchObject({
-          coverage: "complete",
+          coverage: "partial",
+          warnings: ["turn_in_progress"],
           inputTokens: 100,
           outputTokens: 10,
           totalTokens: 110,
@@ -990,9 +999,9 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["root configuration", { approval_policy: "never" }],
+    ["root configuration", { approval_policy: "never" }, "never"],
     [
-      "selected profile",
+      "selected never profile",
       {
         approval_policy: "on-request",
         profile: "strict",
@@ -1000,10 +1009,22 @@ describe("CodexSecurity orchestration", () => {
           strict: { approval_policy: "never", model: "profile-model" },
         },
       },
+      "never",
+    ],
+    [
+      "selected on-request profile",
+      {
+        approval_policy: "never",
+        profile: "review",
+        profiles: {
+          review: { approval_policy: "on-request", model: "profile-model" },
+        },
+      },
+      "on-request",
     ],
   ] as const)(
-    "preserves strict approvals from %s in scan threads and saved recipes",
-    async (_source, codexOverrides) => {
+    "preserves approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides, approvalPolicy) => {
       const { root, repository, codexHome } = await runtimeDirectories();
       let threadOptions: Record<string, unknown> | undefined;
       let recipe: Record<string, unknown> | undefined;
@@ -1023,8 +1044,11 @@ describe("CodexSecurity orchestration", () => {
             }
             return mockWorkbench(args, input);
           },
-          createCodex: () => ({
+          createCodex: (codexOptions) => ({
             startThread: (options: Record<string, unknown>) => {
+              expect(codexOptions.config).toMatchObject({
+                approval_policy: approvalPolicy,
+              });
               threadOptions = options;
               return {
                 id: null,
@@ -1038,9 +1062,9 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, { outputDir: join(root, "scan") }),
       ).rejects.toThrow("scan approval policy captured");
-      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(threadOptions).toMatchObject({ approvalPolicy });
       expect(recipe).toMatchObject({
-        config: { approval_policy: "never" },
+        config: { approval_policy: approvalPolicy },
       });
       await client.close();
     },
@@ -1100,6 +1124,7 @@ describe("CodexSecurity orchestration", () => {
       stopAfterConsecutiveErrors: 3,
       maxDiscoveryRuns: 40,
       maxTimeHours: 96,
+      maxTimeMinutes: 5760,
       deepScanSources: {
         workers: "default",
         subagents: "default",
@@ -2474,7 +2499,7 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([false, true])(
-    "archives accepted output before starting, cancellation=%j",
+    "archives accepted output before starting, cancellation=%p",
     async (cancelRegistration) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -2729,10 +2754,9 @@ describe("CodexSecurity orchestration", () => {
               scanPrompt: "Review café boundaries.\nPreserve the second line.",
             })
       ).catch((error: unknown) => error);
-      let socket: Socket | undefined;
       let closing: Promise<void> | undefined;
       try {
-        [socket] = (await Promise.race([
+        const [socket] = (await Promise.race([
           connected,
           operation.then((error) => {
             throw error;
@@ -2744,21 +2768,25 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        // Terminating the paused child can reset its socket on Windows.
-        // Still wait for close, and retain unexpected errors and the deadline.
+        // Terminating the paused child can reset its socket on Windows. Still
+        // wait for close, and preserve the deadline and other socket errors.
+        deadline.throwIfAborted();
         const closed = new Promise<void>((resolve, reject) => {
-          const onError = (error: NodeJS.ErrnoException) => {
-            if (error.code !== "ECONNRESET") reject(error);
-          };
-          const onAbort = () => reject(deadline.reason);
-          socket!.once("error", onError);
-          socket!.once("close", () => {
-            socket!.removeListener("error", onError);
+          const finish = (error?: unknown) => {
+            socket.off("close", onClose);
+            socket.off("error", onError);
             deadline.removeEventListener("abort", onAbort);
-            resolve();
-          });
-          if (deadline.aborted) onAbort();
-          else deadline.addEventListener("abort", onAbort, { once: true });
+            if (error === undefined) resolve();
+            else reject(error);
+          };
+          const onClose = () => finish();
+          const onError = (error: NodeJS.ErrnoException) => {
+            if (error.code !== "ECONNRESET") finish(error);
+          };
+          const onAbort = () => finish(deadline.reason);
+          socket.once("close", onClose);
+          socket.on("error", onError);
+          deadline.addEventListener("abort", onAbort, { once: true });
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
@@ -5256,6 +5284,144 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each(
+    [false, true].flatMap((reenter) =>
+      [false, true].map((failCleanup) => ({ reenter, failCleanup })),
+    ),
+  )(
+    "close shares cleanup during abort reentry=$reenter and failure=$failCleanup",
+    async ({ reenter, failCleanup }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const prepared: ReturnType<typeof preparedRuntime> = {
+        ...preparedRuntime(codexHome),
+      };
+      const requestStarted = Promise.withResolvers<void>();
+      const operationRelease = Promise.withResolvers<void>();
+      const cleanupStarted = Promise.withResolvers<void>();
+      const cleanupRelease = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const deadline = AbortSignal.timeout(5_000);
+      const rejectReadiness = () => requestStarted.reject(deadline.reason);
+      deadline.addEventListener("abort", rejectReadiness, { once: true });
+      const failure = new Error("synthetic runtime cleanup failure");
+      const closes: Array<{ settled: boolean; result: Promise<unknown> }> = [];
+      const observeClose = (pending: Promise<void>) => {
+        const observed = {
+          settled: false,
+          result: pending.catch((error: unknown) => error),
+        };
+        observed.result = observed.result.finally(() => {
+          observed.settled = true;
+        });
+        closes.push(observed);
+      };
+      let cleanupCalls = 0;
+      let scanSignal: AbortSignal | undefined;
+      let budgetSignal: AbortSignal | undefined;
+      const client = new TestClient(
+        { codexOverrides: { model: "gpt-5.6-sol" } },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: async () => prepared,
+          createCodex: codexFactory(
+            async (_input: string, { signal }: { signal: AbortSignal }) => {
+              scanSignal = signal;
+              prepared.providerProfile = {
+                name: "synthetic-cleanup-observer",
+                path: join(root, "unused-profile.toml"),
+                async cleanup() {
+                  cleanupCalls++;
+                  cleanupStarted.resolve();
+                  await cleanupRelease.promise;
+                  if (failCleanup) throw failure;
+                },
+              };
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await writeUsageSession(codexHome, "scan-thread", {
+                  input_tokens: 900,
+                  output_tokens: 0,
+                });
+                await (signal.aborted ? undefined : once(signal, "abort"));
+                await operationRelease.promise;
+                signal.throwIfAborted();
+              }
+              return { events: events() };
+            },
+          ),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      const scan = client
+        .run(repository, {
+          mode: "standard",
+          maxCostUsd: 0.004,
+          signal: AbortSignal.any([controller.signal, deadline]),
+          onBudgetApproaching: ({ signal }) => {
+            budgetSignal = signal;
+            if (reenter) {
+              signal.addEventListener(
+                "abort",
+                () => observeClose(client.close()),
+                {
+                  once: true,
+                },
+              );
+              signal.addEventListener(
+                "abort",
+                () => observeClose(client[Symbol.asyncDispose]()),
+                { once: true },
+              );
+            }
+            requestStarted.resolve();
+            return undefined;
+          },
+        })
+        .catch((error: unknown) => error);
+      try {
+        await Promise.race([
+          requestStarted.promise,
+          scan.then((result) => {
+            throw new Error("Scan ended before its budget callback", {
+              cause: result,
+            });
+          }),
+        ]);
+        observeClose(client.close());
+        expect(scanSignal?.aborted).toBe(true);
+        expect(budgetSignal?.aborted).toBe(true);
+        observeClose(client.close());
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(cleanupCalls).toBe(0);
+        expect(closes.every(({ settled }) => !settled)).toBe(true);
+        operationRelease.resolve();
+        await cleanupStarted.promise;
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(closes).toHaveLength(reenter ? 4 : 2);
+        expect(closes.every(({ settled }) => !settled)).toBe(true);
+        cleanupRelease.resolve();
+        for (const close of closes) {
+          expect(await close.result).toBe(failCleanup ? failure : undefined);
+        }
+        const late = client.close().catch((error: unknown) => error);
+        expect(await late).toBe(failCleanup ? failure : undefined);
+        expect(cleanupCalls).toBe(1);
+        expect(await scan).toMatchObject({
+          message: "CodexSecurity is closed.",
+        });
+      } finally {
+        clearTimeout(keepAlive);
+        deadline.removeEventListener("abort", rejectReadiness);
+        controller.abort();
+        operationRelease.resolve();
+        cleanupRelease.resolve();
+        await client.close().catch(() => {});
+        await scan;
+        await Promise.all(closes.map(({ result }) => result));
+      }
+    },
+  );
+
   test("raises a live budget twice without restarting or resetting accumulated usage", async () => {
     const { root, repository, codexHome } = await runtimeDirectories();
     const scanDir = join(root, "scan");
@@ -5519,6 +5685,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.004,
+          maxTimeMinutes: 5,
           postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
@@ -6422,7 +6589,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("isolates selected skill settings in current Deep worker snapshots", async () => {
+  test("isolates selected native settings in current Deep worker snapshots", async () => {
     const root = await temporaryDirectory();
     const started = Promise.withResolvers<void>();
     let starts = 0;
@@ -6432,6 +6599,7 @@ describe("CodexSecurity orchestration", () => {
         const repository = join(root, `repository-${index}`);
         const codexHome = join(root, `home-${index}`);
         const scanDir = join(root, `scan-${index}`);
+        const sqliteHome = join(scanDir, "sqlite");
         const configPath = join(root, `worker-config-${index}.toml`);
         const installedRoot = join(codexHome, "plugins", "cache", "selected");
         const customSkill = {
@@ -6443,9 +6611,20 @@ describe("CodexSecurity orchestration", () => {
             mkdir(directory, { mode: 0o700 }),
           ),
         );
+        const nativeFile = join(root, `native-${index}.json`);
+        await writeFile(nativeFile, JSON.stringify({ models: [] }));
         const config: JsonObject = {
           profile: "selected",
-          profiles: { selected: { skills: { config: [customSkill] } } },
+          synthetic_native: { root: index, selected: "root" },
+          profiles: {
+            selected: {
+              skills: { config: [customSkill] },
+              synthetic_native: { selected: `scan-${index}` },
+              experimental_compact_prompt_file: `../native-${index}.json`,
+              model_catalog_json: `../native-${index}.json`,
+              sqlite_home: index === 0 ? "sqlite" : sqliteHome,
+            },
+          },
         };
         const client = new TestClient(
           { codexOverrides: config },
@@ -6453,8 +6632,15 @@ describe("CodexSecurity orchestration", () => {
             ...scanRuntimeDependencies(codexHome, scanDir),
             prepareRuntime: runtimePreparer(codexHome, () => ({
               configPath,
+              environment: { CODEX_SQLITE_HOME: join(root, "overridden") },
               plugin: { ...preparedRuntime(codexHome).plugin, installedRoot },
             })),
+            runWorkbench: async (options, args, input) => {
+              expect(options.environment?.["CODEX_SQLITE_HOME"]).toBe(
+                sqliteHome,
+              );
+              return mockWorkbench(args, input);
+            },
             createCodex: (options) => ({
               startThread: () => ({
                 id: null,
@@ -6467,6 +6653,7 @@ describe("CodexSecurity orchestration", () => {
                   expect(options.env?.["CODEX_SECURITY_CONFIG_PATH"]).toBe(
                     configPath,
                   );
+                  expect(options.env?.["CODEX_SQLITE_HOME"]).toBe(sqliteHome);
                   paths.add(configPath);
                   const saved = resolveCodexProfile(
                     parseToml(await readFile(configPath, "utf8")) as JsonObject,
@@ -6475,6 +6662,9 @@ describe("CodexSecurity orchestration", () => {
                     options.config as JsonObject,
                   );
                   expect(saved["skills"]).toEqual(effective["skills"]);
+                  expect(effective["sqlite_home"]).toBe(
+                    index === 0 ? "sqlite" : sqliteHome,
+                  );
                   const snapshot = parseToml(
                     await readFile(
                       options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
@@ -6484,6 +6674,26 @@ describe("CodexSecurity orchestration", () => {
                   expect(
                     (snapshot["worker_runtime"] as JsonObject)["skills"],
                   ).toEqual(effective["skills"]);
+                  expect(
+                    (snapshot["worker_runtime"] as JsonObject)[
+                      "synthetic_native"
+                    ],
+                  ).toEqual({ root: index, selected: `scan-${index}` });
+                  for (const key of [
+                    "experimental_compact_prompt_file",
+                    "model_catalog_json",
+                  ]) {
+                    const file = (snapshot["worker_runtime"] as JsonObject)[
+                      key
+                    ];
+                    expect(file).toBe(nativeFile);
+                    expect(await readFile(file as string, "utf8")).toBe(
+                      JSON.stringify({ models: [] }),
+                    );
+                  }
+                  expect(
+                    (snapshot["worker_runtime"] as JsonObject)["sqlite_home"],
+                  ).toBe(sqliteHome);
                   const selections = (saved["skills"] as JsonObject)[
                     "config"
                   ] as JsonObject[];
@@ -7269,6 +7479,7 @@ describe("CodexSecurity orchestration", () => {
     const inheritedTools = join(root, "operator-tools");
     await mkdir(bundledTools, { recursive: true });
     await mkdir(dirname(executable));
+    await writeFile(executable, "synthetic executable; never launched\n");
     await mkdir(inheritedTools);
     const originalPlatform = Object.getOwnPropertyDescriptor(
       process,
