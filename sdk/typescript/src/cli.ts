@@ -6443,7 +6443,11 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
+  if (notice !== undefined) {
+    try {
+      errorOutput.write(formatUpdateNotice(notice));
+    } catch {}
+  }
   if (frameworkExit !== undefined) {
     if (policyFullOutput || structuredError) {
       if (exitCode === 0) exitCode = 2;
