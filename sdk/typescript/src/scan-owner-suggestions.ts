@@ -1,8 +1,12 @@
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import type { ScanResult } from "./result.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { ReadOnlyCodexOptions } from "./scan-comparison.js";
-import { repositoryRevision } from "./targets.js";
+import {
+  enclosingGitWorktreeRoot,
+  normalizeRepository,
+  repositoryRevision,
+} from "./targets.js";
 import {
   suggestOwnersInternal,
   type SuggestOwnersOptions,
@@ -32,19 +36,20 @@ export async function writeScanOwnerSuggestions(
     throw new Error(
       "Owner checkout does not match the completed scan revision.",
     );
+  const scanRoot = await normalizeRepository(repository, options.signal);
+  const gitRoot =
+    (await enclosingGitWorktreeRoot(scanRoot, options.signal, {
+      requireIfPresent: true,
+    })) ?? scanRoot;
+  const prefix = relative(gitRoot, scanRoot).split(sep).join("/");
   const report = await suggestOwnersInternal(
     repository,
     result.findings.findings.map((finding) => ({
-      findingId: finding.findingId,
-      occurrenceId: finding.occurrenceId,
-      title: finding.title,
-      summary: finding.summary,
-      remediation: finding.remediation,
+      ...finding,
       sourceRevision: revision,
-      locations: finding.locations.map(({ path, startLine, endLine }) => ({
-        path,
-        startLine,
-        ...(endLine === undefined ? {} : { endLine }),
+      locations: finding.locations.map((location) => ({
+        ...location,
+        path: prefix ? `${prefix}/${location.path}` : location.path,
       })),
     })),
     options,

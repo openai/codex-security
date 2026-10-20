@@ -6525,6 +6525,13 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe is missing resolved deep scan settings.",
     );
   }
+  const ownerSuggestions = ScanSettingsSchema.shape.ownerSuggestions.safeParse(
+    recipe["ownerSuggestions"],
+  );
+  if (!ownerSuggestions.success)
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid owner suggestions setting.",
+    );
   const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
   const cyberAccessProgram =
     ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
@@ -6572,6 +6579,7 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
+    ownerSuggestions: ownerSuggestions.data,
     target:
       paths.length > 0
         ? paths

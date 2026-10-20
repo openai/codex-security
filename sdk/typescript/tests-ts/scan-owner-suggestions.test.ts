@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ScanResult } from "../src/result.js";
 import { writeScanOwnerSuggestions } from "../src/scan-owner-suggestions.js";
@@ -130,3 +130,41 @@ test("rejects a changed checkout before starting owner inference", async () => {
   expect(inference).not.toHaveBeenCalled();
   expect(restore).not.toHaveBeenCalled();
 });
+
+test.each([true, false])(
+  "subdirectory owners use Git-root paths (root collision=%s)",
+  async (collision) => {
+    const { repository, result } = await fixture();
+    const service = join(repository, "service");
+    await mkdir(service);
+    await writeFile(join(service, "handler.ts"), "export const service = 1;\n");
+    await writeFile(
+      join(repository, "CODEOWNERS"),
+      "/handler.ts root@example.test\n/service/handler.ts service@example.test\n",
+    );
+    if (!collision) await rm(join(repository, "handler.ts"));
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "Synthetic service");
+    result.manifest.scan.target.revision = git(repository, "rev-parse", "HEAD");
+    const inference = mock(() => {
+      throw new Error("CODEOWNERS needs no inference");
+    });
+    const path = await writeScanOwnerSuggestions(
+      service,
+      result,
+      {
+        restore: async (name, bytes) => {
+          await writeFile(join(result.scanDir, name), bytes);
+        },
+      },
+      { codex: { startThread: inference } },
+    );
+    const report = JSON.parse(await readFile(path, "utf8"));
+    expect(report.results[0]).toMatchObject({
+      status: "identified",
+      owner: { email: "service@example.test" },
+    });
+    expect(result.findings.findings[0]!.locations[0]!.path).toBe("handler.ts");
+    expect(inference).not.toHaveBeenCalled();
+  },
+);

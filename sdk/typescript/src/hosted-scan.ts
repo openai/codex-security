@@ -211,9 +211,11 @@ export async function runHostedScan(
       environment: hostedScanEnvironment(input.stateDirectory),
       hostedScan: {
         context,
-        ...(options.ownerCodex === undefined
-          ? {}
-          : { ownerCodex: options.ownerCodex }),
+        ownerCodex: options.ownerCodex ?? {
+          startThread() {
+            throw new Error("Hosted owner inference is unavailable.");
+          },
+        },
         executor: {
           async run(value, runOptions) {
             request = value;

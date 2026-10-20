@@ -43,7 +43,7 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
-import type { SuggestOwnersOptions } from "./suggest-owners.js";
+import type { HostedScanOptions } from "./hosted-scan.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
 import {
@@ -617,7 +617,7 @@ interface ClientDependencies {
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
-    ownerCodex?: SuggestOwnersOptions["codex"];
+    ownerCodex: NonNullable<HostedScanOptions["ownerCodex"]>;
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity"
@@ -759,7 +759,12 @@ export class CodexSecurity {
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
-      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+      | "threadId"
+      | "turnResult"
+      | "sarifPath"
+      | "repositoryFindings"
+      | "ownerSuggestionsPath"
+      | "ownerSuggestionsError"
     >;
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -815,6 +820,8 @@ export class CodexSecurity {
         turnResult: result.turnResult,
         sarifPath: result.sarifPath,
         repositoryFindings: result.repositoryFindings,
+        ownerSuggestionsPath: result.ownerSuggestionsPath,
+        ownerSuggestionsError: result.ownerSuggestionsError,
       } satisfies ScanMetadata);
       return result;
     } catch (error) {
@@ -2067,6 +2074,7 @@ export class CodexSecurity {
         maxTimeMinutes: options.maxTimeMinutes,
         auth: options.auth,
         cyberAccessProgram: options.cyberAccessProgram,
+        ownerSuggestions: options.ownerSuggestions,
       });
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       recipe["scanInputs"] = scanInputIdentity(
@@ -2793,6 +2801,24 @@ export class CodexSecurity {
           )(`Could not run post-scan instructions: ${errorMessage(error)}`);
         }
       }
+      const inferenceRuntimeConfig = structuredClone(workerRuntimeConfig);
+      const inferenceFeatures = inferenceRuntimeConfig["features"];
+      if (isRecord(inferenceFeatures)) delete inferenceFeatures["plugins"];
+      const inferenceOptions = {
+        environment,
+        nativeProfile: runtime.providerProfile,
+        config: {
+          codexOverrides: {
+            ...scanPreflightCodexConfig(
+              resolveCodexProfile(session.sessionConfig),
+            ),
+            ...inferenceRuntimeConfig,
+          },
+        },
+        model,
+        cyberAccessProgram: options.cyberAccessProgram,
+        signal,
+      };
       if (options.ownerSuggestions) {
         try {
           if (options.maxCostUsd !== undefined)
@@ -2801,40 +2827,20 @@ export class CodexSecurity {
             );
           const { writeScanOwnerSuggestions } =
             await import("./scan-owner-suggestions.js");
-          const writer = await prepareScanArtifactRestorer(
+          const writer = await prepareArtifactRestorer(
             workbenchOptions,
             scanDir,
           );
-          const hosted = this.#dependencies.hostedScan;
           result.ownerSuggestionsPath = await writeScanOwnerSuggestions(
             repo,
             result,
             writer,
             {
-              environment,
+              ...inferenceOptions,
               auth: options.auth,
-              config: {
-                codexOverrides: scanPreflightCodexConfig(
-                  resolveCodexProfile(session.sessionConfig),
-                ),
-              },
-              nativeProfile: runtime.providerProfile,
-              model,
               reasoningEffort: scanModelConfiguration(session.sessionConfig)
                 .reasoningEffort,
-              signal,
-              cyberAccessProgram: options.cyberAccessProgram,
-              ...(hosted === undefined
-                ? {}
-                : {
-                    codex: hosted.ownerCodex ?? {
-                      startThread() {
-                        throw new Error(
-                          "Hosted owner inference is unavailable.",
-                        );
-                      },
-                    },
-                  }),
+              codex: this.#dependencies.hostedScan?.ownerCodex,
             },
             this.#surface,
           );
@@ -2856,9 +2862,6 @@ export class CodexSecurity {
           "all",
         );
         if (previousFindings !== undefined) {
-          const matchingRuntimeConfig = structuredClone(workerRuntimeConfig);
-          const matchingFeatures = matchingRuntimeConfig["features"];
-          if (isRecord(matchingFeatures)) delete matchingFeatures["plugins"];
           await matchCompletedScan({
             scanId,
             repository: repo,
@@ -2879,19 +2882,7 @@ export class CodexSecurity {
                   singleTurn: options.maxCostUsd !== undefined,
                 },
               ),
-            environment,
-            nativeProfile: runtime.providerProfile,
-            config: {
-              codexOverrides: {
-                ...scanPreflightCodexConfig(
-                  resolveCodexProfile(session.sessionConfig),
-                ),
-                ...matchingRuntimeConfig,
-              },
-            },
-            model,
-            cyberAccessProgram: options.cyberAccessProgram,
-            signal,
+            ...inferenceOptions,
           });
           result.repositoryFindings = (await listRepositoryFindings(
             runWorkbench,
@@ -4000,6 +3991,7 @@ export class CodexSecurity {
               maxTimeMinutes: options.maxTimeMinutes,
               auth: options.auth,
               cyberAccessProgram: options.cyberAccessProgram,
+              ownerSuggestions: options.ownerSuggestions,
             }),
             mock: true,
           },
@@ -4894,6 +4886,7 @@ function scanRecipe({
   deepScan,
   auth,
   cyberAccessProgram,
+  ownerSuggestions,
 }: {
   repository: string;
   target: NormalizedTarget;
@@ -4908,6 +4901,7 @@ function scanRecipe({
   deepScan?: Required<DeepScanOptions>;
   auth?: ScanAuthMode;
   cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
+  ownerSuggestions?: boolean;
 }): JsonObject {
   return {
     repository,
@@ -4916,6 +4910,7 @@ function scanRecipe({
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
     config,
+    ...(ownerSuggestions === undefined ? {} : { ownerSuggestions }),
     ...(auth === undefined ? {} : { auth }),
     ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),

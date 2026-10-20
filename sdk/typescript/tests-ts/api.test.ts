@@ -60,7 +60,12 @@ import {
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
-import { matchScanFindingsInternal } from "../src/scan-comparison.js";
+import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
+import {
+  runReadOnlyCodex,
+  matchScanFindingsInternal,
+} from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
   copyCompletedScan,
@@ -135,7 +140,14 @@ async function scanDirectories() {
   return { ...directories, scanDir };
 }
 
-test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
+test.each([
+  "completed",
+  "receipt-lost",
+  "scan-interrupted",
+  "prompt-files",
+  "owner-success",
+  "owner-failure",
+])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -154,6 +166,17 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const scanPrompt = "Review synthetic authentication boundaries.";
     const promptFile = join(root, "instructions.md");
     if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
+    const ownerScenario = scenario.startsWith("owner-");
+    const ownerPath = join(scanDir, "owner-suggestions.json");
+    const ownerSpy = ownerScenario
+      ? spyOn(ownerArtifacts, "writeScanOwnerSuggestions").mockImplementation(
+          async () => {
+            if (scenario === "owner-failure")
+              throw new Error("Synthetic owner failure");
+            return ownerPath;
+          },
+        )
+      : undefined;
     let modelCalls = 0;
     let completed = false;
     let loseReceipt = scenario === "receipt-lost";
@@ -188,6 +211,9 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
             };
           if (args[0] === "register-cli-scan") {
             expect(JSON.parse(input!).workflowId).toBe(workflowId);
+            expect(JSON.parse(input!).recipe.ownerSuggestions).toBe(
+              ownerScenario || undefined,
+            );
             const registration = mockScanRegistration(args, input);
             await new FindingWorkflow(workflowId, environment).bind({
               scanId: registration["scanId"] as string,
@@ -211,10 +237,15 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const first = await makeClient(1);
     let original: Record<string, unknown> | undefined;
     try {
-      if (scenario === "completed" || scenario === "prompt-files")
+      if (
+        scenario === "completed" ||
+        scenario === "prompt-files" ||
+        ownerScenario
+      )
         original = (
           await first.run(repository, {
             workflowId,
+            ownerSuggestions: ownerScenario || undefined,
             ...(scenario === "prompt-files"
               ? { scanPromptFile: promptFile }
               : {}),
@@ -234,6 +265,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
       const result = await resumed.run(repository, {
         workflowId,
+        ownerSuggestions: ownerScenario || undefined,
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
       expect(result.manifest.scan.id).toBe("scan_example_001");
@@ -241,6 +273,15 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
         expect.objectContaining({ protectedRoot: repository }),
       );
       if (original) expect(result.toJSON()).toEqual(original);
+      if (ownerScenario) {
+        expect(ownerSpy).toHaveBeenCalledTimes(1);
+        expect(result.ownerSuggestionsPath).toBe(
+          scenario === "owner-success" ? ownerPath : undefined,
+        );
+        expect(result.ownerSuggestionsError).toBe(
+          scenario === "owner-failure" ? "Synthetic owner failure" : undefined,
+        );
+      }
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
@@ -252,6 +293,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     } finally {
       python.mockRestore();
       await resumed.close();
+      ownerSpy?.mockRestore();
     }
   },
 );
@@ -4839,8 +4881,30 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
+      const ownerSpy =
+        failure === "managed"
+          ? spyOn(
+              ownerArtifacts,
+              "writeScanOwnerSuggestions",
+            ).mockImplementation(
+              async (_repository, _result, _writer, options) => {
+                await runReadOnlyCodex(
+                  "Synthetic owner inference",
+                  {},
+                  options,
+                  {
+                    surface: "sdk",
+                    command: "suggest-owners",
+                    threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
+                  },
+                );
+                return join(scanDir, "owner-suggestions.json");
+              },
+            )
+          : undefined;
       try {
         const result = await client.run(repository, {
+          ownerSuggestions: failure === "managed",
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
           onWarning: (message) => warnings.push(message),
@@ -4892,7 +4956,14 @@ describe("CodexSecurity orchestration", () => {
             .trim()
             .split("\n")
             .map((line) => JSON.parse(line));
+          expect(ownerSpy).toHaveBeenCalledTimes(1);
+          expect(result.ownerSuggestionsPath).toBe(
+            join(scanDir, "owner-suggestions.json"),
+          );
           expect(calls.map(({ kind }) => kind)).toEqual([
+            "mcp",
+            "preflight",
+            "exec",
             "mcp",
             "preflight",
             "exec",
@@ -4928,6 +4999,7 @@ describe("CodexSecurity orchestration", () => {
       } finally {
         await client.close();
         spawnSpy?.mockRestore();
+        ownerSpy?.mockRestore();
       }
     },
   );
