@@ -19,6 +19,7 @@ import {
 } from "../src/index.js";
 import {
   prepareCodexSecurityCredentialHome,
+  prepareOutputDir,
   requireSecureCredentialHome,
   resolveCodexCommand,
 } from "../src/runtime.js";
@@ -124,9 +125,10 @@ async function scanSandboxFixture() {
   });
   const workspace = join(stateDirectory, "scans", "workspace");
   const temporary = join(root, "temp");
-  await Promise.all(
-    [workspace, temporary].map((path) => mkdir(path, { recursive: true })),
-  );
+  await Promise.all([
+    prepareOutputDir(workspace, "sandbox-fixture"),
+    mkdir(temporary, { recursive: true }),
+  ]);
   await writeCodexConfig(
     join(codexHome, "config.toml"),
     scanRuntimeCodexConfig(await mergedCodexConfig({}), codexHome),

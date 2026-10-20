@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { Octokit } from "@octokit/core";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { isGitHubCloudHost } from "./git-remote.js";
 
 const execFile = promisify(execFileCallback);
 type GitHubAlert = Awaited<ReturnType<typeof fetchGitHubAlert>>;
@@ -88,10 +89,9 @@ export async function createAuthenticatedGitHub(
   }
   return new Octokit({
     auth: token,
-    baseUrl:
-      host === "github.com" || host.endsWith(".ghe.com")
-        ? `https://api.${host}`
-        : `https://${host}/api/v3`,
+    baseUrl: isGitHubCloudHost(host)
+      ? `https://api.${host}`
+      : `https://${host}/api/v3`,
   });
 }
 

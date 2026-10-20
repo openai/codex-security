@@ -71,7 +71,9 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
+_ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
+_DACL_SECURITY_INFORMATION = 0x00000004
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -97,6 +99,14 @@ class _FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", wintypes.DWORD),
         ("ReparseTag", wintypes.DWORD),
+    ]
+
+
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [
+        ("nLength", wintypes.DWORD),
+        ("lpSecurityDescriptor", wintypes.LPVOID),
+        ("bInheritHandle", wintypes.BOOL),
     ]
 
 
@@ -143,6 +153,17 @@ class _OwnedHandle:
 
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    _GetFileSecurityW = _advapi32.GetFileSecurityW
+    _GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _GetFileSecurityW.restype = wintypes.BOOL
 
     _CreateFileW = _kernel32.CreateFileW
     _CreateFileW.argtypes = [
@@ -438,6 +459,27 @@ def _create_directory(path: Path) -> None:
         return
     error = ctypes.get_last_error()
     if error not in _COLLISION_ERRORS:
+        _raise_last_error("CreateDirectoryW", path)
+
+
+def create_directory_with_same_dacl(path: Path, source: Path) -> None:
+    """Create an archive replacement with the original directory's DACL."""
+    _require_windows()
+    source_path = _extended_path(source)
+    size = wintypes.DWORD()
+    _GetFileSecurityW(source_path, _DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size))
+    if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
+        _raise_last_error("GetFileSecurityW", source)
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not _GetFileSecurityW(
+        source_path, _DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)
+    ):
+        _raise_last_error("GetFileSecurityW", source)
+    attributes = _SecurityAttributes(
+        ctypes.sizeof(_SecurityAttributes), ctypes.cast(descriptor, wintypes.LPVOID), False
+    )
+    # Supply the descriptor at creation, without an inherited-access window.
+    if not _CreateDirectoryW(_extended_path(path), ctypes.byref(attributes)):
         _raise_last_error("CreateDirectoryW", path)
 
 

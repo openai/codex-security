@@ -6,6 +6,7 @@
   "include": [
     "deep-reducer/*.mts",
     "secret-discovery/*.mts",
+    "workflow-routing/*.mts",
     "triage-finding/assertions/*.mts",
     "triage-finding/scripts/*.mts",
     "triage-finding/sastbench/assertions/*.mts",

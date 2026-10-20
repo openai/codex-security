@@ -219,6 +219,7 @@ export function dependencies(
       input?: string,
       signal?: AbortSignal,
     ) => JsonObject | Promise<JsonObject>;
+    readSavedFindings?: MainDependencies["readSavedFindings"];
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -295,6 +296,8 @@ export function dependencies(
       : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input, signal) =>
       (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    readSavedFindings:
+      options.readSavedFindings ?? (async () => result.findings.findings),
     matchFindings: async (input, comparisonOptions) =>
       (await options.onMatch?.(input, comparisonOptions)) ?? {
         matches: [],

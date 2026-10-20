@@ -89,8 +89,9 @@ export const DeepScanSettingsSchema = z.strictObject({
     .optional()
     .meta({
       default: DEFAULT_DEEP_SCAN_SETTINGS.maxTimeHours,
+      deprecated: true,
       description:
-        "Maximum deep-scan discovery hours (default: 96; maximum: 96).",
+        "Deprecated Deep-only alias for maxTimeMinutes / --max-time, in hours (default: 96; maximum: 96).",
     }),
 });
 
@@ -107,6 +108,13 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
       "Experimental Cyber access program for scan turns (OpenAI provider only). Omit to preserve Codex defaults.",
     ),
   mode: z.enum(SCAN_MODES).optional().meta({ default: DEFAULT_SCAN_MODE }),
+  maxTimeMinutes: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "Investigation minutes: advisory in Standard (default: unset); enforced Deep discovery limit (default and maximum: 5760). Scans may finish early; reporting may run longer.",
+    ),
   knowledgeBasePaths: z.array(inputPath).optional(),
   scanPrompt: z.string().optional(),
   scanPromptFile: inputPath.optional(),

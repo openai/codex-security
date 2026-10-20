@@ -1,4 +1,11 @@
-import { fakeCodexSource } from "./support/fake-codex-source.ts";
+import { windowsAcl } from "./support/windows-output-fixture.ts";
+import {
+  createFakeCodexFixture,
+  deniedWorkerPermissionProfile,
+  emptyWorkerPermissionProfile,
+  trustedParentSandbox,
+  trustedParentSandboxWithDenials,
+} from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -35,6 +42,7 @@ import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
+import { testConcurrentWorkerExecutableAliases } from "./deep_scan_executable_alias_cases.ts";
 import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
@@ -76,43 +84,13 @@ export { parseDeepScan } from "./response.js";`,
 });
 
 const temporaryDirectories = createTemporaryDirectories(true);
+const fakeCodexFixture = createFakeCodexFixture.bind(
+  null,
+  temporaryDirectories,
+);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
-const trustedParentSandbox = Object.freeze({
-  filesystemDenies: [],
-});
-const trustedParentSandboxWithDenials = Object.freeze({
-  filesystemDenies: [
-    "/repo/.env",
-    "/repo/**/.secret",
-    "/repo/**/*.pem",
-    "/repo/temp[1]",
-    "/repo/secret[1]",
-    "/repo/.env",
-  ],
-  literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
-  globScanMaxDepth: 3,
-});
-const emptyWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: { ":root": "read" },
-  network: { enabled: false },
-};
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
-const deniedWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: {
-    ":root": "read",
-    "/repo/.env": "deny",
-    "/repo/**/.secret": "deny",
-    "/repo/**/*.pem": "deny",
-    "/repo/temp[1]": { ".": "deny" },
-    "/repo/secret[1]": { ".": "deny" },
-    "/": { "repo/temp[1]": "deny", "repo/secret[1]": "deny" },
-    glob_scan_max_depth: 3,
-  },
-  network: { enabled: false },
-};
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
@@ -136,6 +114,14 @@ try {
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
     await testWorkerLaunchesWithoutGlobalCodex();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
+    await testConcurrentWorkerExecutableAliases({
+      CodexSdkWorkerExecutor,
+      fakeCodexFixture,
+      parentSandbox: trustedParentSandbox,
+      bundledCodexSdkEnvironment,
+      assertConfigOverrides,
+      assertReadOnlyWorkerPolicy,
+    });
     await testSdkInvocationAndThreadCapture();
     await testBedrockCredentialsReachWorker();
     await testBedrockCredentialsReachWorker("oidc");
@@ -1151,6 +1137,8 @@ async function testOpenAiCredentialsReachWorker() {
     const previousEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
+      "OPENAI_FEDERATION_RULE_ID",
+      "OPENAI_IDENTITY_TOKEN_FILE",
       "CODEX_CLI_PATH",
       "CODEX_HOME",
       "CODEX_SECURITY_CONFIG_PATH",
@@ -1160,6 +1148,8 @@ async function testOpenAiCredentialsReachWorker() {
     try {
       restoreEnv("OPENAI_API_KEY", entry.openai);
       restoreEnv("CODEX_API_KEY", entry.codex);
+      restoreEnv("OPENAI_FEDERATION_RULE_ID", undefined);
+      restoreEnv("OPENAI_IDENTITY_TOKEN_FILE", undefined);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
       const configPath = path.join(fixture.root, "scan-settings.toml");
@@ -1406,6 +1396,7 @@ async function testWorkerRuntimeSettings() {
         deniedWorkerPermissionProfile,
         true,
         { account: null, requiresOpenaiAuth: false },
+        process.platform === "win32" && configuration === "",
       );
       const python = path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
@@ -1515,7 +1506,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     },
                   ],
                 };
-          // Cover missing settings, native config inheritance, and snapshot overrides.
           const mergeProfileTelemetry = index === 0 && configuration !== "";
           const telemetry =
             index === 0 && configuration === ""
@@ -1612,7 +1602,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     env: { CLIENT_SECRET: `synthetic-client-secret-${index}` },
                   },
                 };
+          const nativePaths = {
+            experimental_compact_prompt_file: path.join(
+              fixture.root,
+              `compact-${index}.md`,
+            ),
+            sqlite_home: path.join(codexHome, `sqlite-${index}`),
+          };
           return {
+            nativePaths,
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
             knowledgeDocuments: {
               "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
@@ -1678,6 +1676,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             configuration: {
               ...parsedConfiguration,
               ...inheritedTelemetry,
+              ...Object.fromEntries(
+                Object.entries(nativePaths).map(([key, value]) => [
+                  key,
+                  index === 0 ? value : "parent",
+                ]),
+              ),
               ...(skills === undefined
                 ? {}
                 : {
@@ -1753,6 +1757,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 worker_runtime: {
                   ...entry.authentication,
                   ...entry.workerTelemetry,
+                  ...entry.nativePaths,
+                  approval_policy: "on-request",
+                  default_permissions: "parent",
+                  permissions: { parent: { filesystem: { ":root": "write" } } },
+                  sandbox_mode: "danger-full-access",
+                  sandbox_workspace_write: { network_access: true },
+                  mcp_servers: { parent: { command: "synthetic-parent-tool" } },
                   ...(entry.skills === undefined
                     ? {}
                     : { skills: entry.skills }),
@@ -1866,7 +1877,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           launches.length = 0;
           await Promise.all(
             executors.map((executor, index) => {
-              // Each concurrent launch snapshots its own scan environment.
+              // Snapshot each scan environment independently.
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
               process.env.CODEX_SECURITY_STATE_DIR = path.join(
                 fixture.root,
@@ -1983,6 +1994,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            if (
+              process.platform === "win32" &&
+              configuration === "" &&
+              index === 0
+            ) {
+              const acl = windowsAcl(workerLaunch.markerPath);
+              assert.ok(!acl.includes(";;;WD)"));
+              assertFlagPair(invocation.argv, "--cd", fixture.root);
+            }
             for (const name of [
               "LD_LIBRARY_PATH",
               "DYLD_LIBRARY_PATH",
@@ -2234,6 +2254,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               },
               enable_fanout: false,
             });
+            assertConfigOverrides(invocation.argv, {
+              ...selectedProvider.nativePaths,
+              sandbox_mode: undefined,
+              "mcp_servers.parent": undefined,
+            });
             assertReadOnlyWorkerPolicy(invocation.argv);
             assertWorkerSubagentPolicy(invocation.argv, 0);
           }
@@ -2267,6 +2292,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assertConfigOverrides(preflight.argv, {
               openai_base_url: selectedProvider.endpoint,
               model_instructions_file: selectedProvider.instructionsFile,
+              ...selectedProvider.nativePaths,
               model_verbosity: selectedProvider.verbosity,
               model_context_window: selectedProvider.modelContextWindow,
               model_auto_compact_token_limit:
@@ -2346,11 +2372,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               Promise.all([
                 writeFile(
                   entry.path,
-                  'model_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n[analytics]\nenabled = false\n[responses_api_metadata]\ncustom_tag = "changed"\n',
+                  'sqlite_home = "changed"\nmodel_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n[analytics]\nenabled = false\n[responses_api_metadata]\ncustom_tag = "changed"\n',
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.shell_environment_policy]\ninherit = "all"\n[worker_runtime.shell_environment_policy.set]\nSYNTHETIC_SHELL_MARKER = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n[worker_runtime.analytics]\nenabled = false\n[worker_runtime.responses_api_metadata]\ncustom_tag = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nsqlite_home = "changed"\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.shell_environment_policy]\ninherit = "all"\n[worker_runtime.shell_environment_policy.set]\nSYNTHETIC_SHELL_MARKER = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n[worker_runtime.analytics]\nenabled = false\n[worker_runtime.responses_api_metadata]\ncustom_tag = "changed"\n',
                 ),
               ]),
             ),
@@ -3740,34 +3766,6 @@ async function runFixtureWorker(
     await writeFile(promptPath, `${prompt}\n`);
     return await runWorker(promptPath, workingDirectory, { kind, subagents });
   });
-}
-
-async function fakeCodexFixture(
-  preflightProfile = emptyWorkerPermissionProfile,
-  preflightAllowed = true,
-  accountResult: {
-    account: { type: string } | null;
-    requiresOpenaiAuth: boolean;
-  } = { account: { type: "apiKey" }, requiresOpenaiAuth: true },
-) {
-  const root = await temporaryDirectories.create(
-    "codex-security-sdk-executor-",
-  );
-  const markerPath = path.join(root, "invocation.json");
-  const preflightMarkerPath = path.join(root, "preflight.json");
-  const scriptPath = path.join(root, "fake-codex.mjs");
-  await writeFile(
-    scriptPath,
-    fakeCodexSource(
-      preflightProfile,
-      preflightAllowed,
-      accountResult,
-      preflightMarkerPath,
-    ),
-  );
-  await chmod(scriptPath, 0o755);
-  process.env.FAKE_CODEX_MARKER = markerPath;
-  return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
 }
 
 function assertReadOnlyWorkerPolicy(args: readonly string[]) {
