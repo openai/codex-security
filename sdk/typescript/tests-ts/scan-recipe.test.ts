@@ -29,6 +29,11 @@ test.each(
       model_provider: "amazon-bedrock",
       features: { goals: false },
     };
+    const selectedProviders = {
+      "amazon-bedrock": {
+        aws: { region: "us-east-2", profile: "scan-profile" },
+      },
+    };
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "state", "codex-home");
@@ -79,8 +84,18 @@ test.each(
                 model: "synthetic-root-model",
                 model_reasoning_effort: "low",
                 model_provider: "openai",
+                model_providers: {
+                  "amazon-bedrock": {
+                    aws: { region: "us-west-2", profile: "ambient-profile" },
+                  },
+                },
                 profile,
-                profiles: { [profile]: selected },
+                profiles: {
+                  [profile]: {
+                    ...selected,
+                    model_providers: selectedProviders,
+                  },
+                },
               },
             },
             {
@@ -111,7 +126,11 @@ test.each(
       "--scan-id",
       scans[0]!.scanId,
     ]);
-    expect(saved["recipe"]).toMatchObject({ mode, postScanPrompt });
+    expect(saved["recipe"]).toMatchObject({
+      mode,
+      postScanPrompt,
+      config: { model_providers: selectedProviders },
+    });
     expect(JSON.stringify(saved)).not.toContain(promptFile);
     expect(JSON.stringify(saved)).not.toContain("synthetic-launch-key");
     expect(JSON.stringify(saved)).not.toContain("synthetic-bedrock-key");
@@ -121,9 +140,10 @@ test.each(
           environment,
           currentDirectory: root,
           onConfig: ({ codexOverrides }) => {
-            expect(resolveCodexProfile(codexOverrides!)).toMatchObject(
-              selected,
-            );
+            expect(resolveCodexProfile(codexOverrides!)).toMatchObject({
+              ...selected,
+              model_providers: selectedProviders,
+            });
           },
         }),
         runWorkbench: command,

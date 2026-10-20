@@ -1591,6 +1591,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   wire_api: "responses",
                   env_key: "SYNTHETIC_GATEWAY_KEY",
                   env_http_headers: { "X-Synthetic": "SYNTHETIC_HEADER_VALUE" },
+                  aws: {
+                    region: index % 2 === 0 ? "us-east-2" : "us-west-2",
+                    profile: `synthetic-scan-${index}`,
+                  },
                   ...(index === 3 ? {} : { requires_openai_auth: index === 2 }),
                   experimental_bearer_token: `synthetic-bearer-${index}`,
                   auth: {
@@ -2467,6 +2471,21 @@ async function testBedrockCredentialsReachWorker(
   assert.ok(awsEnvironment.AWS_ACCESS_KEY_ID);
   assert.ok(awsEnvironment.AWS_SECRET_ACCESS_KEY);
   assert.ok(awsEnvironment.AWS_SESSION_TOKEN);
+  const codexHome = path.join(fixture.root, "private profile home");
+  const nativeProfile = `bedrock_${credentials}`;
+  const providerConfig = {
+    aws: {
+      region: credentials === "all" ? "eu-west-1" : "eu-central-1",
+      profile: `synthetic-bedrock-${credentials}`,
+    },
+  };
+  await mkdir(codexHome);
+  await writeFile(
+    path.join(codexHome, `${nativeProfile}.config.toml`),
+    stringifyToml({
+      model_providers: { "amazon-bedrock": providerConfig },
+    }),
+  );
   const configPath = path.join(fixture.root, "bedrock.toml");
   await writeFile(
     configPath,
@@ -2475,12 +2494,19 @@ async function testBedrockCredentialsReachWorker(
   const deepConfigPath = path.join(fixture.root, "bedrock-workers.toml");
   await writeFile(
     deepConfigPath,
-    '[worker_runtime]\nmodel_provider = "amazon-bedrock"\nmodel_reasoning_summary = "none"\n',
+    stringifyToml({
+      worker_runtime: {
+        model_provider: "amazon-bedrock",
+        model_reasoning_summary: "none",
+        native_profile: nativeProfile,
+      },
+    }),
   );
   const environment = {
     ...Object.fromEntries(awsNames.map((name) => [name, awsEnvironment[name]])),
     OPENAI_API_KEY: undefined,
     CODEX_API_KEY: undefined,
+    CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: configPath,
     CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepConfigPath,
     CODEX_CLI_PATH: fixture.executablePath,
@@ -2519,6 +2545,15 @@ async function testBedrockCredentialsReachWorker(
         const invocation = await readJson(fixture.markerPath);
         assert.deepEqual(invocation.bedrockAuthentication, awsEnvironment);
         assert.deepEqual(invocation.openaiAuthentication, {});
+        assertFlagPair(invocation.argv, "--profile", nativeProfile);
+        assert.deepEqual(
+          JSON.parse(
+            JSON.stringify(
+              parseToml(invocation.profileContents).model_providers,
+            ),
+          ),
+          { "amazon-bedrock": providerConfig },
+        );
         assert.equal(
           invocation.argv.includes("resume"),
           resumeThreadId !== undefined,

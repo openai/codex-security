@@ -40,6 +40,65 @@ const findingFor = (candidateId: string) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+for (const layout of ["standard", "diff"] as const) {
+  test(`${layout}: parent writes return receipt repairs and workbench warnings`, async (t) => {
+    const f = await fixture(t, layout);
+    await mkdir(path.join(f.root, "artifacts"));
+    await writeFile(
+      path.join(f.root, "artifacts/original.md"),
+      "Original review.",
+    );
+    await writeFile(
+      path.join(f.root, "artifacts/current.md"),
+      "Current review.",
+    );
+    const surface = {
+      id: "api",
+      label: "API review",
+      disposition: "needs_follow_up",
+      receiptRefs: ["artifacts/original.md"],
+    };
+    await f.write(
+      f.draft({
+        surfaces: [surface],
+        deferred: [
+          { id: "review", reason: "Review remains.", surfaceIds: ["api"] },
+        ],
+      }),
+    );
+    await rm(path.join(f.root, "artifacts/original.md"));
+    const result = await recordCodexSecurityScanDraftViaWorkbench(
+      f.context,
+      f.draft(
+        {
+          surfaces: [
+            {
+              ...surface,
+              disposition: "no_issue_found",
+              receiptRefs: ["artifacts/current.md"],
+            },
+          ],
+          resolvedDeferred: [close("review")],
+        },
+        true,
+      ),
+      async (args: string[]) => {
+        const staged = await readJson(args[args.indexOf("--draft-path") + 1]);
+        assert.deepEqual(staged.coverage.surfaces[0].receiptRefs, [
+          "artifacts/current.md",
+        ]);
+        return { warnings: ["Workbench publication warning."] };
+      },
+    );
+    assert.equal(result.warnings?.length, 2);
+    assert.match(
+      result.warnings[0],
+      /Replaced missing saved coverage receipt artifacts\/original.md/,
+    );
+    assert.equal(result.warnings[1], "Workbench publication warning.");
+  });
+}
+
 for (const source of ["title", "candidateId", "reportId", "ledgerRowId"]) {
   for (const [value, expected] of [
     ["_Unsafe archive_", "unsafe-archive_"],

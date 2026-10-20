@@ -1511,6 +1511,9 @@ scan and custom-validation prompts when the original used them:
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md
 ```
 
+Saved path scopes remain relative to the repository. Names such as `~` and
+`~/source.ts` are replayed literally; they do not select the home directory.
+
 A rerun creates a new scan. When the original has saved input identities, the
 rerun reports changes to the scan instructions or knowledge base. `scans show`
 includes the saved scope, runtime and Deep Scan settings, instruction digest,

@@ -16,7 +16,9 @@ on:
         required: true
         type: string
 
-concurrency: container-release-publish
+concurrency:
+  group: container-release-publish
+  queue: max
 
 permissions:
   contents: read
@@ -443,6 +445,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       attestations: write
+      artifact-metadata: write
       contents: read
       id-token: write
       packages: write

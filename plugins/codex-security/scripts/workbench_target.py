@@ -1072,7 +1072,7 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
     branch = git_output(target, "symbolic-ref", "--quiet", "--short", "HEAD")
     metadata.update({"branch": branch, "detachedHead": revision is not None and branch is None})
     if revision is not None:
-        subject = git_bytes(target, "show", "-s", "--format=%s", "HEAD")
+        subject = git_bytes(target, "show", "-s", "--no-show-signature", "--format=%s", "HEAD")
         metadata.update(
             {
                 "commitSubject": (subject or b"").decode("utf-8", errors="replace").strip() or None,

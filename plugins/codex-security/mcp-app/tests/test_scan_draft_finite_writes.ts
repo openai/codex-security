@@ -147,7 +147,15 @@ for (const layout of ["worker", "deep"] as const) {
           : {}),
       });
       const before = structuredClone(input);
-      await assert.rejects(f.write(input), finiteError);
+      await assert.rejects(
+        f.write(input),
+        layout === "worker" && field !== "threatModel"
+          ? {
+              name: "Error",
+              message: `coverage.${field}[0].<property>.<property>: non-finite JSON numbers are not supported`,
+            }
+          : finiteError,
+      );
       assert.deepEqual(await readdir(f.root), []);
       assert.deepEqual(input, before);
     });

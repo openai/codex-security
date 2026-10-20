@@ -314,6 +314,18 @@ export function resolveScanSettings(
     file?.codex ?? {},
     overrides.codexOverrides ?? {},
   );
+  const nativeSourceTree = (
+    value: JsonObject,
+    source: ConfigurationSource,
+  ): JsonObject =>
+    Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        item !== null && typeof item === "object" && !Array.isArray(item)
+          ? nativeSourceTree(item, source)
+          : source,
+      ]),
+    );
   const recordNativeSources = (
     value: JsonObject,
     source: ConfigurationSource,
@@ -322,19 +334,24 @@ export function resolveScanSettings(
     for (const [key, item] of Object.entries(value)) {
       const path: `codex.${string}` = `${prefix}.${key}`;
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-        delete sources[path];
         recordNativeSources(item, source, path);
-      } else {
-        for (const existing of Object.keys(sources) as ProvenanceKey[]) {
-          if (existing.startsWith(`${path}.`)) delete sources[existing];
-        }
+      } else if (item === source) {
         sources[path] = source;
       }
     }
   };
-  recordNativeSources(DEFAULT_CODEX_CONFIG, "default");
-  recordNativeSources(file?.codex ?? {}, "project");
-  recordNativeSources(overrides.codexOverrides ?? {}, "cli");
+  // Match the value merge: defaults beneath the combined project/CLI overrides.
+  const nativeSources = mergeCodexOverrides(
+    nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
+    mergeCodexOverrides(
+      nativeSourceTree(file?.codex ?? {}, "project"),
+      nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
+    ),
+  );
+  // Literal dotted keys can share a flattened name; retain layer precedence.
+  for (const source of ["default", "project", "cli"] as const) {
+    recordNativeSources(nativeSources, source);
+  }
   const knowledgeBasePaths =
     choose(
       "scan.knowledge_base",
