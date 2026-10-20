@@ -43,6 +43,7 @@ function save(
       evidence: { count: 18446744073709551617n },
     },
     assessment: {
+      classificationRuns: null,
       findingId,
       occurrenceId: `occurrence-${findingId}`,
       inputSha256: "evidence-digest",
@@ -77,6 +78,7 @@ function begin(
 test("severity checkpoints retain external findings and each scan's cached assessments", (t) => {
   const database = open(t);
   const payload = save("finding\0suffix", "scan-a");
+  payload.assessment.classificationRuns = 10;
   for (const field of [
     "occurrenceId",
     "inputSha256",
