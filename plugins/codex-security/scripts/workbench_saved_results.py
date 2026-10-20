@@ -748,6 +748,7 @@ def _generic_surface_updates(
     ambiguous_deferred: set[tuple[str | None, str]],
     *,
     surface_is_retained: Callable[[str, str | None, dict[str, Any]], bool],
+    eligible_receipt_sources: set[str],
     receipt_root: Path | None = None,
     receipt_warnings: list[str] | None = None,
 ) -> tuple[set[int], list[tuple[str | None, dict[str, Any]]]]:
@@ -883,7 +884,16 @@ def _generic_surface_updates(
                 continue
             # An accepted checkpoint can update a saved surface by ID without
             # optional surfaceIds links on its generic task.
-            latest_surface = max(matches, key=lambda match: source_order[match[0]])[1]
+            receipt_matches = [
+                (saved_path, row)
+                for saved_path, row in matches
+                if receipt_root is None
+                or saved_path in eligible_receipt_sources
+                or surface_is_retained(saved_path, owner, row)
+            ]
+            if not receipt_matches:
+                continue
+            latest_surface = max(receipt_matches, key=lambda match: source_order[match[0]])[1]
             target = retained_surfaces.get((owner, identity)) if repair_only else latest_surface
             if target is None:
                 continue
@@ -906,7 +916,7 @@ def _generic_surface_updates(
                             repaired = False
                             break
                         replacement_paths[key] = normalized
-                for _, row in matches:
+                for _, row in receipt_matches:
                     previous_refs = row.get("receiptRefs", [])
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
@@ -1954,6 +1964,11 @@ def merge_saved_results(
         surface_is_retained=lambda relative, owner, row: coverage_row_is_retained(
             "surfaces", row, owner, source_coverage_selection(relative, owner)
         ),
+        eligible_receipt_sources={
+            relative
+            for relative, draft, _ in all_sources
+            if draft.get("complete") is not False or relative in selected_observations
+        },
     )
     replaced_rows = {
         "surfaces": replaced_surfaces,
@@ -2314,6 +2329,29 @@ def merge_saved_results(
             if retained_task == task:
                 _, links = retained_surface_links.setdefault(id(retained_task), (retained_task, {}))
                 links[published_id] = retained_surface
+    if project_worker_coverage:
+        worker_surfaces: dict[tuple[str, str], dict[str, Any]] = {}
+        surfaces = coverage.get("surfaces", [])
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if not isinstance(surface, dict):
+                continue
+            owner, identity = surface.get("workerId"), surface.get("id")
+            if isinstance(owner, str) and isinstance(identity, str):
+                worker_surfaces.setdefault((owner, identity), surface)
+        for task in output_tasks if isinstance(output_tasks, list) else []:
+            if (
+                not isinstance(task, dict)
+                or not isinstance(owner := task.get("workerId"), str)
+                or not isinstance(task.get("surfaceIds"), list)
+            ):
+                continue
+            for identity in task["surfaceIds"]:
+                if (
+                    isinstance(identity, str)
+                    and (surface := worker_surfaces.get((owner, identity))) is not None
+                ):
+                    _, links = retained_surface_links.setdefault(id(task), (task, {}))
+                    links.setdefault(identity, surface)
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
@@ -2438,6 +2476,7 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
                     "The configured discovery time limit elapsed before any source review completed. "
                     "Saved findings and pending review were preserved without a completed reduction."
                 ),
+                project_worker_coverage=True,
             )
             if documents is None:
                 raise ContractError("Deep Scan deadline has no saved parent draft.")

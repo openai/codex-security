@@ -223,3 +223,72 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
     if existing_head:
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])
+
+
+def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    workers = {}
+    originals = {}
+    for name in ("first", "second"):
+        result = add_worker(workbench_db, scan, status="canceled")
+        worker_id = result.parent.name
+        output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+        output.parent.mkdir(parents=True)
+        result.parent.rename(output)
+        result = output / result.name
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? "
+                "WHERE id = ?",
+                (str(output), str(result), worker_id),
+            )
+        receipt = result.parent / "artifacts" / "review.md"
+        receipt.parent.mkdir()
+        receipt.write_text(f"Synthetic {name} source review.\n")
+        checkpoint = write_checkpoint(
+            result.parent / "checkpoints",
+            saved_draft(
+                scan.scan_id,
+                complete=False,
+                surfaces=[
+                    {
+                        "id": "api",
+                        "label": name,
+                        "disposition": "no_issue_found",
+                        "receiptRefs": ["artifacts/review.md"],
+                    }
+                ],
+                deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+            ),
+        )
+        head = result.parent / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        workers[worker_id] = receipt
+        originals.update({path: path.read_bytes() for path in (receipt, checkpoint, head)})
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "workers = 2, max_discovery_runs = 3, discovery_runs_dispatched = 2, "
+            "created_at = '2000-01-01T00:00:00+00:00', manifest_path = NULL, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+
+    finished = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+
+    assert finished["status"] == "succeeded"
+    assert finished["completionSequence"] == 0
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert {row["id"] for row in coverage["surfaces"]} == {
+        f"{worker_id}/api" for worker_id in workers
+    }
+    for worker_id, receipt in workers.items():
+        surface = next(row for row in coverage["surfaces"] if row["workerId"] == worker_id)
+        task = next(row for row in coverage["deferred"] if row.get("workerId") == worker_id)
+        assert surface["disposition"] == "no_issue_found"
+        assert surface["receiptRefs"] == [receipt.relative_to(scan.scan_dir).as_posix()]
+        assert task["id"] == f"{worker_id}/review"
+        assert task["surfaceIds"] == [surface["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())

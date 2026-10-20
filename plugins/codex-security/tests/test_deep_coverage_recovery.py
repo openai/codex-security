@@ -89,6 +89,43 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
     assert all(p.read_bytes() == contents for p, contents in originals.items())
 
 
+@pytest.mark.parametrize("collision", [False, True])
+def test_worker_links_follow_final_ids_without_redirecting_parent_links(tmp_path, collision):
+    surface = {"id": "api", "label": "Worker review", "disposition": "needs_follow_up"}
+    source = worker(
+        tmp_path,
+        "first",
+        saved_draft(
+            "coverage-scan",
+            complete=True,
+            surfaces=[surface],
+            deferred=[{"id": "review", "reason": "Review worker.", "surfaceIds": ["api"]}],
+        ),
+    )
+    parent_id = "first/api" if collision else "parent-api"
+    write_saved_parent(
+        tmp_path,
+        saved_draft(
+            "coverage-scan",
+            complete=True,
+            surfaces=[{**surface, "id": parent_id, "label": "Parent review"}],
+            deferred=[
+                {"id": "parent-review", "reason": "Review parent.", "surfaceIds": [parent_id]}
+            ],
+        ),
+        200,
+    )
+    first = recover(tmp_path, [source], project=True)
+    replay = recover(tmp_path, [source], project=True, frozen=first[0]["scan"]["preservedSources"])
+    for documents in (first, replay):
+        surfaces = {row["label"]: row for row in documents[2]["surfaces"]}
+        tasks = {row["id"]: row for row in documents[2]["deferred"]}
+        assert surfaces["Parent review"]["id"] == parent_id
+        assert surfaces["Worker review"]["id"] == ("first/api-2" if collision else "first/api")
+        assert tasks["first/review"]["surfaceIds"] == [surfaces["Worker review"]["id"]]
+        assert tasks["parent-review"]["surfaceIds"] == [parent_id]
+
+
 def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pending_work(tmp_path):
     surface = {"id": "api", "label": "API", "disposition": "needs_follow_up"}
     task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
@@ -451,6 +488,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         {"old": [task], "current": []},
         set(),
         surface_is_retained=lambda _relative, _owner, _row: True,
+        eligible_receipt_sources={"old", "current"},
         receipt_root=tmp_path,
         receipt_warnings=warnings,
     )
@@ -810,6 +848,83 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
         assert (
             output.relative_to(tmp_path).as_posix() + "/artifacts/accepted.md"
             in surfaces[0]["receiptRefs"]
+        )
+        assert not any(ref.endswith("/unselected.md") for ref in surfaces[0]["receiptRefs"])
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("accepted_receipt_exists", [False, True])
+def test_receipt_repair_does_not_promote_unselected_checkpoint_evidence(
+    tmp_path, accepted_receipt_exists
+):
+    surface = {
+        "id": "api",
+        "label": "Accepted review",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/accepted.md"],
+    }
+    accepted = saved_draft("coverage-scan", complete=True, surfaces=[surface])
+    source = worker(tmp_path, "first", accepted)
+    output = Path(source["artifact_dir"])
+    if accepted_receipt_exists:
+        (output / "artifacts/accepted.md").write_text("Accepted receipt.\n")
+        historical = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(
+                "coverage-scan",
+                complete=True,
+                surfaces=[{**surface, "receiptRefs": ["artifacts/missing.md"]}],
+            ),
+        )
+        os.utime(historical, ns=(100, 100))
+    selected = write_checkpoint(output / "checkpoints", accepted)
+    os.utime(selected, ns=(200, 200))
+    (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(output / "checkpoint-head.json", ns=(250, 250))
+    os.utime(output / "result.json", ns=(300, 300))
+    (output / "artifacts/unselected.md").write_text("Unselected interrupted observation.\n")
+    pending = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            "coverage-scan",
+            complete=False,
+            surfaces=[{**surface, "receiptRefs": ["artifacts/unselected.md"]}],
+        ),
+    )
+    os.utime(pending, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    frozen = None
+    for _ in range(2):
+        warnings = []
+        documents = saved.merge_saved_results(
+            tmp_path,
+            "coverage-scan",
+            saved_binding("deep_repository", repository="synthetic"),
+            [source],
+            warnings,
+            stopped=True,
+            reason="Source review stopped.",
+            project_worker_coverage=True,
+            frozen_source_digests=frozen,
+        )
+        assert documents is not None
+        frozen = documents[0]["scan"]["preservedSources"]
+        finalizer._recover_unsealed_coverage(
+            documents[2],
+            Path(saved.__file__).resolve().parent.parent / "schemas",
+            tmp_path,
+            warnings,
+            [],
+        )
+        retained = documents[2]["surfaces"]
+        assert len(retained) == 1
+        assert retained[0]["disposition"] == (
+            "no_issue_found" if accepted_receipt_exists else "needs_follow_up"
+        )
+        assert retained[0]["receiptRefs"] == (
+            [output.relative_to(tmp_path).as_posix() + "/artifacts/accepted.md"]
+            if accepted_receipt_exists
+            else []
         )
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
