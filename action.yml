@@ -1,4 +1,4 @@
-name: Codex Security
+name: OpenAI Codex Security
 description: Scan code with Codex Security, enforce findings policy, and produce JSON, coverage, and SARIF reports.
 branding:
   icon: shield

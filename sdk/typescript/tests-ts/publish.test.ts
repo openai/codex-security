@@ -24,6 +24,8 @@ import {
   UnknownLinearError,
 } from "@linear/sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
+import { requestMetadata } from "./support/request-metadata.js";
+import { VERSION } from "../src/version.js";
 import {
   forceTerminatePublicationProcesses,
   publishScanInternal,
@@ -40,7 +42,6 @@ import type {
 } from "../src/publication.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
   async (_prepared, issues) => {
@@ -1419,7 +1420,7 @@ describe("connected Linear publication", () => {
     expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
   });
 
-  test("reuses ambient Codex configuration and loads exact issue data from a private file", async () => {
+  test("attributes publication while preserving ambient Codex configuration and private issue data", async () => {
     const publication = preparedPublication();
     const stateDirectory = await temporaryDirectory();
     const environment = {
@@ -1470,6 +1471,8 @@ describe("connected Linear publication", () => {
       "gpt-5.6-luna",
       "-c",
       'model_reasoning_effort="low"',
+      "-c",
+      expect.stringMatching(/^responses_api_metadata=\{/u),
       "--ephemeral",
       "--json",
       "--sandbox",
@@ -1481,6 +1484,11 @@ describe("connected Linear publication", () => {
     ]);
     expect(args).not.toContain("--ignore-user-config");
     expect(args).not.toContain("--disable");
+    expect(requestMetadata(args)).toEqual({
+      codex_security_surface: "sdk",
+      codex_security_command: "publish",
+      codex_security_package_version: VERSION,
+    });
     expect(inheritedEnvironment).toBe(environment);
     expect(input).toContain("already-connected hosted Linear application");
     expect(input).toContain("untrusted inert data");

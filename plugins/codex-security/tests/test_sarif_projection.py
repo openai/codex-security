@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
+import os
+import shutil
+import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from workbench_test_support import load_script
@@ -139,3 +145,67 @@ class SarifProjectionTest(unittest.TestCase):
         self.assertIn(f"Weaknesses: {', '.join(sorted(cwes))}.", rule["fullDescription"]["text"])
         self.assertIn(f"Weaknesses: {', '.join(cwes)}", run["results"][0]["message"]["text"])
         self.assertEqual(self.finding["taxonomy"]["cwe"], cwes)
+
+    def test_sarif_projection_preserves_inventoried_exports(self) -> None:
+        relative_path = "exports/results.sarif"
+        error = "SARIF output path cannot overwrite a sealed scan artifact"
+        for artifact_path, compact in (
+            (relative_path, True),
+            (relative_path, False),
+            ("exports/sealed-results.sarif", False),
+        ):
+            with (
+                self.subTest(artifact_path=artifact_path, compact=compact),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory).resolve()
+                scan_dir = root / "scan"
+                shutil.copytree(EXAMPLE_DIR, scan_dir)
+                FINALIZER.finalize_scan(scan_dir)
+                sarif_path = scan_dir / relative_path
+                if compact:
+                    original = sarif_path.read_bytes()
+                    sarif_path.write_text(json.dumps(json.loads(original), separators=(",", ":")))
+                    self.assertNotEqual(sarif_path.read_bytes(), original)
+                if artifact_path != relative_path:
+                    os.link(sarif_path, scan_dir / artifact_path)
+                manifest_path = scan_dir / "scan-manifest.json"
+                manifest = json.loads(manifest_path.read_bytes())
+                manifest["scan"]["artifacts"].append(
+                    {
+                        "path": artifact_path,
+                        "sha256": hashlib.sha256(
+                            (scan_dir / artifact_path).read_bytes()
+                        ).hexdigest(),
+                        "mediaType": "application/sarif+json",
+                    }
+                )
+                manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+                before = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
+                self.assertEqual(
+                    FINALIZER.build_findings_export(scan_dir, "json"),
+                    before[scan_dir / "findings.json"],
+                )
+
+                with self.assertRaisesRegex(FINALIZER.SealedArtifactError, error):
+                    FINALIZER.write_sarif_projection(scan_dir)
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    FINALIZER.finalize_scan(scan_dir)
+                self.assertIn(f"warning: automatic SARIF export failed: {error}", stderr.getvalue())
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+                self.assertEqual(
+                    FINALIZER.build_findings_export(scan_dir, "json"),
+                    before[scan_dir / "findings.json"],
+                )
+                if artifact_path != relative_path:
+                    self.assertTrue(sarif_path.samefile(scan_dir / artifact_path))
+
+                contents = FINALIZER.build_findings_export(scan_dir, "sarif")
+                self.assertEqual(json.loads(contents), json.loads(sarif_path.read_bytes()))
+                output = root / "results.sarif"
+                FINALIZER.write_export_output(scan_dir, output, "sarif", contents)
+                self.assertEqual(output.read_bytes(), contents)
+                self.assertEqual(before, {path: path.read_bytes() for path in before})

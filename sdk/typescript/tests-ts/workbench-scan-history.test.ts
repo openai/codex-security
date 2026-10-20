@@ -106,7 +106,7 @@ for index, (scan, repository) in enumerate([
     ('before', 'selected'), ('after', 'selected')
 ]):
     connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?)',
-                       (scan, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
+                       (scan, str(Path(sys.argv[2]) / repository), 'complete', f'2026-08-01T00:00:0{index}Z'))
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?)', [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
@@ -330,7 +330,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "''')",
     "for index in range(3):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "queries = []",
     "connection.set_trace_callback(queries.append)",
@@ -349,7 +349,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
     "for index in (3, 4):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "def coverage(scan):",
     "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
@@ -662,7 +662,7 @@ CREATE TABLE scan_comparison_matches (
 ''')
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, str(index)))
+    connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, f'2026-08-01T00:00:0{index}Z'))
     connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, finding, scan, scan))
 connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)', [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),
@@ -671,7 +671,7 @@ connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 
 def collect_history():
     result = {}
     for index, (scan, finding) in enumerate(scans):
-        matches, first, bounds = finding_matches(connection, scan, scan, str(index))
+        matches, first, bounds = finding_matches(connection, scan, scan, f'2026-08-01T00:00:0{index}Z')
         result[scan] = {'linked': [match['occurrenceId'] for match in matches], 'first': first, 'bounds': bounds}
         for match in matches:
             assert match['reason']
@@ -686,38 +686,62 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
     withLinks: {
       a: {
         linked: ["a-repeat", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       b: {
         linked: ["a", "a-repeat", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       c: {
         linked: ["a", "a-repeat", "b", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "a-repeat": {
         linked: ["a", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "c-repeat": {
         linked: ["a", "a-repeat", "b", "c"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      unlinked: {
+        linked: [],
+        first: "2026-08-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
     withoutLinks: {
-      a: { linked: ["a-repeat"], first: "0", bounds: ["a", "a-repeat"] },
-      "a-repeat": { linked: ["a"], first: "0", bounds: ["a", "a-repeat"] },
-      b: { linked: [], first: "1", bounds: ["b"] },
-      c: { linked: ["c-repeat"], first: "2", bounds: ["c", "c-repeat"] },
-      "c-repeat": { linked: ["c"], first: "2", bounds: ["c", "c-repeat"] },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      a: {
+        linked: ["a-repeat"],
+        first: "2026-08-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      "a-repeat": {
+        linked: ["a"],
+        first: "2026-08-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      b: { linked: [], first: "2026-08-01T00:00:01Z", bounds: ["b"] },
+      c: {
+        linked: ["c-repeat"],
+        first: "2026-08-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      "c-repeat": {
+        linked: ["c"],
+        first: "2026-08-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      unlinked: {
+        linked: [],
+        first: "2026-08-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
   });
 });

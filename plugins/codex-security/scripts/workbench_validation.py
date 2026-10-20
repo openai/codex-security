@@ -69,16 +69,19 @@ SCAN_USAGE_TOKEN_KEYS = tuple(TOKEN_FIELDS.values())
 
 def _valid_legacy_scan_cost(cost: object) -> bool:
     token_keys = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens")
-    return (
-        isinstance(cost, dict)
-        and isinstance(cost.get("model"), str)
-        and bool(cost["model"])
-        and all(type(cost.get(key)) is int and cost[key] >= 0 for key in token_keys)
-        and cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] <= cost["inputTokens"]
-        and type(cost.get("estimatedUsd")) in (int, float)
-        and math.isfinite(cost["estimatedUsd"])
-        and cost["estimatedUsd"] >= 0
-    )
+    try:
+        return (
+            isinstance(cost, dict)
+            and isinstance(cost.get("model"), str)
+            and bool(cost["model"])
+            and all(type(cost.get(key)) is int and cost[key] >= 0 for key in token_keys)
+            and cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] <= cost["inputTokens"]
+            and type(cost.get("estimatedUsd")) in (int, float)
+            and math.isfinite(cost["estimatedUsd"])
+            and cost["estimatedUsd"] >= 0
+        )
+    except OverflowError:
+        return False
 
 
 def _valid_measured_scan_usage(usage: object) -> bool:
@@ -87,7 +90,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     coverage = usage.get("coverage")
     thread_count = usage.get("threadCount")
     if (
-        coverage not in {"complete", "partial", "unavailable"}
+        coverage not in ("complete", "partial", "unavailable")
         or usage.get("source") != "codex_rollout"
         or type(thread_count) is not int
         or thread_count < 0
@@ -117,9 +120,15 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or len(set(warnings)) != len(warnings)
     ):
         return False
+    if "accountRateLimits" in usage:
+        limits = usage["accountRateLimits"]
+        if not isinstance(limits, list) or not all(
+            valid_account_rate_limit(limit) for limit in limits
+        ):
+            return False
     if coverage == "unavailable":
         return thread_count == 0 and set(usage).issubset(
-            {"coverage", "source", "threadCount", "warnings", "completion"}
+            {"coverage", "source", "threadCount", "warnings", "completion", "accountRateLimits"}
         )
 
     allowed_keys = {
@@ -173,12 +182,6 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         ):
             return False
         if any(sum(role[key] for role in roles.values()) != usage[key] for key in keys):
-            return False
-    if "accountRateLimits" in usage:
-        limits = usage["accountRateLimits"]
-        if not isinstance(limits, list) or not all(
-            valid_account_rate_limit(limit) for limit in limits
-        ):
             return False
     return True
 

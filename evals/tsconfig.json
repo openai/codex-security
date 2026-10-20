@@ -4,6 +4,7 @@
     "typeRoots": ["../sdk/typescript/node_modules/@types"]
   },
   "include": [
+    "../plugins/codex-security/mcp-app/src/assets.d.ts",
     "deep-reducer/*.mts",
     "secret-discovery/*.mts",
     "workflow-routing/*.mts",
