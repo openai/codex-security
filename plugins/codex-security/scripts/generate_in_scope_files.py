@@ -121,7 +121,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 message = f"{message}: {detail}"
             raise InventoryError(message)
 
-        if (repository / ".git").exists():
+        if any((parent / ".git").exists() for parent in (repository, *repository.parents)):
             try:
                 tracked = git_command(
                     repository,

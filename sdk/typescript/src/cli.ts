@@ -5949,9 +5949,21 @@ export async function main(
             scanId: string;
             startedAt: string;
           }[];
-          scanId = scans.toSorted((a, b) =>
-            b.startedAt.localeCompare(a.startedAt),
-          )[0]?.scanId;
+          let latest:
+            { scanId: string; timestamp: number; fraction: string } | undefined;
+          for (const scan of scans) {
+            const timestamp = Date.parse(scan.startedAt);
+            const fraction =
+              scan.startedAt.match(/\.\d{3}(\d*[1-9])/u)?.[1] ?? "";
+            if (
+              latest === undefined ||
+              timestamp > latest.timestamp ||
+              (timestamp === latest.timestamp && fraction > latest.fraction)
+            ) {
+              latest = { scanId: scan.scanId, timestamp, fraction };
+            }
+          }
+          scanId = latest?.scanId;
         }
         const scan =
           scanId === undefined
