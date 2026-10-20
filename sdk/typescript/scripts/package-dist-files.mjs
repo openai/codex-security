@@ -79,6 +79,7 @@ const distModules = [
   "scan-logs",
   "security-policy",
   "security-policy-cli",
+  "security-policy-diff",
   "standalone-validation-prompt",
   "validation-records",
   "suggest-owners",
