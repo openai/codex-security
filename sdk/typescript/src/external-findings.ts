@@ -1,9 +1,15 @@
 import type { ExternalFindingEvidence } from "./external-import-models.js";
 
-/** A provider occurrence and its evidence, before Cloud assigns a source report. */
+/** A provider occurrence and its evidence, independent of a Codex assessment. */
 export interface ExternalFinding {
   source_finding_id: string;
   evidence: ExternalFindingEvidence;
+}
+
+/** Repository provenance retained by a reader outside the published evidence. */
+export interface ExternalSourceRepository {
+  url: string;
+  platform?: "github";
 }
 
 export interface ExternalFindings {

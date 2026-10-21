@@ -1,0 +1,294 @@
+import { isNumberObject } from "node:util/types";
+import { CodexSecurityError } from "./errors.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
+import {
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
+} from "./external-import-contract.js";
+import type {
+  ExternalFindingEvidence,
+  Provider,
+} from "./external-import-models.js";
+import { parseGitRemote } from "./git-remote.js";
+import { isRecord } from "./record.js";
+import {
+  bundledPluginRoot,
+  canonicalizeModelSafePath,
+  expandHome,
+  requireOutputOutsideRepositories,
+  runWorkbench,
+  workbenchEnvironment,
+  type WorkbenchCommandOptions,
+} from "./runtime.js";
+import {
+  gitOutput,
+  gitProtectionRoots,
+  normalizeRepository,
+} from "./targets.js";
+
+/** A scanner source record, independent of a Codex assessment or completed scan. */
+export interface StoredExternalFinding {
+  id: string;
+  repository: string;
+  provider: Provider;
+  sourceKey: string;
+  sourceFindingId: string;
+  evidence: ExternalFindingEvidence;
+  assessment: { state: "not_assessed" };
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NormalizedLocalImportOptions {
+  /** Local checkout or source directory to associate with these records. */
+  repository: string;
+  provider: Provider;
+  /** Stable scanner organization/project/branch namespace across imports. */
+  sourceKey: string;
+}
+
+export interface LocalExternalImportDependencies {
+  environment?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  runWorkbench?: typeof runWorkbench;
+  /** Repository references supplied by a reader outside its projected evidence. */
+  sourceRepositories?: readonly ExternalSourceRepository[];
+}
+
+export interface LocalExternalImportPreview extends ExternalFindings {
+  repository: string;
+  source: { provider: Provider; source_key: string };
+}
+
+export interface LocalExternalImportResult {
+  repository: string;
+  read: number;
+  ready: number;
+  excluded: ExternalFindings["excluded"];
+  findings: StoredExternalFinding[];
+  counts: { created: number; updated: number; unchanged: number };
+}
+
+export interface PreparedLocalExternalImport {
+  preview: LocalExternalImportPreview;
+  import(): Promise<LocalExternalImportResult>;
+}
+
+function requireIdentity(
+  value: unknown,
+  field: string,
+): asserts value is string {
+  if (typeof value !== "string" || !value.trim() || value.includes("\0"))
+    throw new CodexSecurityError(
+      `${field} must be nonempty and contain no NUL characters.`,
+    );
+}
+
+/** Compare transport forms without changing retained scanner evidence. */
+function remoteRepositoryKey(
+  value: string,
+  provider: Provider,
+): string | undefined {
+  let remote;
+  try {
+    remote = parseGitRemote(value);
+  } catch {
+    return undefined;
+  }
+  if (!remote || !["http:", "https:", "ssh:"].includes(remote.url.protocol))
+    return undefined;
+  const url = remote.url;
+  const protocol = url.protocol === "ssh:" ? "https:" : url.protocol;
+  const port = url.protocol === "ssh:" && url.port === "22" ? "" : url.port;
+  // A GitHub source identifies a case-insensitive repository on custom Enterprise
+  // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
+  const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
+  return key(
+    `${protocol}//${url.hostname}${port ? `:${port}` : ""}/${remote.path}`,
+  );
+}
+
+async function requireMatchingRepository(
+  repository: string,
+  provider: Provider,
+  sources: readonly ExternalSourceRepository[],
+  signal?: AbortSignal,
+): Promise<void> {
+  if (sources.length === 0) return;
+  let configuration: string;
+  try {
+    configuration = await gitOutput(
+      repository,
+      ["config", "--local", "--null", "--get-regexp", "^remote\\..*\\.url$"],
+      signal,
+    );
+  } catch {
+    signal?.throwIfAborted();
+    // A local directory need not be a Git checkout or have a configured remote.
+    return;
+  }
+  const remotes = configuration.split("\0").flatMap((record) => {
+    const separator = record.indexOf("\n");
+    return separator < 0 ? [] : [record.slice(separator + 1)];
+  });
+  for (const source of sources) {
+    const sourceProvider = source.platform === "github" ? "github" : provider;
+    const remoteKeys = new Set(
+      remotes.flatMap((remote) => {
+        const key = remoteRepositoryKey(remote, sourceProvider);
+        return key === undefined ? [] : [key];
+      }),
+    );
+    if (remoteKeys.size === 0) continue;
+    const key = remoteRepositoryKey(source.url, sourceProvider);
+    if (key === undefined || !remoteKeys.has(key))
+      throw new CodexSecurityError(
+        `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+      );
+  }
+}
+
+async function localContext(
+  selectedRepository: string,
+  dependencies: LocalExternalImportDependencies,
+): Promise<{
+  repository: string;
+  options: Omit<WorkbenchCommandOptions, "python">;
+}> {
+  dependencies.signal?.throwIfAborted();
+  const environment = workbenchEnvironment(
+    dependencies.environment ?? process.env,
+  );
+  const repository = await normalizeRepository(
+    expandHome(selectedRepository, environment),
+    dependencies.signal,
+  );
+  const protectedRoot = [
+    ...new Set([
+      repository,
+      ...(await gitProtectionRoots(repository, dependencies.signal)),
+      ...(await gitProtectionRoots(process.cwd(), dependencies.signal)),
+    ]),
+  ];
+  requireOutputOutsideRepositories(
+    protectedRoot,
+    await canonicalizeModelSafePath(environment.CODEX_SECURITY_STATE_DIR),
+    "runtime",
+  );
+  return {
+    repository,
+    options: {
+      pluginRoot: await bundledPluginRoot(),
+      environment,
+      protectedRoot,
+      signal: dependencies.signal,
+      failureMessage: "Could not access imported local findings",
+    },
+  };
+}
+
+/** Prepare scanner evidence without writing state or performing a security assessment. */
+export async function prepareNormalizedLocalImport(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+  dependencies: LocalExternalImportDependencies = {},
+): Promise<PreparedLocalExternalImport> {
+  dependencies.signal?.throwIfAborted();
+  requireIdentity(options.sourceKey, "Source key");
+  const current = structuredClone(input);
+  const identities = new Set<string>();
+  for (const finding of current.findings) {
+    requireIdentity(finding.source_finding_id, "Source finding id");
+    if (identities.has(finding.source_finding_id))
+      throw new CodexSecurityError(
+        `Duplicate source finding id ${JSON.stringify(finding.source_finding_id)}.`,
+      );
+    identities.add(finding.source_finding_id);
+    if (!isRecord(finding.evidence))
+      throw new CodexSecurityError("Imported evidence must be an object.");
+  }
+  const { repository, options: workbenchOptions } = await localContext(
+    options.repository,
+    dependencies,
+  );
+  const sources = new Map<string, ExternalSourceRepository>();
+  for (const { evidence } of current.findings) {
+    const url = evidence.details?.repository?.url;
+    if (url) sources.set(url, { url });
+  }
+  for (const source of dependencies.sourceRepositories ?? []) {
+    // A reader's explicit platform also applies to the same URL in typed evidence.
+    if (sources.get(source.url)?.platform !== "github")
+      sources.set(source.url, source);
+  }
+  await requireMatchingRepository(
+    repository,
+    options.provider,
+    [...sources.values()],
+    dependencies.signal,
+  );
+  dependencies.signal?.throwIfAborted();
+  const preview = {
+    ...structuredClone(current),
+    repository,
+    source: { provider: options.provider, source_key: options.sourceKey },
+  };
+  const payload = JSON.stringify(
+    {
+      repository,
+      provider: options.provider,
+      sourceKey: options.sourceKey,
+      findings: current.findings,
+    },
+    (_key, value: unknown) => {
+      if (isNumberObject(value)) value = +value;
+      if (typeof value === "number" && !Number.isFinite(value))
+        throw new TypeError(
+          "Stored finding JSON cannot contain non-finite numbers.",
+        );
+      return value;
+    },
+  );
+  return {
+    preview,
+    async import() {
+      dependencies.signal?.throwIfAborted();
+      const result = await (dependencies.runWorkbench ?? runWorkbench)(
+        workbenchOptions,
+        ["store-external-findings"],
+        payload,
+      );
+      return {
+        repository,
+        read: current.read,
+        ready: current.findings.length,
+        excluded: current.excluded,
+        findings: result["findings"] as unknown as StoredExternalFinding[],
+        counts: result["counts"] as LocalExternalImportResult["counts"],
+      };
+    },
+  };
+}
+
+/** Read imported source records, including evidence that has not been assessed by Codex. */
+export async function listLocalExternalFindings(
+  selection: { repository: string; id?: string },
+  dependencies: LocalExternalImportDependencies = {},
+): Promise<StoredExternalFinding[]> {
+  if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
+  const { repository, options } = await localContext(
+    selection.repository,
+    dependencies,
+  );
+  dependencies.signal?.throwIfAborted();
+  const result = await (dependencies.runWorkbench ?? runWorkbench)(
+    options,
+    ["list-external-findings"],
+    JSON.stringify({ repository, id: selection.id }),
+  );
+  return result["findings"] as unknown as StoredExternalFinding[];
+}

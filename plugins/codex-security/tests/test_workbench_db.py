@@ -72,6 +72,7 @@ EXPECTED_TABLES = {
     "deep_scan_runs",
     "deep_scan_worker_threads",
     "deep_scan_workers",
+    "external_source_reports",
     "finding_decisions",
     "finding_dedupe_group_members",
     "finding_dedupe_groups",

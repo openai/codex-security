@@ -1635,6 +1635,8 @@ export async function runWorkbench(
       "database-info",
       "store-findings",
       "list-stored-findings",
+      "store-external-findings",
+      "list-external-findings",
       "find-potential-duplicates",
       "store-dedupe-groups",
       "list-dedupe-groups",

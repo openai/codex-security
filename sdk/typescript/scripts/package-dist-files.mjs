@@ -24,6 +24,7 @@ const distModules = [
   "cloud-endpoint",
   "cloud-publish",
   "external-findings",
+  "external-findings-local",
   "scanner-import",
   "external-findings-publish",
   "external-import-contract",
