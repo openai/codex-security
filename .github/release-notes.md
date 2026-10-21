@@ -8,6 +8,7 @@
 - bump hono from 4.13.10 to 4.13.13 in /plugins/codex-security/mcp-app ([#1831](https://github.com/openai/codex-security/pull/1831))
 - emit optional owner suggestions after scans ([#1760](https://github.com/openai/codex-security/pull/1760))
 - compute policy diffs without Python ([#1837](https://github.com/openai/codex-security/pull/1837))
+- update @linear/sdk to 97.2.0 ([#1852](https://github.com/openai/codex-security/pull/1852))
 
 <!-- release-section: highlights:end -->
 
