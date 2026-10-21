@@ -935,6 +935,7 @@ async function preparePublicationInput(
               ),
             );
             if (
+              report.id !== item.source_report_id ||
               report.canonical_finding_id !== item.canonical_finding_id ||
               report.version < item.version! ||
               (report.version === item.version &&

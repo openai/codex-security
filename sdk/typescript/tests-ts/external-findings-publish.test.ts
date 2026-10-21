@@ -1973,7 +1973,10 @@ test("existing source updates do not need a newly discovered default environment
   expect(f.posts).toHaveLength(posts);
 });
 
-test("source readback must preserve the acknowledged batch environment", async () => {
+test.each([
+  ["id", `aif_${"0".repeat(64)}`],
+  ["environment_id", "unexpected-environment"],
+])("source readback must preserve acknowledged %s", async (field, value) => {
   const f = await fixture();
   const prepared = await prepareExternalPublication(f.file, options, {
     ...f.deps,
@@ -1982,7 +1985,7 @@ test("source readback must preserve the acknowledged batch environment", async (
       if (new URL(url).pathname.includes("/source_reports/")) {
         return Response.json({
           ...(await response.json()),
-          environment_id: "unexpected-environment",
+          [field]: value,
         });
       }
       return response;
