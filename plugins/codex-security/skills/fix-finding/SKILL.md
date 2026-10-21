@@ -17,7 +17,7 @@ Judge the result in this order:
 2. any fix completely closes the broken security boundary
 3. legitimate behavior and compatibility are preserved
 4. relevant repository checks pass
-5. the implementation follows repository conventions
+5. the implementation follows applicable organization-wide and project-specific style guides and surrounding code conventions
 6. the patch contains only the scope necessary for the earlier properties
 
 Never trade an earlier property for a later one. Minimal means the smallest repository-native change that satisfies all earlier properties, not the fewest lines.
@@ -29,6 +29,7 @@ Before editing, inspect the affected implementation, its direct callers, nearby 
 - the attacker-controlled input and concrete source-to-sink path or broken control
 - the security invariant and narrowest shared enforcement boundary
 - legitimate behavior, APIs, error semantics, and compatibility constraints that must remain
+- applicable repository instructions and organization-wide or project-specific style guides
 - the closest existing implementation, validation, and error-handling precedents
 
 Treat the finding as a data-flow and boundary problem, not merely the named input example. Check equivalent encodings, parser forms, aliases, callers, sinks, and every representation or copy of security-sensitive state that could bypass the proposed change. Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it into another reachable form.
@@ -45,10 +46,10 @@ The investigation requires repository-relative evidence and a clear separation b
 
 1. Trace the reported path and inspect only the context needed to identify the real shared boundary. Return `no_change` when repository evidence shows that the reported path is already safe; do not make a speculative change.
 2. When feasible, run the smallest high-signal reproduction through that boundary and one legitimate control through the same path.
-3. Implement the smallest repository-native fix at the shared boundary. Prefer nearby helpers and established APIs. Do not broaden into unrelated redesign, cleanup, or sibling findings.
+3. Implement the smallest repository-native fix at the shared boundary. Prefer nearby helpers and established APIs, matching surrounding naming, formatting, types, control flow, and error-handling conventions. Preserve existing APIs, helper signatures, data types, assertions, and legitimate behavior unless changing them is required for complete security closure. Do not broaden into unrelated redesign, cleanup, renaming, formatting, or sibling findings.
 4. Before verification, challenge the patch rather than defending it: inspect every direct caller of each changed helper and both outcomes of each changed condition. Look for one sibling path, representation, or copy that still reaches the vulnerable sink and one ordinary or default input that the patch newly rejects or reinterprets; revise the implementation if either exists.
 5. Verify in order:
-   - inspect the final diff and run the narrowest syntax, import, build, or type check relevant to it
+   - inspect the complete candidate diff against its original base, remove unnecessary fix-added changes while preserving pre-existing user changes, and run the narrowest syntax, import, build, or type check relevant to it
    - rerun the security trigger or strongest focused substitute and review one alternate malicious input class
    - rerun the legitimate control, nearest existing tests, and the owning package's applicable required checks
 
@@ -92,7 +93,7 @@ If using a scan artifact directory, resolve it using `../../references/scan-arti
 
 - Do not report `fixed` until every ordered verification gate has passed. Omit a check only when repository evidence shows it is irrelevant; an unavailable relevant check makes verification `blocked` and must be reported.
 - Do not rely only on code inspection when a focused test or reproducer is feasible.
-- Do not broaden the patch into unrelated cleanup, sibling findings, or architectural redesign without evidence that the broader change is required for complete closure.
+- Do not broaden the patch into unrelated refactoring, cleanup, formatting, sibling findings, or architectural redesign without evidence that the broader change is required for complete closure.
 - Do not remove user changes or unrelated local modifications.
 - Do not weaken authentication, authorization, tenant isolation, input validation, sandboxing, or logging to make tests pass.
 - Do not hide proof gaps. If the environment blocks validation, say exactly which command or setup failed and what evidence is still missing.
