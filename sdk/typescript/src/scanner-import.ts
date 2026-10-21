@@ -48,6 +48,25 @@ export function stableId(prefix: string, fields: unknown[]): string {
   return `${prefix}:${hash("sha256", JSON.stringify(fields))}`;
 }
 
+/** Detect gzip from the report bytes and preserve identities with strict UTF-8. */
+export async function readScannerText(path: string): Promise<string> {
+  let bytes = await readFile(path);
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b)
+    bytes = await promisify(gunzip)(bytes);
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+export function parseJsonOrJsonl(contents: string): unknown {
+  try {
+    return JSON.parse(contents);
+  } catch {
+    return contents
+      .split(/\r?\n/u)
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+  }
+}
+
 export async function readScannerJson(path: string): Promise<unknown> {
   let bytes = await readFile(path);
   if (bytes[0] === 0x1f && bytes[1] === 0x8b)
@@ -74,7 +93,7 @@ export async function readScannerJson(path: string): Promise<unknown> {
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
 export function normalizeRecords<T>(
   records: T[],
-  normalize: (record: T) => ExternalFinding,
+  normalize: (record: T, id: string) => ExternalFinding,
   identify: (record: T) => string,
 ): ExternalFindings {
   const result: ExternalFindings = {
@@ -112,7 +131,7 @@ export function normalizeRecords<T>(
       continue;
     }
     try {
-      const finding = normalize(value);
+      const finding = normalize(value, id);
       if (finding.source_finding_id !== id)
         throw new Error("Finding identity changed during normalization.");
       result.findings.push(finding);

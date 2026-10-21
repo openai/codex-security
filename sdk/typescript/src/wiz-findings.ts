@@ -1,14 +1,9 @@
-import { readFile } from "node:fs/promises";
-import { promisify } from "node:util";
-import { gunzip } from "node:zlib";
 import { CodexSecurityError } from "./errors.js";
 import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-
-const decompressGzip = promisify(gunzip);
-
+import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
 import type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
@@ -84,23 +79,21 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
     severity: severity?.toLowerCase(),
     url: text(record["portalUrl"]),
     advisory_ids: [text(record["vulnerabilityExternalId"]) ?? name],
-    packages: packageName
-      ? [
-          {
-            name: packageName,
-            ecosystem:
-              text(record["packageManager"]) ??
-              text(artifact?.["osPackageManager"]) ??
-              text(artifact?.["codeLibraryLanguage"]) ??
-              text(record["codeLibraryLanguage"]),
-            installed_version: version,
-            manifest_path: repositoryPath,
-            fixed_versions: text(record["fixedVersion"])
-              ? [record["fixedVersion"]]
-              : [],
-          },
-        ]
-      : [],
+    packages: [
+      {
+        name: packageName,
+        ecosystem:
+          text(record["packageManager"]) ??
+          text(artifact?.["osPackageManager"]) ??
+          text(artifact?.["codeLibraryLanguage"]) ??
+          text(record["codeLibraryLanguage"]),
+        installed_version: version,
+        manifest_path: repositoryPath,
+        fixed_versions: text(record["fixedVersion"])
+          ? [record["fixedVersion"]]
+          : [],
+      },
+    ],
     locations: repositoryPath ? [{ path: repositoryPath }] : [],
     branch: null,
     code_revision: null,
@@ -130,10 +123,7 @@ type RepositoryMetadata = {
 
 type FindingInput = {
   records: InputRecord[];
-  repositories: Map<
-    string,
-    RepositoryMetadata & { platform: string | null; names?: string[] }
-  >;
+  repositories: Map<string, RepositoryMetadata & { platform: string | null }>;
   legacyRepositories?: FindingInput["repositories"];
 };
 
@@ -178,7 +168,6 @@ function sourceRepository(
 function sourceBranch(
   branch: Record<string, unknown> | undefined,
   repository: RepositoryMetadata,
-  inventoryNames: readonly string[] = [],
   legacy = false,
 ): string | null {
   const name = text(branch?.["name"]);
@@ -186,8 +175,7 @@ function sourceBranch(
   // Repository names and URL paths can both be literal branch prefixes. Keep
   // the old mapping only for an already approved publication checkpoint.
   if (!legacy) return name;
-  const qualifiers = [...inventoryNames];
-  if (repository.name) qualifiers.push(repository.name);
+  const qualifiers = repository.name ? [repository.name] : [];
 
   // Include the URL qualifier before selecting the longest repository prefix.
   // Keep URL normalization and the branch suffix's original case and slashes.
@@ -316,14 +304,7 @@ function repositoryFinding(
       description: text(record["description"]) ?? text(rule?.["description"]),
       url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
       locations: path ? [{ path, line: line ?? null }] : [],
-      branch: sourceBranch(
-        branch,
-        repository,
-        text(suppliedRepository?.["name"])
-          ? []
-          : repositories.get(repository.id ?? "")?.names,
-        legacy,
-      ),
+      branch: sourceBranch(branch, repository, legacy),
       code_revision: null,
       source_scan_id: null,
       source_updated_at:
@@ -401,12 +382,6 @@ function records(payload: unknown): FindingInput {
         );
       repositories.set(entry.id, {
         ...entry,
-        names: [
-          ...new Set([
-            ...(previous?.names ?? []),
-            ...(entry.name ? [entry.name] : []),
-          ]),
-        ],
         // Equivalent inventory aliases must produce the same evidence when the
         // export reorders its rows. Keep a stable supplied URL and nonempty name.
         url: previous && previous.url < entry.url ? previous.url : entry.url,
@@ -457,16 +432,7 @@ function records(payload: unknown): FindingInput {
     return {
       records: selected,
       repositories,
-      ...([...repositories].some(([id, current]) => {
-        const legacy = legacyRepositories.get(id)!;
-        return (
-          current.url !== legacy.url ||
-          current.name !== legacy.name ||
-          current.names?.some((name) => name !== legacy.name)
-        );
-      })
-        ? { legacyRepositories }
-        : {}),
+      legacyRepositories,
     };
   throw new Error(
     "Unsupported Wiz export. Supply vulnerability finding objects, named sastFindings/secretInstances/iacFindings collections, or normalized JSONL. CSV reports must be converted to the documented normalized JSONL profile.",
@@ -525,25 +491,7 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
 
 async function readFindingInput(path: string): Promise<FindingInput> {
   try {
-    // Wiz's default report export is gzip, sometimes with a .json filename.
-    // Inspect the bytes rather than requiring users to rename their download.
-    const bytes = await readFile(path);
-    const decoded =
-      bytes[0] === 0x1f && bytes[1] === 0x8b
-        ? await decompressGzip(bytes)
-        : bytes;
-    // A replacement character would change vendor identities and retained evidence.
-    const contents = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
-    let payload: unknown;
-    try {
-      payload = JSON.parse(contents);
-    } catch {
-      payload = contents
-        .split(/\r?\n/u)
-        .filter((line) => line.trim())
-        .map((line) => JSON.parse(line));
-    }
-    return records(payload);
+    return records(parseJsonOrJsonl(await readScannerText(path)));
   } catch (cause) {
     throw new CodexSecurityError(
       `Could not read vendor findings as UTF-8 JSON or JSONL: ${cause instanceof Error ? cause.message : String(cause)}`,
