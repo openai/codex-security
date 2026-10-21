@@ -8,12 +8,7 @@ import { main } from "../src/cli.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import {
-  capture,
-  dependencies,
-  fakeResult,
-  type OnCodex,
-} from "./cli-fixtures.js";
+import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
 
@@ -39,38 +34,6 @@ const linearClient = () =>
   ({ issue: linearIssue }) as ReturnType<LinearClientFactory>;
 
 describe("read-only finding verification", () => {
-  test("selects static verification without changing the read-only sandbox", async () => {
-    const { stdout, runCli } = createCliTest(main);
-    const evidence =
-      "The guard closes the original path. Runtime checks were not performed.";
-    const onCodex = mock<OnCodex>((_args, output) => {
-      expect(output?.appServer?.prompt).toContain("Verification mode: static");
-      expect(output?.appServer?.sandbox).toBe("read-only");
-      output?.stdout.write(
-        JSON.stringify({
-          results: [{ id: "finding-1", status: "fixed", evidence }],
-        }),
-      );
-      return 0;
-    });
-    expect(
-      await runCli(
-        [
-          "verify-fix",
-          "Synthetic finding",
-          "--verification-mode",
-          "static",
-          "--json",
-        ],
-        dependencies({ onCodex }),
-      ),
-    ).toBe(0);
-    expect(onCodex).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(stdout.text()).results).toEqual([
-      { id: "finding-1", status: "fixed", evidence },
-    ]);
-  });
-
   test("verifies imported Linear issues in a read-only sandbox without exposing credentials", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -345,7 +308,9 @@ describe("read-only finding verification", () => {
     });
   });
 
-  test("verifies saved findings in their original repository", async () => {
+  test("verifies saved findings in their original repository with static mode", async () => {
+    const evidence =
+      "Source review confirms the guard; runtime checks were not performed.";
     const result = fakeResult(["high", "medium"]);
     result.findings.findings.forEach((finding, index) => {
       Object.assign(finding, {
@@ -364,6 +329,8 @@ describe("read-only finding verification", () => {
           "scan-1",
           "--severity",
           "high",
+          "--verification-mode",
+          "static",
           "--model",
           "gpt-6-astra",
           "--effort",
@@ -387,6 +354,9 @@ describe("read-only finding verification", () => {
             expect(args).toContain('model_reasoning_effort="max"');
             expect(output?.appServer?.directory).toBe("/saved/repository");
             expect(output?.appServer?.sandbox).toBe("read-only");
+            expect(output?.appServer?.prompt).toContain(
+              "Verification mode: static",
+            );
             const findings = JSON.parse(
               output!.appServer!.prompt.split("\n").at(-1)!,
             ) as Finding[];
@@ -399,8 +369,7 @@ describe("read-only finding verification", () => {
                   {
                     id: "occ_1",
                     status: "fixed",
-                    evidence:
-                      "The original exploit fails and regression checks pass.",
+                    evidence,
                   },
                 ],
               }),
@@ -414,7 +383,7 @@ describe("read-only finding verification", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       repository: "/saved/repository",
       scanId: "scan-1",
-      results: [{ id: "occ_1", status: "fixed" }],
+      results: [{ id: "occ_1", status: "fixed", evidence }],
     });
   });
 

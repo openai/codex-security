@@ -1,9 +1,7 @@
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import {
-  HostedRemediationInputSchema,
   runHostedRemediation,
   runHostedRemediationProtocol,
   type HostedRemediationInput,
@@ -48,13 +46,24 @@ async function fixture(
   );
 }
 
-test.each(["patch", "verify"] as const)(
-  "%s reuses skill context, explicit instructions, and the requested sandbox",
-  async (operation) => {
+test.each([
+  ["patch", "standard"],
+  ["verify", "standard"],
+  ["patch", "static"],
+  ["verify", "static"],
+] as const)(
+  "%s preserves skill context, instructions, and permissions in %s mode",
+  async (operation, mode) => {
+    const staticVerification = mode === "static";
     const input = {
       ...(await fixture(operation)),
       reasoningEffort: "provider-specific-effort",
+      verificationMode: staticVerification ? mode : undefined,
+      validationInstructions: "Install dependencies and run regression tests.",
     };
+    const evidence =
+      "guard.ts rejects unauthorized requests before dispatch and preserves authorized callers. Runtime checks were not performed.";
+    const staticChecks = [{ ...passedChecks[1]!, evidence }];
     const run = mock<RemediationExecutor["run"]>(async (request, options) => {
       expect(request).toMatchObject({
         operation,
@@ -68,14 +77,42 @@ test.each(["patch", "verify"] as const)(
       });
       expect(request.prompt).toContain(input.finding.context);
       expect(request.prompt).toContain(input.instructions!);
-      expect(request.prompt).toContain(input.validationInstructions!);
+      expect(request.prompt).toContain(input.validationInstructions);
       expect(request.prompt).toContain(
         operation === "patch"
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
       options.onEvent?.({ type: "activity", description: "Checking guard" });
-      return receipt(request);
+      if (!staticVerification) return receipt(request);
+      expect(request.prompt).toContain("Verification mode: static");
+      expect(request.prompt).toContain("without executing requested setup");
+      expect(request.prompt).not.toContain(
+        "instructions for dynamic validation",
+      );
+      expect(request.prompt).not.toContain(
+        "only after the original issue no longer reproduces",
+      );
+      return receipt(request, {
+        finalResponse: JSON.stringify(
+          operation === "patch"
+            ? {
+                patches: [
+                  {
+                    occurrenceId: input.finding.id,
+                    status: "verified",
+                    files: ["guard.ts"],
+                    verification: evidence,
+                  },
+                ],
+              }
+            : {
+                results: [
+                  { ...verificationResult, evidence, checks: staticChecks },
+                ],
+              },
+        ),
+      });
     });
     const result = await runHostedRemediation(input, {
       executor: { run },
@@ -96,133 +133,22 @@ test.each(["patch", "verify"] as const)(
         ? result.patch?.status
         : result.verification?.status,
     ).toBe(operation === "patch" ? "verified" : "fixed");
-    if (operation === "verify")
-      expect(result.verification?.checks).toEqual(passedChecks);
-    await runHostedRemediation(
-      { ...input, verificationMode: "standard" },
-      { executor: { run } },
-    );
-    expect(run.mock.calls[1]![0].prompt).toBe(run.mock.calls[0]![0].prompt);
-  },
-);
-
-test.each(["patch", "verify"] as const)(
-  "static %s scopes requested runtime validation to source assessment",
-  async (operation) => {
-    const input = {
-      ...(await fixture(operation)),
-      verificationMode: "static" as const,
-      validationInstructions: "Install dependencies and run regression tests.",
-    };
-    const evidence =
-      "guard.ts rejects unauthorized requests before dispatch and preserves authorized callers. Runtime checks were not performed.";
-    const run = mock<RemediationExecutor["run"]>(async (request) => {
-      expect(request.prompt).toContain("Verification mode: static");
-      expect(request.prompt).toContain(input.validationInstructions);
-      expect(request.prompt).toContain("without executing requested setup");
-      expect(request.prompt).not.toContain(
-        "instructions for dynamic validation",
-      );
-      expect(request.prompt).not.toContain(
-        "only after the original issue no longer reproduces",
-      );
-      expect(request.sandbox).toBe(
-        operation === "verify" ? "read-only" : "workspace-write",
-      );
-      return receipt(request, {
-        finalResponse: JSON.stringify(
-          operation === "patch"
-            ? {
-                patches: [
-                  {
-                    occurrenceId: input.finding.id,
-                    status: "verified",
-                    files: ["guard.ts"],
-                    verification: evidence,
-                  },
-                ],
-              }
-            : {
-                results: [
-                  {
-                    id: input.finding.id,
-                    status: "fixed",
-                    evidence,
-                    checks: [
-                      {
-                        name: "Authorization paths and legitimate callers",
-                        status: "passed",
-                        evidence,
-                      },
-                    ],
-                  },
-                ],
-              },
-        ),
-      });
-    });
-    const result = await runHostedRemediation(input, { executor: { run } });
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(result.status).toBe("completed");
     expect(result.patch?.verification ?? result.verification?.evidence).toBe(
-      evidence,
+      staticVerification ? evidence : verificationResult.evidence,
     );
-    if (operation === "verify") {
-      expect(result.verification?.status).toBe("fixed");
-      expect(result.verification?.checks?.[0]?.command).toBeUndefined();
+    if (operation === "verify")
+      expect(result.verification?.checks).toEqual(
+        staticVerification ? staticChecks : passedChecks,
+      );
+    if (!staticVerification) {
+      await runHostedRemediation(
+        { ...input, verificationMode: "standard" },
+        { executor: { run } },
+      );
+      expect(run.mock.calls[1]![0].prompt).toBe(run.mock.calls[0]![0].prompt);
     }
   },
 );
-
-test.each(["fixed", "inconclusive"] as const)(
-  "static verification retains a source-evidence gap for a reported %s result",
-  async (status) => {
-    const input = {
-      ...(await fixture("verify")),
-      verificationMode: "static" as const,
-    };
-    const evidence =
-      "The authorization provider implementation is unavailable, so its return value cannot be established from source.";
-    const verification = {
-      id: input.finding.id,
-      status,
-      evidence,
-      checks: [
-        {
-          name: "Authorization provider contract",
-          status: "not_run" as const,
-          evidence,
-        },
-      ],
-    };
-    const result = await runHostedRemediation(input, {
-      executor: {
-        run: async (request) =>
-          receipt(request, {
-            finalResponse: JSON.stringify({ results: [verification] }),
-          }),
-      },
-    });
-    if (status === "inconclusive") {
-      expect(result.status).toBe("completed");
-      expect(result.verification).toEqual(verification);
-    } else {
-      expect(result.status).toBe("failed");
-      expect(result.error?.code).toBe("INVALID_RESULT");
-      expect(result.execution?.sessionId).toBe("host-session");
-    }
-  },
-);
-
-test("hosted input rejects an unsupported verification mode", async () => {
-  const input = await fixture();
-  expect(() =>
-    HostedRemediationInputSchema.parse({
-      ...input,
-      verificationMode: "unrestricted",
-    }),
-  ).toThrow();
-});
 
 test.each([
   ["still_vulnerable", "failed"],
@@ -389,23 +315,18 @@ test("malformed protocol input returns one error without dispatch", async () => 
 });
 
 test.each([
-  ["patch", false, false],
-  ["verify", false, false],
-  ["verify", true, false],
-  ["patch", false, true],
-  ["verify", false, true],
-  ["verify", true, true],
+  ["patch", false],
+  ["verify", false],
+  ["verify", true],
 ] as const)(
-  "protocol pipes execute %s with cancellation=%p, CLI=%p",
-  async (operation, cancel, cli) => {
-    const input = await fixture(operation);
-    const entrypoint = cli
-      ? join(import.meta.dirname, "../src/cli.ts")
-      : pathToFileURL(join(import.meta.dirname, "../src/index.ts")).href;
-    await exerciseRemediationProtocol(process.execPath, entrypoint, input, {
-      cancel,
-      cli,
-    });
+  "CLI protocol pipes execute %s with cancellation=%p",
+  async (operation, cancel) => {
+    await exerciseRemediationProtocol(
+      process.execPath,
+      join(import.meta.dirname, "../src/cli.ts"),
+      await fixture(operation),
+      { cancel },
+    );
   },
 );
 

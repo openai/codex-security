@@ -80,31 +80,25 @@ export function remediationReceipt(request, overrides = {}) {
 }
 
 /**
- * Exercise the same pipe contract against source and installed SDK entrypoints.
+ * Exercise the same pipe contract against source and installed CLI entrypoints.
  * @param {string} node
  * @param {string} entrypoint
  * @param {import("../../src/hosted-remediation.js").HostedRemediationInput} input
- * @param {{cli?: boolean, cancel?: boolean, onExecution?: (request: import("../../src/hosted-remediation.js").RemediationExecutionRequest) => Promise<void>}} options
+ * @param {{cancel?: boolean, onExecution?: (request: import("../../src/hosted-remediation.js").RemediationExecutionRequest) => Promise<void>}} options
  */
 export async function exerciseRemediationProtocol(
   node,
   entrypoint,
   input,
-  { cli = false, cancel = false, onExecution } = {},
+  { cancel = false, onExecution } = {},
 ) {
   const child = spawn(
     node,
-    cli
-      ? [
-          entrypoint,
-          input.operation === "patch" ? "patch" : "verify-fix",
-          "--host",
-        ]
-      : [
-          "--input-type=module",
-          "-e",
-          `import {runHostedRemediationProtocol} from ${JSON.stringify(entrypoint)}; process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);`,
-        ],
+    [
+      entrypoint,
+      input.operation === "patch" ? "patch" : "verify-fix",
+      "--host",
+    ],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
   const closed = new Promise((resolve, reject) => {

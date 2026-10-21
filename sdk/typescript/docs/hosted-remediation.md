@@ -47,21 +47,18 @@ a required check that cannot run without repository changes is a proof gap,
 not permission to edit. Generation's ordinary skill checks and standalone
 verification are separate operations.
 
-Set `verificationMode: "static"` to assess the fix from source evidence without
-installing dependencies, building, running tests or reproducers, or starting the
-application. This applies to validation during `patch` as well as standalone
-`verify`; select it for both requests when both stages should be static. Omit
-the field or use `"standard"` to retain the existing behavior.
+Set `verificationMode: "static"` to review attack paths, bypasses, and legitimate
+behavior from source and diffs, without installing dependencies or executing
+builds, tests, reproducers, or the application. Select it for both `patch` and
+`verify` requests when both stages should be static. Omitted or `"standard"`
+retains the existing behavior.
 
-Static mode reviews the original attack path, candidate changes, equivalent
-paths and bypasses, and legitimate behavior. Validation instructions become
-additional questions for that source review, including when they request
-runtime checks. Missing runtime tooling alone does not block the assessment;
-material source-evidence gaps still produce `blocked` or `inconclusive`. Results
-must explain the static evidence and state that runtime checks were not
-performed. Hosts should retain the selected mode with the attempt and display
-it alongside the result. This is an assessment policy, not a command-execution
-security boundary; sandbox permissions remain unchanged.
+Static mode treats validation instructions as source-review questions. Missing
+runtime tooling alone is not a blocker; material proof gaps still produce
+`blocked` or `inconclusive`. Results must cite source evidence and state that
+runtime checks were not performed. Hosts should retain and display the selected
+mode with each attempt. This is an assessment policy; sandbox permissions remain
+unchanged and do not enforce the static scope.
 
 The executor receives one request with a unique `requestId`, operation,
 repository/revision, identity, finding ID, prompt, model, reasoning effort,

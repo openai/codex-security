@@ -37,7 +37,6 @@ try {
   for (const operation of ["patch", "verify"]) {
     const input = remediationInput({ repository, revision }, operation);
     await exerciseRemediationProtocol(node, entrypoint, input, {
-      cli: true,
       async onExecution(request) {
         assert.ok(request.prompt.includes(input.validationInstructions));
         const skill = operation === "patch" ? "fix-finding" : "verify-fix";
