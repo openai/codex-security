@@ -1197,6 +1197,18 @@ Supply the validation prompt again when rerunning.
 
 ## Import vendor findings locally
 
+Prefer the provider's supported native JSON from its CLI, plugin, or API. Native
+reports can retain details omitted by SARIF. Use SARIF or CSV as compatibility
+inputs only for providers and report profiles that support them. A JSON API
+summary is not automatically a supported report; follow the provider's acquisition
+instructions and retain the original records. The readers detect supported input
+formats; `--format json` selects command output, not the input format.
+
+Keep the acquisition format consistent across imports. Depending on the provider,
+switching formats can create separate records for the same vulnerability or
+replace a richer evidence snapshot with less detail. The importer does not merge
+evidence or deduplicate equivalent vulnerabilities across different source IDs.
+
 Use the same vendor input and parser as Cloud publication, selecting a local
 repository path instead of a Cloud repository ID or URL:
 

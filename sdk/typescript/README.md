@@ -659,6 +659,12 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
+Prefer each provider's supported native JSON for local and Cloud imports. Keep
+the same acquisition format for repeat imports: SARIF and CSV are compatibility
+options where supported, and changing formats can change record identities or
+replace richer evidence with less detail. See the
+[import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
 Use `publish findings FILE --to local --repository PATH --provider wiz
 --source-key KEY` to store the same vendor evidence in the local workbench SQLite
 database. Preview with `--dry-run --format json`, then confirm interactively or

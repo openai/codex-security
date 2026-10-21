@@ -9,6 +9,12 @@ Use the installed `codex-security publish findings` command for preview and impo
 
 For `--to cloud`, destinations currently support connected GitHub and GitHub Enterprise repositories, including custom Enterprise hostnames. Resolve the user's destination to its repository URL or Cloud repository ID; the command accepts either. Confirm that the repository is connected in the intended Cloud account and has an authorized environment. Use the existing file-backed ChatGPT login; explain a missing or incompatible login rather than changing credential storage automatically.
 
+## Choose the source report
+
+Prefer the provider's supported native JSON from its authenticated CLI, plugin, or API. Keep the original records and complete the requested pagination. A JSON summary or a different product's API response is not interchangeable with the documented report. Use SARIF or CSV only when the installed provider reader supports that profile and native JSON is unavailable or the user supplies that format. Do not convert a richer JSON report to SARIF for import.
+
+Use the same acquisition format for repeated imports. Check the provider's identity rules before switching formats: another format can create a separate record or replace a richer snapshot with less detail. Importing findings does not reconcile equivalent vulnerabilities across formats. `--format json` controls command output, not the input report format; readers detect their supported inputs.
+
 ## Local imports
 
 For local storage, use a repository path with `--repository`. No Cloud login is required. Preview the same selected evidence before importing:
