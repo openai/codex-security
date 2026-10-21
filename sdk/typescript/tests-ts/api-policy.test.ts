@@ -471,7 +471,7 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test("uses the client's Python and renders preview controls visibly", async () => {
+  test("renders preview controls without resolving the client's Python", async () => {
     const content = `${POLICY}\n\u001b]52;c;c3ludGhldGlj\u0007\u202eOwner note\n`;
     const f = await setup({
       config: { pythonPath: "configured-policy-python" },
@@ -495,7 +495,7 @@ describe("CodexSecurity policy API", () => {
       python.mockRestore();
     }
     const preview = await f.security.previewPolicy(draft);
-    expect(f.pythonSelections).toHaveLength(2);
+    expect(f.pythonSelections).toHaveLength(1);
     for (const selection of f.pythonSelections)
       expect(selection).toMatchObject({
         configuredPath: "configured-policy-python",

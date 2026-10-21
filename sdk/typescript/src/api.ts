@@ -248,7 +248,6 @@ import {
 } from "./runtime.js";
 import {
   enclosingGitWorktreeRoot,
-  enclosingGitWorktreeRoots,
   normalizeRepository,
   normalizeTarget,
   gitMarkerRoot,
@@ -1255,22 +1254,7 @@ export class CodexSecurity {
         ...(options.signal === undefined ? [] : [options.signal]),
       ]);
       return formatSecurityPolicyText(
-        await securityPolicyDiff(
-          draft,
-          async () =>
-            await (
-              this.#dependencies.resolvePluginPython ?? resolvePluginPython
-            )({
-              configuredPath: this.config.pythonPath,
-              environment: this.#dependencies.environment,
-              protectedRoot:
-                (await enclosingGitWorktreeRoots(draft.repository, signal)).at(
-                  -1,
-                ) ?? draft.repository,
-              signal,
-            }),
-          signal,
-        ),
+        await securityPolicyDiff(draft, undefined, signal),
         true,
       );
     });

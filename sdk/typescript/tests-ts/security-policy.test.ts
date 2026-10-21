@@ -1042,6 +1042,28 @@ describe("security policy preview", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
+  test.each([null, "", "# Old policy\n"])(
+    "preserves missing and empty policy behavior (%j)",
+    async (before) => {
+      const f = await fixture();
+      if (before !== null)
+        await writeFile(join(f.repository, "SECURITY.md"), before);
+      const draft = await f.generate();
+      const diff = await securityPolicyDiff({ ...draft, content: "" });
+      expect(diff).toBe(
+        before
+          ? "--- a/SECURITY.md\n+++ b/SECURITY.md\n@@ -1 +0,0 @@\n-# Old policy\n"
+          : "",
+      );
+      if (before === "") {
+        expect(await securityPolicyDiff(draft)).toStartWith(
+          "--- a/SECURITY.md\n+++ b/SECURITY.md\n",
+        );
+      }
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(before);
+    },
+  );
+
   test("rejects preview after a component changes Git roots", async () => {
     for (const change of ["add", "remove"] as const) {
       const f = await fixture();
@@ -1085,7 +1107,7 @@ describe("security policy preview", () => {
     expect(diff.match(/No newline at end of file/gu)).toHaveLength(2);
   });
 
-  test("preserves native launch errors and settles failed diff input", async () => {
+  test("previews with Python unavailable in a Node process", async () => {
     const f = await fixture();
     const draft = await f.generate();
     const source = new URL("../src/security-policy.ts", import.meta.url);
@@ -1098,14 +1120,7 @@ describe("security policy preview", () => {
     expect(built.success).toBe(true);
     const module = join(f.root, "policy.mjs");
     await writeFile(module, await built.outputs[0]!.text());
-    const ignoreInput = join(f.root, "ignore-input");
-    const deniedInterpreter = join(f.root, "denied-interpreter");
-    if (process.platform !== "win32") {
-      await writeFile(ignoreInput, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-      await writeFile(deniedInterpreter, "#!/bin/sh\nexit 0\n", {
-        mode: 0o600,
-      });
-    }
+    const missingPython = join(f.root, "missing-python");
     const result = JSON.parse(
       execFileSync(
         nodeCommand().command,
@@ -1113,89 +1128,66 @@ describe("security policy preview", () => {
           "--input-type=module",
           "--eval",
           `
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { setTimeout as delay } from "node:timers/promises";
+import { readFileSync } from "node:fs";
 const { securityPolicyDiff } = await import(process.argv[1]);
 const draft = JSON.parse(readFileSync(0, "utf8"));
-const failures = [];
-for (const [interpreter, size] of [[process.execPath, 100], [process.argv[3], 900000], [process.argv[4], 900000], [process.argv[2], 900000]].filter(([interpreter]) => interpreter)) {
-  try { await securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(size) }, interpreter); failures.push(null); }
-  catch (error) { failures.push({ code: error.code, message: error.message }); }
-}
-if (process.argv[2]) {
-  const wrapper = process.argv[2];
-  const release = wrapper + '-held';
-  const diagnostic = '  synthetic café 日本語 😀 error\\n  ';
-  const holder = "const fs = require('fs'); process.send('ready'); const timer = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(timer); fs.writeFileSync(process.argv[1] + '.done', 'done'); process.exit(0); } }, 10); setTimeout(() => process.exit(2), 10000).unref();";
-  const launcher = [
-    '#!' + process.execPath,
-    "require('fs').closeSync(0);",
-    "const child = require('child_process').spawn(process.execPath, ['-e', " + JSON.stringify(holder) + ", " + JSON.stringify(release) + "], { stdio: ['ignore', 1, 2, 'ipc'] });",
-    "child.once('message', () => process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(0)));",
-  ].join('\\n');
-  writeFileSync(wrapper, launcher, { mode: 0o700 });
-  const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
-    () => ({ code: null }), error => ({ code: error.code, message: error.message }));
-  let outcome;
-  try {
-    outcome = await Promise.race([task, delay(2000).then(() => null)]);
-  } finally {
-    writeFileSync(release, 'release');
-    await task;
-    while (!existsSync(release + '.done')) await delay(10);
-  }
-  failures.push({ ...outcome, settledBeforeRelease: outcome !== null });
-  for (const live of [true, false]) {
-    const release = wrapper + '-live-' + live;
-    const pid = release + '.pid';
-    const finish = "require('fs').writeFileSync(" + JSON.stringify(release + '.done') + ", 'done'); process.stderr.write(" + JSON.stringify(diagnostic) + ", () => process.exit(7));";
-    const body = live
-      ? "const fs=require('fs'); fs.writeFileSync(" + JSON.stringify(pid) + ", String(process.pid)); fs.closeSync(0); const timer=setInterval(() => { if (fs.existsSync(" + JSON.stringify(release) + ")) { clearInterval(timer); " + finish + " } }, 10);"
-      : "process.stdin.resume(); process.stdin.once('end', () => { " + finish + " });";
-    writeFileSync(wrapper, ['#!' + process.execPath, body].join('\\n'), { mode: 0o700 });
-    const task = securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(900000) }, wrapper).then(
-      () => ({ code: null }), error => ({ code: error.code, message: error.message }));
-    let outcome;
-    let childAlive = false;
-    try {
-      outcome = await Promise.race([task, delay(2000).then(() => null)]);
-      if (live) {
-        process.kill(Number(readFileSync(pid, 'utf8')), 0);
-        childAlive = true;
-      }
-    } finally {
-      writeFileSync(release, 'release');
-      await task;
-      while (!existsSync(release + '.done')) await delay(10);
-    }
-    failures.push({ ...outcome, settledBeforeRelease: outcome !== null, childAlive, preservedDiagnostic: live || outcome?.message.endsWith(diagnostic) });
-  }
-}
-console.log(JSON.stringify(failures));`,
+const defaultDiff = await securityPolicyDiff(draft);
+const explicitDiff = await securityPolicyDiff(draft, process.env.PYTHON);
+console.log(JSON.stringify({ defaultDiff, explicitDiff }));`,
           pathToFileURL(module).href,
-          process.platform === "win32" ? "" : ignoreInput,
-          join(f.root, "missing-interpreter"),
-          process.platform === "win32" ? "" : deniedInterpreter,
         ],
-        { encoding: "utf8", input: JSON.stringify(draft), timeout: 20_000 },
+        {
+          encoding: "utf8",
+          input: JSON.stringify(draft),
+          env: {
+            ...process.env,
+            PATH: "",
+            PYTHON: missingPython,
+            CODEX_SECURITY_PYTHON_COMMAND: missingPython,
+          },
+          timeout: 20_000,
+        },
       ),
     );
-    expect(result[0].code).toBe(9);
-    expect(result[0].message).toContain("bad option: -I");
-    expect(result[1].code).toBe("ENOENT");
-    if (process.platform !== "win32") {
-      expect(result[2].code).toBe("EACCES");
-      expect(result[3].code).toBe("EPIPE");
-      expect(result.slice(4)).toMatchObject([
-        { code: "EPIPE", settledBeforeRelease: true },
-        { code: "EPIPE", settledBeforeRelease: true, childAlive: true },
-        { code: 7, settledBeforeRelease: true, preservedDiagnostic: true },
-      ]);
-    }
+    expect(result.defaultDiff).toContain("--- /dev/null\n+++ b/SECURITY.md\n");
+    expect(result.explicitDiff).toBe(result.defaultDiff);
     expect(await readdir(f.repository)).toEqual([]);
   });
 
-  test("preserves UTF-8 text and CRLF content independently of Python's locale", async () => {
+  test("awaits explicit legacy resolvers and propagates their errors", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const resolver = mock(async () => join(f.root, "missing-python"));
+    expect(await securityPolicyDiff(draft, resolver)).toBe(
+      await securityPolicyDiff(draft),
+    );
+    expect(resolver).toHaveBeenCalledTimes(1);
+    const failure = new Error("Synthetic resolver failure");
+    await expect(
+      securityPolicyDiff(draft, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  test("honors cancellation supplied through the public diff API", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const controller = new AbortController();
+    const reason = new Error("Preview cancelled");
+    await expect(
+      securityPolicyDiff(
+        draft,
+        async () => {
+          controller.abort(reason);
+          return "unused-python";
+        },
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+  });
+
+  test("preserves UTF-8 text and CRLF content", async () => {
     const f = await fixture();
     await writeFile(
       join(f.repository, "SECURITY.md"),
