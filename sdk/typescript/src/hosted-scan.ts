@@ -172,7 +172,7 @@ function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
 
 export interface HostedScanOptions {
   executor: ScanExecutor;
-  /** Host-owned, read-only inference for the optional owner stage. Never uses local credentials. */
+  /** @deprecated Automatic owner reports validate scan hints without additional inference. */
   ownerCodex?: {
     startThread(options: { model?: string; modelReasoningEffort?: string }): {
       run(
@@ -211,11 +211,6 @@ export async function runHostedScan(
       environment: hostedScanEnvironment(input.stateDirectory),
       hostedScan: {
         context,
-        ownerCodex: options.ownerCodex ?? {
-          startThread() {
-            throw new Error("Hosted owner inference is unavailable.");
-          },
-        },
         executor: {
           async run(value, runOptions) {
             request = value;

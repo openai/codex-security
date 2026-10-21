@@ -167,3 +167,68 @@ test.each([true, false])(
     expect(inference).not.toHaveBeenCalled();
   },
 );
+
+test.each([
+  "identified",
+  "missing",
+  "invalid",
+  "unknown",
+  "wrong_commit",
+] as const)(
+  "finalizes an inline %s hint without inference and preserves sealed findings",
+  async (outcome) => {
+    const { repository, result } = await fixture();
+    await rm(join(repository, "CODEOWNERS"));
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "Remove declaration");
+    const revision = git(repository, "rev-parse", "HEAD");
+    const authorCommit = git(repository, "rev-parse", "HEAD^");
+    result.manifest.scan.target.revision = revision;
+    const finding = result.findings.findings[0]!;
+    if (outcome !== "missing")
+      finding.extensions = {
+        ownerSuggestion:
+          outcome === "invalid"
+            ? "invalid"
+            : {
+                email:
+                  outcome === "unknown"
+                    ? "unobserved@example.test"
+                    : git(
+                        repository,
+                        "show",
+                        "-s",
+                        "--format=%ae",
+                        authorCommit,
+                      ),
+                commit:
+                  outcome === "wrong_commit" ? "0".repeat(40) : authorCommit,
+                reason: "Maintains the affected source.",
+              },
+      };
+    const before = JSON.stringify(result.findings);
+    const inference = mock(() => {
+      throw new Error("No owner inference is allowed");
+    });
+    const path = await writeScanOwnerSuggestions(
+      repository,
+      result,
+      {
+        restore: async (name, bytes) => {
+          await writeFile(join(result.scanDir, name), bytes);
+        },
+      },
+      { codex: { startThread: inference } },
+    );
+    const report = JSON.parse(await readFile(path!, "utf8"));
+    expect(report.results[0].status).toBe(
+      outcome === "identified"
+        ? "identified"
+        : outcome === "missing"
+          ? "abstained"
+          : "error",
+    );
+    expect(JSON.stringify(result.findings)).toBe(before);
+    expect(inference).not.toHaveBeenCalled();
+  },
+);

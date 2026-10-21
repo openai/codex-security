@@ -19,9 +19,6 @@ import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import * as ownerSuggestions from "../src/suggest-owners.js";
-import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
-import { runReadOnlyCodex } from "../src/scan-comparison.js";
-import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
 import {
   ScanExecutionEventSchema,
   ScanExecutionResultSchema,
@@ -625,171 +622,6 @@ test("a changed checkout cannot produce accepted completed output", async () => 
 test("malformed run input returns one protocol error", async () => {
   expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
-
-test.each(["completed", "error", "invalid", "cancel"] as const)(
-  "CLI owner inference preserves the sealed scan (%s)",
-  async (outcome) => {
-    const input = { ...(await fixture()), ownerSuggestions: true };
-    const child = spawn(
-      process.execPath,
-      [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
-      { stdio: ["pipe", "pipe", "pipe"] },
-    );
-    const closed = new Promise<number | null>((resolve, reject) => {
-      child.on("exit", resolve);
-      child.on("error", reject);
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    let executions = 0;
-    const owners: string[] = [];
-    let final: any;
-    let sealedFindings: string | undefined;
-    let sealedManifest: string | undefined;
-    try {
-      send(child.stdin, { id: "run", method: "run", params: input });
-      for await (const line of createInterface({ input: child.stdout })) {
-        const message = JSON.parse(line);
-        if (message.method === "execution.run") {
-          executions++;
-          await writeDraft(message.params);
-          const findings = {
-            findings: ["high", "medium"].map((level, index) => ({
-              findingId: `csf_${String(index).repeat(24)}`,
-              occurrenceId: `occ_${String(index).repeat(24)}`,
-              ruleId: `synthetic-${index}`,
-              identity: { anchor: `synthetic-${index}` },
-              fingerprints: {
-                algorithm: "codex-security/v1",
-                primary: `codex-security/v1:sha256:${String(index).repeat(64)}`,
-              },
-              title: `Synthetic finding ${index}`,
-              summary: "Synthetic finding used for hosted inference testing.",
-              severity: { level },
-              confidence: { level: "high", rationale: "Synthetic test" },
-              taxonomy: { category: "synthetic", cwe: [] },
-              locations: [{ path: "service-a/index.ts", startLine: 1 }],
-              remediation: "Synthetic test remediation.",
-              provenance: { source: "test" },
-            })),
-          };
-          await writeJson(
-            join(input.outputDirectory, "findings.json"),
-            findings,
-          );
-          send(child.stdin, {
-            id: message.id,
-            result: receipt(message.params),
-          });
-        } else if (message.method === "owner.infer") {
-          owners.push(message.id);
-          const request = message.params;
-          expect(request).toMatchObject({
-            version: 2,
-            requestId: message.id,
-            repository: input.repository,
-            revision: input.revision,
-            scope: input.scope,
-            identity: input.identity,
-            model: input.model,
-            reasoningEffort: input.reasoningEffort,
-          });
-          expect(request.schema).toHaveProperty("type", "object");
-          const findings = await readFile(
-            join(input.outputDirectory, "findings.json"),
-            "utf8",
-          );
-          const manifest = await readFile(
-            join(input.outputDirectory, "scan-manifest.json"),
-            "utf8",
-          );
-          sealedFindings ??= findings;
-          sealedManifest ??= manifest;
-          expect(findings).toBe(sealedFindings);
-          expect(manifest).toBe(sealedManifest);
-          if (outcome === "cancel") {
-            send(child.stdin, { method: "cancel", params: { id: "run" } });
-          } else if (outcome === "error") {
-            send(child.stdin, {
-              id: message.id,
-              error: { code: -32000, message: "Synthetic owner timeout" },
-            });
-          } else {
-            const context = JSON.parse(request.prompt.split("\n\n").at(-1));
-            const evidence = context.evidence.find(
-              (item: any) => item.identityIndex === 0,
-            );
-            send(child.stdin, {
-              id: message.id,
-              result:
-                outcome === "invalid"
-                  ? {}
-                  : {
-                      identityIndex: 0,
-                      reason: "Synthetic contributor maintains this source.",
-                      evidenceIds: [evidence.id],
-                    },
-            });
-          }
-        } else if (message.method === "owner.cancel") {
-          expect(message.params.requestId).toBe(owners.at(-1));
-          send(child.stdin, {
-            id: message.params.requestId,
-            error: { code: -32800, message: "Synthetic owner cancellation" },
-          });
-        } else if (message.id === "run") {
-          expect(message.error).toBeUndefined();
-          final = message.result;
-        }
-      }
-      expect(final, JSON.stringify(final)).toHaveProperty(
-        "status",
-        "completed",
-      );
-      expect(await closed).toBe(0);
-      expect(stderr).toBe("");
-      expect(executions).toBe(1);
-      expect(owners).toHaveLength(outcome === "cancel" ? 1 : 2);
-      expect(new Set(owners).size).toBe(owners.length);
-      expect(final.status).toBe("completed");
-      expect(
-        await readFile(join(input.outputDirectory, "findings.json"), "utf8"),
-      ).toBe(sealedFindings!);
-      expect(
-        await readFile(
-          join(input.outputDirectory, "scan-manifest.json"),
-          "utf8",
-        ),
-      ).toBe(sealedManifest!);
-      if (outcome === "cancel") {
-        expect(final.ownerSuggestionsError).toBeDefined();
-        expect(
-          final.artifacts.some(
-            (item: any) => item.path === "owner-suggestions.json",
-          ),
-        ).toBe(false);
-      } else {
-        const report = await readJson(
-          join(input.outputDirectory, "owner-suggestions.json"),
-        );
-        expect(report).toHaveProperty(
-          "results",
-          Array(2).fill(
-            expect.objectContaining({
-              status: outcome === "completed" ? "identified" : "error",
-            }),
-          ),
-        );
-      }
-    } finally {
-      child.kill("SIGKILL");
-      child.stdin.destroy();
-      await closed;
-    }
-  },
-);
 
 test.each([
   { path: "missing", reason: "scope_missing" },
@@ -1422,59 +1254,29 @@ test("ordinary SDK rejects the removed hosted option instead of using local infe
 });
 
 test.each([true, false])(
-  "hosted owner inference uses only the hosted callback (supplied=%s)",
+  "hosted owner reporting never invokes the legacy callback (supplied=%s)",
   async (supplied) => {
     const input = await fixture();
-    const run = mock(async () => ({
-      finalResponse: "synthetic owner response",
-    }));
-    const startThread = mock(() => ({ run }));
-    const owner = spyOn(
-      ownerArtifacts,
-      "writeScanOwnerSuggestions",
-    ).mockImplementation(async (_repository, _result, writer, options) => {
-      const response = await runReadOnlyCodex(
-        "Synthetic owner prompt",
-        {},
-        options,
-        {
-          surface: "sdk",
-          command: "suggest-owners",
-          threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
-        },
-      );
-      expect(response).toBe("synthetic owner response");
-      await writer.restore("owner-suggestions.json", Buffer.from("{}\n"));
-      return join(input.outputDirectory, "owner-suggestions.json");
+    const startThread = mock(() => {
+      throw new Error("No additional owner turn");
     });
-    try {
-      const result = await runHostedScan(
-        { ...input, ownerSuggestions: true },
-        {
-          executor: draftExecutor(),
-          ...(supplied ? { ownerCodex: { startThread } } : {}),
-        },
-      );
-      expect(result.status).toBe("completed");
-      if (supplied) {
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(run).toHaveBeenCalledTimes(1);
-        expect(startThread).toHaveBeenCalledWith(
-          expect.objectContaining({
-            sandboxMode: "read-only",
-            networkAccessEnabled: false,
-          }),
-        );
-        expect(result).not.toHaveProperty("ownerSuggestionsError");
-      } else {
-        expect(startThread).not.toHaveBeenCalled();
-        expect(result).toHaveProperty(
-          "ownerSuggestionsError",
-          "Hosted owner inference is unavailable.",
-        );
-      }
-    } finally {
-      owner.mockRestore();
-    }
+    const result = await runHostedScan(
+      { ...input, ownerSuggestions: true },
+      {
+        executor: draftExecutor(),
+        ...(supplied ? { ownerCodex: { startThread } } : {}),
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result).not.toHaveProperty("ownerSuggestionsError");
+    expect(startThread).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        await readFile(
+          join(input.outputDirectory, "owner-suggestions.json"),
+          "utf8",
+        ),
+      ),
+    ).toHaveProperty("results");
   },
 );

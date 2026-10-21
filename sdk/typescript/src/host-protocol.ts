@@ -36,7 +36,6 @@ type Execute = (
   id: string,
   request: unknown,
   onProgress?: (event: unknown) => void,
-  channel?: { requestMethod: string; cancelMethod: string },
 ) => Promise<unknown>;
 
 /** One bidirectional run, shared with dedupe. This transport never replays. */
@@ -66,7 +65,6 @@ export async function runHostProtocol(
   let pending:
     | {
         id: string;
-        cancelMethod: string;
         resolve(value: unknown): void;
         reject(error: Error): void;
         onProgress?: (event: unknown) => void;
@@ -181,7 +179,7 @@ export async function runHostProtocol(
     if (pending)
       void send({
         jsonrpc: "2.0",
-        method: pending.cancelMethod,
+        method: "execution.cancel",
         params: { requestId: pending.id },
       }).catch(outputError);
   };
@@ -218,23 +216,17 @@ export async function runHostProtocol(
       void operation
         .run(
           run.data.params,
-          (id, params, onProgress, channel) => {
+          (id, params, onProgress) => {
             if (terminalCode !== undefined || controller.signal.aborted)
               return Promise.reject(controller.signal.reason);
             if (pending)
               return Promise.reject(new Error("Execution is already pending."));
             return new Promise((resolve, reject) => {
-              pending = {
-                id,
-                resolve,
-                reject,
-                onProgress,
-                cancelMethod: channel?.cancelMethod ?? "execution.cancel",
-              };
+              pending = { id, resolve, reject, onProgress };
               void send({
                 jsonrpc: "2.0",
                 id,
-                method: channel?.requestMethod ?? operation.requestMethod,
+                method: operation.requestMethod,
                 params,
               }).catch(outputError);
             });

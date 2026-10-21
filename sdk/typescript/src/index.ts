@@ -51,7 +51,7 @@ export type {
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
 export { classifySeverity } from "./classify-severity.js";
-export { suggestOwners } from "./suggest-owners.js";
+export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {
   OwnerFinding,
   CodeownerIdentity,

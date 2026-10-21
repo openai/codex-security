@@ -74,28 +74,44 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
-Set `ownerSuggestions: true` on the input to generate the optional
-`owner-suggestions.json` after sealing the base scan. The completed receipt
-includes that artifact when available, or `ownerSuggestionsError` if the owner
-stage fails. Owner failure or cancellation does not invalidate sealed findings.
-The SDK host can pass `ownerCodex` in the options to execute read-only owner
-decisions using its own inference service. Without that callback, CODEOWNERS
-matches still work and findings that require inference report an owner error.
-The callback receives the model and reasoning effort in `startThread`, then
-the prompt, output schema, and cancellation signal in `run`.
-The CLI bridges that callback using sequential `owner.infer` requests after the
-base scan is sealed. Each request includes `requestId`, `scanId`, `version`,
-`repository`, `revision`, `scope`, `identity`, `model`, `reasoningEffort`, `prompt`,
-and `schema` (the expected JSON output schema). Reply with the same JSON-RPC ID
-and the structured decision as `result`, or an `error` when inference fails.
-The host must validate the frozen scan identity and model settings, bound owner
-inference independently, and keep its usage separate from scan execution usage.
-An owner inference error is recorded in the owner report without failing the
-completed scan. Run cancellation during inference sends `owner.cancel` with
-`{requestId}`; the host must settle that request with its outcome before the CLI
-returns the sealed scan receipt. Owner requests are never resubmitted by the
-transport. Existing hosts that omit `ownerSuggestions` receive no owner requests.
-Hosted owner enrichment never launches local Codex or selects local credentials.
+Set `ownerSuggestions: true` to record ownership evidence during the existing
+scan execution. The scan agent may include an optional hint on each finding:
+
+```json
+{
+  "extensions": {
+    "ownerSuggestion": {
+      "email": "alex@example.test",
+      "commit": "0123456789012345678901234567890123456789",
+      "reason": "Maintains the affected source."
+    }
+  }
+}
+```
+
+Use an observed contributor email and a full supporting commit hash from Git
+blame/history for the affected source. Omit the hint when ownership is unclear.
+Hints use the scan's existing session and budget; there is no extra ownership
+turn or model call. Security findings take priority over optional hints.
+
+After sealing the scan, the SDK builds `owner-suggestions.json` without inference.
+CODEOWNERS declarations take precedence. Other hints must match an observed Git
+identity and supporting commit in the finding's evidence. Missing hints abstain;
+invalid hints produce per-finding owner errors. Neither invalid hints nor report
+failures invalidate sealed findings. A completed receipt includes the artifact
+when available, or `ownerSuggestionsError` if finalization fails.
+
+There are no `owner.infer` or `owner.cancel` protocol requests. Hosts only execute
+the normal scan request and capture its optional report. The legacy SDK
+`ownerCodex` option is unused by automatic scan reporting. The separate explicit
+`suggestOwners` API / `suggest-owners` command still supports model inference;
+automatic reporting instead uses `suggestOwnersFromScan` to validate recorded hints.
+Both entry points share CODEOWNERS precedence, Git evidence collection, identity
+validation and report formatting. Explicit owner-only jobs keep their own budget;
+an absent scan hint never starts such a job automatically.
+Owner reporting also works with the SDK's `maxCostUsd`: it requires no remaining
+inference budget. A scan that runs out of budget may not have recorded a hint;
+report generation does not start another turn to fill that gap.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress

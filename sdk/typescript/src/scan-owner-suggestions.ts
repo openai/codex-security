@@ -8,7 +8,7 @@ import {
   repositoryRevision,
 } from "./targets.js";
 import {
-  suggestOwnersInternal,
+  suggestOwnersFromScan,
   type SuggestOwnersOptions,
 } from "./suggest-owners.js";
 
@@ -20,7 +20,7 @@ export async function writeScanOwnerSuggestions(
   result: ScanResult,
   writer: ScanArtifactRestorer,
   options: SuggestOwnersOptions & Pick<ReadOnlyCodexOptions, "auth">,
-  surface: "sdk" | "cli" = "sdk",
+  _surface: "sdk" | "cli" = "sdk",
 ): Promise<string> {
   const target = result.manifest.scan.target;
   const revision = target.revision ?? target.headRevision;
@@ -42,7 +42,7 @@ export async function writeScanOwnerSuggestions(
       requireIfPresent: true,
     })) ?? scanRoot;
   const prefix = relative(gitRoot, scanRoot).split(sep).join("/");
-  const report = await suggestOwnersInternal(
+  const report = await suggestOwnersFromScan(
     repository,
     result.findings.findings.map((finding) => ({
       ...finding,
@@ -53,7 +53,6 @@ export async function writeScanOwnerSuggestions(
       })),
     })),
     options,
-    surface,
   );
   if (report.revision !== revision)
     throw new Error("Owner report revision does not match the completed scan.");
