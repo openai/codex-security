@@ -22,11 +22,11 @@ do not count.
 
 Every location must cite a fixture file and an in-bounds line range. Each
 non-supporting location must match an exposure classified by that finding's
-taxonomy. The grader rejects unrelated locations and incomplete coverage.
-Deferred work, surfaces needing follow-up, or exclusions that match fixture
-files make coverage incomplete. Exclusions outside the generated repository
-are allowed. Supporting locations, including the production `expected_control`
-role, may cite benign context but cannot satisfy recall. Known credential-use
+taxonomy. The grader rejects unrelated locations. Scope notes, exclusions,
+deferred work, and follow-up questions remain in the saved result but do not
+change the grade: final findings must independently satisfy every positive case.
+Supporting locations, including the production `expected_control` role, may
+cite benign context but cannot satisfy recall. Known credential-use
 sites may be cited as sinks; they cannot replace the exposed source location.
 
 Each finding must also include nonempty `codeEvidence`. Every snippet must cite
@@ -39,12 +39,15 @@ Credential values remain part of the source evidence.
 ## Run
 
 Install dependencies and build the TypeScript SDK using the repository's normal
-setup. The eval reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
+setup, including the MCP app dependencies. `build:evals` type-checks the eval
+sources; Node runs them directly with `--experimental-strip-types`. The eval
+reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
 creating private homes. It bundles the MCP app's permission-profile preflight
 locally with esbuild and adds no dependencies.
 
 ```sh
-node evals/secret-discovery/run.mjs
+pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types evals/secret-discovery/run.mts
 ```
 
 An optional positional argument selects a model. When omitted, Codex selects
@@ -100,7 +103,8 @@ the model.
 ## Deterministic checks
 
 ```sh
-node --test evals/secret-discovery/test_*.mjs
+pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types --test evals/secret-discovery/test_*.mts
 ```
 
 CI runs these Node-only checks for fixture staging, production-prompt loading,

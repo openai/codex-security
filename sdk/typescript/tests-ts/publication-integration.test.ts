@@ -1,3 +1,9 @@
+import { jsonCodex } from "./support/codex.js";
+import {
+  createCliTest,
+  captureCli,
+  runCapturedCli,
+} from "./support/cli-run.js";
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { nodeCommand } from "./support/shell.js";
@@ -17,7 +23,6 @@ import { prepareScanPublication } from "../src/publication.js";
 import { recordPublishedIssues } from "../src/publication-store.js";
 import type {
   CoverageDocument,
-  Finding,
   FindingsDocument,
   ScanManifest,
 } from "../src/models.js";
@@ -31,7 +36,7 @@ import {
   type PublishedScanIssue,
 } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { execNodePython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -50,13 +55,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-publication-integration-",
 );
 
-interface PublicationFixture {
-  python: string;
-  scanDirectory: string;
-  stateDirectory: string;
-  environment: NodeJS.ProcessEnv;
-  findings: Finding[];
-}
+type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
 
 interface PromptFinding {
   findingId: string;
@@ -85,7 +84,7 @@ interface StoredPublication {
 
 afterEach(cleanup);
 
-async function fixture(count: number): Promise<PublicationFixture> {
+async function fixture(count: number) {
   const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
   const stateDirectory = join(root, "state");
@@ -182,6 +181,24 @@ async function fixture(count: number): Promise<PublicationFixture> {
   };
 }
 
+function publicationArguments(
+  command: "scan" | "check",
+  scanDirectory: string,
+  ...options: string[]
+): string[] {
+  return [
+    "publish",
+    command,
+    scanDirectory,
+    "--to",
+    "linear",
+    "--linear-team",
+    OPTIONS.teamId,
+    ...options,
+    "--json",
+  ];
+}
+
 async function publicationPayload(
   value: string,
 ): Promise<
@@ -252,7 +269,7 @@ function storedPublications(fixture: PublicationFixture): StoredPublication[] {
     "import json, sqlite3, sys",
     "connection = sqlite3.connect(sys.argv[1])",
     "connection.row_factory = sqlite3.Row",
-    "rows = connection.execute('SELECT scan_id, finding_id, occurrence_id, destination_type, team_id, project_id, external_id, external_url FROM finding_publications ORDER BY id').fetchall()",
+    `rows = connection.execute("SELECT scan_id, finding_id, occurrence_id, json_extract(destination_key, '$[0]') AS destination_type, json_extract(destination_key, '$[1]') AS team_id, json_extract(destination_key, '$[2]') AS project_id, external_id, external_url FROM finding_issue_receipts ORDER BY id").fetchall()`,
     "print(json.dumps([dict(row) for row in rows]))",
   ].join("\n");
   return JSON.parse(
@@ -274,6 +291,119 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
+  test("skips a Linear issue recorded through the shared tracking workbench", async () => {
+    const completed = await fixture(1);
+    const finding = completed.findings[0]!;
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const issue = {
+      findingId: finding.findingId,
+      occurrenceId: finding.occurrenceId,
+      issueIdentifier: "EXAMPLE-711",
+      url: "https://linear.app/example/issue/EXAMPLE-711",
+    };
+    await runWorkbench(
+      {
+        python: completed.python,
+        pluginRoot: PLUGIN_ROOT,
+        environment: completed.environment,
+      },
+      ["finding-issues"],
+      JSON.stringify({
+        action: "record",
+        scanDirectory: completed.scanDirectory,
+        destination: {
+          type: "linear",
+          teamId: OPTIONS.teamId,
+          projectId: OPTIONS.projectId,
+        },
+        receipts: [
+          {
+            ...issue,
+            operation: "create",
+            readback: {
+              status: "failed",
+              error: "Synthetic readback unavailable",
+            },
+          },
+        ],
+      }),
+    );
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        skipExisting: true,
+      },
+      {
+        environment: completed.environment,
+        resolveCodex: throwing(
+          "A recorded tracker issue must not be created again.",
+        ),
+      },
+    );
+    expect(result.skipped).toEqual([issue]);
+    expect(result.created).toEqual([]);
+    expect(result.counts).toEqual({
+      findings: 1,
+      created: 0,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
+  test("exposes a CLI-created issue to the shared tracking workbench", async () => {
+    const completed = await fixture(1);
+    type LinearClient = ReturnType<
+      NonNullable<PublishScanDependencies["linearClient"]>
+    >;
+    const result = await publishScanInternal(
+      completed.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "lin_api_SYNTHETIC_INTEROPERABILITY",
+      },
+      {
+        environment: completed.environment,
+        linearClient: () =>
+          ({
+            createIssue: async () => ({
+              success: true,
+              issue: Promise.resolve({
+                identifier: "EXAMPLE-712",
+                url: "https://linear.app/example/issue/EXAMPLE-712",
+              }),
+            }),
+          }) as unknown as LinearClient,
+      },
+    );
+    expect(result.created).toHaveLength(1);
+    const inspected = await runWorkbench(
+      {
+        python: completed.python,
+        pluginRoot: PLUGIN_ROOT,
+        environment: completed.environment,
+      },
+      ["finding-issues"],
+      JSON.stringify({
+        action: "inspect",
+        scanDirectory: completed.scanDirectory,
+        destination: {
+          type: "linear",
+          teamId: OPTIONS.teamId,
+          projectId: OPTIONS.projectId,
+        },
+      }),
+    );
+    expect(inspected["receipts"]).toEqual([
+      expect.objectContaining({
+        ...result.created[0],
+        scanId: SCAN_ID,
+        operation: "create",
+      }),
+    ]);
+  });
+
   test("publishes classified selections while verifying the complete scan history and preserving earlier tickets", async () => {
     const { classifyScanDirectorySeverity } =
       await import("../src/classify-scan-severity.js");
@@ -305,21 +435,15 @@ describe("database-backed Linear publication integration", () => {
         environment: completed.environment,
         rubricPath,
         findingIds: [finding.findingId],
-        codex: {
-          startThread: () => ({
-            run: async () => ({
-              finalResponse: JSON.stringify({
-                findingId: finding.findingId,
-                decision: "assessed",
-                level: "medium",
-                rubricLabel: "MEDIUM",
-                rationale: "Only bounded impact is established.",
-                confidence: "high",
-                reviewTrigger: null,
-              }),
-            }),
-          }),
-        },
+        codex: jsonCodex(() => ({
+          findingId: finding.findingId,
+          decision: "assessed",
+          level: "medium",
+          rubricLabel: "MEDIUM",
+          rationale: "Only bounded impact is established.",
+          confidence: "high",
+          reviewTrigger: null,
+        })),
       });
       const result = await publishScanInternal(
         completed.scanDirectory,
@@ -390,27 +514,16 @@ describe("database-backed Linear publication integration", () => {
             },
           }) as unknown as LinearClient,
       });
-    const command = [
-      "publish",
+    const command = publicationArguments(
       "scan",
       completed.scanDirectory,
-      "--to",
-      "linear",
-      "--linear-team",
-      OPTIONS.teamId,
       "--project",
       OPTIONS.projectId,
-      "--json",
-    ];
+    );
     const run = async (flags: string[] = []) => {
-      const stdout = capture();
-      const stderr = capture();
-      const code = await main(
-        [...command, ...flags],
-        stdout.stream,
-        stderr.stream,
-        cli,
-      );
+      const { stdout, runCli } = createCliTest(main);
+
+      const code = await runCli([...command, ...flags], cli);
       return { code, result: JSON.parse(stdout.text()) as PublishScanResult };
     };
 
@@ -432,25 +545,17 @@ describe("database-backed Linear publication integration", () => {
       checkScanPublicationInternal(directory, options, {
         environment: localEnvironment,
       });
-    const checkOutput = capture();
+    const checkOutput = captureCli(main, "stdout");
     const database = join(completed.stateDirectory, "workbench.sqlite3");
     const before = sha256(await readFile(database));
     expect(
-      await main(
-        [
-          "publish",
+      await checkOutput.run(
+        publicationArguments(
           "check",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
-        checkOutput.stream,
-        capture().stream,
+        ),
         checkCli,
       ),
     ).toBe(0);
@@ -505,8 +610,8 @@ describe("database-backed Linear publication integration", () => {
       ...completed.environment,
       CODEX_SECURITY_LINEAR_API_KEY: key,
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, runCli } = createCliTest(main);
+
     const created: string[] = [];
     const cli = dependencies({ environment });
     type LinearClient = ReturnType<
@@ -550,21 +655,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await main(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--json",
-        ],
-        stdout.stream,
-        stderr.stream,
-        cli,
-      ),
+      await runCli(publicationArguments("scan", completed.scanDirectory), cli),
     ).toBe(0);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
@@ -595,8 +686,8 @@ describe("database-backed Linear publication integration", () => {
   test("publishes 23 sealed findings through a durable handoff without Codex JSON", async () => {
     const completed = await fixture(23);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const progress: PublishScanProgress[] = [];
     const cli = dependencies({ environment: completed.environment });
     let sdkResult: PublishScanResult | undefined;
@@ -685,21 +776,13 @@ describe("database-backed Linear publication integration", () => {
     };
 
     expect(
-      await main(
-        [
-          "publish",
+      await runCli(
+        publicationArguments(
           "scan",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
-        stdout.stream,
-        stderr.stream,
+        ),
         cli,
       ),
     ).toBe(0);
@@ -755,8 +838,8 @@ describe("database-backed Linear publication integration", () => {
   test("retains team-only database-backed partial successes when a later batch fails", async () => {
     const completed = await fixture(22);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const cli = dependencies({ environment: completed.environment });
     cli.publishScan = async (directory, options) =>
       await publishScanInternal(directory, options, {
@@ -791,21 +874,7 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await main(
-        [
-          "publish",
-          "scan",
-          completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
-          "--json",
-        ],
-        stdout.stream,
-        stderr.stream,
-        cli,
-      ),
+      await runCli(publicationArguments("scan", completed.scanDirectory), cli),
     ).toBe(2);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
@@ -841,8 +910,8 @@ describe("database-backed Linear publication integration", () => {
   test("keeps SQLite-backed Linear issues successful when their optional receipt cannot be saved", async () => {
     const completed = await fixture(2);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const cli = dependencies({ environment: completed.environment });
     let publicationAttempts = 0;
 
@@ -873,21 +942,13 @@ describe("database-backed Linear publication integration", () => {
       });
 
     expect(
-      await main(
-        [
-          "publish",
+      await runCli(
+        publicationArguments(
           "scan",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
-        stdout.stream,
-        stderr.stream,
+        ),
         cli,
       ),
     ).toBe(0);
@@ -933,8 +994,8 @@ describe("database-backed Linear publication integration", () => {
       }
       const storedBefore = storedPublications(completed);
       const pending = completed.findings[Number(skipExisting)]!;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const cli = dependencies({ environment: completed.environment });
       let handoffFile = "";
       let handoffLine = "";
@@ -984,22 +1045,14 @@ describe("database-backed Linear publication integration", () => {
         });
 
       expect(
-        await main(
-          [
-            "publish",
+        await runCli(
+          publicationArguments(
             "scan",
             completed.scanDirectory,
-            "--to",
-            "linear",
-            "--linear-team",
-            OPTIONS.teamId,
             "--project",
             OPTIONS.projectId,
             ...(skipExisting ? ["--skip-existing"] : []),
-            "--json",
-          ],
-          stdout.stream,
-          stderr.stream,
+          ),
           cli,
         ),
       ).toBe(2);
@@ -1052,7 +1105,7 @@ describe("database-backed Linear publication integration", () => {
       const publisherPidFile = join(root, "sdk-publication-child.pid");
       await writeFile(
         preload,
-        'const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
+        'if (require("node:path").basename(process.argv[1] ?? "") !== "exec") return; const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
         { mode: 0o600 },
       );
       const publishing = publishScanInternal(completed.scanDirectory, OPTIONS, {
@@ -1121,10 +1174,9 @@ describe("database-backed Linear publication integration", () => {
       };
 
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["publish", "scan", "completed-scan", "--to", "linear"],
-          capture().stream,
-          capture().stream,
           cli,
         ),
       ).toBe(130);
@@ -1142,11 +1194,12 @@ describe("database-backed Linear publication integration", () => {
       'const fs = require("node:fs");process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));setInterval(() => {}, 1000);';
     await writeFile(
       preload,
-      `const fs = require("node:fs"); const { spawn } = require("node:child_process");
+      `if (require("node:path").basename(process.argv[1] ?? "") !== "exec") return;
+const fs = require("node:fs"); const { spawn } = require("node:child_process");
 const prompt = fs.readFileSync(0, "utf8"); const payload = JSON.parse(prompt.split("BEGIN UNTRUSTED PUBLICATION DATA\\n")[1].split("\\nEND UNTRUSTED PUBLICATION DATA")[0]); const finding = JSON.parse(fs.readFileSync(payload.publicationFile, "utf8")).batches[0][0];
 fs.appendFileSync(payload.handoffFile, JSON.stringify({ scanId: payload.scanId, findingId: finding.findingId, occurrenceId: finding.occurrenceId, error: "Synthetic connected publication may have completed.", possibleMutation: true, arguments: finding.arguments }) + "\\n"); fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));
 spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { env: { ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}), CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });
-const waiter = new Int32Array(new SharedArrayBuffer(4)); for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) { if (attempts === 500) process.exit(3); Atomics.wait(waiter, 0, 0, 10); }
+const waiter = new Int32Array(new SharedArrayBuffer(4)); for (let attempts = 0; (!fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID) || fs.statSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID).size === 0); attempts += 1) { if (attempts === 500) process.exit(3); Atomics.wait(waiter, 0, 0, 10); }
 process.on("SIGINT", () => {}); process.on("SIGTERM", () => {}); fs.writeSync(1, '{"type":"synthetic.publisher_ready"}\\n');
 for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
       { mode: 0o600 },
@@ -1191,10 +1244,9 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
     try {
       expect(
         await Promise.race([
-          main(
+          runCapturedCli(
+            main,
             ["publish", "scan", completed.scanDirectory, "--to", "linear"],
-            capture().stream,
-            capture().stream,
             cli,
           ),
           Bun.sleep(20_000).then(() => -1),
@@ -1228,8 +1280,8 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);
     const sealed = await artifactDigests(completed.scanDirectory);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const signals = new FakeSignals();
     const cli = dependencies({ environment: completed.environment, signals });
     let handoffFile = "";
@@ -1292,21 +1344,13 @@ for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
       });
 
     expect(
-      await main(
-        [
-          "publish",
+      await runCli(
+        publicationArguments(
           "scan",
           completed.scanDirectory,
-          "--to",
-          "linear",
-          "--linear-team",
-          OPTIONS.teamId,
           "--project",
           OPTIONS.projectId,
-          "--json",
-        ],
-        stdout.stream,
-        stderr.stream,
+        ),
         cli,
       ),
     ).toBe(130);

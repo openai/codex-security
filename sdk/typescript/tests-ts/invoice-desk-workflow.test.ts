@@ -1,13 +1,7 @@
+import { workflowBashCommand } from "./support/shell.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
@@ -39,17 +33,12 @@ const metrics = steps.find(
   (step) => step.name === "Summarize and measure the scan",
 )!;
 const sourceSha = "a".repeat(40);
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync();
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), "invoice workflow "));
-  temporaryDirectories.push(directory);
+  const directory = temporaryDirectories.create("invoice workflow ");
   const bin = join(directory, "codex-security-cli/node_modules/.bin");
   mkdirSync(bin, { recursive: true });
   mkdirSync(join(directory, "invoice-desk"));
@@ -72,15 +61,8 @@ function runStep(
   python?: string,
 ) {
   const root = directory.replaceAll("\\", "/");
-  const bash =
-    process.platform === "win32"
-      ? join(
-          process.env["ProgramFiles"] ?? "C:/Program Files",
-          "Git/bin/bash.exe",
-        )
-      : "bash";
   const result = spawnSync(
-    bash,
+    workflowBashCommand(),
     [
       "--noprofile",
       "--norc",
@@ -137,6 +119,8 @@ for (const status of [0, 1, 2]) {
       "openai",
       "--auth",
       "api-key",
+      "--codex",
+      'openai_base_url="https://us.api.openai.com/v1"',
       "--model",
       "gpt-5.6-sol",
       "--effort",
@@ -159,6 +143,18 @@ for (const status of [0, 1, 2]) {
     );
   });
 }
+
+test("Invoice Desk keeps the trusted API endpoint despite an inherited override", () => {
+  const directory = fixture();
+  const result = runStep(scan, directory, {
+    OPENAI_BASE_URL: "https://untrusted.example/v1",
+  });
+  expect(result.status).toBe(0);
+  const arguments_ = argumentsFor(directory);
+  expect(arguments_[arguments_.indexOf("--codex") + 1]).toBe(
+    'openai_base_url="https://us.api.openai.com/v1"',
+  );
+});
 
 test("Invoice Desk reports a missing key without invoking the scanner", () => {
   const directory = fixture();
@@ -213,7 +209,10 @@ for (const completed of [true, false]) {
       );
       writeFileSync(
         join(directory, "invoice-desk-scan/coverage.json"),
-        JSON.stringify({ completeness: "partial" }),
+        JSON.stringify({
+          includePaths: ["app/"],
+          excludePaths: ["app/generated/"],
+        }),
       );
     }
     const result = runStep(
@@ -227,6 +226,7 @@ for (const completed of [true, false]) {
       readFileSync(join(directory, "invoice-desk-metrics.json"), "utf8"),
     );
     expect(saved).toMatchObject({
+      schemaVersion: 2,
       sourceSha,
       workflowSha: "b".repeat(40),
       pullRequest: 7,
@@ -237,14 +237,24 @@ for (const completed of [true, false]) {
       packageCacheRestoredForScan: true,
       findings: completed ? 2 : null,
       findingsBySeverity: completed ? { high: 1, low: 1 } : {},
-      coverage: completed ? "partial" : null,
+      scope: {
+        includePaths: completed ? ["app/"] : [],
+        excludePaths: completed ? ["app/generated/"] : [],
+      },
       tokenUsage: completed ? { input_tokens: 23, output_tokens: 5 } : null,
       estimatedUsdRange: completed ? { min: 0.01, max: 0.02 } : null,
       seedRecall: null,
     });
+    expect(saved).not.toHaveProperty("coverage");
     const summary = readFileSync(join(directory, "summary.md"), "utf8");
     expect(summary).toContain(sourceSha);
-    if (!completed) expect(summary).toContain("did not complete");
+    expect(summary).not.toContain("Coverage:");
+    if (completed) {
+      expect(summary).toContain("Scan completed.");
+      expect(summary).toContain("Scope:");
+      expect(summary).toContain('"includePaths": [');
+      expect(summary).toContain('"app/"');
+    } else expect(summary).toContain("did not complete");
     const upload = steps.find(
       (step) => step.name === "Save reports and metrics",
     )!;

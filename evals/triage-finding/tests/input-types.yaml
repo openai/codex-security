@@ -64,7 +64,7 @@
          advisory: Safe download endpoint may allow path traversal.
          affected path: src/server.js route /safe-download
 
-- description: "Scanner ticket input: production unsafe query and test-only false positive"
+- description: "Scanner ticket input: SQL text response and test-only false positives"
   metadata:
     case_id: scanner-query
     source_type: scanner_ticket
@@ -74,7 +74,7 @@
     source_type_under_test: scanner_ticket
     expected_ids: SCAN-SQL-001,SCAN-SQL-TEST-ONLY
     expected_source_types: scanner_ticket,scanner_ticket
-    expected_verdicts: confirmed,not_actionable
+    expected_verdicts: not_actionable,not_actionable
     finding_input: |-
       Source type: scanner_ticket
       1. input_id: SCAN-SQL-001

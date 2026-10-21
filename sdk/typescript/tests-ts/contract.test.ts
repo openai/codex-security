@@ -53,6 +53,16 @@ async function reseal(scanDir: string): Promise<void> {
   await writeJson(manifestPath, manifest);
 }
 
+function pythonExport(scanDir: string) {
+  return runPython(process.env["PYTHON"] ?? Bun.which("python3") ?? "python", [
+    join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+    "--scan-dir",
+    scanDir,
+    "--export-format",
+    "json",
+  ]);
+}
+
 function expectation(
   target: NormalizedTarget,
   mode: "standard" | "deep" = "standard",
@@ -438,6 +448,123 @@ describe("canonical scan contract", () => {
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 
+  test.each(["rootCause", "root_cause"])(
+    "reads legacy %s evidence references in both readers without rewriting the seal",
+    async (section) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      findings["findings"][0]["code_evidence"] = [
+        { id: "synthetic-evidence", code: "handler()" },
+      ];
+      findings["findings"][0][section] = {
+        summary: "Synthetic root cause.",
+        evidenceRefs: [null, "synthetic-evidence", 3],
+      };
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const bytes = await readFile(findingsPath);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(loaded.findings.findings[0]?.[section as "rootCause"]).toEqual({
+        summary: "Synthetic root cause.",
+        evidenceRefs: ["synthetic-evidence"],
+      });
+      expect(await readFile(findingsPath)).toEqual(bytes);
+    },
+  );
+
+  test("rejects duplicate sealed findings in both readers", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"].push(structuredClone(findings["findings"][0]));
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+    expect(pythonExport(scanDir).exitCode).not.toBe(0);
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("duplicate finding");
+  });
+
+  test.each([
+    ["title", " \t\n", false],
+    ["summary", " \t\n", false],
+    ["remediation", " \t\n", false],
+    ["confidence.rationale", " \t\n", false],
+    ["taxonomy.category", " \t\n", false],
+    ["provenance.source", " \t\n", false],
+    ["severity.scoringSystem", " \t\n", false],
+    ["title", "\u0085\u001c", false],
+    ["title", "\ufeff", true],
+    ["title", "  Synthetic required text. \n", true],
+  ] as const)(
+    "agrees with Python on required finding text %s %j",
+    async (field, text, valid) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      const finding = findings["findings"][0];
+      finding["severity"]["score"] = 5;
+      finding["severity"]["scoringSystem"] = "synthetic";
+      const parts = field.split(".");
+      const object = parts.length === 1 ? finding : finding[parts[0]!];
+      object[parts.at(-1)!] = text;
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode === 0).toBe(valid);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      if (valid) {
+        await expect(loaded).resolves.toBeDefined();
+        expect(JSON.parse(new TextDecoder().decode(exported.stdout))).toEqual(
+          findings,
+        );
+      } else {
+        await expect(loaded).rejects.toThrow("non-empty string");
+      }
+      expect(await readJson(findingsPath)).toEqual(findings);
+    },
+  );
+
+  test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
+    "reads a UTF-8 BOM in sealed %s without changing its bytes",
+    async (filename) => {
+      const scanDir = await copyExample();
+      const path = join(scanDir, filename);
+      const bytes = Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        await readFile(path),
+      ]);
+      await writeFile(path, bytes);
+      if (filename !== "scan-manifest.json") await reseal(scanDir);
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).resolves.toBeDefined();
+      expect(await readFile(path)).toEqual(bytes);
+    },
+  );
+
+  test("rejects noncanonical remote backslashes in both readers", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["target"]["remote"] =
+      "https://example.test/synthetic/repo\\name";
+    await writeJson(manifestPath, manifest);
+    expect(pythonExport(scanDir).exitCode).not.toBe(0);
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("canonical absolute URL");
+  });
+
   test("loads an empty legacy root cause without changing the artifact", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");
@@ -552,9 +679,9 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
-  test("does not expose attacker-controlled keys in validation errors", async () => {
+  test("identifies unusual property names unambiguously in validation errors", async () => {
     const scanDir = await copyExample();
-    const marker = "PRIVATE_JSON_KEY";
+    const marker = 'synthetic/"~\nkey';
     await writeFile(
       join(scanDir, "findings.json"),
       JSON.stringify({ [marker]: 9007199254740992 }),
@@ -569,7 +696,7 @@ describe("canonical scan contract", () => {
 
     expect(thrown).toBeInstanceOf(ContractValidationError);
     expect((thrown as Error).message).toContain("unsafe integer-valued");
-    expect((thrown as Error).message).not.toContain(marker);
+    expect((thrown as Error).message).toContain(`[${JSON.stringify(marker)}]`);
   });
 
   test("accepts valid schemas beyond the previous complexity limit", async () => {
@@ -662,6 +789,8 @@ describe("canonical scan contract", () => {
       "artifacts/report.json.",
       "artifacts/report.json ",
       "artifacts/CON.txt",
+      " ",
+      "\u00a0",
     ]) {
       const scanDir = await copyExample();
       const path = join(scanDir, "scan-manifest.json");
@@ -731,6 +860,127 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  test.each([" ", "  ", "\u00a0"])(
+    "preserves literal whitespace repository path %j in the contract",
+    async (path) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const manifest = await readJson(manifestPath);
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      manifest["scan"]["scope"]["includePaths"] = [path];
+      coverage["includePaths"] = [path];
+      findings["findings"][0]["locations"][0]["path"] = path;
+      await writeJson(manifestPath, manifest);
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.scope.includePaths).toEqual([path]);
+      expect(contract.coverage.includePaths).toEqual([path]);
+      expect(contract.findings.findings[0]!.locations[0]!.path).toBe(path);
+    },
+  );
+
+  test("preserves accepted paths in sealed deferred coverage", async () => {
+    const paths = [
+      ".",
+      "./",
+      "././",
+      "src",
+      "src/parser.ts",
+      "./src/parser.ts",
+      "src/./parser.ts",
+      "src//parser.ts",
+      "src/",
+      "src:parser.ts",
+      "src/a:b.py",
+      "src/.hidden",
+      "src/na\u00efve file.ts",
+      "src/\u007fparser.ts",
+      "src/\u2028parser.ts",
+      "src/\u2029parser.ts",
+      " ",
+      "\u0085",
+      "\ufeff",
+    ];
+    const scanDir = await copyExample();
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson(coveragePath);
+    coverage["deferred"] = [
+      { id: "review", reason: "Review is incomplete.", paths },
+    ];
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+    const sealedBytes = await readFile(coveragePath);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toMatchObject({
+      coverage: { deferred: [{ paths }] },
+    });
+    expect(await readFile(coveragePath)).toEqual(sealedBytes);
+  });
+
+  test("rejects unsafe paths in sealed deferred coverage", async () => {
+    for (const path of [
+      "",
+      "../../outside.ts",
+      "src/../outside.ts",
+      "src/..",
+      "/outside.ts",
+      "//server/share",
+      "C:/outside.ts",
+      "c:outside.ts",
+      "src\\outside.ts",
+      "src/\u0000outside.ts",
+      "src/\u0001outside.ts",
+      "src/\toutside.ts",
+      "src/outside.ts\n",
+      "src/\routside.ts",
+      "src/\u2028/../outside.ts",
+    ]) {
+      const scanDir = await copyExample();
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = await readJson(coveragePath);
+      coverage["deferred"] = [
+        { id: "review", reason: "Review is incomplete.", paths: [path] },
+      ];
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(/coverage.*deferred/);
+    }
+  });
+
+  test.each([-1, 0])(
+    "agrees with Python on a finding end-line offset of %i",
+    async (offset) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      const location = findings["findings"][0]["locations"][0];
+      location["endLine"] = location["startLine"] + offset;
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+
+      expect(pythonExport(scanDir).exitCode === 0).toBe(offset === 0);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      if (offset === 0) {
+        await expect(loaded).resolves.toBeDefined();
+      } else {
+        await expect(loaded).rejects.toThrow(
+          "findings.findings[0].locations[0].endLine: expected an integer >= startLine.",
+        );
+      }
+    },
+  );
+
   test("rejects trailing-dot aliases for sealed artifacts", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
@@ -781,35 +1031,28 @@ describe("canonical scan contract", () => {
     expect(stderr).toContain("duplicate artifact path");
   });
 
-  test("rejects calendar-invalid RFC 3339 timestamps", async () => {
+  test.each([
+    ["2026-02-30T18:00:00Z", false],
+    ["0000-01-01T00:00:00Z", false],
+    ["1900-02-29T00:00:00Z", false],
+    ["2026-01-01T24:00:00Z", false],
+    ["2026-01-01T00:00:60Z", false],
+    ["2026-01-01T00:00:00+24:00", false],
+    ["2026-01-01T00:00Z", false],
+    ["2026-05-31t18:09:00z", true],
+    ["0001-01-01T00:00:00Z", true],
+    ["2000-02-29T23:59:59.123456+23:59", true],
+    ["2026-01-01T00:00:00Z\n", false],
+  ] as const)("validates RFC 3339 timestamp %j", async (value, valid) => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-02-30T18:00:00Z";
-    manifest["scan"]["sealedAt"] = "2026-02-30T18:00:00Z";
+    manifest["scan"]["completedAt"] = value;
+    manifest["scan"]["sealedAt"] = value;
     await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-
-    manifest["scan"]["completedAt"] = "0000-01-01T00:00:00Z";
-    manifest["scan"]["sealedAt"] = "0000-01-01T00:00:00Z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("date-time");
-  });
-
-  test("accepts lowercase RFC 3339 separators", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-05-31t18:09:00z";
-    manifest["scan"]["sealedAt"] = "2026-05-31t18:09:00z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toBeDefined();
+    const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    if (valid) await expect(loaded).resolves.toBeDefined();
+    else await expect(loaded).rejects.toThrow("date-time");
   });
 
   test("requires completed and sealed timestamps to match exactly", async () => {
@@ -852,6 +1095,65 @@ describe("canonical scan contract", () => {
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toThrow("unreadable JSON document");
   });
+
+  test.each([
+    ["src/handler.py", true],
+    ["src/a:b.py", true],
+    ["report:summary.py", true],
+    ["src/name with spaces.py", true],
+    ["src/日本語.py", true],
+    ["./src//handler.py", true],
+    ["src/line\u2028separator.py", true],
+    ["../outside.py", false],
+    ["src/../../outside.py", false],
+    ["/outside.py", false],
+    ["C:/outside.py", false],
+    ["C:outside.py", false],
+    ["src\\outside.py", false],
+    [".", false],
+    ["src/\u0000outside.py", false],
+    ["src/name\t.py", false],
+  ] as const)(
+    "validates canonical code-evidence path %j",
+    async (path, valid) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      findings["findings"][0]["codeEvidence"] = [
+        {
+          id: "source",
+          label: "Source",
+          path,
+          startLine: 1,
+          code: "source()",
+          explanation: "Synthetic repository evidence.",
+        },
+      ];
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const saved = await readFile(findingsPath);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const exported = pythonExport(scanDir);
+      const stderr = new TextDecoder().decode(exported.stderr);
+
+      if (valid) {
+        const contract = await loaded;
+        expect(contract.findings.findings[0]?.codeEvidence?.[0]?.path).toBe(
+          path,
+        );
+        expect(exported.exitCode, stderr).toBe(0);
+      } else {
+        await expect(loaded).rejects.toThrow(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+        expect(exported.exitCode).not.toBe(0);
+        expect(stderr).toContain(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+      }
+      expect(await readFile(findingsPath)).toEqual(saved);
+    },
+  );
 
   test("rejects schema-valid but canonically invalid contract data", async () => {
     const cases: Array<
@@ -962,7 +1264,7 @@ describe("canonical scan contract", () => {
           manifest["scan"]["target"]["remote"] =
             "https://example.com\\@evil.test/repo";
         },
-        "scan.target.remote",
+        "/scan/target/remote",
       ],
     ];
 
@@ -1010,6 +1312,24 @@ describe("canonical scan contract", () => {
     );
   });
 
+  test("identifies the failing schema field and required member", async () => {
+    for (const field of ["severity", "confidence"]) {
+      const scanDir = await copyExample();
+      const path = join(scanDir, "findings.json");
+      const document = await readJson(path);
+      document["findings"][0][field].level = null;
+      await writeJson(path, document);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(`/findings/0/${field}/level`);
+      delete document["findings"][0][field].level;
+      await writeJson(path, document);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("required property 'level'");
+    }
+  });
+
   test("rejects unsafe and non-finite JSON numbers before contract typing", async () => {
     for (const [field, expected] of [
       ["startLine", "unsafe integer-valued JSON numbers"],
@@ -1036,7 +1356,7 @@ describe("canonical scan contract", () => {
         ];
       }
       if (field === "overflow") {
-        finding["extensions"] = { overflow: 0 };
+        finding["extensions"] = { 'evidence/"~\n': { overflow: 0 } };
       }
       await writeJson(findingsPath, findings);
       let text = await readFile(findingsPath, "utf8");
@@ -1065,6 +1385,10 @@ describe("canonical scan contract", () => {
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).rejects.toThrow(expected);
+      if (field === "overflow")
+        await expect(
+          loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+        ).rejects.toThrow('["extensions"]["evidence/\\"~\\n"]["overflow"]');
     }
   });
 

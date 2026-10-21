@@ -8,6 +8,7 @@ import {
   fakeSecurity,
 } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
+import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 
 describe("CLI signals", () => {
   test("maps Ctrl-C and SIGTERM to conventional exits and preserves partial output", async () => {
@@ -15,14 +16,12 @@ describe("CLI signals", () => {
       ["SIGINT", 130, "Scan canceled by Ctrl-C."],
       ["SIGTERM", 143, "Scan terminated by SIGTERM."],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const signals = new FakeSignals();
       const onInterrupt = mock();
-      const exit = await main(
+      const exit = await runCli(
         ["scan", "."],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           signals,
           onRun: () => signals.emit(signal),
@@ -39,8 +38,8 @@ describe("CLI signals", () => {
   });
 
   test("cancels runtime preparation when a signal arrives", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const signals = new FakeSignals();
     const deps = dependencies({ signals });
     deps.createSecurity = () =>
@@ -50,22 +49,18 @@ describe("CLI signals", () => {
         expect(signal?.aborted).toBe(true);
         throw new DOMException("aborted", "AbortError");
       });
-    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
-      130,
-    );
+    expect(await runCli(["scan", "."], deps)).toBe(130);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan canceled by Ctrl-C.");
     expect(stderr.text()).toContain("No partial output was kept.");
   });
 
   test("preserves signals received during client cleanup", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const signals = new FakeSignals();
-    const exit = await main(
+    const exit = await runCli(
       ["scan", "."],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         signals,
         onClose: () => signals.emit("SIGTERM"),
@@ -78,8 +73,8 @@ describe("CLI signals", () => {
   });
 
   test("lets a later repeated signal escape cleanup while suppressing delivery duplicates", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+
     const signals = new FakeSignals();
     const forced: string[] = [];
     const synchronousWrites: string[] = [];
@@ -98,9 +93,7 @@ describe("CLI signals", () => {
         return fakeResult();
       });
 
-    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
-      130,
-    );
+    expect(await runCli(["scan", "."], deps)).toBe(130);
     expect(forced).toEqual(["SIGINT"]);
     expect(synchronousWrites).toEqual(["\u001B[?25h"]);
     expect(stderr.text()).toContain("\u001B[?25h");
@@ -122,7 +115,7 @@ describe("CLI signals", () => {
         return fakeResult();
       });
 
-    await main(["scan", "."], capture().stream, capture().stream, deps);
+    await runCapturedCli(main, ["scan", "."], deps);
     expect(forced).toEqual(["SIGTERM"]);
   });
 

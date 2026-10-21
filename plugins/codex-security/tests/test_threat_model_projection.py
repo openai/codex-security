@@ -11,16 +11,14 @@ import unittest.mock
 from pathlib import Path
 
 import test_finalize_scan_contract as fixtures
+from workbench_test_support import ScanFixtureTestCase
 
 FINALIZER = fixtures.FINALIZER
 
 
-class ThreatModelProjectionTest(unittest.TestCase):
+class ThreatModelProjectionTest(ScanFixtureTestCase):
     setUp = fixtures.FinalizeScanContractTest.setUp
-    tearDown = fixtures.FinalizeScanContractTest.tearDown
     write_scan = fixtures.FinalizeScanContractTest.write_scan
-    write_json = fixtures.FinalizeScanContractTest.write_json
-    read_json = fixtures.FinalizeScanContractTest.read_json
 
     def test_saves_and_exports_markdown_threat_model_without_changing_authored_body(self) -> None:
         body = "# Service Model\n\n| Asset | Owner |\n| --- | --- |\n| Queue | Service |\n\n```text\nA -> B\n```\n"
@@ -83,12 +81,16 @@ class ThreatModelProjectionTest(unittest.TestCase):
         self.assertIn(b"Service boundaries.", document)
 
     def test_exports_legacy_structured_model_extensions(self) -> None:
-        for extensions in (
-            {"format": "markdown"},
-            {"format": "markdown", "content": " \n"},
-            {"scope": "Repository-wide", "origin": "legacy-import"},
-            {"scope": {"includePaths": 42}, "origin": {"tool": "legacy"}},
-            {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+        for extensions, expected_origin in (
+            ({"format": "markdown"}, "not recorded"),
+            ({"format": "markdown", "content": " \n"}, "not recorded"),
+            ({"scope": "Repository-wide", "origin": "legacy-import"}, "legacy-import"),
+            ({"scope": {"includePaths": 42}, "origin": {"tool": "legacy"}}, "not recorded"),
+            (
+                {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+                "not recorded",
+            ),
+            ({"origin": ["generated"]}, "not recorded"),
         ):
             with self.subTest(extensions=extensions):
                 model = {"summary": "Existing structured model.", **extensions}
@@ -96,10 +98,10 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 self.write_scan()
                 FINALIZER.finalize_scan(self.scan_dir)
                 self.assertEqual(self.read_json("scan-manifest.json")["scan"]["threatModel"], model)
-                self.assertIn(
-                    b"Existing structured model.",
-                    FINALIZER.build_threat_model_export(self.scan_dir),
-                )
+                document = FINALIZER.build_threat_model_export(self.scan_dir)
+                self.assertIn(b"Existing structured model.", document)
+                self.assertIn(f"- Model origin: {expected_origin}".encode(), document.splitlines())
+                self.assertEqual((self.scan_dir / "threatmodel.md").read_bytes(), document)
                 self.assertEqual(
                     FINALIZER.build_findings_export(self.scan_dir, "json"),
                     (self.scan_dir / "findings.json").read_bytes(),
@@ -119,11 +121,14 @@ class ThreatModelProjectionTest(unittest.TestCase):
 
     def test_exports_legacy_metadata_with_markdown_content(self) -> None:
         body = "# Saved model\n\nKeep **authored** detail.\n"
-        for metadata in (
-            {"origin": "legacy-import", "scope": "Repository-wide"},
-            {"origin": {"tool": "legacy"}, "scope": {"includePaths": 42}},
-            {"origin": None, "scope": None},
-            {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+        for metadata, expected_origin in (
+            ({"origin": "legacy-import", "scope": "Repository-wide"}, "legacy-import"),
+            ({"origin": {"tool": "legacy"}, "scope": {"includePaths": 42}}, "not recorded"),
+            ({"origin": None, "scope": None}, "not recorded"),
+            (
+                {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+                "not recorded",
+            ),
         ):
             with self.subTest(metadata=metadata):
                 model = {
@@ -141,6 +146,8 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 document = FINALIZER.build_threat_model_export(self.scan_dir)
                 self.assertTrue(document.startswith(body.encode()))
                 self.assertNotIn(b"Existing structured model.", document)
+                self.assertIn(f"- Model origin: {expected_origin}".encode(), document.splitlines())
+                self.assertEqual((self.scan_dir / "threatmodel.md").read_bytes(), document)
                 self.assertEqual(
                     FINALIZER.describe_threat_model(self.scan_dir)["threatModel"], model
                 )
@@ -439,10 +446,64 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 source = Path(directory).resolve()
                 path = source / filename
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(body)
+                path.write_bytes(body.encode())
                 self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
                 self.assertEqual(path.read_text(), body)
-                self.assertEqual(FINALIZER.describe_threat_model(source)["path"], str(path))
+                description = FINALIZER.describe_threat_model(source)
+                self.assertEqual(description["path"], str(path))
+                self.assertEqual(description["provenance"]["source"], filename)
+
+    @unittest.skipUnless(
+        FINALIZER._descriptor_relative_writes_available(), "requires descriptor-relative reads"
+    )
+    def test_legacy_document_spelling_stays_on_open_parent_after_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "scan"
+            parent = source / "artifacts" / "01_context"
+            parent.mkdir(parents=True)
+            body = "# Original model\n"
+            (parent / "threat_model.md").write_text(body)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "threat_model.md").write_text("# Replacement model\n")
+            open_directory = FINALIZER._open_scan_local_directory
+            iterdir = Path.iterdir
+            outside_lookups = []
+
+            def open_then_swap(root_fd, parts, *, create):
+                descriptor = open_directory(root_fd, parts, create=create)
+                parent.rename(parent.with_name("original"))
+                parent.symlink_to(outside, target_is_directory=True)
+                return descriptor
+
+            def record_listing(path):
+                if path.resolve() == outside:
+                    outside_lookups.append(path)
+                return iterdir(path)
+
+            with (
+                unittest.mock.patch.object(
+                    FINALIZER, "_open_scan_local_directory", side_effect=open_then_swap
+                ),
+                unittest.mock.patch.object(Path, "iterdir", record_listing),
+            ):
+                description = FINALIZER.describe_threat_model(source)
+
+            self.assertEqual(description["threatModel"]["content"], body)
+            self.assertEqual(
+                description["provenance"]["source"], "artifacts/01_context/threat_model.md"
+            )
+            self.assertEqual(outside_lookups, [])
+
+    def test_exports_legacy_document_with_crlf_bytes_unchanged(self) -> None:
+        body = b"# Existing Model\r\n\r\n    Preserve indentation.\r\n"
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory).resolve()
+            path = source / "threatmodel.md"
+            path.write_bytes(body)
+            self.assertEqual(FINALIZER.build_threat_model_export(source), body)
+            self.assertEqual(path.read_bytes(), body)
 
     def test_malformed_canonical_model_does_not_export_a_stale_legacy_document(self) -> None:
         body = "# Earlier model\n\nEarlier service boundaries.\n"
@@ -463,7 +524,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
                     original = json.dumps(manifest)
                     path.write_text(original)
                     legacy = source / "threatmodel.md"
-                    legacy.write_text(body)
+                    legacy.write_bytes(body.encode())
                     for read_model in (
                         FINALIZER.describe_threat_model,
                         FINALIZER.build_threat_model_export,
@@ -552,7 +613,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
         FINALIZER.finalize_scan(self.scan_dir)
         legacy_path = self.scan_dir / "artifacts" / "01_context" / "threat_model.md"
         legacy_path.parent.mkdir(parents=True)
-        legacy_path.write_text(body)
+        legacy_path.write_bytes(body.encode())
         manifest = self.read_json("scan-manifest.json")
         manifest["scan"]["artifacts"].append(
             FINALIZER._artifact_record(
@@ -591,7 +652,7 @@ class ThreatModelProjectionTest(unittest.TestCase):
                     }
                 )
             )
-            (source / "THREAT_MODEL.md").write_text(body)
+            (source / "THREAT_MODEL.md").write_bytes(body.encode())
             description = FINALIZER.describe_threat_model(source)
             self.assertEqual(description["provenance"]["source"], "policy")
             self.assertEqual(description["provenance"]["revision"], "abc123")

@@ -1,3 +1,4 @@
+import { createCliTest } from "./support/cli-run.js";
 import { hash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,7 +17,7 @@ import {
   type ScanComparisonResult,
   type ScanMatchingBatch,
 } from "../src/scan-comparison.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
@@ -350,13 +351,11 @@ test("matches sealed scan history end to end without merging related findings", 
       });
     };
     const cli = async (args: string[], matcher = onMatch) => {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [...args, "--json"],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             currentDirectory: repository,
             environment,

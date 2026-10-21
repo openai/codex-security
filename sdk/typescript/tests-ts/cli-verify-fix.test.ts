@@ -1,12 +1,16 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { main } from "../src/cli.js";
+import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 async function linearIssue(identifier: string) {
   return {
@@ -31,16 +35,14 @@ const linearClient = () =>
 
 describe("read-only finding verification", () => {
   test("verifies imported Linear issues in a read-only sandbox without exposing credentials", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     let prompt = "";
     let environment: NodeJS.ProcessEnv | undefined;
 
     expect(
-      await main(
+      await runCli(
         ["verify-fix", "--linear-issue", "SEC-123", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           environment: {
             CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
@@ -49,6 +51,10 @@ describe("read-only finding verification", () => {
           },
           linearClient,
           onCodex: (args, output, processEnvironment, input) => {
+            expect(requestMetadata(args)).toMatchObject({
+              codex_security_command: "verify-fix",
+              codex_security_package_version: VERSION,
+            });
             expect(args[0]).toBe("app-server");
             expect(input).toBeUndefined();
             expect(args).toContain('approval_policy="on-request"');
@@ -113,14 +119,11 @@ describe("read-only finding verification", () => {
   });
 
   test("shows live agent progress in the verification dashboard while keeping JSON clean", async () => {
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 
     expect(
-      await main(
+      await runCli(
         ["verify-fix", "A previously reported authorization bypass", "--json"],
-        stdout.stream,
-        stderr.stream,
         dependencies({
           onCodex: (_args, output) => {
             const emit = output?.appServer?.onEvent;
@@ -197,18 +200,15 @@ describe("read-only finding verification", () => {
 
   test("uses plain verification progress in CI and dumb terminals", async () => {
     for (const environment of [{ CI: "1" }, { TERM: "dumb" }]) {
-      const stdout = capture();
-      const stderr = capture(true);
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 
       expect(
-        await main(
+        await runCli(
           [
             "verify-fix",
             "A previously reported authorization bypass",
             "--json",
           ],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             environment,
             onCodex: (_args, output) => {
@@ -252,12 +252,12 @@ describe("read-only finding verification", () => {
   });
 
   test("verifies repeated Linear issues together in one agent invocation", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     let agentCalls = 0;
     let prompt = "";
 
     expect(
-      await main(
+      await stdout.run(
         [
           "verify-fix",
           "--linear-issue",
@@ -266,8 +266,6 @@ describe("read-only finding verification", () => {
           "SEC-456",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         dependencies({
           environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
           linearClient,
@@ -319,10 +317,10 @@ describe("read-only finding verification", () => {
         title: `Finding ${index + 1}`,
       });
     });
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
 
     expect(
-      await main(
+      await stdout.run(
         [
           "verify-fix",
           "--scan",
@@ -335,9 +333,8 @@ describe("read-only finding verification", () => {
           "max",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         dependencies({
+          result,
           onWorkbench: (args) => {
             expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
             return {
@@ -385,12 +382,10 @@ describe("read-only finding verification", () => {
   });
 
   test("reports inconclusive findings without treating them as fixed", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["verify-fix", "A previously reported authorization bypass"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           onCodex: (_args, output) => {
             output?.stdout.write(
@@ -423,32 +418,79 @@ describe("read-only finding verification", () => {
   ] as const)(
     "maps Codex exit %i to verification exit %i",
     async (codexStatus, expectedStatus) => {
-      const stdout = capture();
+      for (const flags of [
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "yaml", "--full-output"],
+        ["--token-count"],
+      ]) {
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            ["verify-fix", "Synthetic finding", ...flags],
+            dependencies({ onCodex: () => codexStatus }),
+          ),
+        ).toBe(expectedStatus);
+        expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
+  test.each([
+    ["fixed", 0],
+    ["still_vulnerable", 1],
+    ["inconclusive", 2],
+  ] as const)(
+    "retains completed %s results with full output",
+    async (status, code) => {
+      const { stdout, runCli } = createCliTest(main);
+      const results = [
+        {
+          id: "finding-1",
+          status,
+          evidence: "Synthetic verification evidence.",
+        },
+      ];
+      expect(
+        await runCli(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(JSON.stringify({ results }));
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(code);
+      expect(JSON.parse(stdout.text()).data.results).toEqual(results);
+    },
+  );
+
+  test.each([130, 143])(
+    "preserves interrupted status %i without writing a success envelope",
+    async (status) => {
+      const { stderr } = createCliTest(main);
+      const write = mock(() => {
+        throw new Error("Unexpected stdout write.");
+      });
       expect(
         await main(
-          [
-            "verify-fix",
-            "A previously reported authorization bypass",
-            "--json",
-          ],
-          stdout.stream,
-          capture().stream,
-          dependencies({ onCodex: () => codexStatus }),
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          { write },
+          stderr.stream,
+          dependencies({ onCodex: () => status }),
         ),
-      ).toBe(expectedStatus);
-      expect(stdout.text()).toBe("");
+      ).toBe(status);
+      expect(write).not.toHaveBeenCalled();
     },
   );
 
   test("sanitizes model-controlled evidence in human-readable output", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
 
     expect(
-      await main(
+      await stdout.run(
         ["verify-fix", "A previously reported authorization bypass"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           onCodex: (_args, output) => {
             output?.stdout.write(
@@ -474,6 +516,105 @@ describe("read-only finding verification", () => {
     );
   });
 
+  test.each(["fixed", "still_vulnerable", "inconclusive"])(
+    "reports required output failure for a %s verification",
+    async (status) => {
+      const failure = new Error("Synthetic verification output failure");
+      const stdout = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() => callback(failure));
+        },
+      });
+      const emitted = new Promise<Error>((resolve) =>
+        stdout.once("error", resolve),
+      );
+      const stderr = capture();
+      const [exitCode, error] = await Promise.all([
+        main(
+          ["verify-fix", "Synthetic finding"],
+          stdout,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(
+                JSON.stringify({
+                  results: [
+                    {
+                      id: "finding-1",
+                      status,
+                      evidence: "Synthetic evidence.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+        emitted,
+      ]);
+      expect(error).toBe(failure);
+      expect(exitCode).toBe(2);
+      expect(stderr.text()).toContain(failure.message);
+      expect(stdout.listenerCount("error")).toBe(0);
+    },
+  );
+
+  test("waits for each verification result before writing the next", async () => {
+    const writes = [
+      Promise.withResolvers<() => void>(),
+      Promise.withResolvers<() => void>(),
+    ];
+    const chunks: string[] = [];
+    const stdout = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        writes[chunks.length - 1]!.resolve(callback);
+      },
+    });
+    const operation = main(
+      ["verify-fix", "First finding", "Second finding"],
+      stdout,
+      capture().stream,
+      dependencies({
+        onCodex: (_args, output) => {
+          output?.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id: "finding-1",
+                  status: "fixed",
+                  evidence: "Café evidence.",
+                },
+                {
+                  id: "finding-2",
+                  status: "still_vulnerable",
+                  evidence: "Exploit still succeeds.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      }),
+    );
+    const first = await writes[0]!.promise;
+    const firstBufferedBytes = stdout.writableLength;
+    first();
+    const second = await writes[1]!.promise;
+    second();
+    expect(await operation).toBe(1);
+    expect(chunks).toEqual([
+      "FIXED finding-1: Café evidence.\n",
+      "STILL_VULNERABLE finding-2: Exploit still succeeds.\n",
+    ]);
+    expect(firstBufferedBytes).toBe(Buffer.byteLength(chunks[0]!));
+    expect(stdout.writableEnded).toBe(false);
+    expect(stdout.listenerCount("error")).toBe(0);
+    stdout.destroy();
+  });
+
   test.each([
     ["missing result", { results: [] }],
     [
@@ -495,14 +636,11 @@ describe("read-only finding verification", () => {
   ] as const)(
     "rejects %s instead of reporting an unverified fix",
     async (_name, result) => {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
 
       expect(
-        await main(
+        await runCli(
           ["verify-fix", "--linear-issue", "SEC-123", "--json"],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
             linearClient,
@@ -530,14 +668,12 @@ describe("read-only finding verification", () => {
   ] as const)(
     "rejects invalid verification selection %j",
     async (args, expected) => {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const onCodex = mock<() => number>().mockReturnValue(0);
 
       expect(
-        await main(
+        await stderr.run(
           args,
-          capture().stream,
-          stderr.stream,
           dependencies({
             environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
             onCodex,

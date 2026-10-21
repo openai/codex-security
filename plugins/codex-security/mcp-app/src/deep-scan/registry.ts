@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { DeepScanCoordinator } from "./coordinator.js";
-import type { CoordinatorOptions } from "./coordinator.js";
+import type { CoordinatorOptions, ParentScanState } from "./coordinator.js";
 import { isTransientPersistenceError } from "./store.js";
 import type { DeepScanCoordinatorClaim, DeepScanRunState } from "./types.js";
 
@@ -15,6 +15,8 @@ export {
 /** Owns the live coordinators in this MCP server process. */
 export class DeepScanCoordinatorRegistry {
   private readonly coordinators = new Map<string, DeepScanCoordinator>();
+  private readonly observers = new Set<DeepScanCoordinator>();
+  private closed = false;
 
   get(scanId: string): DeepScanCoordinator | undefined {
     return this.coordinators.get(scanId);
@@ -23,18 +25,24 @@ export class DeepScanCoordinatorRegistry {
   start(options: CoordinatorOptions): DeepScanCoordinator {
     const existing = this.coordinators.get(options.run.scanId);
     if (existing) return existing;
+    if (this.closed) throw new Error("Deep Scan coordinator host has closed.");
     let coordinator!: DeepScanCoordinator;
     coordinator = new DeepScanCoordinator({
       ...options,
-      observeReplacement: async (run) => {
+      observeReplacement: async (run, signal) => {
         if (this.coordinators.get(run.scanId) === coordinator) {
           this.coordinators.delete(run.scanId);
         }
-        return await new DeepScanRemoteCoordinator({
-          run,
-          registry: this,
-          options,
-        }).wait(undefined);
+        this.observers.add(coordinator);
+        try {
+          return await new DeepScanRemoteCoordinator({
+            run,
+            registry: this,
+            options,
+          }).wait(signal);
+        } finally {
+          this.observers.delete(coordinator);
+        }
       },
     });
     this.coordinators.set(options.run.scanId, coordinator);
@@ -52,16 +60,23 @@ export class DeepScanCoordinatorRegistry {
     scanId: string,
     reason: string,
     persistCancellation: () => Promise<void>,
+    readParentState: () => Promise<ParentScanState>,
   ): Promise<boolean> {
     const coordinator = this.coordinators.get(scanId);
     if (!coordinator) return false;
-    await coordinator.cancelAfterPersistence(reason, persistCancellation);
+    await coordinator.cancelAfterPersistence(
+      reason,
+      persistCancellation,
+      readParentState,
+    );
     return true;
   }
 
   shutdown(reason: string): void {
+    this.closed = true;
     for (const coordinator of this.coordinators.values())
       coordinator.cancel(reason);
+    for (const coordinator of this.observers) coordinator.cancel(reason);
   }
 }
 
@@ -71,10 +86,8 @@ export class AsyncLock {
 
   async run<T>(operation: () => Promise<T>): Promise<T> {
     const predecessor = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>((resolvePromise) => {
-      release = resolvePromise;
-    });
+    const { promise, resolve: release } = Promise.withResolvers<void>();
+    this.tail = promise;
     await predecessor;
     try {
       return await operation();
@@ -180,11 +193,9 @@ export class DeepScanRemoteCoordinator {
   }
 }
 
-export async function startOrJoinDeepScanCoordinator(input: {
-  run: DeepScanRunState;
-  registry: Pick<DeepScanCoordinatorRegistry, "get" | "start">;
-  options: Omit<CoordinatorOptions, "run" | "observeReplacement">;
-}): Promise<{
+export async function startOrJoinDeepScanCoordinator(
+  input: ConstructorParameters<typeof DeepScanRemoteCoordinator>[0],
+): Promise<{
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
 }> {

@@ -1,10 +1,10 @@
 import { once } from "node:events";
 import { describe, expect, test, mock } from "bun:test";
 import {
-  DeepScanProgressTracker,
+  ScanProgressTracker,
   deepScanProgressFromWorkbench,
   type DeepScanProgress,
-} from "../src/deep-progress.js";
+} from "../src/scan-progress.js";
 
 function workbenchResult(
   independentReviews?: Record<string, unknown>,
@@ -29,7 +29,7 @@ describe("Deep Scan progress", () => {
           consolidating: false,
         }),
       ),
-    ).toEqual({ completed: 34, active: 2, maximum: 40 });
+    ).toEqual({ completed: 34, active: 2, maximum: 40, consolidating: false });
   });
 
   test("waits for the Deep Scan coordinator to create independent-review state", () => {
@@ -40,6 +40,8 @@ describe("Deep Scan progress", () => {
     { completed: -1, active: 0, maximum: 40 },
     { completed: 0, active: 0, maximum: 0 },
     { completed: 0, active: "two", maximum: 40 },
+    { completed: 2, active: 0, maximum: 40, consolidating: "false" },
+    { completed: 2, active: 0, maximum: 40, consolidating: null },
   ])("rejects invalid workbench progress %#", (independentReviews) => {
     expect(() =>
       deepScanProgressFromWorkbench(workbenchResult(independentReviews)),
@@ -57,9 +59,9 @@ describe("Deep Scan progress", () => {
     const read = mock(async () => {
       return reads.shift() ?? workbenchResult();
     });
-    const tracker = new DeepScanProgressTracker({
+    const tracker = new ScanProgressTracker({
       read,
-      onProgress: (update) => progress.push(update),
+      onDeepProgress: (update) => progress.push(update),
     });
 
     await tracker.refresh();
@@ -84,9 +86,9 @@ describe("Deep Scan progress", () => {
       return workbenchResult({ completed: 1, active: 0, maximum: 40 });
     });
     let aborted = false;
-    const tracker = new DeepScanProgressTracker({
+    const tracker = new ScanProgressTracker({
       read,
-      onProgress: (update) => progress.push(update),
+      onDeepProgress: (update) => progress.push(update),
     });
 
     const first = tracker.refresh();
@@ -98,5 +100,23 @@ describe("Deep Scan progress", () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(aborted).toBe(true);
     expect(progress).toEqual([]);
+  });
+
+  test("reports reduction transitions when review counts remain unchanged", async () => {
+    const reads = [false, true, true, false].map((consolidating) =>
+      workbenchResult({ completed: 2, active: 2, maximum: 40, consolidating }),
+    );
+    const progress: DeepScanProgress[] = [];
+    const tracker = new ScanProgressTracker({
+      read: async () => reads.shift(),
+      onDeepProgress: (update) => progress.push(update),
+    });
+    for (let index = 0; index < 4; index++) await tracker.refresh();
+    tracker.stop();
+    expect(progress.map((update) => update.consolidating)).toEqual([
+      false,
+      true,
+      false,
+    ]);
   });
 });

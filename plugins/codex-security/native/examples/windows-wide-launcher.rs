@@ -157,15 +157,16 @@ fn main() -> std::io::Result<()> {
         let repo = root.join(&cwds[0]).join(&repos[0]);
         let output_name = raw("out-", 0xdfff);
         let output = repo.join(&output_name);
-        let invoke = |args: &[PathBuf]| {
+        let invoke = |command: &str, args: &[PathBuf]| {
             Command::new(&node)
                 .arg(&script)
-                .args(["--helper", "resolve-security-md"])
+                .args(["--helper", command])
                 .args(args)
                 .current_dir(&repo)
                 .env("USERPROFILE", &repo)
                 .output()
         };
+        let policy = |args: &[PathBuf]| invoke("resolve-security-md", args);
         for (repo_arg, scope_arg, output_arg) in [
             (repo.clone(), PathBuf::from(&scopes[0]), output.clone()),
             (
@@ -179,7 +180,7 @@ fn main() -> std::io::Result<()> {
                 PathBuf::from(&output_name),
             ),
         ] {
-            let child = invoke(&[
+            let child = policy(&[
                 "--repo".into(),
                 repo_arg,
                 "--scope".into(),
@@ -206,7 +207,7 @@ fn main() -> std::io::Result<()> {
             fs::remove_file(&output)?;
         }
         for scope in [PathBuf::from("."), PathBuf::from(&scopes[0]).join("..")] {
-            let child = invoke(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
+            let child = policy(&["--repo".into(), repo.clone(), "--scope".into(), scope])?;
             let expected = b"## SECURITY.md source: \"SECURITY.md\"\n\nroot raw\n";
             if !child.status.success() || !child.stderr.is_empty() || child.stdout != expected {
                 return Err(io::Error::other(
@@ -214,7 +215,7 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
-        let listing = invoke(&["--repo".into(), "~".into(), "--list".into()])?;
+        let listing = policy(&["--repo".into(), "~".into(), "--list".into()])?;
         let expected =
             b"[\"SECURITY.md\", \"scope-\\udfff/SECURITY.md\", \"scope-\\ufffd/SECURITY.md\"]\n";
         if !listing.status.success() || !listing.stderr.is_empty() || listing.stdout != expected {
@@ -236,7 +237,7 @@ fn main() -> std::io::Result<()> {
         let sibling_policy = sibling.join("SECURITY.md");
         fs::write(&sibling_policy, "sibling policy\n")?;
         let verify_outside_root = |scope: &Path| -> io::Result<()> {
-            let result = invoke(&[
+            let result = policy(&[
                 "--repo".into(),
                 identity_root.clone(),
                 "--scope".into(),
@@ -292,20 +293,20 @@ fn main() -> std::io::Result<()> {
             "\n",
         );
         let candidate = |repo_arg: &Path, input: &Path, scope: &Path, output: &Path| {
-            Command::new(&node)
-                .arg(&script)
-                .args(["--helper", "normalize-candidates", "--repo-root"])
-                .arg(repo_arg)
-                .arg("--input")
-                .arg(input)
-                .arg("--in-scope-files")
-                .arg(scope)
-                .arg("--out")
-                .arg(output)
-                .arg("--allow-missing-in-scope")
-                .current_dir(&repo)
-                .env("USERPROFILE", &repo)
-                .output()
+            invoke(
+                "normalize-candidates",
+                &[
+                    "--repo-root".into(),
+                    repo_arg.into(),
+                    "--input".into(),
+                    input.into(),
+                    "--in-scope-files".into(),
+                    scope.into(),
+                    "--out".into(),
+                    output.into(),
+                    "--allow-missing-in-scope".into(),
+                ],
+            )
         };
         fs::write(&output, "previous output")?;
         for (index, prefix) in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")]
@@ -362,8 +363,155 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
+        let assessment_name = raw("assessment-", 0xd800);
+        let assessment_path = repo.join(&assessment_name);
+        let replacement_assessment = repo.join(raw("assessment-", 0xfffd));
+        let assessment = r#"{
+            "schemaVersion":1,
+            "patch":{"repository":"example/project","sourceType":"patch_file","base":"base","head":"head","changedFiles":["src/example.ts"],"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+            "recommendation":"no_op","workflowLabel":"no_op",
+            "impact":{"rating":"low","rationale":"No active path changes."},
+            "regressionLikelihood":{"rating":"low","rationale":"No live effect."},
+            "regressionProtection":{"rating":"strong","rationale":"Fixture validated.","exactHeadChecksPassed":true},
+            "recoverability":{"rating":"easy","rationale":"Local change."},
+            "confidence":{"rating":"high","rationale":"Known fixture."},
+            "applicability":{"status":"no_live_effect","rationale":"Synthetic input."},
+            "statusQuoRisk":{"rating":"low","rationale":"No live effect."},
+            "autoMergeExclusions":[],"affectedRuntimeRoots":[],"materialBoundaries":[],
+            "validation":[{"name":"fixture","status":"passed","protects":"Validator input."}],
+            "unknowns":[],"evidencePlan":[]
+        }"#;
+        fs::write(&assessment_path, assessment)?;
+        fs::write(&replacement_assessment, "replacement assessment sentinel")?;
+        for input in [assessment_path.clone(), PathBuf::from(&assessment_name)] {
+            let child = Command::new(&node)
+                .arg(&script)
+                .args(["--helper", "validate-patch-risk-assessment"])
+                .arg(input)
+                .current_dir(&repo)
+                .output()?;
+            if !child.status.success() || !child.stdout.is_empty() || !child.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "Wide assessment helper failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )));
+            }
+        }
+        if fs::read(&assessment_path)? != assessment.as_bytes()
+            || fs::read(&replacement_assessment)? != b"replacement assessment sentinel"
+        {
+            return Err(io::Error::other("Assessment validation changed its input"));
+        }
+        let worklist_dir = raw("worklist-", 0xdc80);
+        let worklist_output = repo.join(&worklist_dir).join(&output_name);
+        let worklist_sentinel = repo
+            .join(raw("worklist-", 0xfffd))
+            .join(&replacement_output);
+        fs::create_dir_all(worklist_sentinel.parent().unwrap())?;
+        fs::write(&worklist_sentinel, "worklist output sentinel")?;
+        fs::write(
+            repo.join(&input_name),
+            "{\"path\":\"source.py\",\"area\":\"src\",\"preview\":\"source line\"}\n",
+        )?;
+        for prefix in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")] {
+            let child = invoke(
+                "copy-deep-review-input",
+                &[
+                    "--rank-input".into(),
+                    prefix.join(&input_name),
+                    "--out".into(),
+                    prefix.join(&worklist_dir).join(&output_name),
+                ],
+            )?;
+            if !child.status.success()
+                || !child.stderr.is_empty()
+                || fs::read(&worklist_output)? != b"{\"path\":\"source.py\",\"area\":\"src\"}\r\n"
+            {
+                return Err(io::Error::other(format!(
+                    "Wide deep-review helper failed: {}",
+                    String::from_utf8_lossy(&child.stderr)
+                )));
+            }
+            fs::remove_file(&worklist_output)?;
+        }
+        if fs::read(&worklist_sentinel)? != b"worklist output sentinel"
+            || fs::read(repo.join(raw("input-", 0xfffd)))? != b"invalid replacement input"
+        {
+            return Err(io::Error::other(
+                "Deep-review helper changed a replacement path",
+            ));
+        }
+        let scopes_name = raw("requested-", 0xd800);
+        let manifest_name = raw("manifest-", 0xdc80);
+        let coverage_name = raw("coverage-", 0xdfff);
+        let scopes_path = repo.join(&scopes_name);
+        let manifest_path = repo.join(&manifest_name);
+        let coverage_path = repo.join(&coverage_name);
+        let scope_contents = r#"["src","\udfff","src"]"#;
+        fs::write(&scopes_path, scope_contents)?;
+        for prefix in ["requested-", "manifest-", "coverage-"] {
+            fs::write(repo.join(raw(prefix, 0xfffd)), "replacement scope sentinel")?;
+        }
+        let manifest_before =
+            r#"{"scan":{"scope":{"includePaths":["old"],"excludePaths":[]}},"sha256":"unchanged"}"#;
+        let coverage_before = r#"{"includePaths":["old"],"excludePaths":[]}"#;
+        let manifest_after = concat!(
+            "{\n  \"scan\": {\n    \"scope\": {\n      \"includePaths\": [\n",
+            "        \"src\",\n        \"\\udfff\",\n        \"src\"\n      ],\n",
+            "      \"excludePaths\": []\n    }\n  },\n  \"sha256\": \"unchanged\"\n}\n",
+        );
+        let coverage_after = concat!(
+            "{\n  \"includePaths\": [\n    \"src\",\n    \"\\udfff\",\n",
+            "    \"src\"\n  ],\n  \"excludePaths\": []\n}\n",
+        );
+        for prefix in [repo.clone(), PathBuf::from("~"), PathBuf::from(".")] {
+            fs::write(
+                &manifest_path,
+                format!("{manifest_before}{}", " ".repeat(512)),
+            )?;
+            fs::write(
+                &coverage_path,
+                format!("{coverage_before}{}", " ".repeat(512)),
+            )?;
+            let bind_args = [
+                "--scopes-file".into(),
+                prefix.join(&scopes_name),
+                "--manifest".into(),
+                prefix.join(&manifest_name),
+                "--coverage".into(),
+                prefix.join(&coverage_name),
+            ];
+            let bound = invoke("bind-repo-scopes", &bind_args)?;
+            if !bound.status.success()
+                || !bound.stderr.is_empty()
+                || bound.stdout != b"Bound 3 requested scopes into the scan contract\r\n"
+                || fs::read(&manifest_path)? != manifest_after.as_bytes()
+                || fs::read(&coverage_path)? != coverage_after.as_bytes()
+                || fs::read(&scopes_path)? != scope_contents.as_bytes()
+            {
+                return Err(io::Error::other(format!(
+                    "Wide scope binding failed: {}",
+                    String::from_utf8_lossy(&bound.stderr)
+                )));
+            }
+            fs::write(&coverage_path, "{")?;
+            let invalid = invoke("bind-repo-scopes", &bind_args)?;
+            if invalid.status.code() != Some(1)
+                || !invalid.stdout.is_empty()
+                || invalid.stderr != b"Unable to bind requested scopes into the scan contract\r\n"
+                || fs::read(&manifest_path)? != manifest_after.as_bytes()
+                || fs::read(&coverage_path)? != b"{"
+            {
+                return Err(io::Error::other("Invalid wide scope contract was changed"));
+            }
+        }
+        for prefix in ["requested-", "manifest-", "coverage-"] {
+            if fs::read(repo.join(raw(prefix, 0xfffd)))? != b"replacement scope sentinel" {
+                return Err(io::Error::other("Scope binding changed a replacement path"));
+            }
+        }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }

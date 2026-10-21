@@ -49,8 +49,10 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
             connection,
             SimpleNamespace(claim_token=None, cost_json=None, scan_id=scan_id),
         )["scan"]
-        exported = namespace["export_findings"](
-            connection, SimpleNamespace(scan_id=scan_id, format="csv")
+        exported = namespace["publication"].export_findings(
+            namespace["_WORKBENCH_PUBLICATION_CONTEXT"],
+            connection,
+            SimpleNamespace(scan_id=scan_id, format="csv"),
         )
 
     assert completed["progress"]["status"] == "complete"

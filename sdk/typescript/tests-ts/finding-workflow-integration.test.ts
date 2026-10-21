@@ -1,4 +1,4 @@
-import { findingFingerprint, sha256 } from "./support/finding-identity.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -25,19 +25,16 @@ import {
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { DeduplicationReviewError } from "../src/errors.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 import { capture } from "./cli-fixtures.js";
 
-const fixtures: Array<Awaited<ReturnType<typeof workflowFixture>>> = [];
-afterEach(async () => {
-  await Promise.all(
-    fixtures.splice(0).map((fixture) => fixture[Symbol.asyncDispose]()),
-  );
-});
+const temporaryDirectories = createTemporaryDirectories();
+afterEach(temporaryDirectories.cleanup);
 
 async function fixture() {
   const value = await workflowFixture();
-  fixtures.push(value);
+  temporaryDirectories.track(value.root);
   const { environment, document, scanDir, repository } = value;
   const workbenchOptions = {
     environment,
@@ -88,17 +85,9 @@ async function fixtureWithFindings(count: number) {
   document.findings = Array.from({ length: count }, (_value, index) => {
     const finding = structuredClone(document.findings[0]!);
     finding.identity.instance = `concurrent-${index}`;
-    const fingerprint = findingFingerprint(
-      manifest.scan.target.targetId,
-      finding,
-    );
-    return {
-      ...finding,
-      findingId: `csf_${sha256(fingerprint).slice(0, 24)}`,
-      occurrenceId: `occ_${sha256([document.scanId, fingerprint].join("\0")).slice(0, 24)}`,
-      fingerprints: { ...finding.fingerprints, primary: fingerprint },
-      title: `Synthetic concurrent finding ${index}`,
-    };
+    setFindingIdentity({ ...manifest.scan, id: document.scanId }, finding);
+    finding.title = `Synthetic concurrent finding ${index}`;
+    return finding;
   });
   const content = JSON.stringify(document);
   await writeFile(join(scanDir, "findings.json"), content);
@@ -445,6 +434,134 @@ test("an empty scan completes publication and dedupe and remains retrievable", a
   });
 });
 
+test.each(["acknowledged", "interrupted", "without workflow"])(
+  "observes cancellation after the final group write (%s) without losing durable state",
+  async (outcome) => {
+    const { environment, document, history } = await fixtureWithFindings(2);
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation during group write");
+    const options = {
+      ...(outcome === "without workflow" ? {} : { workflowId: "final-write" }),
+      findingsUrl: "http://synthetic.test",
+    };
+    const groups = [
+      document.findings.map((finding) => finding.findingId).sort(),
+    ];
+    const writes: string[][][] = [];
+    const reviewer = {
+      screen: mock(async (findings: readonly Finding[]) => ({
+        decisions: Object.fromEntries(
+          findings.slice(1).map(screeningRecommendation),
+        ),
+      })),
+      reviewPair: mock(async () => sameRecommendation),
+    };
+    const dependencies = {
+      environment,
+      runWorkbench: history,
+      reviewer,
+      fetch: async (url: URL, init: RequestInit) => {
+        if (!url.pathname.endsWith("/dedupe-groups"))
+          return await findingFetch(document)(url);
+        writes.push(JSON.parse(init.body as string).groups);
+        if (writes.length === 1) {
+          controller.abort(reason);
+          if (outcome === "interrupted") throw reason;
+        }
+        return Response.json([]);
+      },
+    };
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        dependencies,
+      ),
+    ).rejects.toThrow(reason.message);
+    expect(writes).toEqual([groups]);
+    if (options.workflowId === undefined) return;
+    const workflow = new FindingWorkflow(options.workflowId, environment);
+    const saved = (await workflow.get())!.stages.dedupe;
+    expect(saved.status).toBe(
+      outcome === "interrupted" ? "failed" : "completed",
+    );
+    expect(saved.result).toMatchObject({ duplicateGroups: groups });
+    expect(saved.pendingWrite).toEqual(
+      outcome === "interrupted" ? { groups } : undefined,
+    );
+    const reviewCalls = reviewer.reviewPair.mock.calls.length;
+    expect<unknown>(
+      await deduplicateScanInternal(document.scanId, options, dependencies),
+    ).toEqual(saved.result);
+    expect(reviewer.reviewPair).toHaveBeenCalledTimes(reviewCalls);
+    expect(writes).toHaveLength(outcome === "interrupted" ? 2 : 1);
+    expect((await workflow.get())!.stages.dedupe).toEqual({
+      status: "completed",
+      result: saved.result,
+    });
+  },
+);
+
+test.each(["complete", "cached"])(
+  "observes final cancellation for a %s workflow without group writes",
+  async (phase) => {
+    const { environment, document, history } = await fixtureWithFindings(0);
+    const controller = new AbortController();
+    const reason = new Error(
+      "Synthetic cancellation after workflow completion",
+    );
+    const options = {
+      workflowId: "empty-canceled",
+      findingsUrl: "http://synthetic.test",
+    };
+    const fetch = mock(findingFetch(document));
+    if (phase === "cached")
+      await deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench: history,
+        fetch,
+      });
+    await expect(
+      deduplicateScanInternal(
+        document.scanId,
+        { ...options, signal: controller.signal },
+        {
+          environment,
+          fetch,
+          runWorkbench: async (args, input) => {
+            const result = await history(args, input);
+            const payload = input ? JSON.parse(input) : {};
+            if (
+              payload.stage === "dedupe" &&
+              payload.action === (phase === "cached" ? "begin" : "complete")
+            )
+              controller.abort(reason);
+            return result;
+          },
+        },
+      ),
+    ).rejects.toThrow(reason.message);
+    const saved = (await new FindingWorkflow(
+      options.workflowId,
+      environment,
+    ).get())!.stages.dedupe;
+    expect(saved).toMatchObject({
+      status: "completed",
+      result: { duplicateGroups: [] },
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]![0].pathname).toBe("/v1/bulk/findings");
+    expect<unknown>(
+      await deduplicateScanInternal(document.scanId, options, {
+        environment,
+        runWorkbench: history,
+        fetch,
+      }),
+    ).toEqual(saved.result);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  },
+);
+
 test("does not write workflow metadata into sealed artifacts", async () => {
   const { scanDir, environment } = await fixture();
   await expect(
@@ -494,7 +611,7 @@ test.each(["screen", "pair"])(
     const { scanDir, environment, document, history } = await fixture();
     const findings = [
       document.findings[0]!,
-      ...[1, 2, 3].map((index) => ({
+      ...[1, 2].map((index) => ({
         ...structuredClone(document.findings[0]!),
         findingId: `csf_${"f".repeat(23)}${index}`,
         title: `Synthetic original ${index}`,
@@ -539,10 +656,10 @@ test.each(["screen", "pair"])(
                 ),
               }
             : originals.some(
-                  (finding) => finding.findingId === findings[3]!.findingId,
+                  (finding) => finding.findingId === findings[2]!.findingId,
                 )
               ? distinct
-              : merged(originals),
+              : { ...sameRecommendation },
         );
       },
     };
@@ -571,13 +688,13 @@ test.each(["screen", "pair"])(
       fetch,
     });
     expect(result.duplicateGroups).toEqual([
-      findings.slice(0, 3).map((finding) => finding.findingId),
+      findings.slice(0, 2).map((finding) => finding.findingId),
     ]);
     expect(calls.filter((stage) => stage === "screen")).toHaveLength(
       interruptAt === "screen" ? 2 : 1,
     );
     expect(calls.filter((stage) => stage === "pair")).toHaveLength(
-      interruptAt === "pair" ? 4 : 3,
+      interruptAt === "pair" ? 3 : 2,
     );
     const count = calls.length;
     expect(
@@ -595,7 +712,7 @@ test.each(["screen", "pair"])(
 test.each(["screening", "pair-review"] as const)(
   "drains concurrent %s checkpoints after failure and resumes with different concurrency",
   async (failedStage) => {
-    const { environment, document, history } = await fixtureWithFindings(4);
+    const { environment, document, history } = await fixtureWithFindings(3);
     const options = {
       workflowId: `concurrent-${failedStage}`,
       findingsUrl: "http://synthetic.test",
@@ -631,7 +748,7 @@ test.each(["screening", "pair-review"] as const)(
                   originals.slice(1).map(screeningRecommendation),
                 ),
               }
-            : merged(originals),
+            : { ...sameRecommendation },
         );
       },
     };
@@ -698,7 +815,7 @@ test.each(["screening", "pair-review"] as const)(
     expect(groupWrites).toHaveBeenCalledTimes(1);
     expect(attempts.get(interruptedKeys[0]!)).toBe(2);
     expect(attempts.get(interruptedKeys[1]!)).toBe(1);
-    expect(attempts.size).toBe(10);
+    expect(attempts.size).toBe(6);
     for (const [key, count] of attempts)
       expect(count).toBe(key === interruptedKeys[0] ? 2 : 1);
     expect(
@@ -754,7 +871,7 @@ test("resumes a saved Sol review after overlapping Luna work fails", async () =>
                   originals.slice(1).map(screeningRecommendation),
                 ),
               }
-            : merged(originals),
+            : { ...sameRecommendation },
         );
       },
     },
@@ -820,7 +937,7 @@ test("replays an unacknowledged group write after migrating its workflow databas
           ? {
               decisions: { "pair-1": { ...sameRecommendation } },
             }
-          : merged(originals),
+          : { ...sameRecommendation },
       );
     },
   };

@@ -1,9 +1,23 @@
 import { resolving } from "./support/promises.js";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
+import {
+  publishFindingsCsvToCloud,
+  publishScanToCloud,
+} from "../src/cloud-publish.js";
 import type { JsonObject } from "../src/index.js";
 import {
   capture,
@@ -12,8 +26,11 @@ import {
   SYNTHETIC_CREDENTIALS,
   mustNotInitializeCodex,
 } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 const receipt = {
   scanId: "scan-1",
@@ -58,17 +75,45 @@ async function savedScansFixture() {
 
 describe("publish scan to Cloud", () => {
   test("documents the findings CSV option", async () => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
-        ["publish", "scan", "--help"],
-        stdout.stream,
-        capture().stream,
-        dependencies(),
-      ),
+      await stdout.run(["publish", "scan", "--help"], dependencies()),
     ).toBe(0);
     expect(stdout.text()).toContain("--csv <file>");
     expect(stdout.text()).toContain("Findings CSV");
+  });
+
+  test("preserves native CSV read and decode failures in CLI output", async () => {
+    const root = await temporaryDirectory();
+    const invalid = join(root, "invalid.csv");
+    await writeFile(invalid, Buffer.from([0xff]));
+    const deps = dependencies({
+      onConfig: throwing("unexpected model setup"),
+      onWorkbench: throwing("unexpected scan lookup"),
+    });
+    const fetchMock = mock(rejecting("unexpected request"));
+    deps.cloudFetch = fetchMock;
+    for (const path of [invalid, join(root, "missing.csv")]) {
+      let nativeError: Error | undefined;
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(await readFile(path));
+      } catch (error) {
+        nativeError = error as Error;
+      }
+      expect(nativeError).toBeInstanceOf(Error);
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["publish", "scan", "--to", "cloud", "--csv", path, "--dry-run"],
+          deps,
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        `Could not read findings CSV. ${nativeError!.message}`,
+      );
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("passes --dry-run through when publishing a findings CSV", async () => {
@@ -83,10 +128,10 @@ describe("publish scan to Cloud", () => {
       expect(options?.signal).toBeInstanceOf(AbortSignal);
       return { ...receipt, dryRun: true };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -97,8 +142,6 @@ describe("publish scan to Cloud", () => {
           "--dry-run",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -133,15 +176,8 @@ describe("publish scan to Cloud", () => {
     const deps = dependencies();
     const publishFindingsCsvToCloud = mock(resolving(receipt));
     deps.publishFindingsCsvToCloud = publishFindingsCsvToCloud;
-    const stderr = capture();
-    expect(
-      await main(
-        ["publish", "scan", ...args],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(["publish", "scan", ...args], deps)).toBe(2);
     expect(publishFindingsCsvToCloud).toHaveBeenCalledTimes(0);
     expect(stderr.text()).toContain(message);
   });
@@ -159,10 +195,10 @@ describe("publish scan to Cloud", () => {
       calls.push(scan.scanId);
       return { ...receipt, scanId: scan.scanId, dryRun: true };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -176,8 +212,6 @@ describe("publish scan to Cloud", () => {
           "--dry-run",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -205,9 +239,9 @@ describe("publish scan to Cloud", () => {
         await rm(second!.scanDir, { recursive: true });
       const publishScanToCloud = mock(resolving(receipt));
       deps.publishScanToCloud = publishScanToCloud;
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           [
             "publish",
             "scan",
@@ -218,8 +252,6 @@ describe("publish scan to Cloud", () => {
             "--to",
             "cloud",
           ],
-          capture().stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -236,9 +268,9 @@ describe("publish scan to Cloud", () => {
     const deps = dependencies({
       onWorkbench: throwing("unexpected lookup"),
     });
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         [
           "publish",
           "scan",
@@ -249,8 +281,6 @@ describe("publish scan to Cloud", () => {
           "--to",
           "cloud",
         ],
-        capture().stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -290,14 +320,9 @@ describe("publish scan to Cloud", () => {
       calls.push(options!.expectedScanId!);
       return { ...receipt, scanId: options!.expectedScanId! };
     };
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
-        ["publish", "scan", "--to", "cloud", "--json"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
+      await stdout.run(["publish", "scan", "--to", "cloud", "--json"], deps),
     ).toBe(0);
     expect(calls).toEqual(picks);
     expect(
@@ -325,15 +350,11 @@ describe("publish scan to Cloud", () => {
     };
     const publishScanToCloud = mock(resolving(receipt));
     deps.publishScanToCloud = publishScanToCloud;
-    expect(
-      await main(
-        ["publish", "scan", "--to", "cloud"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(130);
+    const { stderr, runCli } = createCliTest(main);
+    expect(await runCli(["publish", "scan", "--to", "cloud"], deps)).toBe(130);
     expect(publishScanToCloud).toHaveBeenCalledTimes(0);
+    expect(stderr.text()).toContain("Publication canceled");
+    expect(stderr.text()).not.toMatch(/accepted|retry/i);
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,
@@ -355,9 +376,9 @@ describe("publish scan to Cloud", () => {
       }
       return { ...receipt, scanId: options!.expectedScanId! };
     };
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         [
           "publish",
           "scan",
@@ -366,8 +387,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(143);
@@ -393,10 +412,10 @@ describe("publish scan to Cloud", () => {
       if (uploads === scans.length) signals.emit("SIGINT");
       return { ...receipt, scanId: options!.expectedScanId! };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -405,8 +424,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -451,6 +468,7 @@ describe("publish scan to Cloud", () => {
           environment: deps.environment,
           dryRun,
           signal: expect.any(AbortSignal),
+          fetch: expect.any(Function),
         });
         const { scanDir: _, ...result } = results[calls.length]!;
         calls.push(directory);
@@ -458,10 +476,10 @@ describe("publish scan to Cloud", () => {
         publishing = false;
         return result;
       };
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "publish",
             "scan",
@@ -474,8 +492,6 @@ describe("publish scan to Cloud", () => {
             "--json",
             ...(dryRun ? ["--dry-run"] : []),
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -506,10 +522,10 @@ describe("publish scan to Cloud", () => {
         scanId: directory === directories[0] ? "scan-1" : "scan-3",
       };
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "publish",
           "scan",
@@ -518,8 +534,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -568,10 +582,10 @@ describe("publish scan to Cloud", () => {
           }
           return receipt;
         };
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
+
         expect(
-          await main(
+          await runCli(
             [
               "publish",
               "scan",
@@ -580,8 +594,6 @@ describe("publish scan to Cloud", () => {
               "cloud",
               "--json",
             ],
-            stdout.stream,
-            stderr.stream,
             deps,
           ),
         ).toBe(code);
@@ -616,14 +628,195 @@ describe("publish scan to Cloud", () => {
     },
   );
 
-  test("rejects multiple scans for Linear before publishing any findings", async () => {
-    const deps = dependencies();
-    const publishScan = mock(rejecting("unexpected publication"));
-    deps.publishScan = publishScan;
+  test.each([
+    ["single preflight", "preflight", false],
+    ["single request", "request", false],
+    ["single receipt", "receipt", false],
+    ["batch preflight", "preflight", true],
+    ["batch request", "request", true],
+    ["batch receipt", "receipt", true],
+  ] as const)(
+    "handles cancellation from the real Cloud publisher: %s",
+    async (_scenario, stage, batch) => {
+      for (const [signal, code] of [
+        ["SIGINT", 130],
+        ["SIGTERM", 143],
+      ] as const) {
+        const root = await realpath(await temporaryDirectory());
+        const credentialHome = join(root, "credentials");
+        await mkdir(credentialHome, { mode: 0o700 });
+        await writeFile(
+          join(credentialHome, "auth.json"),
+          JSON.stringify({
+            auth_mode: "chatgpt",
+            tokens: {
+              access_token: "synthetic-access-token",
+              account_id: "synthetic-account",
+            },
+          }),
+          { mode: 0o600 },
+        );
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          'cli_auth_credentials_store = "file"\n',
+        );
+        const scanDirectories = await Promise.all(
+          ["scan-one", "scan-two"].map(async (name) => {
+            const directory = join(root, name);
+            await cp(
+              join(PLUGIN_ROOT, "examples", "completed-scan"),
+              directory,
+              {
+                recursive: true,
+              },
+            );
+            if (process.platform !== "win32") await chmod(directory, 0o700);
+            return directory;
+          }),
+        );
+        const directories = batch
+          ? [...scanDirectories, join(root, "not-attempted")]
+          : [scanDirectories[0]!];
+        const signals = new FakeSignals();
+        const deps = dependencies({
+          signals,
+          currentDirectory: root,
+          environment: {
+            CODEX_HOME: credentialHome,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+        });
+        let requests = 0;
+        deps.cloudFetch = async (_url, request) => {
+          requests++;
+          if (batch && requests === 1) {
+            return Response.json({
+              status: "accepted",
+              finding_ids: ["accepted-finding"],
+              finding_count: 1,
+            });
+          }
+          expect(request.signal).toBeInstanceOf(AbortSignal);
+          if (stage === "request") {
+            signals.emit(signal);
+            throw request.signal!.reason;
+          }
+          return new Response(
+            new ReadableStream({
+              pull(body) {
+                signals.emit(signal);
+                body.error(request.signal!.reason);
+              },
+            }),
+            { status: 201 },
+          );
+        };
+        let publications = 0;
+        deps.publishScanToCloud = (directory, options) => {
+          const result = publishScanToCloud(directory, options);
+          publications++;
+          if (stage === "preflight" && publications === (batch ? 2 : 1)) {
+            signals.emit(signal);
+          }
+          return result;
+        };
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              "publish",
+              "scan",
+              ...directories.flatMap((directory) => ["--scan-dir", directory]),
+              "--to",
+              "cloud",
+              "--json",
+            ],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(code);
+        expect(requests).toBe(
+          (batch ? 1 : 0) + (stage === "preflight" ? 0 : 1),
+        );
+        if (batch) {
+          expect(JSON.parse(stdout.text())).toEqual({
+            results: [
+              expect.objectContaining({
+                scanDir: directories[0],
+                findingIds: ["accepted-finding"],
+              }),
+            ],
+            failed: [
+              {
+                scanDir: directories[1],
+                error:
+                  stage === "preflight"
+                    ? signal
+                    : expect.stringMatching(/accepted.*check.*retry/i),
+              },
+            ],
+            notAttempted: [directories[2]],
+          });
+        } else {
+          expect(stdout.text()).toBe("");
+        }
+        if (stage === "preflight") {
+          expect(stderr.text()).not.toMatch(/accepted|retry/i);
+        } else {
+          expect(stderr.text()).toMatch(/accepted.*check.*retry/i);
+        }
+      }
+    },
+  );
+
+  test("cancels during CSV reading without suggesting an upload was accepted", async () => {
+    const root = await temporaryDirectory();
+    const csv = join(root, "findings.csv");
+    await writeFile(csv, "");
+    const signals = new FakeSignals();
+    const deps = dependencies({
+      signals,
+      currentDirectory: root,
+      environment: {
+        CODEX_HOME: join(root, "credentials"),
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+    });
+    let requests = 0;
+    deps.cloudFetch = async () => {
+      requests++;
+      throw new Error("unexpected upload");
+    };
+    deps.publishFindingsCsvToCloud = (path, options) => {
+      const result = publishFindingsCsvToCloud(path, options);
+      signals.emit("SIGINT");
+      return result;
+    };
     const stdout = capture();
     const stderr = capture();
     expect(
       await main(
+        ["publish", "scan", "--csv", csv, "--to", "cloud"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(130);
+    expect(requests).toBe(0);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).not.toMatch(/accepted|retry/i);
+  });
+
+  test("rejects multiple scans for Linear before publishing any findings", async () => {
+    const deps = dependencies();
+    const publishScan = mock(rejecting("unexpected publication"));
+    deps.publishScan = publishScan;
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
         [
           "publish",
           "scan",
@@ -636,8 +829,6 @@ describe("publish scan to Cloud", () => {
           "synthetic-team",
           "--json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -675,13 +866,14 @@ describe("publish scan to Cloud", () => {
               environment: deps.environment,
               dryRun,
               signal: expect.any(AbortSignal),
+              fetch: expect.any(Function),
             });
             return result;
           };
-          const stdout = capture();
-          const stderr = capture();
+          const { stdout, stderr, runCli } = createCliTest(main);
+
           expect(
-            await main(
+            await runCli(
               [
                 "publish",
                 "scan",
@@ -692,8 +884,6 @@ describe("publish scan to Cloud", () => {
                 "--json",
                 ...(dryRun ? ["--dry-run"] : []),
               ],
-              stdout.stream,
-              stderr.stream,
               deps,
             ),
           ).toBe(0);
@@ -724,12 +914,10 @@ describe("publish scan to Cloud", () => {
       });
       const calls = mock(resolving<typeof receipt, [string]>(receipt));
       deps.publishScanToCloud = calls;
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
+        await stdout.run(
           ["publish", "scan", ...inputs, "--to", "cloud", "--json"],
-          stdout.stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
@@ -763,9 +951,9 @@ describe("publish scan to Cloud", () => {
       onWorkbench: unexpectedScanHistory,
     });
     deps.publishScanToCloud = calls;
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         [
           "publish",
           "scan",
@@ -777,8 +965,6 @@ describe("publish scan to Cloud", () => {
           "cloud",
           "--json",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(0);
@@ -799,15 +985,10 @@ describe("publish scan to Cloud", () => {
       const deps = dependencies();
       const publishScanToCloud = mock(resolving(receipt));
       deps.publishScanToCloud = publishScanToCloud;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
-          ["publish", "scan", ...inputs, "--to", "cloud"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
+        await runCli(["publish", "scan", ...inputs, "--to", "cloud"], deps),
       ).toBe(2);
       expect(publishScanToCloud).toHaveBeenCalledTimes(0);
       expect(stdout.text()).toBe("");
@@ -852,14 +1033,9 @@ describe("publish scan to Cloud", () => {
         expect(options?.expectedScanId).toBe("scan-1");
         return receipt;
       };
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
-          ["publish", "scan", "--to", "cloud", "--json"],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
+        await stdout.run(["publish", "scan", "--to", "cloud", "--json"], deps),
       ).toBe(0);
       expect(selections).toBe(1);
       expect(JSON.parse(stdout.text())).toEqual(receipt);
@@ -875,15 +1051,10 @@ describe("publish scan to Cloud", () => {
       select: rejecting("unexpected picker"),
     };
     deps.publishScanToCloud = rejecting("unexpected publication");
-    const stderr = capture();
-    expect(
-      await main(
-        ["publish", "scan", "--to", "cloud"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(["publish", "scan", "--to", "cloud"], deps)).toBe(
+      2,
+    );
     expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
     expect(stderr.text()).not.toContain("--linear-team");
   });
@@ -900,10 +1071,10 @@ describe("publish scan to Cloud", () => {
       const deps = dependencies();
       const publishScanToCloud = mock(resolving(receipt));
       deps.publishScanToCloud = publishScanToCloud;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "publish",
             "scan",
@@ -912,8 +1083,6 @@ describe("publish scan to Cloud", () => {
             "cloud",
             ...linearOptions,
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -925,17 +1094,10 @@ describe("publish scan to Cloud", () => {
 
   test("keeps the internal Cloud destination out of help and discovery", async () => {
     for (const flag of ["--help", "--schema", "--llms", "--llms-full"]) {
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       const deps = dependencies();
       deps.publishScanToCloud = rejecting("unexpected publication");
-      expect(
-        await main(
-          ["publish", "scan", flag],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(0);
+      expect(await stdout.run(["publish", "scan", flag], deps)).toBe(0);
       expect(stdout.text().toLowerCase()).not.toContain("cloud");
     }
   });
@@ -945,13 +1107,11 @@ describe("publish scan to Cloud", () => {
     deps.publishScanToCloud = rejecting(
       `Cloud failed: ${SYNTHETIC_CREDENTIALS}\u001b[2J\ncontinued`,
     );
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["publish", "scan", "completed-scan", "--to", "cloud"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -968,13 +1128,11 @@ describe("publish scan to Cloud", () => {
       signals.emit("SIGINT");
       return receipt;
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         ["publish", "scan", "completed-scan", "--to", "cloud", "--json"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -985,6 +1143,27 @@ describe("publish scan to Cloud", () => {
         (listeners) => listeners.size === 0,
       ),
     ).toBe(true);
+  });
+
+  test("does not suggest retrying an upload when a Cloud dry run is canceled", async () => {
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.publishScanToCloud = async (_directory, options) => {
+      signals.emit("SIGINT");
+      throw options!.signal!.reason;
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", "--to", "cloud", "--dry-run"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(130);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).not.toMatch(/accepted|retry/i);
   });
 
   test("aborts Cloud publication without activating Linear recovery signal handling", async () => {
@@ -1009,13 +1188,11 @@ describe("publish scan to Cloud", () => {
         options?.signal?.throwIfAborted();
         return receipt;
       };
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           ["publish", "scan", "completed-scan", "--to", "cloud"],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(code);

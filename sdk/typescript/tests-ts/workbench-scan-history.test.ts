@@ -106,7 +106,7 @@ for index, (scan, repository) in enumerate([
     ('before', 'selected'), ('after', 'selected')
 ]):
     connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?)',
-                       (scan, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
+                       (scan, str(Path(sys.argv[2]) / repository), 'complete', f'2026-08-01T00:00:0{index}Z'))
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?)', [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
@@ -116,7 +116,7 @@ connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)',
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-    read_coverage=lambda _: {'completeness': 'complete'}, include_matching_inputs=True)
+    read_coverage=lambda _: {}, include_matching_inputs=True)
 print(json.dumps(comparison['matchingInputs']))
 `,
     join(tmpdir(), "codex-security-legacy-repositories"),
@@ -170,7 +170,7 @@ def save(value):
         connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
         now=lambda: '2026-01-01T00:00:00Z',
         require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+        read_coverage=lambda _: {'includePaths': ['src'],
                                  'excludePaths': [], 'explicitExclusions': []})
 def snapshot():
     return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
@@ -205,7 +205,14 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: {
+      new: 1,
+      persisting: 2,
+      reopened: 0,
+      resolved: 0,
+      not_observed: 1,
+      unknown: 0,
+    },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -323,7 +330,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "''')",
     "for index in range(3):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "queries = []",
     "connection.set_trace_callback(queries.append)",
@@ -342,7 +349,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
     "for index in (3, 4):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "def coverage(scan):",
     "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
@@ -368,7 +375,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "    'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),",
     "    'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],",
     "    'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],",
-    "    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,",
+    "    'batchedQueryCount': batched_queries,",
     "    'emptyLinks': empty, 'emptyQueryCount': len(queries),",
     "}))",
   ].join("\n");
@@ -390,6 +397,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
       ["scan-1", "scan-2"],
       ["scan-2", "scan-0"],
     ],
+    batchedQueryCount: 1,
     emptyLinks: [],
     emptyQueryCount: 0,
     unavailable: {
@@ -415,9 +423,6 @@ test("loads each scan once and scopes saved links to uncached history", async ()
       ],
     },
   });
-  expect(observed["batchedQueryCount"]).toBe(
-    observed["expectedBatchedQueryCount"],
-  );
 });
 
 test("reconciles cached statuses without losing grouped coverage or uncertainty", async () => {
@@ -467,7 +472,7 @@ payload = {
 }
 def cache():
     connection.execute('INSERT OR REPLACE INTO scan_comparisons VALUES (?, ?, ?)', ('before', 'after', json.dumps(payload)))
-coverage = {'completeness': 'complete', 'includePaths': ['src'],
+coverage = {'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
     return history.compare_scans(
@@ -515,7 +520,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    resolved: { summary: { new: 1, resolved: 0, not_observed: 1, unknown: 0 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [
@@ -606,13 +611,9 @@ batched_queries = len(queries)
 if limited:
     connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
 
-class LegacyConnection:
-    def execute(self, *args):
-        return connection.execute(*args)
-
 queries.clear()
 legacy_rows = list(history._rows_for_ids(
-    LegacyConnection(), 'SELECT id FROM finding_occurrences WHERE id IN ({placeholders})',
+    connection, 'SELECT id FROM finding_occurrences WHERE id IN (SELECT value FROM json_each(?))',
     (f'left-{index}' for index in range(1001))
 ))
 print(json.dumps({
@@ -621,7 +622,6 @@ print(json.dumps({
     'reverse': reverse, 'remaining': sorted(remaining), 'unchanged': unchanged,
     'restoredAfterUnlink': restored,
     'batchedCount': len(batched), 'batchedQueries': batched_queries,
-    'expectedBatchedQueries': 6 if limited else 3,
     'legacyCount': len(legacy_rows), 'legacyQueries': len(queries)
 }))
 `;
@@ -640,10 +640,10 @@ print(json.dumps({
     unchanged: true,
     restoredAfterUnlink: true,
     batchedCount: 10,
+    batchedQueries: 3,
     legacyCount: 1001,
-    legacyQueries: 2,
+    legacyQueries: 1,
   });
-  expect(observed["batchedQueries"]).toBe(observed["expectedBatchedQueries"]);
 });
 
 test("includes recurring stable identities in confirmed finding history", async () => {
@@ -662,7 +662,7 @@ CREATE TABLE scan_comparison_matches (
 ''')
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, str(index)))
+    connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, f'2026-08-01T00:00:0{index}Z'))
     connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, finding, scan, scan))
 connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)', [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),
@@ -671,7 +671,7 @@ connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 
 def collect_history():
     result = {}
     for index, (scan, finding) in enumerate(scans):
-        matches, first, bounds = finding_matches(connection, scan, scan, str(index))
+        matches, first, bounds = finding_matches(connection, scan, scan, f'2026-08-01T00:00:0{index}Z')
         result[scan] = {'linked': [match['occurrenceId'] for match in matches], 'first': first, 'bounds': bounds}
         for match in matches:
             assert match['reason']
@@ -686,38 +686,62 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
     withLinks: {
       a: {
         linked: ["a-repeat", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       b: {
         linked: ["a", "a-repeat", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       c: {
         linked: ["a", "a-repeat", "b", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "a-repeat": {
         linked: ["a", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "c-repeat": {
         linked: ["a", "a-repeat", "b", "c"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      unlinked: {
+        linked: [],
+        first: "2026-08-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
     withoutLinks: {
-      a: { linked: ["a-repeat"], first: "0", bounds: ["a", "a-repeat"] },
-      "a-repeat": { linked: ["a"], first: "0", bounds: ["a", "a-repeat"] },
-      b: { linked: [], first: "1", bounds: ["b"] },
-      c: { linked: ["c-repeat"], first: "2", bounds: ["c", "c-repeat"] },
-      "c-repeat": { linked: ["c"], first: "2", bounds: ["c", "c-repeat"] },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      a: {
+        linked: ["a-repeat"],
+        first: "2026-08-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      "a-repeat": {
+        linked: ["a"],
+        first: "2026-08-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      b: { linked: [], first: "2026-08-01T00:00:01Z", bounds: ["b"] },
+      c: {
+        linked: ["c-repeat"],
+        first: "2026-08-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      "c-repeat": {
+        linked: ["c"],
+        first: "2026-08-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      unlinked: {
+        linked: [],
+        first: "2026-08-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
   });
 });

@@ -4,7 +4,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories = createTemporaryDirectories();
+const directories = createTemporaryDirectories(true);
 
 afterEach(directories.cleanup);
 

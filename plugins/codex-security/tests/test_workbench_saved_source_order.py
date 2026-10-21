@@ -11,9 +11,10 @@ from test_workbench_checkpoint_heads import drafts, select
 from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
 from workbench_test_support import (
     fail_deep_scan,
-    run_workbench,
+    get_scan,
     saved_binding,
     saved_discovery_worker,
+    scan_command,
     write_checkpoint,
 )
 
@@ -36,7 +37,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, latest_pending: bool
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     old, latest = (closed, pending) if latest_pending else (pending, closed)
     result.write_text(json.dumps(old))
@@ -72,7 +73,13 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
         "standard-worker-thread",
     )
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"]) is latest_pending
+    assert not any(row["id"] == "review" for row in coverage["deferred"])
+    assert all(
+        row.get("workerId") == worker_id
+        for row in coverage["deferred"]
+        if row["id"] != "scan-stopped"
+    )
+    assert any(row["id"] == f"{worker_id}/review" for row in coverage["deferred"]) is latest_pending
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
         == frozen
@@ -85,7 +92,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_recovery: bool, layout: str
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     result.write_text(json.dumps(closed))
     os.utime(result, ns=(100, 100))
@@ -121,7 +128,15 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     )
     assert len(published) == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"])
+    expected_id = f"{worker_id}/review" if layout == "worker" else "review"
+    if layout == "worker":
+        assert not any(row["id"] == "review" for row in coverage["deferred"])
+        assert all(
+            row.get("workerId") == worker_id
+            for row in coverage["deferred"]
+            if row["id"] != "scan-stopped"
+        )
+    assert any(row["id"] == expected_id for row in coverage["deferred"])
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert published[0].relative_to(scan_dir).as_posix() in sources
     assert any("/checkpoint-heads/" in f"/{path}" for path in sources)
@@ -190,15 +205,8 @@ def test_order_metadata_is_not_new_evidence(tmp_path: Path) -> None:
     manifest = (scan_dir / "scan-manifest.json").read_bytes()
     orphan = scan_dir / "source-order" / ("0" * 64 + ".json")
     orphan.write_text(json.dumps({"scanId": scan_id, "sources": {}}))
-    assert (
-        run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["resultsRecoveryNeeded"]
-        is False
-    )
-    run_workbench(
-        state,
-        "recover-scan-results",
-        "--scan-id",
-        scan_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
+    scan_command(
+        state, "recover-scan-results", scan_id, environment={"CODEX_HOME": str(codex_home)}
     )
     assert (scan_dir / "scan-manifest.json").read_bytes() == manifest

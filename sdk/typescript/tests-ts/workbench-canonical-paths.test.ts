@@ -1,11 +1,14 @@
 import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-canonical-paths-",
+);
 const testCaseSensitive = process.platform === "linux" ? test : test.skip;
 const testPosix = process.platform === "win32" ? test.skip : test;
 const testWindows = process.platform === "win32" ? test : test.skip;
@@ -83,14 +86,7 @@ const realFilesystemProbe = [
   "print(json.dumps(checks))",
 ].join("\n");
 
-afterEach(temporaryDirectories.cleanup);
-
-async function temporaryDirectory(): Promise<string> {
-  const directory = await temporaryDirectories.create(
-    "codex-security-canonical-paths-",
-  );
-  return directory;
-}
+afterEach(cleanup);
 
 function runPythonProbe(
   program: string,
@@ -114,6 +110,56 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  const nativeCaseAliases =
+    runPythonProbe(
+      [
+        "import json, sys, tempfile",
+        "from pathlib import Path",
+        "with tempfile.TemporaryDirectory(dir=sys.argv[2]) as directory:",
+        "    target = Path(directory) / 'component'",
+        "    target.mkdir()",
+        "    alias = target.with_name('COMPONENT')",
+        "    print(json.dumps({'supported': alias.exists() and alias.samefile(target)}))",
+      ].join("\n"),
+      tmpdir(),
+    )["supported"] === true;
+
+  test.skipIf(!nativeCaseAliases)(
+    "hashes and inventories native filesystem case aliases for Git roots and components",
+    async () => {
+      const root = await temporaryDirectory();
+      expect(
+        runPythonProbe(
+          [
+            "import json, subprocess, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "import workbench_target as target",
+            "root = Path(sys.argv[2])",
+            "repository = root / 'repository'",
+            "repository.mkdir()",
+            "subprocess.run(['git', 'init', '-q', str(repository)], check=True, capture_output=True)",
+            "component = repository / 'component'",
+            "component.mkdir()",
+            "(component / 'app.py').write_text('print(1)\\n')",
+            "(repository / 'root.py').write_text('print(2)\\n')",
+            "scopes = root / 'scopes.json'",
+            "scopes.write_text(json.dumps(['.']))",
+            "output = root / 'inventory.jsonl'",
+            "cases = [(root / 'REPOSITORY', repository, ['component/app.py', 'root.py']), (repository / 'COMPONENT', component, ['app.py'])]",
+            "for selected, original, expected in cases:",
+            "    assert selected.samefile(original)",
+            "    assert target.directory_content_digest(selected) == target.directory_content_digest(original)",
+            "    subprocess.run([sys.executable, str(Path(sys.argv[1]) / 'generate_rank_input.py'), 'make-repo-scope-input', '--repo', str(selected), '--scopes-file', str(scopes), '--out', str(output)], check=True, capture_output=True)",
+            "    assert [json.loads(line)['path'] for line in output.read_text().splitlines()] == expected",
+            "print(json.dumps({'targetsChecked': len(cases)}))",
+          ].join("\n"),
+          root,
+        ),
+      ).toEqual({ targetsChecked: 2 });
+    },
+  );
+
   test("reads Unicode commit subjects regardless of locale or Git log encoding", async () => {
     const repository = await temporaryDirectory();
     expect(

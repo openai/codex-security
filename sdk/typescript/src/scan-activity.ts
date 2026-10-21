@@ -74,12 +74,12 @@ export function scanActivityFromEvent(
     item["type"] === "command_execution" &&
     typeof item["command"] === "string"
   ) {
-    const command = displayCommand(item["command"]);
+    const command = unwrapCommand(item["command"]);
     return {
       id: item["id"],
       kind: "command",
       status,
-      description: command,
+      description: command.replaceAll(/\s+/gu, " "),
       paths: commandRepositoryPaths(command, repository),
     };
   }
@@ -87,14 +87,14 @@ export function scanActivityFromEvent(
   if (item["type"] === "mcp_tool_call" && typeof item["tool"] === "string") {
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
-    const command = typeof value === "string" ? displayCommand(value) : null;
+    const command = typeof value === "string" ? unwrapCommand(value) : null;
     return {
       id: item["id"],
       kind: "tool",
       status,
       description:
         item["tool"] === "exec" && command !== null
-          ? command
+          ? command.replaceAll(/\s+/gu, " ")
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
@@ -118,11 +118,11 @@ export function scanActivityFromEvent(
   return null;
 }
 
-function displayCommand(command: string): string {
-  const normalized = command.replaceAll(/\s+/gu, " ").trim();
+function unwrapCommand(command: string): string {
+  const normalized = command.trim();
   const powershell =
     process.platform === "win32"
-      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/iu.exec(
+      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/isu.exec(
           normalized,
         )
       : null;
@@ -135,7 +135,7 @@ function displayCommand(command: string): string {
     return powershell[4]!;
   }
   const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/u.exec(
+    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
       normalized,
     );
   if (match === null) return normalized;
@@ -242,17 +242,30 @@ function sessionProse(
   kind: "reasoning" | "message",
   value: unknown,
 ): ScanActivity | null {
-  if (!Array.isArray(value)) return null;
-  const text = value
+  return proseActivity(
+    id,
+    kind,
+    "completed",
+    sessionContentText(value, ["summary_text", "output_text"], " "),
+  );
+}
+
+/** @internal */
+export function sessionContentText(
+  content: unknown,
+  types: readonly string[] = ["output_text"],
+  separator = "\n",
+): string {
+  if (!Array.isArray(content)) return "";
+  return content
     .filter(
       (item): item is Record<string, unknown> & { text: string } =>
         isRecord(item) &&
-        (item["type"] === "summary_text" || item["type"] === "output_text") &&
+        types.some((type) => item["type"] === type) &&
         typeof item["text"] === "string",
     )
-    .map((item) => item["text"])
-    .join(" ");
-  return proseActivity(id, kind, "completed", text);
+    .map((item) => item.text)
+    .join(separator);
 }
 
 function proseActivity(
@@ -279,7 +292,7 @@ function proseActivity(
 function prose(text: string, limit?: number): string {
   const normalized = text
     .split(
-      /(`{3,}[^\r\n]*(?:\r?\n[\s\S]*?(?:\r?\n[ \t]*`{3,}[ \t]*(?=\r?\n|$)|$)|$)|`[^`\r\n]+`)/gu,
+      /((?<!`)`{3,}[^`\r\n]*(?:\r?\n[\s\S]*?(?:\r?\n[ \t]*`{3,}[ \t]*(?=\r?\n|$)|$)|$)|`[^`\r\n]+`)/gu,
     )
     .reduce((result, part, index) => {
       if (index % 2 === 1) {

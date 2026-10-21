@@ -2,9 +2,123 @@ from __future__ import annotations
 
 import json
 import runpy
+from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 FINDING_PREVIEW_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "finding_preview.py"
+
+pytestmark = pytest.mark.cross_platform
+
+
+def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    compact = {
+        "severity": {"level": "high", "rationale": "Synthetic impact"},
+        "confidence": {"level": "high", "rationale": "Synthetic validation"},
+        "ruleId": "example-rule",
+        "status": "validated",
+        "identity": {"anchor": "example-finding"},
+    }
+    finding = {
+        **compact,
+        "codeEvidence": [
+            {
+                "id": "example-source",
+                "code": "synthetic code " * 1000,
+                "explanation": "synthetic explanation " * 1000,
+            }
+        ],
+    }
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert {key: bounded[key] for key in compact} == compact
+    assert bounded["codeEvidence"]
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("metadata", "value"),
+    [
+        ("severity", {"rationale": "x" * 20_000, "level": "high"}),
+        ("confidence", {"rationale": "x" * 20_000, "level": "high"}),
+        ("identity", {"anchor": "x" * 20_000}),
+        ("ruleId", "x" * 20_000),
+        ("taxonomy", {"category": "x" * 1_800, "cwe": ["CWE-79"]}),
+        ("taxonomy", {"category": "x" * 20_000, "cwe": ["CWE-79"]}),
+    ],
+    ids=["severity", "confidence", "identity", "rule", "taxonomy-short", "taxonomy-long"],
+)
+def test_verbose_finding_metadata_retains_diagnostics_and_report(
+    metadata: str, value: object
+) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    finding = {
+        "identity": {"anchor": "example-finding"},
+        "status": "validated",
+        "writeup": {"reportPath": "findings/example/example.md"},
+        "rootCause": {"summary": "Synthetic root cause"},
+        "validation": {"summary": "Synthetic validation"},
+        "attackPath": {"summary": "Synthetic path"},
+        "codeEvidence": [{"id": "source", "code": "example()"}],
+        metadata: value,
+    }
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert {key: bounded[key] for key in finding if key != metadata} == {
+        key: value for key, value in finding.items() if key != metadata
+    }
+    assert bounded[metadata]
+    if metadata == "taxonomy":
+        assert bounded[metadata]["cwe"] == value["cwe"]
+    if metadata in {"severity", "confidence"}:
+        assert bounded[metadata]["level"] == "high"
+        assert bounded[metadata]["rationale"]
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )
+
+
+@pytest.mark.parametrize("length", [2_000, 20_000])
+@pytest.mark.parametrize("extra_metadata", [False, True])
+def test_multiple_verbose_metadata_sections_each_retain_a_preview(
+    length: int, extra_metadata: bool
+) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    finding = {
+        "severity": {"level": "high", "rationale": "s" * length},
+        "confidence": {"level": "high", "rationale": "c" * length},
+        "status": "validated",
+        "writeup": {"reportPath": "findings/example/example.md"},
+        "validation": {"summary": "Synthetic validation"},
+    }
+    if extra_metadata:
+        finding.update(
+            identity={"anchor": "i" * length},
+            ruleId="r" * length,
+            taxonomy={"category": "t" * length},
+        )
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert set(bounded) == set(finding)
+    for key in ("severity", "confidence"):
+        assert bounded[key]["level"] == "high"
+        assert bounded[key]["rationale"]
+    assert bounded["status"] == finding["status"]
+    assert bounded["writeup"] == finding["writeup"]
+    assert bounded["validation"] == finding["validation"]
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )
 
 
 def test_nested_attack_path_stays_within_its_preview_budget() -> None:
@@ -56,6 +170,33 @@ def test_bounded_finding_details_normalizes_scalar_attack_path_assessments() -> 
 
     assert "impact" not in missing["attackPath"]
     assert "likelihood" not in missing["attackPath"]
+
+
+def test_nested_attack_path_string_arrays_survive_without_relaxing_section_depth() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    original = {
+        "attackPath": {
+            "dataflow": {
+                "evidenceRefs": ["source-to-sink"],
+                "nested": {"evidenceRefs": ["must remain depth-limited"]},
+            },
+            "reachability": {"preconditions": ["The handler is reachable."]},
+        }
+    }
+    finding = deepcopy(original)
+
+    bounded = preview["bounded_finding_details"](finding)
+
+    assert bounded == {
+        "attackPath": {
+            "dataflow": {
+                "evidenceRefs": ["source-to-sink"],
+                "nested": {"evidenceRefs": [None]},
+            },
+            "reachability": {"preconditions": ["The handler is reachable."]},
+        }
+    }
+    assert finding == original
 
 
 def test_bounded_finding_details_merges_root_cause_aliases() -> None:
@@ -260,3 +401,78 @@ def test_bounded_finding_details_filters_malformed_evidence_before_limiting() ->
     )
 
     assert bounded["code_evidence"] == [{"id": "valid", "code": "valid_source()"}]
+
+
+def test_large_code_preview_bounds_sizing_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    project = preview["bounded_finding_details"]
+    original_size = project.__globals__["json_size"]
+    probe_lengths: list[int] = []
+
+    def observed_size(value: object) -> int:
+        if isinstance(value, str):
+            probe_lengths.append(len(value))
+        return original_size(value)
+
+    monkeypatch.setitem(project.__globals__, "json_size", observed_size)
+    finding = {
+        "preventiveControls": ["Keep the authorization check centralized."],
+        "codeEvidence": [
+            {
+                "id": "source",
+                "label": "Missing check",
+                "path": "example.py",
+                "startLine": 1,
+                "code": "x" * (64 * 1024),
+                "explanation": "The resource is returned without authorization.",
+            }
+        ],
+        "attackPath": {"narrative": "The request reaches the protected resource."},
+        "validation": {"summary": "An unauthorized request succeeds."},
+        "rootCause": {"summary": "The authorization check is missing."},
+        "remediationTests": ["Reject an unauthorized request."],
+    }
+    original = deepcopy(finding)
+    expected = {
+        "rootCause": original["rootCause"],
+        "validation": original["validation"],
+        "attackPath": original["attackPath"],
+        "codeEvidence": [{**original["codeEvidence"][0], "code": "x" * 1_498}],
+        "remediationTests": original["remediationTests"],
+        "preventiveControls": original["preventiveControls"],
+    }
+
+    bounded = project(finding)
+
+    assert bounded == expected
+    assert list(bounded) == list(expected)
+    encoded = json.dumps(bounded, separators=(",", ":")).encode("ascii")
+    assert encoded == json.dumps(expected, separators=(",", ":")).encode("ascii")
+    assert len(encoded) <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    assert finding == original
+    assert probe_lengths
+    assert 1_498 in probe_lengths
+    assert max(probe_lengths) <= 1_500
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "plain", '"\\\n\t\x00', "é", "😀", "a😀é\n", "\ud800"],
+    ids=["empty", "ascii", "escapes", "bmp", "supplementary", "mixed", "lone-surrogate"],
+)
+def test_bounded_json_text_matches_exhaustive_prefix_oracle(value: str) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    prefixes = [
+        (value[:end], len(json.dumps(value[:end]).encode("ascii"))) for end in range(len(value) + 1)
+    ]
+    budgets = {-3, 0, 1, 2}
+    for _, size in prefixes:
+        budgets.update((size - 1, size, size + 1))
+
+    for budget in sorted(budgets):
+        expected = next((item for item in reversed(prefixes) if item[1] <= budget), ("", 2))
+        assert preview["bounded_json_text"](value, budget) == expected, (repr(value), budget)
+        if budget <= 0:
+            remaining = [budget]
+            assert preview["bounded_json_value"](value, remaining) is None
+            assert remaining == [budget]

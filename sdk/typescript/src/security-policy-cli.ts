@@ -1,3 +1,4 @@
+import { listenForAbort } from "./cli-signals.js";
 import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
@@ -44,8 +45,8 @@ export interface PolicyCommandDependencies {
 }
 
 const STAGES: Record<SecurityPolicyStage, string> = {
-  architecture: "[1/3] Understanding the system and its security boundaries",
-  threat_model: "[2/3] Building the source-backed threat model",
+  architecture: "[1/3] Reading the source",
+  threat_model: "[2/3] Writing the threat model",
   policy: "[3/3] Drafting SECURITY.md",
 };
 
@@ -73,30 +74,11 @@ export async function runPolicyCommand(
       errorOutput.write(`${message}\n`);
     } catch {}
   };
-  let firstSignalAt = 0;
-  const signalListener = (signal: SignalName) => () => {
-    if (controller.signal.aborted) {
-      // Match scan's handling of duplicate initial signals from launchers.
-      if (
-        controller.signal.reason === signal &&
-        dependencies.now() - firstSignalAt < 500
-      )
-        return;
-      removeSignalListeners();
-      dependencies.forceExit(signal);
-      return;
-    }
-    firstSignalAt = dependencies.now();
-    controller.abort(signal);
-  };
-  const interrupt = signalListener("SIGINT");
-  const terminate = signalListener("SIGTERM");
-  const removeSignalListeners = () => {
-    dependencies.removeSignalListener("SIGINT", interrupt);
-    dependencies.removeSignalListener("SIGTERM", terminate);
-  };
-  dependencies.addSignalListener("SIGINT", interrupt);
-  dependencies.addSignalListener("SIGTERM", terminate);
+  const removeSignalListeners = listenForAbort(
+    dependencies,
+    controller,
+    (signal) => dependencies.forceExit(signal),
+  );
   try {
     const auth =
       interactive && !options.dryRun
@@ -140,7 +122,7 @@ export async function runPolicyCommand(
               signal: AbortSignal,
             ) => {
               write(
-                "A few details could change this policy. Leave an answer blank to keep it unresolved.",
+                "Answer what you know; leave other answers blank for later review.",
               );
               const answers: string[] = [];
               for (const question of questions) {
@@ -180,7 +162,7 @@ export async function runPolicyCommand(
         ...(draft.reviewNotes.length === 0
           ? []
           : [
-              "\nOwner review:",
+              "\nReview notes:",
               ...draft.reviewNotes.map((note) => `- ${display(note)}`),
             ]),
       ].join("\n");
@@ -195,7 +177,7 @@ export async function runPolicyCommand(
         write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
-          "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
+          "No repository files changed. Review the draft, then copy only SECURITY.md to the Policy target shown.",
         );
     }
     const seconds = Math.max(0, (dependencies.now() - started) / 1000);

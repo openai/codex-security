@@ -34,7 +34,7 @@ type FileInfo = Pick<Stats, "isDirectory" | "isFile" | "isSymbolicLink"> & {
 const statPath = (path: Buffer): FileInfo =>
   windows ? windowsFiles().stat(path) : statSync(path);
 
-function windowsJoin(left: string, right: string): string {
+export function windowsJoin(left: string, right: string): string {
   if (right.startsWith("\\\\?\\") || right.startsWith("\\\\.\\")) return right;
   const namespaced = left.startsWith("\\\\?\\");
   const base = left.startsWith("\\\\?\\UNC\\")
@@ -116,7 +116,7 @@ export function expandHome(
     return namespacedUnc ? win32.toNamespacedPath(expanded) : expanded;
   }
   if (path === "~" || path.startsWith("~/")) {
-    const home = posixHome ?? homedir();
+    const home = (posixHome ?? homedir()).replace(/\/+$/u, "");
     if (home.startsWith("~"))
       throw new Error("Could not determine home directory.");
     return home + path.slice(1) || "/";
@@ -231,13 +231,43 @@ function asciiJson(value: string): string {
   );
 }
 
+function directoryEntries(directory: Buffer) {
+  return windows
+    ? windowsFiles().entriesWithTypes(directory)
+    : readdirSync(directory, {
+        encoding: "buffer",
+        withFileTypes: true,
+      }).flatMap((entry) => {
+        // Some Node-compatible runtimes return names without their types.
+        if (!(entry instanceof Uint8Array)) return [entry];
+        const name = Buffer.from(entry);
+        let metadata;
+        try {
+          metadata = lstatSync(appendPath(directory, name));
+        } catch (error) {
+          if (
+            ["ENOENT", "ENOTDIR"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
+          )
+            return [];
+          throw error;
+        }
+        return [
+          {
+            name,
+            isDirectory: () => metadata.isDirectory(),
+            isSymbolicLink: () => metadata.isSymbolicLink(),
+          },
+        ];
+      });
+}
+
 function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
   const root = resolveRoot(repo, posixHome);
   const policies: string[] = [];
   function walk(directory: Buffer, prefix: string): void {
-    const entries = windows
-      ? windowsFiles().entriesWithTypes(directory)
-      : readdirSync(directory, { encoding: "buffer", withFileTypes: true });
+    const entries = directoryEntries(directory);
     for (const listedEntry of entries) {
       const bytes = listedEntry.name;
       const name = decodePath(bytes);

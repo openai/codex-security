@@ -66,11 +66,12 @@ if it should block merging.
 | ------------- | ----------------------------------------------------------------------- |
 | `0`           | Completed scan; export and upload SARIF                                 |
 | `1`           | Severity-policy violation; upload SARIF and keep the job failed         |
-| Other nonzero | Failed or incomplete scan; fail the job without uploading partial SARIF |
+| Other nonzero | Execution failed or was interrupted; fail the job without uploading SARIF |
 
-For exit `2`, inspect the logs, result JSON, and coverage report: missing coverage
-is not a clean security result. Full and diff scans use separate SARIF categories
-so a diff does not replace the full-repository baseline.
+For exit `2`, inspect the logs and result JSON for the execution error. Scope
+exclusions and deferred investigations do not fail the scan or bypass the
+findings policy. Full and diff scans use separate SARIF categories so a diff
+does not replace the full-repository baseline.
 
 Reports are saved as seven-day artifacts even after a scan or SARIF upload fails
 (cancelled jobs may not save them). Only result JSON, report, coverage, findings,
@@ -97,13 +98,14 @@ you are authorized to submit to the configured inference provider.
 
 The repository's [Invoice Desk workflow](../../.github/workflows/invoice-desk.yml)
 adapts this example to `--provider openai --auth api-key` using an
-`OPENAI_API_KEY` secret in a protected GitHub environment. Pull requests to
-`main` run behavior tests without inference credentials. A trusted dispatcher
+`OPENAI_API_KEY` secret in the protected `codex-security-smoke-test` GitHub
+environment. Pull requests to `main` run behavior tests without inference
+credentials. A trusted dispatcher
 handles only PR metadata and starts a separate
 [scan workflow](../../.github/workflows/invoice-desk-scan.yml) on protected `main`.
-It scans each PR's application source, including forks and drafts, after
-environment approval. The Actions summary shows the PR number, source commit,
-finding counts, coverage, elapsed time, and package-cache reuse. Reports, metrics
+It scans each PR's application source, including forks and drafts, unattended.
+The Actions summary shows the PR number, source commit,
+finding counts, requested scope, elapsed time, and package-cache reuse. Reports, metrics
 JSON, and SARIF are saved as artifacts.
 Only public CLI package downloads are cached; analysis and authentication state
 are fresh for each scan. Manual baseline scans remain available. The scan does

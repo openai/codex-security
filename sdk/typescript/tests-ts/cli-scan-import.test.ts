@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { Writable } from "node:stream";
+import { setImmediate } from "node:timers/promises";
 import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -8,6 +10,7 @@ import {
   FakeSignals,
 } from "./cli-fixtures.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 function importDependencies() {
   const deps = dependencies({
@@ -31,14 +34,127 @@ function importDependencies() {
 }
 
 describe("scan import", () => {
+  test.each(["completed", "failed", "interrupted", "preview"] as const)(
+    "preserves %s import outcomes when cleanup warnings fail asynchronously",
+    async (outcome) => {
+      const signals = new FakeSignals();
+      const deps = dependencies({ signals });
+      deps.importScan = async (options, settings) => {
+        settings?.onWarning?.("Synthetic scratch cleanup failure");
+        if (outcome === "failed") throw new Error("Synthetic import failure");
+        if (outcome === "interrupted") {
+          signals.emit("SIGINT");
+          options.signal?.throwIfAborted();
+        }
+        return options.dryRun
+          ? {
+              dryRun: true,
+              inputPath: options.sourcePath,
+              format: options.format,
+              findingCount: 2,
+            }
+          : fakeResult(["high", "high"]);
+      };
+      const stdout = capture();
+      const stderr = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() =>
+            callback(new Error("Synthetic asynchronous stderr failure")),
+          );
+        },
+      });
+      expect(
+        await main(
+          [
+            "scan",
+            "import",
+            "--json",
+            "findings.json",
+            "--format",
+            "json",
+            ...(outcome === "preview" ? ["--dry-run"] : []),
+          ],
+          stdout.stream,
+          stderr,
+          deps,
+        ),
+      ).toBe(outcome === "failed" ? 2 : outcome === "interrupted" ? 130 : 0);
+      await setImmediate();
+      expect(stderr.listenerCount("error")).toBe(0);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      if (outcome === "completed") {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { id: "scan" } },
+        });
+      } else if (outcome === "preview") {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          dryRun: true,
+          findingCount: 2,
+        });
+      }
+    },
+  );
+
+  test("keeps required import output failures fatal", async () => {
+    const { deps } = importDependencies();
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() =>
+          callback(new Error("Synthetic import output failure")),
+        );
+      },
+    });
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "import", "--json", "findings.json", "--format", "json"],
+        stdout,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Synthetic import output failure");
+  });
+
+  test.each(["completed", "failed"] as const)(
+    "reports cleanup warnings without changing a %s import outcome",
+    async (outcome) => {
+      const { deps } = importDependencies();
+      deps.importScan = async (_options, settings) => {
+        settings?.onWarning?.("Synthetic scratch cleanup failure");
+        if (outcome === "failed") throw new Error("Synthetic import failure");
+        return fakeResult(["high", "high"]);
+      };
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scan", "import", "--json", "findings.json", "--format", "json"],
+          deps,
+        ),
+      ).toBe(outcome === "failed" ? 2 : 0);
+      expect(stderr.text()).toContain(
+        "codex-security: warning: Synthetic scratch cleanup failure",
+      );
+      if (outcome === "failed") {
+        expect(stderr.text()).toContain("Synthetic import failure");
+      } else {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { id: "scan" } },
+        });
+        expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
+      }
+    },
+  );
+
   test.each(["csv", "json"] as const)(
     "imports --%s while --format json controls output",
     async (format) => {
       const { deps, calls } = importDependencies();
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [
             "scan",
             "import",
@@ -50,8 +166,6 @@ describe("scan import", () => {
             "--format",
             "json",
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -79,10 +193,10 @@ describe("scan import", () => {
 
   test("accepts equals input syntax and validates without saving", async () => {
     const { deps, calls } = importDependencies();
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
+      await runCli(
         [
           "scan",
           "import",
@@ -90,8 +204,6 @@ describe("scan import", () => {
           "--dry-run",
           "--format=json",
         ],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(0);
@@ -107,15 +219,10 @@ describe("scan import", () => {
 
   test("uses a concise summary for default output", async () => {
     const { deps } = importDependencies();
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
-        ["scan", "import", "--json", "findings.json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
+      await runCli(["scan", "import", "--json", "findings.json"], deps),
     ).toBe(0);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
@@ -138,39 +245,23 @@ describe("scan import", () => {
     ],
   ])("rejects invalid import arguments %j", async (args, message) => {
     const { deps, calls } = importDependencies();
-    const stderr = capture();
-    expect(
-      await main(
-        ["scan", "import", ...args],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run(["scan", "import", ...args], deps)).toBe(2);
     expect(calls).toHaveLength(0);
     expect(stderr.text()).toContain(message);
   });
 
   test("exposes both source flags in help and schemas", async () => {
     const { deps, calls } = importDependencies();
-    const help = capture();
-    expect(
-      await main(
-        ["scan", "import", "--help"],
-        help.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    const help = captureCli(main, "stdout");
+    expect(await help.run(["scan", "import", "--help"], deps)).toBe(0);
     expect(help.text()).toContain("--csv <file>");
     expect(help.text()).toContain("--json <file>");
     expect(help.text()).toContain("--format json");
-    const schema = capture();
+    const schema = captureCli(main, "stdout");
     expect(
-      await main(
+      await schema.run(
         ["scan", "import", "--schema", "--format", "json"],
-        schema.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(0);
@@ -183,20 +274,13 @@ describe("scan import", () => {
   });
 
   test("ordinary scan retains repository arguments and the --json output shortcut", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, runCli } = createCliTest(main);
+
     const onRun = mock();
     const deps = dependencies({
       onRun,
     });
-    expect(
-      await main(
-        ["scan", "./import", "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", "./import", "--json"], deps)).toBe(0);
     expect(onRun).toHaveBeenCalledTimes(1);
     expect(JSON.parse(stdout.text())).toMatchObject({
       manifest: { scan: { id: "scan" } },
@@ -205,12 +289,10 @@ describe("scan import", () => {
 
   test("preserves the global JSON shortcut before the scan command", async () => {
     const { deps, calls } = importDependencies();
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["--json", "scan", "import", "--csv", "findings.csv"],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(0);
@@ -239,37 +321,37 @@ describe("scan import", () => {
     });
   });
 
-  test("reruns an imported scan from its retained source", async () => {
-    const { deps, calls } = importDependencies();
-    deps.runWorkbench = async (args) => {
-      expect(args).toEqual(["get-scan-recipe", "--scan-id", "previous-scan"]);
-      return {
-        recipe: {
-          import: {
-            format: "csv",
-            sourcePath: resolve("retained", "source.csv"),
+  test.each(["12345678-1234-4234-8234-123456789abc", "12345678"])(
+    "reruns imported scan %s from its retained source with the resolved parent UUID",
+    async (selector) => {
+      const scanId = "12345678-1234-4234-8234-123456789abc";
+      const { deps, calls } = importDependencies();
+      deps.runWorkbench = async (args) => {
+        expect(args).toEqual(["get-scan-recipe", "--scan-id", selector]);
+        return {
+          scanId,
+          recipe: {
+            import: {
+              format: "csv",
+              sourcePath: resolve("retained", "source.csv"),
+            },
           },
-        },
+        };
       };
-    };
-    const stdout = capture();
-    expect(
-      await main(
-        ["scans", "rerun", "previous-scan", "--json"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
-    expect(calls[0]).toMatchObject({
-      sourcePath: resolve("retained", "source.csv"),
-      format: "csv",
-      parentScanId: "previous-scan",
-    });
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      manifest: { scan: { id: "scan" } },
-    });
-  });
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(["scans", "rerun", selector, "--json"], deps),
+      ).toBe(0);
+      expect(calls[0]).toMatchObject({
+        sourcePath: resolve("retained", "source.csv"),
+        format: "csv",
+        parentScanId: scanId,
+      });
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { id: "scan" } },
+      });
+    },
+  );
 
   test.each(["--validation-prompt-file", "--scan-prompt-file"])(
     "rejects %s when rerunning an imported scan",
@@ -283,12 +365,10 @@ describe("scan import", () => {
           },
         },
       });
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           ["scans", "rerun", "previous-scan", option, "workflow.md"],
-          capture().stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -303,14 +383,9 @@ describe("scan import", () => {
     const signals = new FakeSignals();
     const deps = dependencies({ signals });
     deps.importScan = rejecting("Input JSON is not a findings document.");
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
-        ["scan", "import", "--json", "findings.json"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
+      await stderr.run(["scan", "import", "--json", "findings.json"], deps),
     ).toBe(2);
     expect(stderr.text()).toBe(
       "codex-security: Input JSON is not a findings document.\n",
@@ -330,14 +405,9 @@ describe("scan import", () => {
       options.signal!.throwIfAborted();
       throw new Error("unreachable");
     };
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
-        ["scan", "import", "--csv", "findings.csv"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
+      await stderr.run(["scan", "import", "--csv", "findings.csv"], deps),
     ).toBe(status);
     expect(stderr.text()).toContain("Scan import canceled.");
     expect(signals.listeners.get(signal)?.size).toBe(0);

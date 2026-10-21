@@ -112,6 +112,7 @@ export const savedRecipe = (
   config: JsonObject = {},
   target: JsonObject = { kind: "repository", paths: [] },
 ) => ({
+  scanId: "scan-original",
   recipe: {
     repository: "/original/repository",
     target,
@@ -122,7 +123,7 @@ export const savedRecipe = (
 
 export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
-  completeness: CoverageDocument["completeness"] = "complete",
+  completeness?: "complete" | "partial" | "unknown",
   usage: unknown = null,
 ): ScanResult {
   const manifest = {
@@ -159,7 +160,7 @@ export function fakeResult(
     schemaVersion: "1.0",
     scanId: "scan",
     mode: "repository",
-    completeness,
+    ...(completeness === undefined ? {} : { completeness }),
     inventoryStrategy: "repository",
     includePaths: ["."],
     excludePaths: [],
@@ -213,12 +214,12 @@ export function dependencies(
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
-    bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (
       args: readonly string[],
       input?: string,
       signal?: AbortSignal,
     ) => JsonObject | Promise<JsonObject>;
+    readSavedFindings?: MainDependencies["readSavedFindings"];
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -287,7 +288,6 @@ export function dependencies(
         repository,
         commandOptions,
       )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
-    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
@@ -296,6 +296,8 @@ export function dependencies(
       : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input, signal) =>
       (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    readSavedFindings:
+      options.readSavedFindings ?? (async () => result.findings.findings),
     matchFindings: async (input, comparisonOptions) =>
       (await options.onMatch?.(input, comparisonOptions)) ?? {
         matches: [],

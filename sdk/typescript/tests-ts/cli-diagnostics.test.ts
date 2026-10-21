@@ -4,14 +4,81 @@ import { main } from "../src/cli.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
 import {
   warningResult,
-  capture,
   dependencies,
   fakeResult,
   fakeSecurity,
 } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
 
+import { createCliTest } from "./support/cli-run.js";
+
 describe("CLI diagnostics", () => {
+  test.each<string[]>([
+    ["publish", "scan", "completed-scan", "--to", "cloud"],
+    ["publish", "check", "completed-scan", "--to", "linear"],
+    ["import", "github", "example/repository"],
+    ["install-hook"],
+    ["suggest-owners", "findings.json"],
+    ["classify-severity", "--scan", "latest"],
+    ["scan-components", "--component", "api=src", "--output-dir", "out"],
+    ["bulk-scan", "repositories.csv", "--output-dir", "out"],
+    ["export", "completed-scan", "--output", "findings.json"],
+    ["validate", "Synthetic finding"],
+    ["verify-fix", "Synthetic finding"],
+    ["init"],
+  ])("does not format success after %j fails (case %#)", async (...command) => {
+    for (const flags of [["--full-output"], ["--token-count"]]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.currentDirectory = throwing("Synthetic command failure.");
+
+      expect(await runCli([...command, ...flags], deps)).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        "codex-security: Synthetic command failure.\n",
+      );
+    }
+  });
+
+  test("does not format a token count after patch fails", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.currentDirectory = throwing("Synthetic command failure.");
+
+    expect(
+      await runCli(["patch", "Synthetic finding", "--token-count"], deps),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("codex-security: Synthetic command failure.\n");
+  });
+
+  test.each<string[]>([["scan"], ["scans", "rerun", "scan-original"]])(
+    "rejects late Markdown selection for %j without a success result",
+    async (...command) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const fail = throwing("Must not load or execute a scan.");
+      const deps = dependencies({ onWorkbench: fail, onRun: fail });
+      deps.currentDirectory = fail;
+      expect(
+        await runCli(
+          [
+            ...command,
+            "--filter-output",
+            "--help",
+            "--format",
+            "md",
+            "--full-output",
+          ],
+          deps,
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        "codex-security: Markdown output is not supported for scan results.\n",
+      );
+    },
+  );
+
   test.each([
     {
       command: "policy",
@@ -50,6 +117,11 @@ describe("CLI diagnostics", () => {
       structured: true,
     },
     {
+      command: "patch (full-output)",
+      args: ["patch", "Synthetic finding", "--json", "--full-output"],
+      structured: true,
+    },
+    {
       command: "scan import",
       args: ["--json", "scan", "import", "--csv", "findings.csv"],
       structured: false,
@@ -72,16 +144,16 @@ describe("CLI diagnostics", () => {
       deps.importGitHubAlerts = fail;
       if (command === "policy" || command === "suggest-owners")
         deps.currentDirectory = fail;
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
 
-      expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(2);
+      expect(await runCli(args, deps)).toBe(2);
       expect(stderr.text()).toContain(
         "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail\n",
       );
       expect(stderr.text()).not.toContain("\u001b");
       if (structured) {
         const result = JSON.parse(stdout.text());
+        expect(result.ok).toBe(false);
         expect(result.error?.message ?? result.message).toBe(message);
       }
     },
@@ -96,20 +168,13 @@ describe("CLI diagnostics", () => {
     new CodexSecurityError("request timed out token=SYNTHETIC_TIMEOUT_VALUE"),
   ]) {
     test(`preserves scan failure details for ${failure.message}`, async () => {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       const deps = dependencies();
       deps.createSecurity = () =>
         fakeSecurity((Promise.reject<never>).bind(Promise, failure));
 
-      expect(
-        await main(
-          ["scan", ".", "--json", "--verbose"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(2);
+      expect(await runCli(["scan", ".", "--json", "--verbose"], deps)).toBe(2);
       expect(JSON.parse(stdout.text()).message).toBe(failure.message);
       expect(stderr.text()).toContain(failure.message);
     });
@@ -163,8 +228,10 @@ describe("CLI diagnostics", () => {
   ])("preserves warning details and verbosity for $name", async (mode) => {
     const warning = "recoverable warning: token=SYNTHETIC_WARNING_VALUE";
     const observer = "observer failure: token=SYNTHETIC_OBSERVER_VALUE";
-    const stdout = capture();
-    const stderr = capture(mode.tty);
+    const { stderr, runCli } = createCliTest(main, {
+      stderr: mode.tty,
+    });
+
     const result = fakeResult([], "complete", {
       input_tokens: 200,
       cached_input_tokens: 20,
@@ -187,14 +254,7 @@ describe("CLI diagnostics", () => {
         return result;
       });
 
-    expect(
-      await main(
-        ["scan", ".", ...mode.args],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(["scan", ".", ...mode.args], deps)).toBe(0);
     const output = stripVTControlCharacters(stderr.text()).replace(
       /\s+/gu,
       " ",
@@ -218,18 +278,11 @@ describe("CLI diagnostics", () => {
 
   test("preserves target warning details in diagnostics and result data", async () => {
     const warning = "Source changed: token=SYNTHETIC_TARGET_VALUE";
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     deps.createSecurity = () => fakeSecurity(warningResult(warning, true));
-    expect(
-      await main(
-        ["scan", ".", "--json", "--verbose"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["scan", ".", "--json", "--verbose"], deps)).toBe(2);
     expect(JSON.parse(stdout.text()).warnings).toEqual([warning]);
     expect(stderr.text()).toContain(`codex-security: warning: ${warning}`);
   });
@@ -237,8 +290,8 @@ describe("CLI diagnostics", () => {
   test("preserves live activity and observer messages", async () => {
     const activity = "command result: token=SYNTHETIC_ACTIVITY_VALUE";
     const observer = "observer result: token=SYNTHETIC_OBSERVER_VALUE";
-    const stdout = capture();
-    const stderr = capture(true);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+
     const deps = dependencies({ environment: { NO_COLOR: "1" } });
     deps.createSecurity = () =>
       fakeSecurity(async (_repository, options) => {
@@ -254,9 +307,7 @@ describe("CLI diagnostics", () => {
         return fakeResult();
       });
 
-    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
-      0,
-    );
+    expect(await runCli(["scan", "."], deps)).toBe(0);
     const output = stripVTControlCharacters(stderr.text()).replace(
       /\s+/gu,
       " ",

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { isMain } from "../../sdk/typescript/scripts/is-main.mjs";
 
 function eligible(pr, repository, sha) {
   return (
@@ -61,10 +61,9 @@ export async function resolveScanTargets(
   return [{ pr: pr.number, sha: sourceSha }];
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
+  const api = (args, options = {}) =>
+    execFileSync("gh", ["api", ...args], { encoding: "utf8", ...options });
   const repository = process.env.GITHUB_REPOSITORY;
   const targets = await resolveScanTargets(
     {
@@ -80,36 +79,24 @@ if (
               sha: process.env.SOURCE_SHA,
             },
     },
-    (number) =>
-      JSON.parse(
-        execFileSync("gh", ["api", `repos/${repository}/pulls/${number}`], {
-          encoding: "utf8",
-        }),
-      ),
+    (number) => JSON.parse(api([`repos/${repository}/pulls/${number}`])),
     (sha) =>
       JSON.parse(
-        execFileSync(
-          "gh",
-          [
-            "api",
-            "--paginate",
-            "--slurp",
-            `repos/${repository}/commits/${sha}/pulls?per_page=100`,
-          ],
-          { encoding: "utf8" },
-        ),
+        api([
+          "--paginate",
+          "--slurp",
+          `repos/${repository}/commits/${sha}/pulls?per_page=100`,
+        ]),
       ).flat(),
     (sha) =>
       JSON.parse(
-        execFileSync(
-          "gh",
+        api(
           [
-            "api",
             "--paginate",
             "--slurp",
             `repos/${repository}/actions/workflows/invoice-desk-scan.yml/runs?event=workflow_dispatch&branch=main&head_sha=${sha}&per_page=100`,
           ],
-          { encoding: "utf8", maxBuffer: Infinity },
+          { maxBuffer: Infinity },
         ),
       ).flatMap((page) => page.workflow_runs.map((run) => run.display_title)),
   );

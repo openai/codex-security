@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+# Keep sibling helpers importable when Python starts in isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import report_projection as report
 
 _STRUCTURED_SECTIONS = (
     ("Assets", "assets"),
@@ -113,12 +116,6 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     body = threat_model_body(model)
     if _markdown_content(model) is None:
         body = "# Threat Model\n\n" + body
-    script = Path(__file__).resolve().with_name("report_projection.py")
-    spec = importlib.util.spec_from_file_location("codex_security_report_projection", script)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"could not load report projection helper: {script}")
-    report = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(report)
     text = report._text
     provenance = provenance or {}
     footer = ["---", "", "## Saved Model Context", ""]
@@ -132,9 +129,7 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     ):
         if provenance.get(key):
             footer.append(f"- {label}: {text(str(provenance[key]), 'not recorded')}")
-    footer.append(
-        f"- Model origin: {text(str(model.get('origin', 'not recorded')), 'not recorded')}"
-    )
+    footer.append(f"- Model origin: {text(model.get('origin'), 'not recorded')}")
     footer.extend(_scope_lines(model.get("scope"), "Model scope", text))
     scan_scope = provenance.get("scanScope")
     if isinstance(scan_scope, dict):

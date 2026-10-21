@@ -1,3 +1,4 @@
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 import { resolving } from "./support/promises.js";
 import { createHash } from "node:crypto";
 import {
@@ -34,6 +35,11 @@ import {
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
+import {
+  createCliTest,
+  runCapturedCli,
+  captureCli,
+} from "./support/cli-run.js";
 
 async function copyCompletedScan(root: string): Promise<string> {
   const scan = join(root, "scan");
@@ -48,6 +54,10 @@ describe("CLI", () => {
       exportEnvironment({
         Path: "C:\\Python;C:\\Windows\\System32",
         PYTHON: "/managed/python",
+        XDG_CACHE_HOME: "/managed/cache",
+        LD_LIBRARY_PATH: "/managed/libraries",
+        DYLD_LIBRARY_PATH: "/managed/dylibs",
+        DYLD_FALLBACK_LIBRARY_PATH: "/managed/fallback-libraries",
         TMPDIR: "/tmp",
         OPENAI_API_KEY: "openai-secret",
         CODEX_API_KEY: "codex-secret",
@@ -57,31 +67,104 @@ describe("CLI", () => {
     ).toEqual({
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
+      XDG_CACHE_HOME: "/managed/cache",
       PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });
   });
 
   test("exports findings to stdout without initializing Codex", async () => {
-    for (const [format, expected] of [
-      ["csv", "occurrence_id,finding_id\n"],
-      ["json", '{"documentType":"codex-security.findings"}\n'],
-      ["sarif", '{"version":"2.1.0"}\n'],
-    ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = mustNotInitializeCodex;
-      expect(
-        await main(
-          ["export", "scan", "--export-format", format, "--output", "-"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
-      expect(stdout.text()).toBe(expected);
-      expect(stderr.text()).toBe("");
+    const dataHome = await temporaryDirectory("export-skills-");
+    const previousDataHome = process.env["XDG_DATA_HOME"];
+    process.env["XDG_DATA_HOME"] = dataHome;
+    try {
+      const skillPath = join(dataHome, "skills", "codex-security-export");
+      await mkdir(join(dataHome, "incur"), { recursive: true });
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(
+        join(skillPath, "SKILL.md"),
+        "Previously installed skill.",
+      );
+      await writeFile(
+        join(dataHome, "incur", "codex-security.json"),
+        JSON.stringify({
+          hash: "previous-command-hash",
+          skills: ["codex-security-export"],
+          paths: [skillPath],
+        }),
+      );
+      for (const [format, expected] of [
+        ["csv", "occurrence_id,finding_id\n"],
+        ["json", '{"documentType":"codex-security.findings"}\n'],
+        ["sarif", '{"version":"2.1.0"}\n'],
+        ["md", "# Synthetic threat model\n"],
+      ] as const) {
+        for (const metadata of [[], ["--full-output"], ["--token-count"]]) {
+          const { stdout, stderr, runCli } = createCliTest(main);
+
+          const deps = dependencies();
+          deps.createSecurity = mustNotInitializeCodex;
+          deps.exportFindings = async () => Buffer.from(expected);
+          expect(
+            await runCli(
+              [
+                "export",
+                "scan",
+                "--export-format",
+                format,
+                "--output",
+                "-",
+                ...(format === "md" ? ["--artifact", "threat-model"] : []),
+                ...metadata,
+              ],
+              deps,
+            ),
+          ).toBe(0);
+          expect(stdout.text()).toBe(expected);
+          expect(stderr.text()).toBe("");
+        }
+      }
+      const failure = dependencies();
+      failure.exportFindings = async () => {
+        throw new Error("EACCES: synthetic export denied");
+      };
+      failure.runWorkbench = async () => {
+        throw new Error("Synthetic setup read failure");
+      };
+      for (const [args, diagnostic] of [
+        [
+          ["export", "scan", "--output", "-"],
+          "EACCES: synthetic export denied",
+        ],
+        [
+          ["export", "scan", "--export-format", "md", "--output", "-"],
+          "Findings exports support",
+        ],
+        [["export", "--output", "-"], "Synthetic setup read failure"],
+        [
+          ["export", "scan", "--export-format", "invalid", "--output", "-"],
+          "Invalid option:",
+        ],
+      ] as const) {
+        const failed = createCliTest(main);
+        expect(await failed.runCli([...args], failure)).toBe(2);
+        expect(failed.stdout.text()).toBe("");
+        expect(failed.stderr.text()).toContain(diagnostic);
+      }
+      for (const metadata of ["--help", "--schema"]) {
+        const result = createCliTest(main);
+        expect(
+          await result.runCli(
+            ["export", "scan", "--output", "-", metadata],
+            failure,
+          ),
+        ).toBe(0);
+        expect(result.stdout.text()).not.toBe("");
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
+      else process.env["XDG_DATA_HOME"] = previousDataHome;
+      await rm(dataHome, { recursive: true, force: true });
     }
   });
 
@@ -99,14 +182,9 @@ describe("CLI", () => {
       return new Uint8Array();
     };
 
-    expect(
-      await main(
-        ["export", "--output", "-"],
-        capture().stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCapturedCli(main, ["export", "--output", "-"], deps)).toBe(
+      0,
+    );
     expect(exportedScanDir).toBe(scanDir);
   });
 
@@ -123,11 +201,9 @@ describe("CLI", () => {
         exports += 1;
         return undefined;
       };
-      const stdout = capture();
-      const stderr = capture();
-      expect(await main(["export"], stdout.stream, stderr.stream, deps)).toBe(
-        2,
-      );
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["export"], deps)).toBe(2);
       expect(stderr.text()).toBe(
         lookupFails
           ? "codex-security: Synthetic history failure.\n"
@@ -156,20 +232,9 @@ describe("CLI", () => {
       };
       const workbench = (args: readonly string[]) =>
         runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
-      const registered = await workbench([
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ]);
+      const registered = await workbench(
+        scanRegistrationArguments(repository, scanDir),
+      );
       const scanId = registered["scanId"] as string;
       await copyCompletedScan(root);
       const content = "# Saved model\n\nSynthetic component boundaries.\n";
@@ -285,8 +350,8 @@ describe("CLI", () => {
 
   test("exports a saved provisional model by scan prefix without starting Codex", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-export-model-"));
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const calls: string[][] = [];
     const deps = dependencies({
       onWorkbench: (args) => {
@@ -310,7 +375,7 @@ describe("CLI", () => {
     };
     try {
       expect(
-        await main(
+        await runCli(
           [
             "export",
             "--scan",
@@ -320,8 +385,6 @@ describe("CLI", () => {
             "--output",
             "-",
           ],
-          stdout.stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(0);
@@ -363,21 +426,13 @@ describe("CLI", () => {
     };
     try {
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           ["export", "saved", "--artifact", "threat-model"],
-          capture().stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
-      expect(
-        await main(
-          ["export", "saved"],
-          capture().stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCapturedCli(main, ["export", "saved"], deps)).toBe(0);
       expect(selected).toMatchObject([
         {
           artifact: "threat-model",
@@ -412,14 +467,12 @@ describe("CLI", () => {
         "Markdown stdout cannot",
       ],
     ] as const) {
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const deps = dependencies();
       deps.exportFindings = async () => {
         throw new Error("must not export invalid input");
       };
-      expect(
-        await main(["export", ...args], capture().stream, stderr.stream, deps),
-      ).toBe(2);
+      expect(await stderr.run(["export", ...args], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
     }
   });
@@ -658,119 +711,119 @@ describe("CLI", () => {
   );
 
   test.each([
-    ["complete", false],
-    ["partial", true],
-    ["unknown", true],
+    [undefined, true],
     ["partial", false],
-    ["unknown", false],
-  ] as const)("exports %s, deferred: %j", async (completeness, hasDeferred) => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const scan = await copyCompletedScan(directory);
-      const manifestPath = join(scan, "scan-manifest.json");
-      const manifest = JSON.parse(
-        await readFile(manifestPath, "utf8"),
-      ) as ScanManifest;
-      const coveragePath = join(scan, manifest.scan.coverageRef);
-      const coverage = JSON.parse(
-        await readFile(coveragePath, "utf8"),
-      ) as CoverageDocument;
-      coverage.completeness = completeness;
-      coverage.deferred = hasDeferred
-        ? [
-            { id: "review", reason: "Source review did not finish." },
-            { id: "validation", reason: "Validation did not finish." },
-          ]
-        : [];
-      const coverageBytes = JSON.stringify(coverage);
-      await writeFile(coveragePath, coverageBytes);
-      manifest.scan.artifacts.find(
-        (artifact) => artifact.path === manifest.scan.coverageRef,
-      )!.sha256 = createHash("sha256").update(coverageBytes).digest("hex");
-      await writeFile(manifestPath, JSON.stringify(manifest));
+  ] as const)(
+    "exports saved results with legacy metadata %s and notes %j",
+    async (completeness, hasDeferred) => {
+      const directory = await temporaryDirectory("codex-security-export-");
+      try {
+        const scan = await copyCompletedScan(directory);
+        const manifestPath = join(scan, "scan-manifest.json");
+        const manifest = JSON.parse(
+          await readFile(manifestPath, "utf8"),
+        ) as ScanManifest;
+        const coveragePath = join(scan, manifest.scan.coverageRef);
+        const coverage = JSON.parse(
+          await readFile(coveragePath, "utf8"),
+        ) as CoverageDocument;
+        if (completeness !== undefined) coverage["completeness"] = completeness;
+        coverage.deferred = hasDeferred
+          ? [
+              { id: "review", reason: "Source review did not finish." },
+              { id: "validation", reason: "Validation did not finish." },
+            ]
+          : [];
+        const coverageBytes = JSON.stringify(coverage);
+        await writeFile(coveragePath, coverageBytes);
+        manifest.scan.artifacts.find(
+          (artifact) => artifact.path === manifest.scan.coverageRef,
+        )!.sha256 = createHash("sha256").update(coverageBytes).digest("hex");
+        await writeFile(manifestPath, JSON.stringify(manifest));
 
-      const paths = [
-        manifestPath,
-        join(scan, manifest.scan.findingsRef),
-        coveragePath,
-      ];
-      const before = await Promise.all(paths.map((path) => readFile(path)));
-      const source = JSON.parse(before[1]!.toString()).findings[0];
-      for (const [format, filename] of [
-        ["csv", "findings.csv"],
-        ["json", "findings.json"],
-        ["sarif", "results.sarif"],
-      ] as const) {
-        const stdout = capture();
-        const stderr = capture();
-        const output = join(directory, filename);
-        expect(
-          await main(
-            ["export", scan, "--export-format", format, "--output", output],
-            stdout.stream,
-            stderr.stream,
-          ),
-        ).toBe(0);
-        const contents = await readFile(output, "utf8");
-        if (format === "csv") {
-          expect(contents).toContain("occurrence_id,finding_id,");
-        } else if (format === "json") {
-          expect(JSON.parse(contents)).toMatchObject({
-            documentType: "codex-security.findings",
-          });
-        } else {
-          const sarif = JSON.parse(contents);
-          expect(sarif.version).toBe("2.1.0");
-          const run = sarif.runs[0];
-          expect(run.properties.codexSecurityCoverageCompleteness).toBe(
-            completeness === "complete" ? undefined : completeness,
-          );
-          if (completeness === "complete") {
-            expect(run.invocations).toBeUndefined();
+        const paths = [
+          manifestPath,
+          join(scan, manifest.scan.findingsRef),
+          coveragePath,
+        ];
+        const before = await Promise.all(paths.map((path) => readFile(path)));
+        const source = JSON.parse(before[1]!.toString()).findings[0];
+        for (const [format, filename] of [
+          ["csv", "findings.csv"],
+          ["json", "findings.json"],
+          ["sarif", "results.sarif"],
+        ] as const) {
+          const stdout = capture();
+          const stderr = capture();
+          const output = join(directory, filename);
+          expect(
+            await main(
+              ["export", scan, "--export-format", format, "--output", output],
+              stdout.stream,
+              stderr.stream,
+            ),
+          ).toBe(0);
+          const contents = await readFile(output, "utf8");
+          if (format === "csv") {
+            expect(contents).toContain("occurrence_id,finding_id,");
+          } else if (format === "json") {
+            expect(JSON.parse(contents)).toMatchObject({
+              documentType: "codex-security.findings",
+            });
           } else {
-            expect(run.invocations).toHaveLength(1);
-            const invocation = run.invocations[0];
-            expect(invocation.executionSuccessful).toBe(true);
-            expect(invocation.toolExecutionNotifications).toEqual(
-              coverage.deferred.map(({ reason: text }) => ({
-                level: "warning",
-                message: { text },
-              })),
+            const sarif = JSON.parse(contents);
+            expect(sarif.version).toBe("2.1.0");
+            const run = sarif.runs[0];
+            expect(run.properties).not.toHaveProperty(
+              "codexSecurityCoverageCompleteness",
             );
+            if (!hasDeferred) {
+              expect(run.invocations).toBeUndefined();
+            } else {
+              expect(run.invocations).toHaveLength(1);
+              const invocation = run.invocations[0];
+              expect(invocation.executionSuccessful).toBe(true);
+              expect(invocation.toolExecutionNotifications).toEqual(
+                coverage.deferred.map(({ reason: text }) => ({
+                  level: "warning",
+                  message: { text },
+                })),
+              );
+            }
+            expect(run.tool.driver.rules[0]).toMatchObject({
+              id: source.ruleId,
+              help: { markdown: expect.stringContaining(source.remediation) },
+              properties: {
+                "security-severity": "8.1",
+                tags: expect.arrayContaining([
+                  "security",
+                  "external/cwe/cwe-022",
+                ]),
+              },
+            });
+            expect(run.results).toHaveLength(1);
+            expect(run.results[0]).toMatchObject({
+              ruleId: source.ruleId,
+              message: { text: expect.stringContaining(source.remediation) },
+              partialFingerprints: {
+                "codexSecurity/v1": source.fingerprints.primary,
+              },
+            });
           }
-          expect(run.tool.driver.rules[0]).toMatchObject({
-            id: source.ruleId,
-            help: { markdown: expect.stringContaining(source.remediation) },
-            properties: {
-              "security-severity": "8.1",
-              tags: expect.arrayContaining([
-                "security",
-                "external/cwe/cwe-022",
-              ]),
-            },
-          });
-          expect(run.results).toHaveLength(1);
-          expect(run.results[0]).toMatchObject({
-            ruleId: source.ruleId,
-            message: { text: expect.stringContaining(source.remediation) },
-            partialFingerprints: {
-              "codexSecurity/v1": source.fingerprints.primary,
-            },
-          });
+          if (process.platform !== "win32")
+            expect((await stat(output)).mode & 0o777).toBe(0o600);
+          expect(stdout.text()).toBe("");
+          expect(stderr.text()).toBe(`${format.toUpperCase()}: ${output}\n`);
         }
-        if (process.platform !== "win32")
-          expect((await stat(output)).mode & 0o777).toBe(0o600);
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toBe(`${format.toUpperCase()}: ${output}\n`);
+        expect(manifest.scan.status).toBe("completed");
+        expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
+          before,
+        );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
       }
-      expect(manifest.scan.status).toBe("completed");
-      expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
-        before,
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   test("expands home-relative export paths", async () => {
     const root = await temporaryDirectory("codex-security-export-home-");
@@ -791,7 +844,8 @@ describe("CLI", () => {
       const exports = mock<typeof deps.exportFindings>(resolving(undefined));
       deps.exportFindings = exports;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "export",
             "~/scan",
@@ -802,8 +856,6 @@ describe("CLI", () => {
             "--source-root",
             "~/source",
           ],
-          capture().stream,
-          capture().stream,
           deps,
         ),
       ).toBe(0);
@@ -827,12 +879,10 @@ describe("CLI", () => {
     const root = await temporaryDirectory("codex-security-export-missing-");
     try {
       const output = join(root, "reports", "results.sarif");
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       expect(
-        await main(
+        await stderr.run(
           ["export", "scan", "--output", output],
-          capture().stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(2);
@@ -888,10 +938,9 @@ describe("CLI", () => {
           return new TextEncoder().encode('{"version":"2.1.0"}\n');
         };
         expect(
-          await main(
+          await runCapturedCli(
+            main,
             ["export", join(linked, "scan"), "--output", output],
-            capture().stream,
-            capture().stream,
             deps,
           ),
         ).toBe(0);
@@ -970,10 +1019,10 @@ describe("CLI", () => {
         linked,
         process.platform === "win32" ? "junction" : "dir",
       );
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
 
       expect(
-        await main(
+        await stderr.run(
           [
             "export",
             scan,
@@ -982,8 +1031,6 @@ describe("CLI", () => {
             "--output",
             join(linked, "results.json"),
           ],
-          capture().stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(2);
@@ -1012,7 +1059,7 @@ describe("CLI", () => {
         join(repository, "reports"),
         process.platform === "win32" ? "junction" : "dir",
       );
-      const stderr = capture();
+      const stderr = captureCli(main, "stderr");
       const deps = dependencies();
       deps.currentDirectory = () => repository;
       deps.exportFindings = async () => {
@@ -1020,15 +1067,13 @@ describe("CLI", () => {
       };
 
       expect(
-        await main(
+        await stderr.run(
           [
             "export",
             scan,
             "--output",
             join(repository, "reports", "results.sarif"),
           ],
-          capture().stream,
-          stderr.stream,
           deps,
         ),
       ).toBe(2);
@@ -1041,22 +1086,15 @@ describe("CLI", () => {
   });
 
   test("reports strict export failures without a stack trace", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     deps.exportFindings = async () => {
       throw new CodexSecurityError(
         "manifest.scan: SARIF projection requires a sealed scan",
       );
     };
-    expect(
-      await main(
-        ["export", "scan", "--output", "-"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
       "codex-security: manifest.scan: SARIF projection requires a sealed scan\n",
@@ -1064,21 +1102,14 @@ describe("CLI", () => {
   });
 
   test("preserves caught export failures", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies();
     deps.exportFindings = async () => {
       throw new CodexSecurityError(`export failed ${SYNTHETIC_CREDENTIALS}`);
     };
 
-    expect(
-      await main(
-        ["export", "scan", "--output", "-"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
       `codex-security: export failed ${SYNTHETIC_CREDENTIALS}\n`,
