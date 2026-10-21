@@ -2724,3 +2724,27 @@ test("normalized SDK publication rejects nonfinite raw evidence without JSON coe
   expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
 });
+
+test("invalid source namespaces fail before authentication or Cloud requests", async () => {
+  const f = await fixture();
+  const contacted: string[] = [];
+  for (const sourceKey of [" ", "x".repeat(513), "tenant\0namespace"])
+    await expect(
+      prepareExternalPublication(
+        f.file,
+        { ...options, sourceKey },
+        {
+          ...f.deps,
+          credentials: async () => {
+            contacted.push("credentials");
+            throw new Error("Unexpected authentication");
+          },
+          fetch: async () => {
+            contacted.push("fetch");
+            throw new Error("Unexpected Cloud request");
+          },
+        },
+      ),
+    ).rejects.toThrow("source key must contain");
+  expect(contacted).toEqual([]);
+});

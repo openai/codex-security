@@ -391,9 +391,13 @@ async function preparePublicationInput(
       // Optional progress must not interrupt preparation or publication.
     }
   };
-  if (!options.sourceKey.trim() || Buffer.byteLength(options.sourceKey) > 512) {
+  if (
+    !options.sourceKey.trim() ||
+    options.sourceKey.includes("\0") ||
+    Buffer.byteLength(options.sourceKey) > 512
+  ) {
     throw new CodexSecurityError(
-      "The source key must contain 1–512 UTF-8 bytes. Use a stable scanner organization/project/branch namespace across imports.",
+      "The source key must contain 1–512 UTF-8 bytes and no NUL characters. Use a stable scanner organization/project/branch namespace across imports.",
     );
   }
   progress({ phase: "reading", completed: 0 });

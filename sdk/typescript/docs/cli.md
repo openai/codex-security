@@ -1419,7 +1419,7 @@ Results distinguish completion from partial or interrupted work:
 
 | Status        | Exit code | Meaning                                                                                            |
 | ------------- | --------- | -------------------------------------------------------------------------------------------------- |
-| `complete`    | 0         | All selected records were acknowledged and their source records read back.                                               |
+| `complete`    | 0         | All selected records were acknowledged and their source records read back.                         |
 | `partial`     | 1         | The import finished, but some records were excluded locally or rejected by Cloud.                  |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
 | `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |

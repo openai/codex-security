@@ -38,7 +38,7 @@ export function relativePath(value: unknown): string | null {
   return path &&
     !path.startsWith("/") &&
     !path.includes("\0") &&
-    !path.includes(":") &&
+    !/^[A-Za-z]:/.test(path) &&
     !path.split("/").includes("..")
     ? path
     : null;
