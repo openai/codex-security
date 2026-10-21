@@ -124,6 +124,7 @@ import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
 } from "./remediation.js";
@@ -402,6 +403,9 @@ const SKILL_AUTH_OPTION = z
   .describe(
     "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
   );
+const VERIFICATION_MODE_OPTION = VerificationModeSchema.optional().describe(
+  "Use static source review or standard verification (default: standard).",
+);
 const PROJECT_CONFIG_OPTION = optionValue("--config")
   .optional()
   .describe(
@@ -1093,6 +1097,7 @@ interface SkillRunOptions {
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
   validationPrompt?: string;
+  verificationMode?: z.infer<typeof VerificationModeSchema>;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   provider?: string;
@@ -5246,6 +5251,7 @@ export async function main(
           .describe(
             "Run one hosted fix verification over JSON-RPC stdin/stdout; use alone.",
           ),
+        verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         scan: optionValue("--scan")
@@ -5384,6 +5390,7 @@ export async function main(
                     : { findings: selected.findings }),
                   auth: options.auth,
                   verificationIds: identifiers,
+                  verificationMode: options.verificationMode,
                   environment,
                   onEvent: progress.observe.bind(progress),
                 },
@@ -5445,6 +5452,7 @@ export async function main(
           .describe(
             "Run one hosted patch over JSON-RPC stdin/stdout; use alone.",
           ),
+        verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         externalSandbox: z
@@ -5522,6 +5530,7 @@ export async function main(
               options.assessPatchRisk ||
               options.validationPromptFile !== undefined ||
               options.externalSandbox ||
+              options.verificationMode !== undefined ||
               linear ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
@@ -5600,6 +5609,7 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                verificationMode: options.verificationMode,
               },
             );
             exitCode = patchExitCode(patches);
@@ -5720,6 +5730,7 @@ export async function main(
               auth: options.auth,
               externalSandbox: options.externalSandbox,
               validationPrompt,
+              verificationMode: options.verificationMode,
             },
           );
           if (!jsonOutput) await writeCliOutput(output, report.text());
@@ -7982,6 +7993,7 @@ async function runSkill(
           verificationIds: options.verificationIds,
           findingInstructions: options.findingInstructions,
           validationInstructions: options.validationPrompt,
+          verificationMode: options.verificationMode,
         })
       : validate
         ? await standaloneValidationPrompt(plugin)

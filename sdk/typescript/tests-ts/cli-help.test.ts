@@ -55,6 +55,17 @@ describe("CLI help", () => {
       const text = await help([command, "--host", "--help"]);
       expect(option(text, "--host")).toContain("JSON-RPC stdin/stdout");
       expect(option(text, "--host")).toContain("use alone");
+      if (command !== "scan") {
+        expect(option(text, "--verification-mode")).toContain("static");
+        expect(option(text, "--verification-mode")).toContain("standard");
+        const schema = captureCli(main, "stdout");
+        expect(
+          await schema.run([command, "--schema", "--json"], dependencies()),
+        ).toBe(0);
+        expect(
+          JSON.parse(schema.text()).options.properties.verificationMode.enum,
+        ).toEqual(["static", "standard"]);
+      }
     },
   );
 
