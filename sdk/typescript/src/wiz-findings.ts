@@ -6,24 +6,18 @@ import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindingEvidence } from "./external-import-models.js";
 
 const decompressGzip = promisify(gunzip);
 
-export interface VendorFinding {
-  source_finding_id: string;
-  evidence: ExternalFindingEvidence;
-}
+import type {
+  ExternalFinding as VendorFinding,
+  ExternalFindings as VendorFindings,
+} from "./external-findings.js";
 
-export interface VendorFindings {
-  read: number;
-  findings: VendorFinding[];
-  excluded: {
-    position: number;
-    source_finding_id: string | null;
-    reason: string;
-  }[];
-}
+export type {
+  ExternalFinding as VendorFinding,
+  ExternalFindings as VendorFindings,
+} from "./external-findings.js";
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)

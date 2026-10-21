@@ -23,6 +23,8 @@ const distModules = [
   "default-severity-rubric",
   "cloud-endpoint",
   "cloud-publish",
+  "external-findings",
+  "scanner-import",
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",

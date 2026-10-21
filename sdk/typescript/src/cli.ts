@@ -629,8 +629,8 @@ function renderExternalPublicationSummary(
       : [
           "Imported Wiz evidence remains not assessed by Codex.",
           result.cloudUrl
-            ? `View findings: ${diagnosticValue(result.cloudUrl)}\nSearch indexing can lag an accepted import.`
-            : "Open the Codex Security Cloud app's Findings view and select this repository. Search indexing can lag an accepted import.",
+            ? `View Cloud repository: ${diagnosticValue(result.cloudUrl)}`
+            : "Open the repository in Codex Security Cloud.",
         ]),
     "",
   ].join("\n");
@@ -3537,7 +3537,7 @@ export async function main(
             preparing: "Preparing findings",
             waiting: "Waiting for publication access",
             uploading: "Acknowledged findings",
-            verifying: "Verifying imported findings",
+            verifying: "Verifying source records",
           };
           writeDiagnostic(
             `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,

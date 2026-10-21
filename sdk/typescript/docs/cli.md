@@ -1419,7 +1419,7 @@ Results distinguish completion from partial or interrupted work:
 
 | Status        | Exit code | Meaning                                                                                            |
 | ------------- | --------- | -------------------------------------------------------------------------------------------------- |
-| `complete`    | 0         | All selected records were acknowledged and verified.                                               |
+| `complete`    | 0         | All selected records were acknowledged and their source records read back.                                               |
 | `partial`     | 1         | The import finished, but some records were excluded locally or rejected by Cloud.                  |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
 | `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |
@@ -1445,9 +1445,10 @@ batches acknowledged by earlier invocations, not just the latest upload attempt.
 Terminal progress reports preparation, acknowledged uploads, and verification
 on stderr; JSON results stay on stdout. Lookups and readback use at most four
 concurrent requests, while uploads remain sequential. Successful receipts are
-saved locally. Open the Codex Security Cloud app, go
-to its main Findings view, and find the repository’s imported Wiz findings.
-Search indexing can lag an accepted import.
+saved locally. Verification reads the imported source records and checks their
+identities and evidence against the receipts. It does not verify visibility in
+the Cloud Findings view, trigger an assessment, or publish shared findings.
+When available, `cloudUrl` links to the destination repository in Cloud.
 
 ### Publish completed scans
 

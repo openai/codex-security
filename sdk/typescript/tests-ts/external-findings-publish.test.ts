@@ -20,6 +20,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  prepareNormalizedExternalPublication,
   type ExternalPublicationProgress,
 } from "../src/external-findings-publish.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
@@ -575,7 +576,7 @@ test("Wiz network-scan findings are excluded without requiring a detection metho
 });
 
 test("unsupported records are visible exclusions; duplicate identities and unfinished pages stop publication", async () => {
-  const f = await fixture([normalized(), normalized("unknown", "unknown")]);
+  const f = await fixture([normalized(), normalized("unknown", "unsupported")]);
   const parsed = await readVendorFindings(f.file);
   expect(parsed.findings).toHaveLength(1);
   expect(parsed.excluded).toHaveLength(1);
@@ -842,7 +843,10 @@ test.each(["human", "json"])(
         source_data: { id: "vendor-selected", note: "Original vendor detail" },
       },
     };
-    const f = await fixture([selected, normalized("unsupported", "unknown")]);
+    const f = await fixture([
+      selected,
+      normalized("unsupported", "unsupported"),
+    ]);
     const cli = createCliTest(main);
     let prompted = false;
     expect(
@@ -885,7 +889,7 @@ test.each(["human", "json"])(
       );
     } else {
       expect(cli.stdout.text()).toContain(
-        "View findings: https://chatgpt.com/mcp-app/",
+        "View Cloud repository: https://chatgpt.com/mcp-app/",
       );
       expect(cli.stdout.text()).not.toContain("/codex/cloud/security/findings");
     }
@@ -2170,7 +2174,7 @@ test("unsafe evidence integers are rejected while exact strings and safe integer
 
 test("mixed valid and rejected input reports partial completion with exit code 1", async () => {
   const f = await fixture([
-    normalized("invalid", "unknown"),
+    normalized("invalid", "unsupported"),
     normalized("valid"),
   ]);
   const cli = createCliTest(main);
@@ -2188,7 +2192,7 @@ test("mixed valid and rejected input reports partial completion with exit code 1
 
 test("server item failures identify the vendor record after local exclusions", async () => {
   const f = await fixture([
-    normalized("invalid", "unknown"),
+    normalized("invalid", "unsupported"),
     normalized("rejected-vendor"),
   ]);
   f.state.finalError = true;
@@ -2415,7 +2419,7 @@ test("a separate Cloud app URL follows the resolved repository without changing 
       { ...f.cliDeps, environment },
     ),
   ).toBe(0);
-  expect(cli.stdout.text()).toContain(`View findings: ${link}`);
+  expect(cli.stdout.text()).toContain(`View Cloud repository: ${link}`);
 });
 
 test.each([
@@ -2536,7 +2540,7 @@ test("progress is optional and stderr progress never corrupts JSON results", asy
     counts: { unchanged: 1 },
   });
   expect(cli.stderr.text()).toContain("Preparing findings");
-  expect(cli.stderr.text()).toContain("Verifying imported findings: 1/1");
+  expect(cli.stderr.text()).toContain("Verifying source records: 1/1");
 });
 
 test("human previews stay compact while JSON previews retain complete evidence", async () => {
@@ -2561,5 +2565,162 @@ test("human previews stay compact while JSON previews retain complete evidence",
   expect(
     JSON.parse(json.stdout.text()).findings[5].evidence.source_data.detail,
   ).toBe("complete-vendor-evidence-5");
+  expect(f.posts).toHaveLength(0);
+});
+
+test("normalized SDK publication preserves caller evidence and exclusion accounting", async () => {
+  const f = await fixture();
+  const input = {
+    read: 2,
+    findings: [normalized()],
+    excluded: [
+      {
+        position: 2,
+        source_finding_id: null,
+        reason: "Unsupported source record.",
+      },
+    ],
+  };
+  const original = structuredClone(input);
+  const prepared = await prepareNormalizedExternalPublication(
+    input as Parameters<typeof prepareNormalizedExternalPublication>[0],
+    options,
+    f.deps,
+  );
+  expect(input).toEqual(original);
+  expect(prepared.preview.read).toBe(2);
+  const result = await prepared.publish();
+  expect(result.status).toBe("partial");
+  expect(result.counts.created).toBe(1);
+  expect(result.excluded).toEqual(input.excluded);
+  expect(result.verified).toBe(1);
+});
+
+test("normalized publication omits only new null fields to match canonical Cloud readback", async () => {
+  const f = await fixture();
+  const evidence = {
+    title: "Synthetic advisory without known package range",
+    severity: "unknown" as const,
+    packages: [
+      {
+        name: "example-package",
+        vulnerable_version_range: null,
+        installed_version: null,
+      },
+    ],
+    details: {
+      kind: "advisory" as const,
+      repository: null,
+      advisory: { source: "global" as const },
+    },
+  };
+  const prepared = await prepareNormalizedExternalPublication(
+    {
+      read: 1,
+      findings: [{ source_finding_id: "synthetic-global-advisory", evidence }],
+      excluded: [],
+    },
+    options,
+    f.deps,
+  );
+  const sent = prepared.preview.findings[0]!.evidence;
+  expect(sent.packages![0]).not.toHaveProperty("vulnerable_version_range");
+  expect(sent.packages![0]!.installed_version).toBeNull();
+  expect(sent.details).not.toHaveProperty("repository");
+  expect(evidence.details.repository).toBeNull();
+  expect((await prepared.publish()).verified).toBe(1);
+
+  await writeFile(
+    f.file,
+    JSON.stringify([
+      {
+        source_finding_id: "synthetic-sast",
+        evidence: {
+          title: "Synthetic SAST evidence",
+          severity: "high",
+          packages: [
+            { name: "example-package", vulnerable_version_range: null },
+          ],
+          details: {
+            kind: "sast",
+            repository: { url: "https://github.com/example/project" },
+            advisory: null,
+          },
+        },
+      },
+    ]),
+  );
+  const wiz = await prepareExternalPublication(f.file, options, f.deps);
+  expect(wiz.preview.findings[0]!.evidence.details).not.toHaveProperty(
+    "advisory",
+  );
+  expect(wiz.preview.findings[0]!.evidence.details!.scanner_origin).toBeNull();
+  expect((await wiz.publish()).verified).toBe(1);
+});
+
+test("normalized SDK publication detaches raw evidence aliases before validating every finding", async () => {
+  const f = await fixture();
+  const sharedPackage = { name: "example-package" };
+  const input = {
+    read: 2,
+    findings: [
+      {
+        source_finding_id: "shared-first",
+        evidence: {
+          title: "First report",
+          severity: "high" as const,
+          packages: [sharedPackage],
+          source_data: { package: sharedPackage },
+        },
+      },
+      {
+        source_finding_id: "shared-second",
+        evidence: {
+          title: "Second report",
+          severity: "high" as const,
+          source_data: { earlier_package: sharedPackage },
+        },
+      },
+    ],
+    excluded: [],
+  };
+  const original = JSON.stringify(input);
+  const prepared = await prepareNormalizedExternalPublication(
+    input,
+    options,
+    f.deps,
+  );
+  expect(JSON.stringify(input)).toBe(original);
+  expect(prepared.preview.findings[0]!.evidence.source_data).toEqual({
+    package: { name: "example-package" },
+  });
+  expect(prepared.preview.findings[1]!.evidence.source_data).toEqual({
+    earlier_package: { name: "example-package" },
+  });
+  await writeFile(f.file, JSON.stringify(input.findings));
+  const fromFile = await prepareExternalPublication(f.file, options, f.deps);
+  expect(prepared.preview.findings).toEqual(fromFile.preview.findings);
+});
+
+test("normalized SDK publication rejects nonfinite raw evidence without JSON coercion", async () => {
+  const f = await fixture();
+  const input = {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "nonfinite-raw-evidence",
+        evidence: {
+          title: "Synthetic evidence",
+          severity: "high" as const,
+          source_data: { score: Infinity },
+        },
+      },
+    ],
+    excluded: [],
+  };
+  await expect(
+    prepareNormalizedExternalPublication(input, options, f.deps),
+  ).rejects.toThrow("finite JSON numbers");
+  expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
 });

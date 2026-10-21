@@ -5,13 +5,14 @@ export type Id = string;
 export type RepoConnectorId = string;
 export type EnvironmentId = string;
 export type ResetMarker = string;
-export type Provider = "wiz" | "endor" | "snyk";
+export type Provider = "wiz" | "endor" | "snyk" | "github" | "semgrep";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;
 export type ExpectedVersion = number;
 export type Title = string;
-export type Severity = "critical" | "high" | "medium" | "low" | "informational";
+export type Severity =
+  "critical" | "high" | "medium" | "low" | "informational" | "unknown";
 export type Description = string | null;
 export type Url = string | null;
 /**
@@ -21,6 +22,7 @@ export type AdvisoryIds = string[];
 export type Name = string;
 export type Ecosystem = string | null;
 export type InstalledVersion = string | null;
+export type VulnerableVersionRange = string | null;
 export type ManifestPath = string | null;
 /**
  * @maxItems 100
@@ -44,10 +46,11 @@ export type SourceScanId = string | null;
  */
 export type ImageDigests = string[];
 export type SourceUpdatedAt = number | null;
-export type Kind = "sast" | "secret" | "iac";
+export type Kind = "sast" | "secret" | "iac" | "advisory";
 export type Url1 = string;
 export type Id1 = string | null;
 export type Name1 = string | null;
+export type Source = "repository" | "global";
 export type SourceStatus = string | null;
 export type ScannerOrigin = string | null;
 export type ScannerVerdict = string | null;
@@ -136,7 +139,7 @@ export type ObservationId2 = string;
 export type Version2 = number;
 export type Title1 = string;
 export type Severity1 =
-  "critical" | "high" | "medium" | "low" | "informational";
+  "critical" | "high" | "medium" | "low" | "informational" | "unknown";
 export type SourceUpdatedAt1 = number | null;
 export type CreatedAt3 = number;
 export type UpdatedAt1 = number;
@@ -196,6 +199,7 @@ export interface ImportedPackage {
   name: Name;
   ecosystem?: Ecosystem;
   installed_version?: InstalledVersion;
+  vulnerable_version_range?: VulnerableVersionRange;
   manifest_path?: ManifestPath;
   fixed_versions?: FixedVersions;
 }
@@ -211,7 +215,8 @@ export interface SourceData {
  */
 export interface ImportedFindingDetails {
   kind: Kind;
-  repository: ImportedRepositoryReference;
+  repository?: ImportedRepositoryReference | null;
+  advisory?: ImportedAdvisoryContext | null;
   source_status?: SourceStatus;
   scanner_origin?: ScannerOrigin;
   scanner_verdict?: ScannerVerdict;
@@ -230,6 +235,12 @@ export interface ImportedRepositoryReference {
   url: Url1;
   id?: Id1;
   name?: Name1;
+}
+/**
+ * Where the advisory was read; applicability is assessed separately.
+ */
+export interface ImportedAdvisoryContext {
+  source: Source;
 }
 export interface ImportedFindingRule {
   id?: Id2;

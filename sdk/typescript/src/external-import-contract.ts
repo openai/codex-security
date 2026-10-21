@@ -45,6 +45,12 @@ export function repositoryUrlKey(value: string): string {
   return `${parts[1]!.toLowerCase()}://${authority}${path}${parts[4]!}`;
 }
 
+// Cloud's import catalog contains GitHub repositories, including custom Enterprise
+// hosts. Match its case-insensitive URL identity without merging schemes or ports.
+export function cloudRepositoryUrlKey(value: string): string {
+  return repositoryUrlKey(value).toLowerCase();
+}
+
 // Cloud ImportModel applies these constraints to both requests and responses.
 // Its UTF-8 limits are not exported as JSON Schema character limits: even a
 // plain string field such as a receipt error message inherits the 512-byte bound.
@@ -123,13 +129,29 @@ function materializeDetailDefaults(
 function normalizeEvidenceDetails(value: unknown): void {
   if (value !== null && typeof value === "object") {
     const fields = value as Record<string, unknown>;
-    // Only this new wrapper is omitted for null; retain every legacy default.
+    // Cloud omits these new optional fields when null. Preserve every legacy
+    // default so saved Wiz requests still replay the same evidence bytes.
+    if (Array.isArray(fields["packages"]))
+      for (const value of fields["packages"]) {
+        if (
+          value &&
+          typeof value === "object" &&
+          value["vulnerable_version_range"] === null
+        )
+          delete value["vulnerable_version_range"];
+      }
     if (fields["details"] === null) delete fields["details"];
-    else
+    else {
+      const details = fields["details"];
+      if (details && typeof details === "object" && !Array.isArray(details))
+        for (const field of ["repository", "advisory"])
+          if ((details as Record<string, unknown>)[field] === null)
+            delete (details as Record<string, unknown>)[field];
       materializeDetailDefaults(
         fields["details"],
         modelSchemas["ImportedFindingEvidence"]!.properties!["details"]!,
       );
+    }
   }
 }
 
@@ -183,6 +205,28 @@ export function validateExternalEvidence(
     )
       throw new Error("Locations must use repository-relative paths.");
   }
+  const details = result.details;
+  if (details) {
+    if (details.kind === "advisory") {
+      if (!details.advisory)
+        throw new Error("Advisory evidence requires its source context.");
+      if (details.advisory.source === "global" && details.repository)
+        throw new Error(
+          "Global advisory evidence cannot claim a source repository.",
+        );
+      if (details.advisory.source === "repository" && !details.repository)
+        throw new Error(
+          "Repository advisory evidence requires its source repository.",
+        );
+    } else {
+      if (!details.repository)
+        throw new Error(
+          "Repository finding evidence requires its source repository.",
+        );
+      if (details.advisory)
+        throw new Error("Advisory source context requires advisory evidence.");
+    }
+  }
   const endLine = result.details?.code?.end_line;
   if (endLine !== null && endLine !== undefined) {
     const firstLine = result.locations?.[0]?.line;
@@ -193,7 +237,7 @@ export function validateExternalEvidence(
   }
   const urls = [
     result.url,
-    result.details?.repository.url,
+    result.details?.repository?.url,
     result.details?.file_url,
   ];
   for (const value of urls) {

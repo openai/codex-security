@@ -771,7 +771,7 @@ test("saved typed requests resume by repository ID after a repository rename", a
   expect((await resumed.publish()).verified).toBe(1);
   expect(f.posts).toHaveLength(1);
   expect(
-    f.reports.get("sast:occurrence-1")!.evidence.details!.repository.url,
+    f.reports.get("sast:occurrence-1")!.evidence.details!.repository!.url,
   ).toBe(repositoryUrl);
 });
 
@@ -836,7 +836,7 @@ test("GitHub repository metadata accepts case variants without changing source U
   });
   expect(parsed.excluded).toEqual([]);
   expect(parsed.findings[0]!.evidence.source_data).toEqual(supplied);
-  expect(parsed.findings[0]!.evidence.details!.repository.url).toBe(
+  expect(parsed.findings[0]!.evidence.details!.repository!.url).toBe(
     supplied.repository.url,
   );
 });
@@ -950,7 +950,7 @@ test("custom GitHub Enterprise binding preserves branch case and exact source ev
   expect((await prepared.publish()).verified).toBe(1);
   const evidence = f.posts[0]!.items[0]!.evidence;
   expect(evidence.branch).toBe(record.repositoryBranch.name);
-  expect(evidence.details!.repository.url).toBe(record.repository.url);
+  expect(evidence.details!.repository!.url).toBe(record.repository.url);
   expect(evidence.source_data).toEqual(record);
 });
 
@@ -995,7 +995,7 @@ test.each([
     expect((await prepared.publish()).verified).toBe(1);
     const evidence = f.posts[0]!.items[0]!.evidence;
     expect(evidence.branch).toBe(branch.name);
-    expect(evidence.details!.repository.url).toBe(sourceRepository.url);
+    expect(evidence.details!.repository!.url).toBe(sourceRepository.url);
     expect(evidence.source_data).toEqual(record);
   },
 );
@@ -2095,7 +2095,7 @@ test.each([
     const upgraded = await prepareExternalPublication(f.file, f.options, deps);
     expect(upgraded.preview.resumed).toBe(true);
     expect(upgraded.preview.requests).toEqual(original.preview.requests);
-    expect(upgraded.preview.findings).not.toEqual(original.preview.findings);
+    expect(upgraded.preview.findings).toEqual(original.preview.findings);
     let migratedPath = "";
     try {
       await upgraded.publish();
@@ -2137,9 +2137,7 @@ test.each([
       replay = await prepareExternalPublication(f.file, f.options, deps);
       expect(replay.preview.resumed).toBe(true);
       expect(replay.preview.requests).toEqual(original.preview.requests);
-      expect(
-        replay.preview.findings[0]!.evidence.details!.repository.name,
-      ).toBe("EXAMPLE/PROJECT");
+      expect(replay.preview.findings).toEqual(original.preview.findings);
     }
     const newer = f.reports.get("sast:occurrence-1")!;
     newer.version += 1;
@@ -2364,4 +2362,37 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     );
     metadata.mockRestore();
   }
+});
+
+test("resume preview is derived from the saved upload evidence", async () => {
+  const payload = {
+    data: {
+      sastFindings: { nodes: [{ ...sast, repository: { id: repository.id } }] },
+      versionControlResources: {
+        nodes: [
+          {
+            ...inventoryNode("GITHUB"),
+            repository: {
+              ...repository,
+              url: repositoryUrl,
+              name: "original-display-name",
+            },
+          },
+        ],
+      },
+    },
+  };
+  const f = await cloudFixture(payload);
+  const original = await prepareExternalPublication(f.file, f.options, f.deps);
+  f.state.failReadback = true;
+  await expect(original.publish()).rejects.toThrow("Readback unavailable");
+  payload.data.versionControlResources.nodes[0]!.repository.name =
+    "updated-display-name";
+  await writeFile(f.file, JSON.stringify(payload));
+  const resumed = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(resumed.preview.resumed).toBe(true);
+  expect(resumed.preview.requests).toEqual(original.preview.requests);
+  expect(resumed.preview.findings[0]!.evidence).toEqual(
+    resumed.preview.requests[0]!.items[0]!.evidence,
+  );
 });

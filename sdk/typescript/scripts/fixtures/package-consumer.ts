@@ -1,5 +1,10 @@
 import {
   CodexSecurity,
+  prepareExternalPublication,
+  prepareNormalizedExternalPublication,
+  type ExternalFindings,
+  type ExternalPublicationOptions,
+  type ExternalPublicationResult,
   DiffTarget,
   classifySeverity,
   classifyScanSeverity,
@@ -280,6 +285,18 @@ export async function dedupeRecords(
     },
   };
   return await deduplicateRecords(input, { reviewRunner, signal });
+}
+
+export async function externalPublication(
+  file: string,
+  input: ExternalFindings,
+  options: ExternalPublicationOptions,
+): Promise<ExternalPublicationResult> {
+  const fromFile = await prepareExternalPublication(file, options);
+  fromFile.preview.requests[0]?.source.provider satisfies
+    "wiz" | "endor" | "snyk" | "github" | "semgrep" | undefined;
+  const prepared = await prepareNormalizedExternalPublication(input, options);
+  return prepared.publish();
 }
 
 export const ownerVariants: OwnerSuggestion["owner"][] = [
