@@ -47,11 +47,16 @@ import type {
 
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
-/** CLI and plugin callers prepare the same immutable request before approval. */
-export interface ExternalPublicationOptions {
+/** Source and destination for evidence already normalized to the Cloud contract. */
+export interface NormalizedExternalPublicationOptions {
   repository: string;
-  provider: "wiz";
+  provider: FindingImportRequest["source"]["provider"];
   sourceKey: string;
+}
+
+/** File readers accept the vendor formats installed in this SDK. */
+export interface ExternalPublicationOptions extends NormalizedExternalPublicationOptions {
+  provider: "wiz";
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
@@ -341,7 +346,7 @@ export async function prepareExternalPublication(
 /** Prepare normalized provider evidence without reading a vendor export. */
 export async function prepareNormalizedExternalPublication(
   input: ExternalFindings,
-  options: ExternalPublicationOptions,
+  options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
@@ -381,7 +386,7 @@ export async function prepareNormalizedExternalPublication(
 
 async function preparePublicationInput(
   input: ExternalPublicationInput,
-  options: ExternalPublicationOptions,
+  options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
 ): Promise<PreparedExternalPublication> {
   const progress = (event: ExternalPublicationProgress): void => {

@@ -652,7 +652,9 @@ for issue creation.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for saved Wiz
 imports and `prepareNormalizedExternalPublication(findings, options)` for
-normalized external evidence. Both resolve the Cloud repository and return a
+normalized external evidence from any provider in the Cloud import contract.
+The normalized API accepts `NormalizedExternalPublicationOptions`; file readers
+use `ExternalPublicationOptions` for their supported formats. Both resolve the Cloud repository and return a
 `preview` plus a separate `publish()` operation. Inspect the preview before
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.

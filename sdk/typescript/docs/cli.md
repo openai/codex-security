@@ -1204,31 +1204,41 @@ network findings are not supported by this repository importer. Cloud destinatio
 currently support connected GitHub and GitHub Enterprise repositories, including
 custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations.
 
+Use an authorized Wiz connection to acquire findings. If a Wiz plugin is available
+in your Codex workspace, use its MCP connection; otherwise configure
+[Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or use the Wiz API.
+The publisher reads the selected records saved by that connection. It does not
+fetch from Wiz or require a manual website download.
+
+Inspect the connection's actual response before importing it. MCP summaries,
+Wiz Issues, and local Wiz CLI scan results are not automatically compatible with
+this finding mapper. Keep the original occurrence IDs and evidence; use the
+named collections below when the response contains repository findings.
+
 Before the first import:
 
 1. Select an existing repository in Codex Security Cloud and copy its URL or
    Cloud repository ID. The repository needs an
    authorized environment, but does not need a completed native scan.
-2. For **package vulnerabilities**, in Wiz **Vulnerability Findings**, filter to the intended repository and
-   findings. Choose **Save as → Report**, select **Repository Branch** as the
-   resource type (remove the default Virtual Machine selection), **JSON** format,
-   and **Detailed** columns. Retain the repository filter and download the completed
-   report. Gzip compression can stay enabled; the importer detects it even when
-   the download is named `.json`. **Raw Event** on Code & Build Scans exports scan
-   metadata, not finding records. CSV is not supported.
-   Alternatively, read selected package vulnerability records through your
-   authorized Wiz connection and save their JSON. Include `id`, `name`,
-   `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`;
-   retain available package, image, and source metadata. The command does not
-   fetch from Wiz. For SAST, repository secrets, and IaC, use the named API
-   collections and repository metadata described below; their report formats
-   differ from package vulnerability reports.
+2. Read the selected records through the authorized connection and save their
+   JSON. For **package vulnerabilities**, include `id`, `name`, `detailedName`,
+   `vendorSeverity` (or `severity`), and `vulnerableAsset.id`; retain available
+   package, image, and source metadata. For SAST, repository secrets, and IaC,
+   retain the named API collections and repository metadata described below.
+   Complete the selected pages before importing; a summary or unfinished page
+   is not a complete finding selection.
 3. Choose a stable source key such as `TENANT_ID/vulnerability-finding`. Reuse it
    for that Wiz tenant and finding class across exports. Do not create a new key
    for each project filter or import; that creates different source identities.
 4. Check the ChatGPT account used by your existing file-backed Codex Security
    login. API-key-only and keyring-only logins are not supported for Cloud
    publication. See the credential-storage instructions below.
+
+Saved package-vulnerability reports are also supported. In Wiz **Vulnerability
+Findings**, retain the repository and finding filters, choose **Save as → Report**,
+select **Repository Branch**, **JSON**, and **Detailed** columns, then download
+the completed report. Gzip is detected regardless of the filename extension.
+**Raw Event** on Code & Build Scans contains scan metadata rather than findings.
 
 For an alternate Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its
 API root before previewing or uploading, for example
@@ -1446,8 +1456,8 @@ Terminal progress reports preparation, acknowledged uploads, and verification
 on stderr; JSON results stay on stdout. Lookups and readback use at most four
 concurrent requests, while uploads remain sequential. Successful receipts are
 saved locally. Verification reads the imported source records and checks their
-identities and evidence against the receipts. It does not verify visibility in
-the Cloud Findings view, trigger an assessment, or publish shared findings.
+identities and evidence against the receipts. This does not establish a Codex
+assessment or visibility in the shared Cloud Findings view.
 When available, `cloudUrl` links to the destination repository in Cloud.
 
 ### Publish completed scans

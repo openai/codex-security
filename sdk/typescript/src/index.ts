@@ -209,6 +209,7 @@ export {
 } from "./external-findings-publish.js";
 export type {
   ExternalPublicationOptions,
+  NormalizedExternalPublicationOptions,
   ExternalPublicationDependencies,
   ExternalPublicationPreview,
   ExternalPublicationProgress,

@@ -2748,3 +2748,24 @@ test("invalid source namespaces fail before authentication or Cloud requests", a
     ).rejects.toThrow("source key must contain");
   expect(contacted).toEqual([]);
 });
+
+test("normalized SDK publication accepts Cloud providers without their file reader", async () => {
+  const f = await fixture();
+  const prepared = await prepareNormalizedExternalPublication(
+    {
+      read: 1,
+      findings: [
+        {
+          source_finding_id: "synthetic-endor-finding",
+          evidence: { title: "Synthetic finding", severity: "unknown" },
+        },
+      ],
+      excluded: [],
+    },
+    { ...options, provider: "endor" },
+    f.deps,
+  );
+  expect(prepared.preview.source.provider).toBe("endor");
+  expect((await prepared.publish()).verified).toBe(1);
+  expect(JSON.parse(f.posts[0]!).source.provider).toBe("endor");
+});

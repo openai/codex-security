@@ -4,6 +4,7 @@ import {
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type ExternalPublicationOptions,
+  type NormalizedExternalPublicationOptions,
   type ExternalPublicationResult,
   DiffTarget,
   classifySeverity,
@@ -295,6 +296,18 @@ export async function externalPublication(
   const fromFile = await prepareExternalPublication(file, options);
   fromFile.preview.requests[0]?.source.provider satisfies
     "wiz" | "endor" | "snyk" | "github" | "semgrep" | undefined;
+  const prepared = await prepareNormalizedExternalPublication(input, options);
+  return prepared.publish();
+}
+
+export async function publishNormalizedVendorEvidence(
+  input: ExternalFindings,
+): Promise<ExternalPublicationResult> {
+  const options: NormalizedExternalPublicationOptions = {
+    provider: "endor",
+    sourceKey: "example-namespace/example-project/main",
+    repository: "https://github.com/example/project",
+  };
   const prepared = await prepareNormalizedExternalPublication(input, options);
   return prepared.publish();
 }
