@@ -174,6 +174,75 @@ test.each([
   },
 );
 
+test.each(["raw JSON", "normalized JSONL"])(
+  "Wiz package %s retains generic repository URLs without guessing their platform",
+  async (format) => {
+    const fixture = await localFindingsFixture({
+      remote: "git@git.example.test:example/group/project.git",
+    });
+    try {
+      const file = join(fixture.root, "wiz.json");
+      const record = {
+        id: "package-occurrence",
+        name: "CVE-2026-0001",
+        detailedName: "example-package",
+        severity: "HIGH",
+        vulnerableAsset: {
+          id: "source-branch",
+          type: "REPOSITORY_BRANCH",
+          cloudProviderURL: "",
+        },
+      };
+      const options = {
+        repository: fixture.repository,
+        provider: "wiz" as const,
+        sourceKey: "example-project/main",
+      };
+      const dependencies = { environment: fixture.environment };
+      async function writeSelection(url: string) {
+        record.vulnerableAsset.cloudProviderURL = url;
+        await writeFile(file, JSON.stringify([record]));
+        const parsed = await readVendorFindings(file);
+        if (format === "normalized JSONL")
+          await writeFile(
+            file,
+            parsed.findings
+              .map((finding) => JSON.stringify(finding))
+              .join("\n"),
+          );
+        return parsed;
+      }
+      for (const path of [
+        "example/group/other",
+        "Example/Group/Project",
+        "example/group/project/tree/main",
+      ]) {
+        await writeSelection(`https://git.example.test/${path}`);
+        await expect(
+          prepareLocalExternalImport(file, options, dependencies),
+        ).rejects.toThrow("does not match");
+        await expect(
+          access(join(fixture.stateDirectory, "workbench.sqlite3")),
+        ).rejects.toThrow();
+      }
+      const parsed = await writeSelection(
+        "https://git.example.test/example/group/project",
+      );
+      const prepared = await prepareLocalExternalImport(
+        file,
+        options,
+        dependencies,
+      );
+      expect(prepared.preview.findings).toEqual(parsed.findings);
+      expect((await prepared.import()).counts.created).toBe(1);
+      const [stored] = await listLocalExternalFindings(options, dependencies);
+      expect(stored!.evidence.source_data).toEqual(record);
+    } finally {
+      await fixture.dispose();
+    }
+  },
+);
+
 for (const kind of [
   "sastFindings",
   "secretInstances",

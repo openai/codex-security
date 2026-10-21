@@ -33,15 +33,15 @@ export async function readExternalFindings(
       if (!isRecord(asset) || typeof asset["cloudProviderURL"] !== "string")
         return [];
       const url = URL.parse(asset["cloudProviderURL"]);
-      if (
-        !url ||
-        (asset["nativeType"] !== "github#repositoryBranch" &&
-          !(
-            asset["type"] === "REPOSITORY_BRANCH" &&
-            isGitHubCloudHost(url.hostname)
-          ))
-      )
-        return [];
+      if (!url) return [];
+      const github =
+        asset["nativeType"] === "github#repositoryBranch" ||
+        (asset["type"] === "REPOSITORY_BRANCH" &&
+          isGitHubCloudHost(url.hostname));
+      if (!github)
+        return asset["type"] === "REPOSITORY_BRANCH"
+          ? [{ url: asset["cloudProviderURL"] }]
+          : [];
       const [, owner, repository] = url.pathname.split("/");
       return owner && repository
         ? [
