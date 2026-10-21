@@ -13,6 +13,7 @@ export async function runHostedRemediationProtocol(
   input: Readable,
   output: Parameters<typeof runHostProtocol>[1],
   signal?: AbortSignal,
+  operation?: HostedRemediationInput["operation"],
 ): Promise<number> {
   return await runHostProtocol(
     input,
@@ -26,8 +27,16 @@ export async function runHostedRemediationProtocol(
         error instanceof HostedRemediationPreparationError
           ? { reason: error.reason }
           : undefined,
-      run: async (params, execute, signal, onEvent) =>
-        await runHostedRemediation(params as HostedRemediationInput, {
+      run: async (params, execute, signal, onEvent) => {
+        if (
+          operation !== undefined &&
+          (!isRecord(params) || params["operation"] !== operation)
+        ) {
+          throw new Error(
+            `Hosted ${operation} requires operation "${operation}".`,
+          );
+        }
+        return await runHostedRemediation(params as HostedRemediationInput, {
           signal,
           onEvent,
           executor: {
@@ -36,7 +45,8 @@ export async function runHostedRemediationProtocol(
                 if (isRecord(event)) options.onEvent?.(event);
               })) as RemediationExecutionResult,
           },
-        }),
+        });
+      },
     },
     signal,
   );

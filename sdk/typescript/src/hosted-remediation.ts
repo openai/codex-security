@@ -7,6 +7,7 @@ import {
   parseFindingPatch,
   parseFindingVerifications,
   remediationPrompt,
+  VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
 } from "./remediation.js";
@@ -27,6 +28,7 @@ export const HostedRemediationInputSchema = z.strictObject({
   }),
   instructions: z.string().optional(),
   validationInstructions: z.string().optional(),
+  verificationMode: VerificationModeSchema.optional(),
   model: z.string().min(1),
   reasoningEffort: z.string(),
   identity: z.strictObject({
@@ -126,6 +128,7 @@ export async function runHostedRemediation(
     verificationIds: [input.finding.id],
     instructions: input.instructions,
     validationInstructions: input.validationInstructions,
+    verificationMode: input.verificationMode,
   });
   const target = {
     version: 1 as const,

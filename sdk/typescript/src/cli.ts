@@ -118,11 +118,13 @@ import {
   type ClassifySeverityRecordsInput,
 } from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
+import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
 import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
 } from "./remediation.js";
@@ -401,6 +403,9 @@ const SKILL_AUTH_OPTION = z
   .describe(
     "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
   );
+const VERIFICATION_MODE_OPTION = VerificationModeSchema.optional().describe(
+  "Use static source review or standard verification (default: standard).",
+);
 const PROJECT_CONFIG_OPTION = optionValue("--config")
   .optional()
   .describe(
@@ -1092,6 +1097,7 @@ interface SkillRunOptions {
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
   validationPrompt?: string;
+  verificationMode?: z.infer<typeof VerificationModeSchema>;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   provider?: string;
@@ -1868,12 +1874,20 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
+  const remediationOperation =
+    argv[0] === "patch"
+      ? "patch"
+      : argv[0] === "verify-fix"
+        ? "verify"
+        : undefined;
+  const hostedCommand =
+    argv[0] === "scan" || remediationOperation !== undefined;
   if (
     (((argv[0] === "dedupe" ||
       argv[0] === "validate" ||
       argv[0] === "classify-severity") &&
       argv.includes("--records")) ||
-      (argv[0] === "scan" &&
+      (hostedCommand &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
@@ -1898,13 +1912,10 @@ export async function main(
         );
         return 2;
       }
-    } else if (
-      argv.length !== 2 ||
-      (argv[0] === "scan" && argv[1] !== "--host")
-    ) {
+    } else if (argv.length !== 2 || (hostedCommand && argv[1] !== "--host")) {
       errorOutput.write(
-        argv[0] === "scan"
-          ? "codex-security: --host must be used alone with scan.\n"
+        hostedCommand
+          ? `codex-security: --host must be used alone with ${argv[0]}.\n`
           : `codex-security: --records must be used alone with ${argv[0]}.\n`,
       );
       return 2;
@@ -1931,11 +1942,18 @@ export async function main(
                 }),
               controller.signal,
             )
-          : await runProtocol(
-              dependencies.recordsInput ?? process.stdin,
-              output,
-              controller.signal,
-            );
+          : remediationOperation !== undefined
+            ? await runHostedRemediationProtocol(
+                dependencies.recordsInput ?? process.stdin,
+                output,
+                controller.signal,
+                remediationOperation,
+              )
+            : await runProtocol(
+                dependencies.recordsInput ?? process.stdin,
+                output,
+                controller.signal,
+              );
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -5227,6 +5245,13 @@ export async function main(
           .describe("Finding text, a file, or a saved finding identifier."),
       }),
       options: z.object({
+        host: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run one hosted fix verification over JSON-RPC stdin/stdout; use alone.",
+          ),
+        verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         scan: optionValue("--scan")
@@ -5264,6 +5289,8 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
+          if (options.host)
+            throw new CodexSecurityError("Use verify-fix --host alone.");
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
           if (options.linearIssue.length > 0 && options.linearProject) {
@@ -5363,6 +5390,7 @@ export async function main(
                     : { findings: selected.findings }),
                   auth: options.auth,
                   verificationIds: identifiers,
+                  verificationMode: options.verificationMode,
                   environment,
                   onEvent: progress.observe.bind(progress),
                 },
@@ -5418,6 +5446,13 @@ export async function main(
           .describe("Issue text, a file, or a saved finding identifier."),
       }),
       options: z.object({
+        host: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run one hosted patch over JSON-RPC stdin/stdout; use alone.",
+          ),
+        verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         externalSandbox: z
@@ -5482,6 +5517,8 @@ export async function main(
           files: [],
         };
         try {
+          if (options.host)
+            throw new CodexSecurityError("Use patch --host alone.");
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
           if (options.resumePr !== undefined) {
@@ -5493,6 +5530,7 @@ export async function main(
               options.assessPatchRisk ||
               options.validationPromptFile !== undefined ||
               options.externalSandbox ||
+              options.verificationMode !== undefined ||
               linear ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
@@ -5571,6 +5609,7 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                verificationMode: options.verificationMode,
               },
             );
             exitCode = patchExitCode(patches);
@@ -5691,6 +5730,7 @@ export async function main(
               auth: options.auth,
               externalSandbox: options.externalSandbox,
               validationPrompt,
+              verificationMode: options.verificationMode,
             },
           );
           if (!jsonOutput) await writeCliOutput(output, report.text());
@@ -7953,6 +7993,7 @@ async function runSkill(
           verificationIds: options.verificationIds,
           findingInstructions: options.findingInstructions,
           validationInstructions: options.validationPrompt,
+          verificationMode: options.verificationMode,
         })
       : validate
         ? await standaloneValidationPrompt(plugin)
