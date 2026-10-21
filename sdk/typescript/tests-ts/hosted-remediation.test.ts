@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import {
+  HostedRemediationInputSchema,
   runHostedRemediation,
   runHostedRemediationProtocol,
   type HostedRemediationInput,
@@ -97,8 +98,131 @@ test.each(["patch", "verify"] as const)(
     ).toBe(operation === "patch" ? "verified" : "fixed");
     if (operation === "verify")
       expect(result.verification?.checks).toEqual(passedChecks);
+    await runHostedRemediation(
+      { ...input, verificationMode: "standard" },
+      { executor: { run } },
+    );
+    expect(run.mock.calls[1]![0].prompt).toBe(run.mock.calls[0]![0].prompt);
   },
 );
+
+test.each(["patch", "verify"] as const)(
+  "static %s scopes requested runtime validation to source assessment",
+  async (operation) => {
+    const input = {
+      ...(await fixture(operation)),
+      verificationMode: "static" as const,
+      validationInstructions: "Install dependencies and run regression tests.",
+    };
+    const evidence =
+      "guard.ts rejects unauthorized requests before dispatch and preserves authorized callers. Runtime checks were not performed.";
+    const run = mock<RemediationExecutor["run"]>(async (request) => {
+      expect(request.prompt).toContain("Verification mode: static");
+      expect(request.prompt).toContain(input.validationInstructions);
+      expect(request.prompt).toContain("without executing requested setup");
+      expect(request.prompt).not.toContain(
+        "instructions for dynamic validation",
+      );
+      expect(request.prompt).not.toContain(
+        "only after the original issue no longer reproduces",
+      );
+      expect(request.sandbox).toBe(
+        operation === "verify" ? "read-only" : "workspace-write",
+      );
+      return receipt(request, {
+        finalResponse: JSON.stringify(
+          operation === "patch"
+            ? {
+                patches: [
+                  {
+                    occurrenceId: input.finding.id,
+                    status: "verified",
+                    files: ["guard.ts"],
+                    verification: evidence,
+                  },
+                ],
+              }
+            : {
+                results: [
+                  {
+                    id: input.finding.id,
+                    status: "fixed",
+                    evidence,
+                    checks: [
+                      {
+                        name: "Authorization paths and legitimate callers",
+                        status: "passed",
+                        evidence,
+                      },
+                    ],
+                  },
+                ],
+              },
+        ),
+      });
+    });
+    const result = await runHostedRemediation(input, { executor: { run } });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("completed");
+    expect(result.patch?.verification ?? result.verification?.evidence).toBe(
+      evidence,
+    );
+    if (operation === "verify") {
+      expect(result.verification?.status).toBe("fixed");
+      expect(result.verification?.checks?.[0]?.command).toBeUndefined();
+    }
+  },
+);
+
+test.each(["fixed", "inconclusive"] as const)(
+  "static verification retains a source-evidence gap for a reported %s result",
+  async (status) => {
+    const input = {
+      ...(await fixture("verify")),
+      verificationMode: "static" as const,
+    };
+    const evidence =
+      "The authorization provider implementation is unavailable, so its return value cannot be established from source.";
+    const verification = {
+      id: input.finding.id,
+      status,
+      evidence,
+      checks: [
+        {
+          name: "Authorization provider contract",
+          status: "not_run" as const,
+          evidence,
+        },
+      ],
+    };
+    const result = await runHostedRemediation(input, {
+      executor: {
+        run: async (request) =>
+          receipt(request, {
+            finalResponse: JSON.stringify({ results: [verification] }),
+          }),
+      },
+    });
+    if (status === "inconclusive") {
+      expect(result.status).toBe("completed");
+      expect(result.verification).toEqual(verification);
+    } else {
+      expect(result.status).toBe("failed");
+      expect(result.error?.code).toBe("INVALID_RESULT");
+      expect(result.execution?.sessionId).toBe("host-session");
+    }
+  },
+);
+
+test("hosted input rejects an unsupported verification mode", async () => {
+  const input = await fixture();
+  expect(() =>
+    HostedRemediationInputSchema.parse({
+      ...input,
+      verificationMode: "unrestricted",
+    }),
+  ).toThrow();
+});
 
 test.each([
   ["still_vulnerable", "failed"],
