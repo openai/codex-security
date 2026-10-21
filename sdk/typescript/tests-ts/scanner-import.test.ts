@@ -64,7 +64,9 @@ test("SARIF findings omit unrelated inventory without mutating shared run contex
     ],
   };
   const before = structuredClone(indexed);
-  expect(sarifRunContextForResult(context, indexed).artifacts).toBe(artifacts);
+  expect(sarifRunContextForResult(context, indexed)["artifacts"]).toBe(
+    artifacts,
+  );
   expect(indexed).toEqual(before);
 });
 
@@ -108,7 +110,7 @@ test.each([
       },
     ];
     const context = { artifacts };
-    expect(sarifRunContextForResult(context, selected).artifacts).toBe(
+    expect(sarifRunContextForResult(context, selected)["artifacts"]).toBe(
       artifacts,
     );
   },
@@ -139,7 +141,9 @@ test.each([
     const result = {
       locations: [{ physicalLocation: { artifactLocation: location } }],
     };
-    expect(sarifRunContextForResult(context, result).artifacts).toBe(artifacts);
+    expect(sarifRunContextForResult(context, result)["artifacts"]).toBe(
+      artifacts,
+    );
   },
 );
 
