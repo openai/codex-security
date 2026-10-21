@@ -7,6 +7,7 @@ import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
 import type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
+  ExternalSourceRepository,
 } from "./external-findings.js";
 
 export type {
@@ -451,6 +452,7 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
   legacy: VendorFindings;
   currentIdentity: unknown[];
   legacyIdentity: unknown[];
+  sourceRepositories: ExternalSourceRepository[];
 }> {
   const input = await readFindingInput(path);
   const normalized = new WeakSet<VendorFinding>();
@@ -486,6 +488,18 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
     legacy,
     currentIdentity: identity(current),
     legacyIdentity: identity(legacy),
+    sourceRepositories: current.findings.flatMap(({ evidence }) => {
+      const repository = evidence.details?.repository;
+      const inventory = input.repositories.get(repository?.id ?? "");
+      // Forward provenance only for selected findings that match the inventory.
+      // Use the emitted spelling so typed evidence and reader hints share it.
+      return repository &&
+        inventory?.platform === "GITHUB" &&
+        inventoryRepositoryUrlKey(repository.url, inventory.platform) ===
+          inventoryRepositoryUrlKey(inventory.url, inventory.platform)
+        ? [{ url: repository.url, platform: "github" as const }]
+        : [];
+    }),
   };
 }
 
