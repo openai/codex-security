@@ -627,7 +627,7 @@ function renderExternalPublicationSummary(
     ...(result.status === "interrupted"
       ? []
       : [
-          "Imported Wiz evidence remains not assessed by Codex.",
+          "Imported evidence remains not assessed by Codex.",
           result.cloudUrl
             ? `View Cloud repository: ${diagnosticValue(result.cloudUrl)}`
             : "Open the repository in Codex Security Cloud.",

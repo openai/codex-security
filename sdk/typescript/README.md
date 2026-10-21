@@ -650,8 +650,8 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
-The SDK also exposes `prepareExternalPublication(file, options)` for saved Wiz
-imports and `prepareNormalizedExternalPublication(findings, options)` for
+The SDK also exposes `prepareExternalPublication(file, options)` for supported
+vendor exports and `prepareNormalizedExternalPublication(findings, options)` for
 normalized external evidence from any provider in the Cloud import contract.
 The normalized API accepts `NormalizedExternalPublicationOptions`; file readers
 use `ExternalPublicationOptions` for their supported formats. Both resolve the Cloud repository and return a
