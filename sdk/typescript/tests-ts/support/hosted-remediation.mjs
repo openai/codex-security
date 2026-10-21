@@ -84,21 +84,27 @@ export function remediationReceipt(request, overrides = {}) {
  * @param {string} node
  * @param {string} entrypoint
  * @param {import("../../src/hosted-remediation.js").HostedRemediationInput} input
- * @param {{cancel?: boolean, onExecution?: (request: import("../../src/hosted-remediation.js").RemediationExecutionRequest) => Promise<void>}} options
+ * @param {{cli?: boolean, cancel?: boolean, onExecution?: (request: import("../../src/hosted-remediation.js").RemediationExecutionRequest) => Promise<void>}} options
  */
 export async function exerciseRemediationProtocol(
   node,
   entrypoint,
   input,
-  { cancel = false, onExecution } = {},
+  { cli = false, cancel = false, onExecution } = {},
 ) {
   const child = spawn(
     node,
-    [
-      "--input-type=module",
-      "-e",
-      `import {runHostedRemediationProtocol} from ${JSON.stringify(entrypoint)}; process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);`,
-    ],
+    cli
+      ? [
+          entrypoint,
+          input.operation === "patch" ? "patch" : "verify-fix",
+          "--host",
+        ]
+      : [
+          "--input-type=module",
+          "-e",
+          `import {runHostedRemediationProtocol} from ${JSON.stringify(entrypoint)}; process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);`,
+        ],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
   const closed = new Promise((resolve, reject) => {

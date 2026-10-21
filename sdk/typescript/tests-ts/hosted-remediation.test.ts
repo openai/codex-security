@@ -12,7 +12,8 @@ import {
   parseFindingPatch,
   parseFindingVerifications,
 } from "../src/remediation.js";
-import { capture } from "./cli-fixtures.js";
+import { main } from "../src/cli.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { writeSource } from "./support/shell.js";
@@ -264,18 +265,64 @@ test("malformed protocol input returns one error without dispatch", async () => 
 });
 
 test.each([
-  ["patch", false],
-  ["verify", false],
-  ["verify", true],
+  ["patch", false, false],
+  ["verify", false, false],
+  ["verify", true, false],
+  ["patch", false, true],
+  ["verify", false, true],
+  ["verify", true, true],
 ] as const)(
-  "SDK protocol pipes execute %s with cancellation=%p",
-  async (operation, cancel) => {
+  "protocol pipes execute %s with cancellation=%p, CLI=%p",
+  async (operation, cancel, cli) => {
     const input = await fixture(operation);
-    const entrypoint = pathToFileURL(
-      join(import.meta.dirname, "../src/index.ts"),
-    ).href;
+    const entrypoint = cli
+      ? join(import.meta.dirname, "../src/cli.ts")
+      : pathToFileURL(join(import.meta.dirname, "../src/index.ts")).href;
     await exerciseRemediationProtocol(process.execPath, entrypoint, input, {
       cancel,
+      cli,
     });
   },
 );
+
+test.each(["patch", "verify-fix"])(
+  "%s --host rejects a mismatched operation without execution",
+  async (command) => {
+    const input = new PassThrough();
+    const stdout = capture();
+    const stderr = capture();
+    const completed = main([command, "--host"], stdout.stream, stderr.stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    input.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "run",
+        method: "run",
+        params: await fixture(command === "patch" ? "verify" : "patch"),
+      }) + "\n",
+    );
+    expect(await completed).toBe(2);
+    expect(stderr.text()).toBe("");
+    const messages = parseJsonLines(stdout.text());
+    expect(messages).toHaveLength(1);
+    expect(messages[0].error.code).toBe(-32602);
+    expect(messages[0].error.message).toContain("requires operation");
+    input.destroy();
+  },
+);
+
+test.each([
+  { args: ["patch", "--host=true"] },
+  { args: ["patch", "--host", "--create-pr"] },
+  { args: ["verify-fix", "finding.md", "--host"] },
+])("hosted remediation rejects mixed arguments $args", async ({ args }) => {
+  const stdout = capture();
+  const stderr = capture();
+  expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
+    2,
+  );
+  expect(stdout.text()).toBe("");
+  expect(stderr.text()).toContain("--host must be used alone");
+});

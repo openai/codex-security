@@ -88,15 +88,19 @@ finding closed. Retrying persistence must not resubmit execution.
 
 ## JSON-RPC launcher
 
-The SDK exports `runHostedRemediationProtocol`. An installed npm package can run it
-without adding any public CLI flag:
+Use the public CLI to run the hosted protocol:
 
-```sh
-node --input-type=module -e '
-import { runHostedRemediationProtocol } from "@openai/codex-security";
-process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);
-'
+```bash
+codex-security patch --host
+codex-security verify-fix --host
 ```
+
+Use `--host` alone with either command. The `run` request supplies all settings,
+and its `operation` must match the command: `patch` or `verify`, respectively.
+Neither command falls back to local inference. Ordinary patching and verification
+remain unchanged when `--host` is omitted.
+
+The SDK also exports `runHostedRemediationProtocol` for in-process hosts.
 
 Use the existing newline-delimited host transport: send one `run` request whose
 `params` are the input above; respond to `execution.run` with the executor
