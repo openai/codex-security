@@ -147,12 +147,25 @@ package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
-`scripts/run-ci-tests.mts` discovers every shared test file and passes the
-inventory to Bun's native `--shard` option. Bun sorts the file paths and assigns
-them round-robin across the shards. New files are included automatically;
-there is no timing table to update when adding or splitting tests.
+`scripts/run-ci-tests.mts` discovers every shared test file and balances whole
+files using the platform's recorded durations in `scripts/test-timings.json`.
+It assigns longer files first to the shard with the least estimated work, then
+passes each shard's files directly to Bun. Every job uses the same checked-in
+snapshot. New files are included automatically with the mean known-file duration;
+deleted files in the timing snapshot are ignored. Timing hints never select or
+exclude tests, and adding or splitting tests does not require updating them.
 To reproduce one Windows shard locally after building the plugin, run
 `node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
+
+Refresh timing hints from successful CI JUnit artifacts when shard runtimes
+become uneven. From the SDK directory, pass reports for one platform to
+`node --experimental-strip-types scripts/update-test-timings.mts win32 <junit.xml> ...`
+(use `linux` or `darwin` for the other platforms). The updater sums testcase
+durations per file and uses their median across reports, preserving the other
+platforms. Review and commit the generated snapshot. The initial hints use runs
+`39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
+timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
+changes; compare complete JUnit inventories and outcomes as well as wall time.
 
 Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
 reports include case durations, and the MCP runner can upload its JUnit report.

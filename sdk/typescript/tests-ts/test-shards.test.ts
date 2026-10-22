@@ -9,8 +9,61 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
+import { partitionTests, type TestTimings } from "../scripts/test-shards.mts";
 import { readSubprocess } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+
+async function copyRunner(root: string, timings: TestTimings = {}) {
+  for (const name of ["run-ci-tests.mts", "test-shards.mts"]) {
+    await copyFile(
+      new URL(`../scripts/${name}`, import.meta.url),
+      join(root, "scripts", name),
+    );
+  }
+  await writeFile(
+    join(root, "scripts", "test-timings.json"),
+    JSON.stringify(timings),
+  );
+}
+
+test.each(["linux", "darwin", "win32"] as const)(
+  "balances whole files using %s durations without depending on discovery order",
+  (platform) => {
+    const files = ["a", "b", "c", "d", "e", "f"];
+    const timings = Object.fromEntries(
+      files.map((file, index) => [file, { [platform]: 100 - index * 10 }]),
+    );
+    const shards = partitionTests(files, 3, timings, platform);
+    expect(shards).toEqual([
+      ["a", "f"],
+      ["b", "e"],
+      ["c", "d"],
+    ]);
+    expect(partitionTests(files.toReversed(), 3, timings, platform)).toEqual(
+      shards,
+    );
+    expect(files).toEqual(["a", "b", "c", "d", "e", "f"]);
+  },
+);
+
+test("uses each platform's history and includes new files without selecting deleted files", () => {
+  const files = ["a", "b", "c", "new"];
+  const timings = {
+    a: { linux: 100, win32: 1 },
+    b: { linux: 1, win32: 100 },
+    c: { linux: 1, win32: 1 },
+    deleted: { linux: 1_000, win32: 1_000 },
+  };
+  expect(partitionTests(files, 2, timings, "linux")).toEqual([
+    ["a"],
+    ["b", "c", "new"],
+  ]);
+  expect(partitionTests(files, 2, timings, "win32")).toEqual([
+    ["b"],
+    ["a", "c", "new"],
+  ]);
+  expect(partitionTests(files, 2, {}, "darwin").flat().sort()).toEqual(files);
+});
 
 test.each([3, 7])(
   "runs each eligible file once across %i native shards, including new files",
@@ -21,10 +74,11 @@ test.each([3, 7])(
     try {
       await mkdir(join(root, "scripts"));
       await mkdir(join(root, "tests-ts"));
-      await copyFile(
-        new URL("../scripts/run-ci-tests.mts", import.meta.url),
-        join(root, "scripts", "run-ci-tests.mts"),
-      );
+      await copyRunner(root, {
+        "probe-0.test.ts": { linux: 100, darwin: 100, win32: 100 },
+        "probe-1.test.ts": { linux: 80, darwin: 80, win32: 80 },
+        "deleted.test.ts": { linux: 1_000, darwin: 1_000, win32: 1_000 },
+      });
       const files = [
         ...Array.from({ length: 20 }, (_, index) => `probe-${index}.test.ts`),
         "newly-added.test.ts",
@@ -88,10 +142,7 @@ test("rejects an empty shard while allowing a nonempty shard with the same count
   try {
     await mkdir(join(root, "scripts"));
     await mkdir(join(root, "tests-ts"));
-    await copyFile(
-      new URL("../scripts/run-ci-tests.mts", import.meta.url),
-      join(root, "scripts", "run-ci-tests.mts"),
-    );
+    await copyRunner(root);
     await writeFile(
       join(root, "tests-ts", "probe.test.ts"),
       'import { test } from "bun:test"; test("synthetic shard probe", () => {});\n',
@@ -167,10 +218,7 @@ test.each([
     try {
       await mkdir(join(root, "scripts"));
       await mkdir(join(root, "tests-ts"));
-      await copyFile(
-        new URL("../scripts/run-ci-tests.mts", import.meta.url),
-        join(root, "scripts", "run-ci-tests.mts"),
-      );
+      await copyRunner(root);
       await writeFile(
         join(root, "tests-ts", "probe.test.ts"),
         `import { expect, test } from "bun:test";
