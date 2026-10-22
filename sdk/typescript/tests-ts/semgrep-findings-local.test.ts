@@ -70,6 +70,26 @@ function reportAtLine(
   return input;
 }
 
+test("Semgrep file reader rejects malformed SARIF repository provenance", async () => {
+  const fixture = await localFindingsFixture();
+  try {
+    const file = join(fixture.root, "semgrep.sarif");
+    const input = semgrepSarif();
+    input.runs = input.runs.map((run) => ({
+      ...run,
+      versionControlProvenance: [{ repositoryUri: 'http://""?\nX' }],
+    }));
+    await writeFile(file, JSON.stringify(input));
+    await expect(
+      readSemgrepFindings(file, { sourceRepositoryUrl: repositoryUrl }),
+    ).rejects.toThrow(
+      "SARIF source repository does not match the declared source repository URL.",
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 for (const suppliedFingerprint of [true, false]) {
   test.each(formats)(
     `Semgrep %s movement ${suppliedFingerprint ? "updates the supplied fingerprint" : "retains both fallback records"} in SQLite`,
