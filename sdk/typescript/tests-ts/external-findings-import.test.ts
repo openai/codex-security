@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -7,6 +7,67 @@ import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
+
+test("cancels preparation while the source file read is pending", async () => {
+  const fixture = await localFindingsFixture();
+  try {
+    const file = join(fixture.root, "wiz.json");
+    const module = new URL(
+      "../src/external-findings-import.ts",
+      import.meta.url,
+    ).href;
+    const mocks = new URL("./support/module-mocks.ts", import.meta.url).href;
+    const script = `
+      import { strictEqual } from "node:assert/strict";
+      import * as fs from "node:fs/promises";
+      import { setImmediate } from "node:timers/promises";
+      import { mockFs } from ${JSON.stringify(mocks)};
+      const file = ${JSON.stringify(file)};
+      const originalReadFile = fs.readFile;
+      let enteredRead, releaseRead;
+      const entered = new Promise((resolve) => { enteredRead = resolve; });
+      const read = new Promise((resolve) => { releaseRead = resolve; });
+      mockFs(() => ({
+        readFile: (path, ...args) => {
+          if (path !== file) return originalReadFile(path, ...args);
+          enteredRead();
+          return read;
+        },
+      }));
+      const { prepareLocalExternalImport } = await import(${JSON.stringify(module)});
+      const controller = new AbortController();
+      const reason = new Error("Synthetic import cancellation");
+      let outcome;
+      const preparing = prepareLocalExternalImport(
+        file,
+        ${JSON.stringify({ repository: fixture.repository, provider: "wiz", sourceKey: "example-project/main" })},
+        { signal: controller.signal },
+      ).then(
+        () => { outcome = "fulfilled"; },
+        (error) => { outcome = error; },
+      );
+      await entered;
+      controller.abort(reason);
+      await setImmediate();
+      try {
+        strictEqual(outcome, reason);
+      } finally {
+        releaseRead(Buffer.from("[]"));
+        await preparing;
+      }
+      console.log("CANCELLED");
+    `;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      env: fixture.environment,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("CANCELLED");
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
+  } finally {
+    await fixture.dispose();
+  }
+});
 
 test("Wiz JSON imports retain parsed evidence through SQLite readback and updates", async () => {
   const fixture = await localFindingsFixture();

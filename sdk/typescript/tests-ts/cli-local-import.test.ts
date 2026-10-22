@@ -285,6 +285,39 @@ test("imported readback resolves its repository argument and supports structured
   });
 });
 
+for (const format of ["json", "jsonl"] as const) {
+  test.each(["SIGINT", "SIGTERM"] as const)(
+    `imported readback reports %s cancellation in ${format} full output`,
+    async (signalName) => {
+      const signals = new FakeSignals();
+      const deps = dependencies({
+        signals,
+        currentDirectory: resolve("workspace"),
+      });
+      deps.listLocalExternalFindings = async (_selection, settings) => {
+        expect(settings?.signal).toBeDefined();
+        signals.emit(signalName);
+        settings!.signal!.throwIfAborted();
+        throw new Error("Readback should have been canceled");
+      };
+      const cli = createCliTest(main);
+      expect(
+        await cli.runCli(
+          ["findings", "imported", "--format", format, "--full-output"],
+          deps,
+        ),
+      ).toBe(signalName === "SIGINT" ? 130 : 143);
+      expect(JSON.parse(cli.stdout.text())).toMatchObject({
+        ok: false,
+        error: { code: "FINDINGS_READ_FAILED", message: signalName },
+      });
+      expect(cli.stderr.text()).toBe("");
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    },
+  );
+}
+
 test("finding import requires an explicit destination and advertises local repository paths", async () => {
   const cli = createCliTest(main);
   expect(

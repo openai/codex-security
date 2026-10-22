@@ -2350,7 +2350,7 @@ export async function main(
         .describe("Local repository to inspect (default: current directory)."),
     }),
     output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args }) {
+    async run({ args, format, error: incurError }) {
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       try {
@@ -2368,6 +2368,17 @@ export async function main(
       } catch (error) {
         if (controller.signal.aborted) {
           exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+          if (
+            argv.includes("--full-output") &&
+            (format === "json" || format === "jsonl")
+          ) {
+            structuredError = true;
+            return incurError({
+              code: "FINDINGS_READ_FAILED",
+              message: diagnosticValue(error),
+              exitCode,
+            });
+          }
           return;
         }
         throw error;
