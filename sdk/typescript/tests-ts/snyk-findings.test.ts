@@ -8,6 +8,7 @@ import {
   normalizeSnykJson,
   normalizeSnykSarif,
   readSnykFindings,
+  snykRepositoryUrls,
 } from "../src/snyk-findings.js";
 import {
   snykJson,
@@ -685,3 +686,19 @@ test("direct SARIF manifest locations retain matching artifact metadata", () => 
   });
   expect(input).toEqual(original);
 });
+
+test.each([
+  "git@git.example.test:example/project.git",
+  "ssh://git@git.example.test/example/project.git",
+  "ssh://git@git.example.test:22/example/project.git",
+])(
+  "Snyk repository claim stays unchanged without Cloud context: %s",
+  (repository) => {
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    const source =
+      normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
+    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(source).toMatchObject({ collection: input.collection });
+  },
+);

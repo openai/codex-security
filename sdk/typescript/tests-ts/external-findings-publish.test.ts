@@ -146,6 +146,7 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
 async function fixture(
   records: unknown = [normalized()],
   repositoryUrl = "https://github.com/example/project",
+  repoConnectorId = "github",
 ) {
   const root = await mkdtemp(join(tmpdir(), "external-findings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -187,7 +188,7 @@ async function fixture(
   const destination = () => ({
     id: options.repository,
     object: "security.repository",
-    repo_connector_id: "github",
+    repo_connector_id: repoConnectorId,
     url: repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
@@ -2921,21 +2922,65 @@ test("Snyk source repository binding is rechecked for a fresh import after compl
 });
 
 test.each([
-  "https://github.com/example/project.git",
-  "git@github.com:example/project.git",
-  "ssh://git@github.com/example/project.git",
-  "ssh://git@github.com:22/example/project.git",
-  "ssh://git@ssh.github.com:443/example/project.git",
+  [
+    "https://github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  ["git@github.com:example/project.git", "https://github.com/example/project"],
+  [
+    "ssh://git@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@github.com:22/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "git@GIT.EXAMPLE.TEST:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "https://git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
 ])(
   "Snyk plugin export imports and replays with repository remote %s",
-  async (repository) => {
+  async (repository, destination) => {
     const { snykPluginExport } =
       await import("./support/snyk-import-fixtures.js");
     const { normalizeSnykFindingsExport } =
       await import("../src/snyk-findings.js");
     const input = snykPluginExport();
     input.collection.target.repository = repository;
-    const f = await fixture(input);
+    const f = await fixture(input, destination, "connector-selected");
     const selected = {
       ...options,
       provider: "snyk" as const,
@@ -2946,6 +2991,9 @@ test.each([
     ).publish();
     expect(first.counts.created).toBe(1);
     expect(first.verified).toBe(1);
+    expect(JSON.parse(f.posts[0]!).repository.repo_connector_id).toBe(
+      "connector-selected",
+    );
     expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
       collection: input.collection,
       finding: input.findings[0],
@@ -2962,18 +3010,6 @@ test.each([
 );
 
 test.each([
-  [
-    "git@tenant.ghe.com:example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@tenant.ghe.com/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
-  [
-    "ssh://git@tenant.ghe.com:22/example/project.git",
-    "https://tenant.ghe.com/example/project",
-  ],
   ["git@github.com:other/project.git", "https://github.com/example/project"],
   [
     "ssh://git@github.com:2222/example/project.git",
@@ -2986,18 +3022,6 @@ test.each([
   [
     "ssh://git@git.example.test:443/example/project.git",
     "https://github.com/example/project",
-  ],
-  [
-    "git@git.example.test:example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "ssh://git@git.example.test/example/project.git",
-    "https://git.example.test/example/project",
-  ],
-  [
-    "ssh://git@git.example.test:22/example/project.git",
-    "https://git.example.test/example/project",
   ],
   [
     "ssh://git@git.example.test:2222/example/project.git",
@@ -3022,6 +3046,26 @@ test.each([
   [
     "ssh://git@ssh.github.com:2222/example/project.git",
     "https://ssh.github.com:2222/example/project",
+  ],
+  [
+    "git@other.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@git.example.test:other/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test:443/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test:22/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "http://git.example.test/example/project",
   ],
 ])(
   "Snyk plugin repository claim %s cannot target %s",

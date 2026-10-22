@@ -712,7 +712,9 @@ async function preparePublicationInput(
           ? [wizCsvRepositoryUrl(finding.evidence)]
           : []),
         ...(options.provider === "snyk"
-          ? snykRepositoryUrls(finding.evidence.source_data)
+          ? snykRepositoryUrls(finding.evidence.source_data, {
+              cloudRepositoryUrl: destination.url,
+            })
           : []),
       ];
       for (const sourceRepository of sourceRepositories)

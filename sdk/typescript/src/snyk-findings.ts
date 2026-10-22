@@ -127,23 +127,35 @@ export function normalizeSnykFindingsExport(input: unknown): ExternalFindings {
   );
 }
 
-function pluginRepositoryUrl(value: unknown): string | null {
+function pluginRepositoryUrl(
+  value: unknown,
+  cloudRepositoryUrl?: string,
+): string | null {
   const repository = text(value);
   if (repository === null || repository === "unknown") return null;
-  // Only public GitHub's documented SSH endpoints identify the same HTTPS
-  // repository. Other hosts and SSH ports remain distinct Cloud identities.
+  // Cloud's selected catalog repository supplies connected GitHub host context;
+  // imported evidence alone cannot establish an Enterprise host's SSH aliases.
+  const destination = cloudRepositoryUrl
+    ? new URL(cloudRepositoryUrl)
+    : undefined;
+  const connectedHost =
+    destination?.protocol === "https:"
+      ? destination.hostname.toLowerCase()
+      : undefined;
+  const isGitHubHost = (hostname: string) =>
+    hostname === "github.com" || hostname === connectedHost;
   const scp = /^git@([^/:]+):(.+)$/u.exec(repository);
-  if (scp?.[1]?.toLowerCase() === "github.com")
-    return `https://github.com/${scp[2]}`;
+  if (scp && isGitHubHost(scp[1]!.toLowerCase()))
+    return `https://${scp[1]}/${scp[2]}`;
   if (repository.startsWith("ssh://git@")) {
     const url = new URL(repository);
     const hostname = url.hostname.toLowerCase();
     const githubSsh =
-      hostname === "github.com" && (url.port === "" || url.port === "22");
+      isGitHubHost(hostname) && (url.port === "" || url.port === "22");
     const githubSshOverHttps =
       hostname === "ssh.github.com" && url.port === "443";
-    if (githubSsh || githubSshOverHttps)
-      return `https://github.com${url.pathname}`;
+    if (githubSshOverHttps) return `https://github.com${url.pathname}`;
+    if (githubSsh) return `https://${hostname}${url.pathname}`;
   }
   return repository;
 }
@@ -151,7 +163,14 @@ function pluginRepositoryUrl(value: unknown): string | null {
 /** @internal Repository claims retained in original Snyk evidence. */
 export function snykRepositoryUrls(
   sourceData: unknown,
-  { normalizeGitRemote = true }: { normalizeGitRemote?: boolean } = {},
+  {
+    normalizeGitRemote = true,
+    cloudRepositoryUrl,
+  }: {
+    normalizeGitRemote?: boolean;
+    /** The selected destination from the authenticated Cloud repository catalog. */
+    cloudRepositoryUrl?: string;
+  } = {},
 ): string[] {
   if (
     !sourceData ||
@@ -164,7 +183,7 @@ export function snykRepositoryUrls(
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");
     const url = normalizeGitRemote
-      ? pluginRepositoryUrl(target["repository"])
+      ? pluginRepositoryUrl(target["repository"], cloudRepositoryUrl)
       : text(target["repository"]);
     return url && url !== "unknown" ? [url] : [];
   }
