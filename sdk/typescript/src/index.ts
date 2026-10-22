@@ -202,6 +202,28 @@ export type {
   DeduplicationDiagnosticObserver,
 } from "./deduplication/diagnostics.js";
 export type { FindingEmbedder } from "./server/embeddings.js";
+export {
+  ExternalPublicationError,
+  prepareExternalPublication,
+  prepareNormalizedExternalPublication,
+} from "./external-findings-publish.js";
+export type {
+  ExternalPublicationOptions,
+  NormalizedExternalPublicationOptions,
+  ExternalPublicationDependencies,
+  ExternalPublicationPreview,
+  ExternalPublicationProgress,
+  ExternalPublicationResult,
+  PreparedExternalPublication,
+} from "./external-findings-publish.js";
+export type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+export type {
+  ExternalFindingEvidence,
+  FindingImportRequest,
+  FindingImportReceipt,
+  ImportRepository,
+  SourceReport,
+} from "./external-import-models.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,

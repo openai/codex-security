@@ -113,6 +113,7 @@ function validatePackagePaths(entries) {
     "package/dist/index.d.ts",
     "package/dist/cli.js",
     "package/schemas/project-config.schema.json",
+    "package/schemas/external-findings.schema.json",
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
 

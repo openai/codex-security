@@ -10,6 +10,7 @@
 - compute policy diffs without Python ([#1837](https://github.com/openai/codex-security/pull/1837))
 - update @linear/sdk to 97.2.0 ([#1852](https://github.com/openai/codex-security/pull/1852))
 - add hosted remediation commands and static verification ([#1854](https://github.com/openai/codex-security/pull/1854))
+- add shared Cloud findings publisher ([#1441](https://github.com/openai/codex-security/pull/1441))
 
 <!-- release-section: highlights:end -->
 
