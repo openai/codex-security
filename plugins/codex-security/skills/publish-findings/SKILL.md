@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
 ---
 
 # Publish external findings
@@ -28,6 +28,23 @@ codex-security publish findings /path/to/selected-wiz-findings.json \
 Show the repository, source namespace, normalized evidence, and exclusions. After confirmation, repeat without `--dry-run`, adding `--yes`. Read the persisted result with `codex-security findings imported /path/to/project --format json`. The readback repository defaults to the current directory.
 
 Local records remain unassessed source evidence, separate from `findings list` and completed scans. Retain unknown metadata without inventing scanner revisions, assessment fields, or patch results. Report the created, updated, unchanged, and excluded counts. Repeated imports use the same repository/provider/source-key/source-ID identity; omitted records remain stored. When a source repository URL and local Git remotes are available, the source URL must match one of those remotes. Local import does not publish to Cloud or automatically investigate or patch findings.
+
+## Endor Labs findings
+
+For Endor Labs imports, prefer native Finding JSON from authenticated `endorctl`, scoped to one project and context. Omit `--field-mask` and fetch all pages with `--list-all`:
+
+```sh
+endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
+  --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
+  --list-all --output-type json > endor-findings.json
+codex-security publish findings endor-findings.json --to local \
+  --provider endor --repository /path/to/project \
+  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+```
+
+Choose a project that corresponds to the selected local checkout or Cloud repository. To publish the same export to Cloud, use `--to cloud --repository "CLOUD_REPOSITORY_ID"`. For a different branch or scan context, change the Endor filter and keep a distinct, stable source key. The [official Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit) can help with setup and investigation; its summaries, counts and field-masked results do not replace complete Finding objects. The [CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api) supplies the export. The importer reads that saved file; it does not maintain an Endor API connection or write changes back to Endor.
+
+Native JSON retains severity, scanned commit, package and advisory data, and primary SAST/AI SAST locations. Existing self-contained endorctl SARIF is a lossy compatibility format that retains finding UUIDs and links; unavailable severity or revisions stay unknown. Both formats use the Endor UUID within the selected repository and source key as identity. Importing SARIF after native JSON updates the same record by replacing its evidence snapshot, not merging it: native detail absent from SARIF is removed from that snapshot. Use native JSON consistently for ongoing imports. Keep the original evidence and inspect exclusions. Imported records remain unassessed source evidence. For local imports, use the preview and readback procedure above; for Cloud, use the publication procedure below.
 
 ## Wiz findings
 

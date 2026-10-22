@@ -33,6 +33,7 @@ const distModules = [
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",
+  "endor-findings",
   "wiz-csv",
   "wiz-findings",
   "codex-prompt",

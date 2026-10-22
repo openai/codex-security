@@ -324,3 +324,8 @@ export {
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export {
+  normalizeEndorFindings,
+  normalizeEndorSarif,
+  readEndorFindings,
+} from "./endor-findings.js";

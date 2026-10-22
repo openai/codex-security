@@ -3531,15 +3531,15 @@ export async function main(
   });
   publication.command("findings", {
     description:
-      "Preview and import selected Wiz, Snyk, or Semgrep Code findings locally or to Cloud.",
-    hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      "Preview and import selected Wiz, Snyk, Semgrep Code, or Endor findings locally or to Cloud.",
+    hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
         .describe(
-          "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+          "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
         ),
     }),
     options: z.object({
@@ -3548,7 +3548,7 @@ export async function main(
         "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
       ),
       provider: z
-        .enum(["wiz", "snyk", "semgrep"])
+        .enum(["wiz", "snyk", "semgrep", "endor"])
         .describe("Vendor that produced these findings."),
       sourceRepositoryUrl: optionValue("--source-repository-url")
         .optional()
