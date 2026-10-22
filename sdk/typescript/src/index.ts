@@ -216,7 +216,23 @@ export type {
   ExternalPublicationResult,
   PreparedExternalPublication,
 } from "./external-findings-publish.js";
-export type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+export {
+  prepareNormalizedLocalImport,
+  listLocalExternalFindings,
+} from "./external-findings-local.js";
+export type {
+  StoredExternalFinding,
+  NormalizedLocalImportOptions,
+  LocalExternalImportDependencies,
+  LocalExternalImportPreview,
+  LocalExternalImportResult,
+  PreparedLocalExternalImport,
+} from "./external-findings-local.js";
+export type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 export type {
   ExternalFindingEvidence,
   FindingImportRequest,
