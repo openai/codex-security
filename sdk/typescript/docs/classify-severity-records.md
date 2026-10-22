@@ -7,9 +7,8 @@ Use `--records` alone or with `--runs N`; model execution remains host-provided.
 
 The SDK exports `classifySeverityRecords`, `classifySeverityRecordsInputSchema`,
 and their input, result, and review-request types. The protocol and input have
-version `1`. This is an additive capability: pin an artifact containing this
-implementation until it is included in a published release. A prior CLI that does
-not advertise `--records` in `classify-severity --help` cannot run this protocol.
+version `1`. Before using the protocol, confirm that your installed CLI lists
+`--records` in `classify-severity --help`.
 
 ## Immutable inputs
 
@@ -26,7 +25,7 @@ Send one newline-delimited JSON-RPC request with `method: "run"` and these param
 ```
 
 The `rubric` field is optional. Omit it to classify with the
-[built-in severity rubric](../src/default-severity-rubric.ts), using the same configured
+[built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts), using the same configured
 independent host reviews and usage accounting. The result echoes its built-in
 revision (currently `1`) and exact Markdown SHA-256. Supplying a custom rubric
 replaces the default completely and preserves the supplied revision/hash binding.

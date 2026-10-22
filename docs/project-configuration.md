@@ -78,25 +78,28 @@ node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-securit
 
 ## Settings
 
-| Field                          | Meaning                                                                      | Default                            |
-| ------------------------------ | ---------------------------------------------------------------------------- | ---------------------------------- |
-| `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value | `auto`                             |
-| `scan.mode`                    | `standard` or `deep`                                                         | `standard`                         |
-| `scan.max_time_minutes`        | Advisory Standard investigation allowance; enforced Deep discovery limit, in minutes | Unset in Standard; 5760 in Deep |
-| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`  | Unset; preserve Codex defaults     |
-| `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`   | Whole repository                   |
-| `scan.knowledge_base`          | Context files or directories                                                 | Empty list                         |
-| `scan.instructions_file`       | Additional scan instructions                                                 | Unset                              |
-| `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode           | Built-in validation                |
-| `scan.deep`                    | Deep discovery settings shown below                                          | Existing deep defaults             |
-| `codex`                        | Native Codex settings and profiles                                           | Existing isolated configuration    |
-| `limits.max_cost_usd_per_scan` | Estimated USD limit for one scan attempt                                     | No limit                           |
-| `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                       | Report-only                        |
-| `output.directory`             | Artifact directory outside the scanned Git worktree                          | Existing private artifact location |
+| Field                          | Meaning                                                                              | Default                            |
+| ------------------------------ | ------------------------------------------------------------------------------------ | ---------------------------------- |
+| `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value         | `auto`                             |
+| `scan.mode`                    | `standard` or `deep`                                                                 | `standard`                         |
+| `scan.max_time_minutes`        | Advisory Standard investigation allowance; enforced Deep discovery limit, in minutes | Unset in Standard; 5760 in Deep    |
+| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Unset; preserve Codex defaults     |
+| `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`           | Whole repository                   |
+| `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
+| `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |
+| `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
+| `scan.owner_suggestions`       | Generate an owner-suggestions report after a committed Git scan                      | `false`                            |
+| `scan.deep`                    | Deep discovery settings shown below                                                  | Existing deep defaults             |
+| `codex`                        | Native Codex settings and profiles                                                   | Existing isolated configuration    |
+| `limits.max_cost_usd_per_scan` | Estimated USD limit for one scan attempt                                             | No limit                           |
+| `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
+| `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-The file configures scan settings. Patching, PR creation, publication, post-scan
-actions, and machine-specific plugin or Python selection remain explicit CLI/SDK
-inputs.
+See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
+supported scan types, cost-limit behavior, and the saved report.
+
+Patching, PR creation, publication, post-scan prompt files, and machine-specific
+plugin or Python selection remain explicit CLI/SDK inputs.
 
 ## SDK and CLI contract
 
@@ -116,6 +119,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
 | `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
 | `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
+| `scan.owner_suggestions`                  | `ownerSuggestions`                    | `--owner-suggestions`                                |
 | `scan.deep.workers`                       | `workers`                             | `--workers`                                          |
 | `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                                        |
 | `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`                                |
