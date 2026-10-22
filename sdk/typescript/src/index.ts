@@ -318,3 +318,9 @@ export {
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
+export {
+  normalizeSemgrepFindings,
+  normalizeSemgrepSarif,
+  readSemgrepFindings,
+  type SemgrepImportOptions,
+} from "./semgrep-findings.js";
