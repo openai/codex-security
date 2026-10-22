@@ -310,3 +310,5 @@ export type {
   ValidateRecordsOptions,
   ValidationReviewRequest,
 } from "./validation-records.js";
+
+export { prepareLocalExternalImport } from "./external-findings-import.js";

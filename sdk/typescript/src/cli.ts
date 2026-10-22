@@ -110,6 +110,9 @@ import {
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
+import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { listLocalExternalFindings } from "./external-findings-local.js";
+import type { ExternalFindings } from "./external-findings.js";
 import {
   publishPatchReview,
   resolvePatchReviewPublisher,
@@ -1188,6 +1191,8 @@ interface CliDependencies {
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
+  prepareLocalExternalImport?: typeof prepareLocalExternalImport;
+  listLocalExternalFindings?: typeof listLocalExternalFindings;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
@@ -2335,6 +2340,53 @@ export async function main(
       );
     },
   });
+  findingFeedback.command("imported", {
+    description: "List imported vendor evidence for a local repository.",
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .optional()
+        .describe("Local repository to inspect (default: current directory)."),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, format, error: incurError }) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        const repository = resolveCliPath(
+          dependencies.currentDirectory(),
+          args.repository ?? ".",
+        );
+        const findings = await (
+          dependencies.listLocalExternalFindings ?? listLocalExternalFindings
+        )(
+          { repository },
+          { environment: dependencies.environment, signal: controller.signal },
+        );
+        return { repository, findings };
+      } catch (error) {
+        if (controller.signal.aborted) {
+          exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+          if (
+            argv.includes("--full-output") &&
+            (format === "json" || format === "jsonl")
+          ) {
+            structuredError = true;
+            return incurError({
+              code: "FINDINGS_READ_FAILED",
+              message: diagnosticValue(error),
+              exitCode,
+            });
+          }
+          return;
+        }
+        throw error;
+      } finally {
+        removeSignals();
+      }
+    },
+  });
   const scanHistory = Cli.create("scans", {
     description: "Review saved scans (default: list).",
   })
@@ -3479,8 +3531,8 @@ export async function main(
   });
   publication.command("findings", {
     description:
-      "Preview and import selected Wiz repository findings to Cloud.",
-    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      "Preview and import selected Wiz repository findings locally or to Cloud.",
+    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -3491,9 +3543,9 @@ export async function main(
         ),
     }),
     options: z.object({
-      to: z.literal("cloud").describe("Publication destination."),
+      to: z.enum(["cloud", "local"]).describe("Import destination (required)."),
       repository: optionValue("--repository").describe(
-        "Authorized Cloud repository ID or repository URL copied from Cloud.",
+        "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
       ),
       provider: z
         .literal("wiz")
@@ -3505,7 +3557,7 @@ export async function main(
         .boolean()
         .default(false)
         .describe(
-          "Read and preview the destination and findings without uploading.",
+          "Read and preview the destination and findings without storing them.",
         ),
       yes: z
         .boolean()
@@ -3540,6 +3592,29 @@ export async function main(
           format === "toon" &&
           !formatExplicit &&
           !argv.some((argument) => OUTPUT_OPTION.test(argument));
+        const confirmImport = async (
+          preview: ExternalFindings,
+          showPreview: () => void,
+        ): Promise<boolean> => {
+          if (options.yes) return true;
+          const prompt =
+            dependencies.externalPublicationPrompt ??
+            createTerminalPrompt(errorOutput);
+          const local = options.to === "local";
+          if (!prompt.isInteractive())
+            throw new CodexSecurityError(
+              `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
+            );
+          if (structured) showPreview();
+          const action = local
+            ? `Store these ${preview.findings.length} findings locally`
+            : `Publish these ${preview.findings.length} findings`;
+          return prompt.confirm(
+            `${action}${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
+            false,
+            controller.signal,
+          );
+        };
         let lastProgress = "";
         const onProgress = (event: ExternalPublicationProgress) => {
           if (errorOutput.isTTY !== true) return;
@@ -3562,6 +3637,58 @@ export async function main(
           );
         };
         try {
+          if (options.to === "local") {
+            const prepared = await (
+              dependencies.prepareLocalExternalImport ??
+              prepareLocalExternalImport
+            )(
+              resolveCliPath(dependencies.currentDirectory(), args.file),
+              {
+                ...options,
+                repository: resolveCliPath(
+                  dependencies.currentDirectory(),
+                  options.repository,
+                ),
+              },
+              {
+                environment: dependencies.environment,
+                signal: controller.signal,
+              },
+            );
+            const { preview } = prepared;
+            const showPreview = () => {
+              writeDiagnostic(
+                `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
+              );
+              for (const excluded of preview.excluded)
+                writeDiagnostic(
+                  `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
+                );
+              for (const finding of preview.findings.slice(0, 5))
+                writeDiagnostic(
+                  `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
+                );
+              writeDiagnostic(
+                `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
+              );
+            };
+            if (!structured) showPreview();
+            if (options.dryRun) {
+              if (humanSummary)
+                renderedOutput = "Dry run complete. No findings stored.\n";
+              return { ...preview, dryRun: true };
+            }
+            if (!(await confirmImport(preview, showPreview))) {
+              if (humanSummary) renderedOutput = "No findings stored.\n";
+              return { imported: false, preview };
+            }
+            const result = await prepared.import();
+            if (result.excluded.length > 0) exitCode = 1;
+            const summary = `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+            if (humanSummary) renderedOutput = summary;
+            else if (!structured) writeDiagnostic(summary);
+            return { ...result };
+          }
           const prepared = await prepareExternalPublication(
             resolveCliPath(dependencies.currentDirectory(), args.file),
             options,
@@ -3615,25 +3742,9 @@ export async function main(
               renderedOutput = "Dry run complete. No findings uploaded.\n";
             return { ...preview, dryRun: true };
           }
-          if (!options.yes) {
-            const prompt =
-              dependencies.externalPublicationPrompt ??
-              createTerminalPrompt(errorOutput);
-            if (!prompt.isInteractive())
-              throw new CodexSecurityError(
-                "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
-              );
-            if (structured) showPreview();
-            if (
-              !(await prompt.confirm(
-                `Publish these ${preview.findings.length} findings${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
-                false,
-                controller.signal,
-              ))
-            ) {
-              if (humanSummary) renderedOutput = "No findings published.\n";
-              return { published: false, preview };
-            }
+          if (!(await confirmImport(preview, showPreview))) {
+            if (humanSummary) renderedOutput = "No findings published.\n";
+            return { published: false, preview };
           }
           const result = await prepared.publish();
           if (result.status === "partial") exitCode = 1;

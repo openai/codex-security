@@ -13,6 +13,7 @@
 - add shared Cloud findings publisher ([#1441](https://github.com/openai/codex-security/pull/1441))
 - store external findings locally ([#1847](https://github.com/openai/codex-security/pull/1847))
 - serialize patch project trust overrides correctly ([#1861](https://github.com/openai/codex-security/pull/1861))
+- add local report import and readback ([#1848](https://github.com/openai/codex-security/pull/1848))
 
 <!-- release-section: highlights:end -->
 

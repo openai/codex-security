@@ -607,6 +607,9 @@ Import needs no model calls or authentication. `--dry-run` validates without
 saving; `--output-dir` and `--archive-existing` control output. `scans rerun`
 reimports the retained input.
 
+For vendor exports, use [local vendor import](#import-vendor-findings-locally)
+instead. That flow retains unassessed source evidence without creating a scan.
+
 ### Generate mock scan results
 
 ```bash
@@ -1191,6 +1194,60 @@ Candidates and results remain under `artifacts/custom-validation/`. Setup
 failure or incomplete/invalid output fails the scan. Deferred candidates remain
 follow-up notes and do not fail the scan. An incompatible plugin stops the scan.
 Supply the validation prompt again when rerunning.
+
+## Import vendor findings locally
+
+Prefer the provider's supported native JSON from its CLI, plugin, or API. Native
+reports can retain details omitted by SARIF. Use SARIF or CSV as compatibility
+inputs only for providers and report profiles that support them. A JSON API
+summary is not automatically a supported report; follow the provider's acquisition
+instructions and retain the original records. The readers detect supported input
+formats; `--format json` selects command output, not the input format.
+
+Keep the acquisition format consistent across imports. Depending on the provider,
+switching formats can create separate records for the same vulnerability or
+replace a richer evidence snapshot with less detail. The importer does not merge
+evidence or deduplicate equivalent vulnerabilities across different source IDs.
+
+Use the same vendor input and parser as Cloud publication, selecting a local
+repository path instead of a Cloud repository ID or URL:
+
+```bash
+codex-security publish findings selected-wiz.json \
+  --to local --repository ./project --provider wiz \
+  --source-key TENANT_ID/vulnerability-finding --dry-run --format json
+```
+
+Review the normalized evidence, repository, source namespace, and exclusions.
+Run the same command without `--dry-run` to confirm interactively, or add `--yes`
+after reviewing the preview. `--to` is required; there is no default destination.
+Local import uses the workbench SQLite database and requires no Cloud login,
+network connection, or model call. `--dry-run` does not write findings.
+
+Read the saved evidence with:
+
+```bash
+codex-security findings imported ./project --format json
+```
+
+The repository argument defaults to the current directory. Local imports are
+separate from the assessed findings shown by `findings list`: they remain
+`not_assessed`, retain the original vendor evidence, and do not create a completed
+scan or automatically validate or patch findings. Missing revisions, locations,
+and assessment fields stay unknown. When the source includes a repository URL and the local checkout has configured
+Git remotes, the URL must match one of those remotes; the importer does not
+substitute the checkout's current commit for an unknown scanner revision.
+
+Repeated imports update the same record by repository, provider, source key, and
+source finding ID. The result reports created, updated, and unchanged counts.
+Keep the source key stable across exports. Records omitted from a later selection
+remain stored; omission does not resolve or delete a finding. Excluded records
+are reported, and an import with exclusions exits with status 1. The same
+supported vendor formats and evidence requirements apply locally and in Cloud.
+
+`scan import --json` and `scan import --csv` remain separate commands for importing
+Codex Security's findings schema as a saved scan; they do not accept vendor
+exports.
 
 ## Publish findings to Cloud
 
@@ -1797,6 +1854,7 @@ least eight characters.
 | `scans match --all`                                   | Match completed scans across worktrees/clones.             |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
+| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.         |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`

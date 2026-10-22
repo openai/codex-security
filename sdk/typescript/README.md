@@ -659,6 +659,37 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
+Prefer each provider's supported native JSON for local and Cloud imports. Keep
+the same acquisition format for repeat imports: SARIF and CSV are compatibility
+options where supported, and changing formats can change record identities or
+replace richer evidence with less detail. See the
+[import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
+Use `publish findings FILE --to local --repository PATH --provider wiz
+--source-key KEY` to store the same vendor evidence in the local workbench SQLite
+database. Preview with `--dry-run --format json`, then confirm interactively or
+use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
+repository defaults to the current directory. No Cloud login or model call is
+needed. See [local imports](docs/cli.md#import-vendor-findings-locally).
+
+The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
+separate `import()` operation. `prepareNormalizedLocalImport(findings,
+options)` accepts already normalized evidence, and
+`listLocalExternalFindings({ repository })` reads the stored records. Imports
+remain unassessed source evidence, separate from native scan findings. Repeated
+imports update the same repository/provider/source-key/source-ID record; omitted
+records remain stored, and unknown evidence fields are not inferred.
+
+File imports forward repository references from the reader automatically. Direct
+normalized callers should provide additional known references in the third
+argument's `sourceRepositories` when they are absent from
+`evidence.details.repository.url`. For a known GitHub custom host, include
+`platform: "github"`, for example `{ sourceRepositories: [{ url:
+"https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
+reports carry this platform in their repository inventory. If you export only the
+normalized finding rows to JSONL, supply that metadata separately; the original
+finding evidence does not include the surrounding inventory.
+
 ## Findings storage and deduplication
 
 Saved-scan deduplication uses local SQLite directly:
