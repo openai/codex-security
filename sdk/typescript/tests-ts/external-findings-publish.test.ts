@@ -3059,6 +3059,22 @@ test.each([
 
 const snykRepositoryMismatches: [string, string][] = [
   [
+    "ssh://tenant@other:synthetic@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@other:@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@other:synthetic@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@other:@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
     "ssh://te\nnant@tenant.ghe.com/example/project.git",
     "https://tenant.ghe.com/example/project",
   ],

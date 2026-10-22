@@ -149,7 +149,7 @@ function normalizeGitRepositoryUrl(
   if (scp && isGitHubSshUser(scp[1]!, scp[2]!.toLowerCase()))
     return `https://${scp[2]}/${scp[3]}`;
   // Compare Git's literal SSH userinfo before URL strips tabs or newlines.
-  const ssh = /^ssh:\/\/([^/:]+)@/u.exec(repository);
+  const ssh = /^ssh:\/\/([^/]+)@/u.exec(repository);
   if (ssh) {
     const url = new URL(repository);
     const hostname = url.hostname.toLowerCase();

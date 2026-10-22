@@ -687,16 +687,36 @@ test("direct SARIF manifest locations retain matching artifact metadata", () => 
   expect(input).toEqual(original);
 });
 
-test.each([
-  "git@git.example.test:example/project.git",
-  "ssh://git@git.example.test/example/project.git",
-  "ssh://git@git.example.test:22/example/project.git",
-  "tenant@tenant.ghe.com:example/project.git",
-  "ssh://tenant@tenant.ghe.com/example/project.git",
-  "ssh://tenant@tenant.ghe.com:22/example/project.git",
-])(
+const snykRepositoryContexts: [string, string][] = [
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+];
+
+test.each(snykRepositoryContexts)(
   "Plugin repository claims stay raw without Cloud context or when normalization is disabled: %s",
-  (repository) => {
+  (repository, cloudRepositoryUrl) => {
     const input = snykPluginExport();
     input.collection.target.repository = repository;
     const source =
@@ -705,25 +725,16 @@ test.each([
     expect(
       snykRepositoryUrls(source, {
         normalizeGitRemote: false,
-        cloudRepositoryUrl: repository.includes("tenant.ghe.com")
-          ? "https://tenant.ghe.com/example/project"
-          : "https://git.example.test/example/project",
+        cloudRepositoryUrl,
       }),
     ).toEqual([repository]);
     expect(source).toMatchObject({ collection: input.collection });
   },
 );
 
-test.each([
-  "git@git.example.test:example/project.git",
-  "ssh://git@git.example.test/example/project.git",
-  "ssh://git@git.example.test:22/example/project.git",
-  "tenant@tenant.ghe.com:example/project.git",
-  "ssh://tenant@tenant.ghe.com/example/project.git",
-  "ssh://tenant@tenant.ghe.com:22/example/project.git",
-])(
+test.each(snykRepositoryContexts)(
   "SARIF repository claims stay raw without Cloud context or when normalization is disabled: %s",
-  (repository) => {
+  (repository, cloudRepositoryUrl) => {
     const sarif = snykSarif();
     const provenance = [{ repositoryUri: repository }];
     const input = {
@@ -738,9 +749,7 @@ test.each([
     expect(
       snykRepositoryUrls(source, {
         normalizeGitRemote: false,
-        cloudRepositoryUrl: repository.includes("tenant.ghe.com")
-          ? "https://tenant.ghe.com/example/project"
-          : "https://git.example.test/example/project",
+        cloudRepositoryUrl,
       }),
     ).toEqual([repository]);
     expect(source).toMatchObject({
