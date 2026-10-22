@@ -32,10 +32,10 @@ test("Snyk retains the full selected result, rule, producer and unknown context"
         installed_version: "1.0.0",
         ecosystem: "npm",
         fixed_versions: [],
-        manifest_path: "package.json",
+        manifest_path: null,
       },
     ],
-    locations: [{ path: "package.json", line: null }],
+    locations: [],
     source_updated_at: null,
   });
   expect(evidence.source_data).toMatchObject({
@@ -183,12 +183,33 @@ test.each([
     path;
   const original = structuredClone(input);
   const finding = normalizeSnykSarif(input).findings[0]!;
-  expect(finding.evidence.locations).toEqual([{ path, line: null }]);
-  expect(finding.evidence.packages![0]!.manifest_path).toBe(path);
+  expect(finding.evidence.locations).toEqual([]);
+  expect(finding.evidence.packages![0]!.manifest_path).toBeNull();
   expect(finding.evidence.source_data).toMatchObject({
     result: original.runs[0]!.results[0],
   });
   expect(input).toEqual(original);
+});
+
+test("SARIF from a nested scan target retains manifest evidence without claiming a repository-root path", () => {
+  const input = snykSarif();
+  const run = input.runs[0]!;
+  const nested = {
+    ...input,
+    runs: [{ ...run, properties: { path: "/work/example/services/api" } }],
+  };
+  const original = structuredClone(nested);
+  const finding = normalizeSnykSarif(nested).findings[0]!;
+  expect(finding.evidence.locations).toEqual([]);
+  expect(finding.evidence.packages![0]!.manifest_path).toBeNull();
+  expect(finding.evidence.source_data).toMatchObject({
+    run: { properties: { path: "/work/example/services/api" } },
+    result: run.results[0],
+  });
+  expect(finding.source_finding_id).toBe(
+    normalizeSnykSarif(input).findings[0]!.source_finding_id,
+  );
+  expect(nested).toEqual(original);
 });
 
 test("500 independent advisory groups survive normalization with stable identities after reordering", () => {

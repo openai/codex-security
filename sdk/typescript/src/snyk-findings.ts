@@ -1,26 +1,18 @@
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
+import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
   readScannerJson,
   record,
-  relativePath,
   requiredText,
   sarifRunContextForResult,
   stableId,
   strings,
   text,
 } from "./scanner-import.js";
-
-function snykManifestPath(value: unknown): string | null {
-  const path = text(value);
-  // The Snyk formatter writes literal paths, not percent-encoded URI components.
-  return path && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(path)
-    ? relativePath(path)
-    : null;
-}
 
 function snykIdentity(value: unknown): string {
   const result = record(value, "SARIF result");
@@ -144,8 +136,14 @@ function pluginRepositoryUrl(value: unknown): string | null {
   if (scp) return `https://${scp[1]}/${scp[2]}`;
   if (repository.startsWith("ssh://git@")) {
     const url = new URL(repository);
+    const githubSshOverHttps =
+      url.hostname.toLowerCase() === "ssh.github.com" && url.port === "443";
     // Keep nondefault SSH ports distinct from the default HTTPS repository.
-    const host = url.port === "22" ? url.hostname : url.host;
+    const host = githubSshOverHttps
+      ? "github.com"
+      : url.port === "22"
+        ? url.hostname
+        : url.host;
     return `https://${host}${url.pathname}`;
   }
   return repository;
@@ -171,6 +169,16 @@ export function snykRepositoryUrls(
       : text(target["repository"]);
     return url && url !== "unknown" ? [url] : [];
   }
+  // Generic normalized evidence may use these field names for opaque metadata.
+  const document = source["document"];
+  const driver = source["driver"];
+  if (
+    !isRecord(document) ||
+    document["version"] !== "2.1.0" ||
+    !isRecord(driver) ||
+    driver["name"] !== "Snyk Open Source"
+  )
+    return [];
   const run = source["run"];
   if (run == null) return [];
   return array(
@@ -276,7 +284,6 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
         result["locations"] ?? [],
         "Result locations",
       ).map((v) => record(v, "Location"));
-      const manifests: string[] = [];
       const packages: {
         name: string;
         ecosystem: string;
@@ -285,17 +292,6 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
         fixed_versions: string[];
       }[] = [];
       for (const location of locations) {
-        const physical = record(
-          location["physicalLocation"] ?? {},
-          "Physical location",
-        );
-        const artifact = record(
-          physical["artifactLocation"] ?? {},
-          "Artifact location",
-        );
-        const uri = text(artifact["uri"]);
-        if (uri) manifests.push(uri);
-        // Snyk's startLine may be a synthetic 1. Keep it in raw evidence, not as a verified source line.
         for (const logical of array(
           location["logicalLocations"] ?? [],
           "Logical locations",
@@ -310,12 +306,11 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
             name: coordinate.slice(0, split),
             ecosystem: manager,
             installed_version: coordinate.slice(split + 1) || null,
-            manifest_path: snykManifestPath(uri),
+            manifest_path: null,
             fixed_versions: [],
           });
         }
       }
-      const manifestIds = [...new Set(manifests)].sort();
       const description = [message, help].join("\n\n");
       // Use the advisory group + literal manifest set within the caller's stable project/branch namespace.
       // Automation IDs contain export timestamps and run indexes, so are provenance only.
@@ -336,13 +331,9 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
             ]),
           ],
           packages,
-          locations: [
-            ...new Set(
-              manifestIds
-                .map(snykManifestPath)
-                .filter((p): p is string => p !== null),
-            ),
-          ].map((path) => ({ path })),
+          // Snyk emits target-relative paths without a Git-root offset and may
+          // synthesize startLine=1. Keep both only in the original evidence.
+          locations: [],
           source_data: structuredClone({
             document: documentContext,
             run: sarifRunContextForResult(

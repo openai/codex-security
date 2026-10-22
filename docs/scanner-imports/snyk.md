@@ -116,8 +116,10 @@ indexed context and matching artifact metadata are retained. Empty
 external-reference containers are accepted; reports with actual external property
 references remain unsupported. SARIF groups an advisory's occurrences and exposes
 one package coordinate, so native JSON is preferable for preserving individual
-dependency paths and remediation fields. Manifest paths are literal paths,
-including percent characters; synthetic line numbers stay in raw evidence. Snyk
+dependency paths and remediation fields. Manifest paths are literal target-relative
+paths, including percent characters, without a Git-root offset. They stay in
+original evidence with synthetic line numbers instead of being projected as
+repository locations or package manifest paths. Snyk
 Code, Container, IaC, external SARIF property files and indexed or base-relative
 manifest locations are unsupported.
 
@@ -132,7 +134,8 @@ and SARIF advisory groups. Switching does not remove earlier imported records.
 Unsafe or absolute paths remain in original evidence. Known source repository
 claims must match the selected Cloud repository or, for local imports when Git
 remotes are configured, one of those remotes. Standard GitHub SSH remotes in plugin
-bundles are recognized; unknown repository context requires the user to select the
+bundles, including `ssh://git@ssh.github.com:443/owner/repository.git`, are recognized;
+unknown repository context requires the user to select the
 correct destination. Gzip and UTF-8 BOM input are supported. All three file formats
 normalize to the Cloud evidence model before either local import or Cloud publication.
 Records exceeding that model's field or total-size limits appear as exclusions in

@@ -2773,6 +2773,33 @@ test("normalized SDK publication accepts Cloud providers without their file read
   expect(JSON.parse(f.posts[0]!).source.provider).toBe("endor");
 });
 
+test.each([
+  { run: "scan-123" },
+  { run: { versionControlProvenance: "opaque scanner metadata" } },
+])(
+  "normalized Snyk publication preserves opaque source metadata: %j",
+  async (sourceData) => {
+    const original = normalized();
+    const finding = {
+      ...original,
+      evidence: validateExternalEvidence({
+        ...original.evidence,
+        source_data: sourceData,
+      }),
+    };
+    const f = await fixture();
+    const prepared = await prepareNormalizedExternalPublication(
+      { read: 1, findings: [finding], excluded: [] },
+      { ...options, provider: "snyk" },
+      f.deps,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    expect([...f.reports.values()][0]!.evidence.source_data).toEqual(
+      sourceData,
+    );
+  },
+);
+
 test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
   const { snykSarif } = await import("./support/snyk-import-fixtures.js");
   const input = snykSarif();
@@ -2895,11 +2922,14 @@ test.each([
   "git@github.com:example/project.git",
   "ssh://git@github.com/example/project.git",
   "ssh://git@github.com:22/example/project.git",
+  "ssh://git@ssh.github.com:443/example/project.git",
 ])(
   "Snyk plugin export imports and replays with repository remote %s",
   async (repository) => {
     const { snykPluginExport } =
       await import("./support/snyk-import-fixtures.js");
+    const { normalizeSnykFindingsExport } =
+      await import("../src/snyk-findings.js");
     const input = snykPluginExport();
     input.collection.target.repository = repository;
     const f = await fixture(input);
@@ -2918,7 +2948,11 @@ test.each([
       finding: input.findings[0],
     });
     const second = await (
-      await prepareExternalPublication(f.file, selected, f.deps)
+      await prepareNormalizedExternalPublication(
+        normalizeSnykFindingsExport(input),
+        selected,
+        f.deps,
+      )
     ).publish();
     expect(second.counts.unchanged).toBe(1);
   },
@@ -2927,6 +2961,8 @@ test.each([
 test.each([
   "git@github.com:other/project.git",
   "ssh://git@github.com:2222/example/project.git",
+  "ssh://git@ssh.github.com:2222/example/project.git",
+  "ssh://git@git.example.test:443/example/project.git",
 ])(
   "Snyk plugin repository claim %s binds both publication entrypoints",
   async (repository) => {

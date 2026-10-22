@@ -1294,7 +1294,9 @@ Native JSON preserves individual dependency paths and remediation fields. Its
 paths remain original evidence because it does not establish their Git-root offset.
 
 Open Source SARIF from `snyk test --sarif-file-output=snyk.sarif` remains supported
-for compatibility. All three formats accept either destination. Use a consistent
+for compatibility. Its target-relative manifest paths and synthetic line numbers
+remain original evidence, without being projected as repository locations or
+package manifest paths. All three formats accept either destination. Use a consistent
 format and stable source key per repository, branch and scan target, for example
 `github.com/example/project/main/root/native-sca` for native JSON. Their source
 identities differ: use separate keys when switching acquisition formats. Imports

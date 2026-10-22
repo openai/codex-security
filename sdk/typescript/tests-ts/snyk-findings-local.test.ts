@@ -73,9 +73,8 @@ test.each(["plugin", "JSON", "SARIF"] as const)(
           vulnerability: input.vulnerabilities[0],
         });
       } else {
-        expect(stored!.evidence.locations).toEqual([
-          { path: "package.json", line: null },
-        ]);
+        expect(stored!.evidence.locations).toEqual([]);
+        expect(stored!.evidence.packages![0]!.manifest_path).toBeNull();
         expect(stored!.evidence.source_data).toMatchObject({
           result: input.runs[0]!.results[0],
           rule: input.runs[0]!.tool.driver.rules[0],
