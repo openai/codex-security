@@ -43,7 +43,6 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
-import type { HostedScanOptions } from "./hosted-scan.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
 import {
@@ -620,7 +619,6 @@ interface ClientDependencies {
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
-    ownerCodex: NonNullable<HostedScanOptions["ownerCodex"]>;
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity"
@@ -2404,6 +2402,7 @@ export class CodexSecurity {
         options.maxCostUsd !== undefined,
         discoveryPrompt,
         modelProvider,
+        options.ownerSuggestions,
       );
       checkOpen();
       const feedback = await workbench(
@@ -2933,10 +2932,6 @@ export class CodexSecurity {
       };
       if (options.ownerSuggestions) {
         try {
-          if (options.maxCostUsd !== undefined)
-            throw new Error(
-              "Owner suggestions are unavailable when maxCostUsd is set.",
-            );
           const { writeScanOwnerSuggestions } =
             await import("./scan-owner-suggestions.js");
           const writer = await prepareArtifactRestorer(
@@ -2952,7 +2947,6 @@ export class CodexSecurity {
               auth: options.auth,
               reasoningEffort: scanModelConfiguration(session.sessionConfig)
                 .reasoningEffort,
-              codex: this.#dependencies.hostedScan?.ownerCodex,
             },
             this.#surface,
           );
@@ -4867,6 +4861,7 @@ function scanPrompt(
   enforceCostLimit = false,
   discoveryPrompt?: string,
   modelProvider?: unknown,
+  ownerSuggestions = false,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -4876,6 +4871,11 @@ function scanPrompt(
       `Read ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)} and follow that ${skillName} workflow. Resolve all of its plugin-relative references and helpers from ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT")}. This is the readable copy of the selected plugin; its installed cache under CODEX_HOME is intentionally denied.`,
     `For a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name, read ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/skills/<skill-name>/SKILL.md")}, and follow that file. Resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow.`,
     "Run this Codex Security scan non-interactively.",
+    ...(ownerSuggestions
+      ? [
+          "Record optional ownership evidence while finalizing each finding, within this scan's existing session and budget. Prefer CODEOWNERS declarations. Otherwise use Git blame/history for the affected committed source and record extensions.ownerSuggestion as {email, commit, reason}, using an observed contributor email, a full supporting commit hash, and a short explanation. Omit the hint when ownership is unclear. Never invent an identity, infer current employment, invoke a separate owner model/command, or start an ownership turn after the scan. Preserve hints in delegated finding results. Owner hints are optional and must not prevent recording security findings. The SDK validates hints against the checkout and writes owner-suggestions.json without inference.",
+        ]
+      : []),
     ...(modelProvider === "amazon-bedrock"
       ? [
           "This scan uses Amazon Bedrock with AWS authentication. Skip the ChatGPT account Daybreak access advisory, including get_codex_security_daybreak_access and get_tac_status; it does not check Bedrock model access or access to local scan results. OpenAI login is not required for this scan. Report any actual provider error unchanged.",

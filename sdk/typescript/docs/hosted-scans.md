@@ -74,17 +74,43 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
-Set `ownerSuggestions: true` on the input to generate the optional
-`owner-suggestions.json` after sealing the base scan. The completed receipt
-includes that artifact when available, or `ownerSuggestionsError` if the owner
-stage fails. Owner failure or cancellation does not invalidate sealed findings.
-The SDK host can pass `ownerCodex` in the options to execute read-only owner
-decisions using its own inference service. Without that callback, CODEOWNERS
-matches still work and findings that require inference report an owner error.
-The callback receives the model and reasoning effort in `startThread`, then
-the prompt, output schema, and cancellation signal in `run`.
-The CLI protocol does not provide an owner inference callback. Hosted owner
-enrichment never launches local Codex or selects local credentials.
+Set `ownerSuggestions: true` to record ownership evidence during the existing
+scan execution. The scan agent may include an optional hint on each finding:
+
+```json
+{
+  "extensions": {
+    "ownerSuggestion": {
+      "email": "alex@example.test",
+      "commit": "0123456789012345678901234567890123456789",
+      "reason": "Maintains the affected source."
+    }
+  }
+}
+```
+
+Use an observed contributor email and a full supporting commit hash from Git
+blame/history for the affected source. Omit the hint when ownership is unclear.
+Hints use the scan's existing session and budget; there is no extra ownership
+turn or model call. Security findings take priority over optional hints.
+
+After sealing the scan, the SDK builds `owner-suggestions.json` without inference.
+CODEOWNERS declarations take precedence. Other hints must match an observed Git
+identity and supporting commit in the finding's evidence. Missing hints abstain;
+invalid hints produce per-finding owner errors. Neither invalid hints nor report
+failures invalidate sealed findings. A completed receipt includes the artifact
+when available, or `ownerSuggestionsError` if finalization fails.
+
+Hosts run the normal scan request and capture the optional owner report.
+Automatic reporting uses `suggestOwnersFromScan`; it does not use the legacy
+`ownerCodex` option or send `owner.infer` / `owner.cancel` requests.
+
+The standalone `suggestOwners` API and `suggest-owners` command can call a
+model under their own budget. Both paths use the same CODEOWNERS rules, Git
+evidence, identity checks, and report format.
+
+Report generation works after the scan reaches `maxCostUsd`. It uses the
+hints already recorded and never starts another model call to fill gaps.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress

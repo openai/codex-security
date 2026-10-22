@@ -439,7 +439,10 @@ committed Git scan, using the same checkout, model, and reasoning effort. Owner
 errors leave the base scan completed. The JSON result includes
 `ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
 manifest stay unchanged. This option is unsupported for working-tree and
-directory snapshots, and is skipped with a warning when `--max-cost` is set.
+directory snapshots. It works with `--max-cost`: hints are recorded within the
+existing scan execution and budget, and the report is finalized without another
+model call. Missing hints abstain; invalid hints produce per-finding owner errors.
+Use the separate `suggest-owners` command for explicit owner-only jobs.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;

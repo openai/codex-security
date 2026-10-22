@@ -19,9 +19,6 @@ import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import * as ownerSuggestions from "../src/suggest-owners.js";
-import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
-import { runReadOnlyCodex } from "../src/scan-comparison.js";
-import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
 import {
   ScanExecutionEventSchema,
   ScanExecutionResultSchema,
@@ -1257,59 +1254,29 @@ test("ordinary SDK rejects the removed hosted option instead of using local infe
 });
 
 test.each([true, false])(
-  "hosted owner inference uses only the hosted callback (supplied=%p)",
+  "hosted owner reporting never invokes the legacy callback (supplied=%p)",
   async (supplied) => {
     const input = await fixture();
-    const run = mock(async () => ({
-      finalResponse: "synthetic owner response",
-    }));
-    const startThread = mock(() => ({ run }));
-    const owner = spyOn(
-      ownerArtifacts,
-      "writeScanOwnerSuggestions",
-    ).mockImplementation(async (_repository, _result, writer, options) => {
-      const response = await runReadOnlyCodex(
-        "Synthetic owner prompt",
-        {},
-        options,
-        {
-          surface: "sdk",
-          command: "suggest-owners",
-          threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
-        },
-      );
-      expect(response).toBe("synthetic owner response");
-      await writer.restore("owner-suggestions.json", Buffer.from("{}\n"));
-      return join(input.outputDirectory, "owner-suggestions.json");
+    const startThread = mock(() => {
+      throw new Error("No additional owner turn");
     });
-    try {
-      const result = await runHostedScan(
-        { ...input, ownerSuggestions: true },
-        {
-          executor: draftExecutor(),
-          ...(supplied ? { ownerCodex: { startThread } } : {}),
-        },
-      );
-      expect(result.status).toBe("completed");
-      if (supplied) {
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(run).toHaveBeenCalledTimes(1);
-        expect(startThread).toHaveBeenCalledWith(
-          expect.objectContaining({
-            sandboxMode: "read-only",
-            networkAccessEnabled: false,
-          }),
-        );
-        expect(result).not.toHaveProperty("ownerSuggestionsError");
-      } else {
-        expect(startThread).not.toHaveBeenCalled();
-        expect(result).toHaveProperty(
-          "ownerSuggestionsError",
-          "Hosted owner inference is unavailable.",
-        );
-      }
-    } finally {
-      owner.mockRestore();
-    }
+    const result = await runHostedScan(
+      { ...input, ownerSuggestions: true },
+      {
+        executor: draftExecutor(),
+        ...(supplied ? { ownerCodex: { startThread } } : {}),
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result).not.toHaveProperty("ownerSuggestionsError");
+    expect(startThread).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        await readFile(
+          join(input.outputDirectory, "owner-suggestions.json"),
+          "utf8",
+        ),
+      ),
+    ).toHaveProperty("results");
   },
 );
