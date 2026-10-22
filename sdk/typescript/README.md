@@ -702,6 +702,8 @@ reports carry this platform in their repository inventory. If you export only th
 normalized finding rows to JSONL, supply that metadata separately; the original
 finding evidence does not include the surrounding inventory.
 
+See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. Platform API and Guardian/MCP responses need a separate mapping.
+
 ## Findings storage and deduplication
 
 Saved-scan deduplication uses local SQLite directly:

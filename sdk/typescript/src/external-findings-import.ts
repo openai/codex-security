@@ -1,4 +1,8 @@
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
+import {
+  cloudRepositoryUrlKey,
+  repositoryUrlKey,
+} from "./external-import-contract.js";
 import { readExternalFindings } from "./external-findings-read.js";
 import {
   prepareNormalizedLocalImport,
@@ -17,11 +21,37 @@ export async function prepareLocalExternalImport(
     () => readExternalFindings(path, options),
     dependencies.signal,
   );
+  let sourceRepositories = parsed.sourceRepositories ?? [];
+  if (options.provider === "semgrep") {
+    // The Cloud reader allows custom GitHub casing. Local provenance must also
+    // agree with the caller's source URL when the checkout has no remote.
+    const source = options.sourceRepositoryUrl!;
+    const knownGitHub = dependencies.sourceRepositories?.some(
+      ({ url, platform }) =>
+        platform === "github" &&
+        cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
+    );
+    const key = knownGitHub ? cloudRepositoryUrlKey : repositoryUrlKey;
+    for (const reference of sourceRepositories) {
+      if (key(reference.url) !== key(source))
+        throw new Error(
+          "SARIF source repository does not match the declared source repository URL.",
+        );
+    }
+    if (knownGitHub)
+      sourceRepositories = [
+        { url: source, platform: "github" },
+        ...sourceRepositories.map((reference) => ({
+          ...reference,
+          platform: "github" as const,
+        })),
+      ];
+  }
   return prepareNormalizedLocalImport(parsed.findings, options, {
     ...dependencies,
     sourceRepositories: [
       ...(dependencies.sourceRepositories ?? []),
-      ...(parsed.sourceRepositories ?? []),
+      ...sourceRepositories,
     ],
   });
 }

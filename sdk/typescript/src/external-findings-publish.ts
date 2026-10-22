@@ -62,6 +62,7 @@ export interface NormalizedExternalPublicationOptions {
 /** File readers accept the vendor formats installed in this SDK. */
 export interface ExternalPublicationOptions extends NormalizedExternalPublicationOptions {
   provider: ExternalFindingsReaderOptions["provider"];
+  sourceRepositoryUrl?: string;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */

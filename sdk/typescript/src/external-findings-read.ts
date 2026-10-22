@@ -5,13 +5,15 @@ import type {
 } from "./external-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { readSemgrepFindings } from "./semgrep-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 
 /** File readers available in this SDK, shared by local and Cloud imports. */
 export interface ExternalFindingsReaderOptions {
-  provider: "wiz" | "snyk";
+  provider: "wiz" | "snyk" | "semgrep";
+  sourceRepositoryUrl?: string;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -37,6 +39,27 @@ export async function readExternalFindings(
         }).map((url) => ({ url })),
       ),
     };
+  }
+  if (options.provider === "semgrep") {
+    const findings = await readSemgrepFindings(path, {
+      sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+    });
+    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
+      const context = evidence.source_data?.["runContext"];
+      const references = isRecord(context)
+        ? context["versionControlProvenance"]
+        : undefined;
+      return Array.isArray(references)
+        ? references.flatMap((reference) =>
+            isRecord(reference) &&
+            typeof reference["repositoryUri"] === "string" &&
+            reference["repositoryUri"].trim()
+              ? [{ url: reference["repositoryUri"] }]
+              : [],
+          )
+        : [];
+    });
+    return { findings, sourceRepositories };
   }
   const publication = await readVendorFindingsForPublication(path);
   // Raw package exports keep repository-branch URLs in retained source data.

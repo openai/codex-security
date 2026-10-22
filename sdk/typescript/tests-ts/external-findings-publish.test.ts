@@ -3280,3 +3280,190 @@ test("native Snyk JSON publishes selected dependency occurrences and replays the
   ).publish();
   expect(second.counts.unchanged).toBe(1);
 });
+
+test("Semgrep publication preserves identity across JSON and SARIF with explicit repository provenance", async () => {
+  const { semgrepJson, semgrepSarif } =
+    await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture(semgrepJson());
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original.source.provider).toBe("semgrep");
+  expect(original.evidence.details?.kind).toBe("sast");
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  await writeFile(f.file, JSON.stringify(semgrepSarif()));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.source_data).toMatchObject({
+    result: semgrepSarif().runs[0]!.results[0],
+  });
+});
+
+test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
+  const { semgrepJson, semgrepSarif } =
+    await import("./support/semgrep-import-fixtures.js");
+  const paths = [
+    "src/my file.ts",
+    "src/my%20file.ts",
+    "src/100%.ts",
+    "src/100%25.ts",
+  ];
+  const json: any = semgrepJson();
+  const sarif: any = semgrepSarif();
+  delete json.results[0].extra.fingerprint;
+  delete sarif.runs[0].results[0].fingerprints;
+  json.results = paths.map((path) => ({ ...json.results[0], path }));
+  const run = sarif.runs[0];
+  run.results = paths.map((path) => {
+    const result = structuredClone(run.results[0]);
+    result.locations[0].physicalLocation.artifactLocation.uri = path;
+    return result;
+  });
+  const f = await fixture(json);
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(paths.length);
+  expect(first.verified).toBe(paths.length);
+  const originalIds = [...f.reports.values()]
+    .map((report) => [report.id, report.canonical_finding_id])
+    .sort();
+  await writeFile(f.file, JSON.stringify(sarif));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.created).toBe(0);
+  expect(changed.counts.updated).toBe(paths.length);
+  expect(changed.verified).toBe(paths.length);
+  expect(
+    [...f.reports.values()]
+      .map((report) => [report.id, report.canonical_finding_id])
+      .sort(),
+  ).toEqual(originalIds);
+  expect(
+    [...f.reports.values()]
+      .map((report) => report.evidence.locations?.[0]?.path)
+      .sort(),
+  ).toEqual(paths.toSorted());
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(paths.length);
+});
+
+test("Semgrep publication retains unsupported SARIF bases without repository locations", async () => {
+  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
+  const input: any = semgrepSarif();
+  const run = input.runs[0];
+  run.results[0].locations[0].physicalLocation.artifactLocation.uriBaseId =
+    "ROOT";
+  run.originalUriBaseIds = { ROOT: { uri: "file:///outside/" } };
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original.evidence.locations).toEqual([]);
+  expect(original.evidence.source_data).toMatchObject({
+    result: run.results[0],
+    runContext: { originalUriBaseIds: run.originalUriBaseIds },
+  });
+  expect(JSON.parse(f.posts[0]!).items[0].evidence.locations).toEqual([]);
+
+  run.originalUriBaseIds.ROOT.uri = "subproject/";
+  await writeFile(f.file, JSON.stringify(input));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.locations).toEqual([]);
+  expect(updated.evidence.source_data).toMatchObject({
+    runContext: { originalUriBaseIds: run.originalUriBaseIds },
+  });
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+});
+
+test("Semgrep refuses missing source identity and a conflicting Cloud destination without uploads", async () => {
+  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture(semgrepJson());
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...options, provider: "semgrep" },
+      f.deps,
+    ),
+  ).rejects.toThrow("sourceRepositoryUrl");
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider: "semgrep",
+        sourceRepositoryUrl: "https://github.com/other/project",
+      },
+      f.deps,
+    ),
+  ).rejects.toThrow(/repository/i);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("Semgrep CLI dry-run preserves explicit source repository and does not upload", async () => {
+  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture(semgrepJson());
+  const command = [
+    ...f.command,
+    "--dry-run",
+    "--source-repository-url",
+    "https://github.com/example/project",
+  ];
+  command[command.indexOf("--provider") + 1] = "semgrep";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
