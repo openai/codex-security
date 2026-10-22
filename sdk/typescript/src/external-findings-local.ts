@@ -1,3 +1,5 @@
+import { lstat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
 import type {
@@ -26,9 +28,11 @@ import {
 } from "./runtime.js";
 import {
   abortable,
+  gitMarkerRoot,
   gitOutput,
   gitProtectionRoots,
   normalizeRepository,
+  nullIfMissingPath,
 } from "./targets.js";
 
 /** A scanner source record, independent of a Codex assessment or completed scan. */
@@ -102,17 +106,25 @@ function remoteRepositoryKey(
   } catch {
     return undefined;
   }
-  if (!remote || !["http:", "https:", "ssh:"].includes(remote.url.protocol))
+  if (
+    !remote ||
+    !["http:", "https:", "ssh:", "git:"].includes(remote.url.protocol)
+  )
     return undefined;
   const url = remote.url;
-  const protocol = url.protocol === "ssh:" ? "https:" : url.protocol;
+  const protocol =
+    url.protocol === "ssh:" || url.protocol === "git:"
+      ? "https:"
+      : url.protocol;
   const githubSshOverHttps =
     url.protocol === "ssh:" &&
     url.hostname.toLowerCase() === "ssh.github.com" &&
     url.port === "443";
   const hostname = githubSshOverHttps ? "github.com" : url.hostname;
   const port =
-    githubSshOverHttps || (url.protocol === "ssh:" && url.port === "22")
+    githubSshOverHttps ||
+    (url.protocol === "ssh:" && url.port === "22") ||
+    (url.protocol === "git:" && url.port === "9418")
       ? ""
       : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
@@ -121,6 +133,38 @@ function remoteRepositoryKey(
   return key(
     `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
   );
+}
+
+async function hasGitMetadata(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (
+    (await abortable(
+      () => gitMarkerRoot(repository, signal, "nearest"),
+      signal,
+    )) !== null
+  )
+    return true;
+  let directory = repository;
+  for (;;) {
+    signal?.throwIfAborted();
+    const present = async (name: string) =>
+      (await abortable(
+        () => lstat(join(directory, name)).catch(nullIfMissingPath),
+        signal,
+      )) !== null;
+    // Git also discovers bare repositories and linked metadata without .git.
+    if (
+      (await present("HEAD")) &&
+      ((await present("commondir")) ||
+        ((await present("objects")) && (await present("refs"))))
+    )
+      return true;
+    const parent = dirname(directory);
+    if (parent === directory) return false;
+    directory = parent;
+  }
 }
 
 async function requireMatchingRepository(
@@ -132,16 +176,27 @@ async function requireMatchingRepository(
   signal?: AbortSignal,
 ): Promise<void> {
   if (sources.length === 0) return;
+  if (!(await hasGitMetadata(repository, signal))) return;
+  const gitProtectedRoots = [
+    ...(typeof protectedRoots === "string"
+      ? [protectedRoots]
+      : (protectedRoots ?? [])),
+    await abortable(() => canonicalConfigPath(process.cwd()), signal),
+  ];
   const readGit = (args: readonly string[]) =>
-    gitOutput(
-      repository,
-      args,
+    abortable(
+      () =>
+        gitOutput(
+          repository,
+          args,
+          signal,
+          { LC_ALL: "C" },
+          undefined,
+          "utf8",
+          gitProtectedRoots,
+          environment,
+        ),
       signal,
-      { LC_ALL: "C" },
-      undefined,
-      "utf8",
-      protectedRoots,
-      environment,
     );
   let remoteNames: string;
   try {
@@ -203,19 +258,31 @@ async function localContext(
   const protectedRoot = [
     ...new Set([
       repository,
-      ...(await gitProtectionRoots(path, dependencies.signal)),
-      ...(await gitProtectionRoots(process.cwd(), dependencies.signal)),
+      ...(await abortable(
+        () => gitProtectionRoots(path, dependencies.signal),
+        dependencies.signal,
+      )),
+      ...(await abortable(
+        () => gitProtectionRoots(process.cwd(), dependencies.signal),
+        dependencies.signal,
+      )),
     ]),
   ];
   requireOutputOutsideRepositories(
     protectedRoot,
-    await canonicalizeModelSafePath(environment.CODEX_SECURITY_STATE_DIR),
+    await abortable(
+      () => canonicalizeModelSafePath(environment.CODEX_SECURITY_STATE_DIR),
+      dependencies.signal,
+    ),
     "runtime",
   );
   return {
     repository,
     options: {
-      pluginRoot: await bundledPluginRoot(),
+      pluginRoot: await abortable(
+        () => bundledPluginRoot(),
+        dependencies.signal,
+      ),
       environment,
       protectedRoot,
       signal: dependencies.signal,
@@ -295,7 +362,10 @@ export async function prepareNormalizedLocalImport(
       const protectedRoot = [
         ...new Set([
           ...workbenchOptions.protectedRoot,
-          ...(await gitProtectionRoots(process.cwd(), dependencies.signal)),
+          ...(await abortable(
+            () => gitProtectionRoots(process.cwd(), dependencies.signal),
+            dependencies.signal,
+          )),
         ]),
       ];
       requireOutputOutsideRepositories(
@@ -309,12 +379,14 @@ export async function prepareNormalizedLocalImport(
         ),
         "runtime",
       );
-      dependencies.signal?.throwIfAborted();
-      const result = await (dependencies.runWorkbench ?? runWorkbench)(
-        { ...workbenchOptions, protectedRoot },
-        ["store-external-findings"],
-        payload,
-      );
+      const result = await abortable(() => {
+        dependencies.signal?.throwIfAborted();
+        return (dependencies.runWorkbench ?? runWorkbench)(
+          { ...workbenchOptions, protectedRoot },
+          ["store-external-findings"],
+          payload,
+        );
+      }, dependencies.signal);
       return {
         repository,
         read: current.read,
@@ -338,11 +410,13 @@ export async function listLocalExternalFindings(
     dependencies,
     "read",
   );
-  dependencies.signal?.throwIfAborted();
-  const result = await (dependencies.runWorkbench ?? runWorkbench)(
-    options,
-    ["list-external-findings"],
-    JSON.stringify({ repository, id: selection.id }),
-  );
+  const result = await abortable(() => {
+    dependencies.signal?.throwIfAborted();
+    return (dependencies.runWorkbench ?? runWorkbench)(
+      options,
+      ["list-external-findings"],
+      JSON.stringify({ repository, id: selection.id }),
+    );
+  }, dependencies.signal);
   return result["findings"] as unknown as StoredExternalFinding[];
 }

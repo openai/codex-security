@@ -309,35 +309,62 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
   });
 
-  test("cancels readback while repository path resolution is pending", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
-    const module = new URL("../src/external-findings-local.ts", import.meta.url)
-      .href;
-    const mocks = new URL("./support/module-mocks.ts", import.meta.url).href;
-    const script = `
+  test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
+    "cancels %s resolution while its filesystem lookup is pending",
+    async (operation) => {
+      const { repository, stateDirectory, environment } = await fixture();
+      if (operation === "prepare-metadata")
+        await rm(join(repository, ".git"), { recursive: true });
+      const module = new URL(
+        "../src/external-findings-local.ts",
+        import.meta.url,
+      ).href;
+      const mocks = new URL("./support/module-mocks.ts", import.meta.url).href;
+      const script = `
       import { strictEqual } from "node:assert/strict";
       import * as fs from "node:fs/promises";
       import { setImmediate } from "node:timers/promises";
       import { mockFs } from ${JSON.stringify(mocks)};
       const repository = ${JSON.stringify(repository)};
+      const operation = ${JSON.stringify(operation)};
+      const heldPath = operation === "repository" ? repository
+        : operation === "prepare-metadata" ? ${JSON.stringify(join(repository, "HEAD"))}
+        : ${JSON.stringify(stateDirectory)};
       const originalRealpath = fs.realpath;
+      const originalLstat = fs.lstat;
       let enteredLookup, releaseLookup;
       const entered = new Promise((resolve) => { enteredLookup = resolve; });
-      const lookup = new Promise((resolve) => { releaseLookup = resolve; });
+      const lookup = new Promise((_, reject) => { releaseLookup = reject; });
       mockFs(() => ({
         realpath: (path, ...args) => {
-          if (path !== repository) return originalRealpath(path, ...args);
+          if (operation === "prepare-metadata" || path !== heldPath)
+            return originalRealpath(path, ...args);
+          enteredLookup();
+          return lookup;
+        },
+        lstat: (path, ...args) => {
+          if (operation !== "prepare-metadata" || path !== heldPath)
+            return originalLstat(path, ...args);
           enteredLookup();
           return lookup;
         },
       }));
-      const { listLocalExternalFindings } = await import(${JSON.stringify(module)});
+      const { listLocalExternalFindings, prepareNormalizedLocalImport } =
+        await import(${JSON.stringify(module)});
       const controller = new AbortController();
-      const reason = new Error("Synthetic readback cancellation");
+      const reason = new Error("Synthetic path resolution cancellation");
       let outcome;
-      const reading = listLocalExternalFindings(
-        { repository }, { signal: controller.signal },
-      ).then(
+      const pending = operation.startsWith("prepare-")
+        ? prepareNormalizedLocalImport(
+            { read: 0, findings: [], excluded: [] },
+            { repository, provider: "snyk", sourceKey: "synthetic-project" },
+            { signal: controller.signal,
+              sourceRepositories: [{ url: "https://github.com/example/project" }] },
+          )
+        : listLocalExternalFindings(
+            { repository }, { signal: controller.signal },
+          );
+      const reading = pending.then(
         () => { outcome = "fulfilled"; },
         (error) => { outcome = error; },
       );
@@ -347,12 +374,151 @@ describe("local normalized scanner findings", () => {
       try {
         strictEqual(outcome, reason);
       } finally {
-        releaseLookup(repository);
+        releaseLookup(new Error("Synthetic filesystem failure"));
         await reading;
       }
+      strictEqual(outcome, reason);
+      console.log("CANCELLED");
+    `;
+      const result = spawnSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: environment,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("CANCELLED");
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
+  test.each([
+    ["selected-roots", "prepare"],
+    ["selected-roots", "read"],
+    ["caller-roots", "prepare"],
+    ["caller-roots", "read"],
+    ["caller-roots", "import"],
+    ["plugin-manifest", "prepare"],
+    ["plugin-path", "read"],
+    ["git-executable", "prepare"],
+    ["workbench-path", "read"],
+    ["workbench-path", "import"],
+  ])("cancels pending %s lookup during %s", async (site, operation) => {
+    const { repository, stateDirectory, environment } = await fixture({
+      remote: "https://github.com/example/project",
+    });
+    const caller = await fixture();
+    const module = new URL("../src/external-findings-local.ts", import.meta.url)
+      .href;
+    const mocks = new URL("./support/module-mocks.ts", import.meta.url).href;
+    const trusted = new URL("../src/trusted-executable.ts", import.meta.url)
+      .href;
+    const plugin = new URL("../_bundled_plugin", import.meta.url).href;
+    const script = `
+      import { strictEqual } from "node:assert/strict";
+      import * as fs from "node:fs/promises";
+      import { dirname, join } from "node:path";
+      import { fileURLToPath } from "node:url";
+      import { setImmediate } from "node:timers/promises";
+      import { mockFs } from ${JSON.stringify(mocks)};
+      const site = ${JSON.stringify(site)};
+      const operation = ${JSON.stringify(operation)};
+      const repository = ${JSON.stringify(repository)};
+      const original = { lstat: fs.lstat, realpath: fs.realpath, stat: fs.stat };
+      const held = new Map();
+      function lookup(method, path, args) {
+        const gate = held.get(method + ":" + path);
+        if (gate) { gate.entered(); return gate.wait; }
+        return original[method](path, ...args);
+      }
+      mockFs(() => ({
+        lstat: (path, ...args) => lookup("lstat", path, args),
+        realpath: (path, ...args) => lookup("realpath", path, args),
+        stat: (path, ...args) => lookup("stat", path, args),
+      }));
+      const { prepareNormalizedLocalImport, listLocalExternalFindings } =
+        await import(${JSON.stringify(module)});
+      const { resolveTrustedExecutable } = await import(${JSON.stringify(trusted)});
+      const nodeDirectory = site === "workbench-path"
+        ? dirname((await resolveTrustedExecutable("node", process.env, [repository])).executable)
+        : undefined;
+      const controller = new AbortController();
+      const reason = new Error("Synthetic setup cancellation");
+      let helperCalls = 0;
+      const dependencies = {
+        signal: controller.signal,
+        sourceRepositories: site === "git-executable"
+          ? [{ url: "https://github.com/example/project" }] : [],
+        ...(site === "workbench-path" ? {
+          environment: {
+            ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "PATH")),
+            PATH: nodeDirectory,
+          },
+        } : {
+          runWorkbench: async () => {
+            helperCalls++;
+            return { findings: [], counts: { created: 0, updated: 0, unchanged: 0 } };
+          },
+        }),
+      };
+      const input = { read: 0, findings: [], excluded: [] };
+      const options = { repository, provider: "snyk", sourceKey: "synthetic-project" };
+      const prepared = operation === "import"
+        ? await prepareNormalizedLocalImport(input, options, dependencies)
+        : undefined;
+      let paths;
+      if (site.endsWith("-roots")) {
+        const directory = site === "selected-roots" ? repository
+          : await original.realpath(process.cwd());
+        paths = [["lstat", directory], ["lstat", join(directory, ".git")]];
+      } else if (site.startsWith("plugin-")) {
+        const plugin = fileURLToPath(${JSON.stringify(plugin)});
+        paths = site === "plugin-manifest"
+          ? [["lstat", join(plugin, ".codex-plugin", "plugin.json")]]
+          : [["realpath", plugin]];
+      } else if (site === "workbench-path") {
+        paths = [["realpath", nodeDirectory]];
+      } else {
+        const git = await resolveTrustedExecutable("git", process.env, [repository]);
+        paths = [["stat", await original.realpath(git.executable)]];
+      }
+      const gates = [];
+      for (const [method, path] of paths) {
+        const value = await original[method](path);
+        let entered, release;
+        const reached = new Promise((resolve) => { entered = resolve; });
+        const wait = new Promise((resolve, reject) => {
+          release = site === "workbench-path"
+            ? () => reject(Object.assign(new Error("Synthetic PATH lookup failure"), { code: "EIO" }))
+            : resolve;
+        });
+        const gate = { key: method + ":" + path, entered, release, reached, wait, value };
+        held.set(gate.key, gate);
+        gates.push(gate);
+      }
+      let outcome;
+      const pending = (operation === "import" ? prepared.import()
+        : operation === "prepare" ? prepareNormalizedLocalImport(input, options, dependencies)
+        : listLocalExternalFindings({ repository }, dependencies)).then(
+          () => { outcome = "fulfilled"; }, (error) => { outcome = error; },
+        );
+      await Promise.all(gates.map((gate) => gate.reached));
+      controller.abort(reason);
+      await setImmediate();
+      try {
+        strictEqual(outcome, reason);
+      } finally {
+        for (const gate of gates) {
+          held.delete(gate.key);
+          gate.release(gate.value);
+        }
+        await pending;
+      }
+      await setImmediate();
+      strictEqual(outcome, reason);
+      strictEqual(helperCalls, 0);
       console.log("CANCELLED");
     `;
     const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: caller.repository,
       encoding: "utf8",
       env: environment,
     });
@@ -551,6 +717,42 @@ describe("local normalized scanner findings", () => {
     );
     expect(existsSync(stateDirectory)).toBe(false);
   });
+
+  test.each(["", ":9418", ":19418"])(
+    "matches native Git transport remotes with port %s",
+    async (port) => {
+      const { repository, stateDirectory, environment } = await fixture({
+        remote: `git://git.example.test${port}/Example/Project.git`,
+      });
+      const expectedPort = port === ":19418" ? port : "";
+      await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        {
+          environment,
+          sourceRepositories: [
+            {
+              url: `https://git.example.test${expectedPort}/Example/Project`,
+            },
+          ],
+        },
+      );
+      for (const url of [
+        `https://git.example.test${expectedPort}/Example/Other`,
+        `https://git.example.test${expectedPort}/example/project`,
+        `https://git.example.test${expectedPort ? "" : ":19418"}/Example/Project`,
+      ]) {
+        await expect(
+          prepareNormalizedLocalImport(
+            input(),
+            { repository, ...source },
+            { environment, sourceRepositories: [{ url }] },
+          ),
+        ).rejects.toThrow("does not match a configured remote");
+      }
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
 
   test.each(["ssh.github.com", "SSH.GITHUB.COM"])(
     "matches %s over the HTTPS port without equating other SSH ports",
@@ -808,32 +1010,111 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
-  test("repository matching ignores Git executables in a separate caller checkout", async () => {
+  test("requires Git for bare and linked metadata but permits plain directories without it", async () => {
     const { root, repository, stateDirectory, environment } = await fixture({
       remote: "https://github.com/example/project",
     });
-    const caller = join(root, "caller");
-    const callerDirectory = join(caller, "src");
-    const callerBin = join(caller, "tools");
-    const marker = join(root, "caller-git-executed");
-    await Promise.all([
-      mkdir(join(caller, ".git"), { recursive: true }),
-      mkdir(callerDirectory, { recursive: true }),
-      mkdir(callerBin, { recursive: true }),
+    const plain = join(root, "plain");
+    const bare = join(root, "bare");
+    const nested = join(bare, "objects", "nested");
+    const linked = join(root, "linked");
+    const invalid = join(root, "invalid");
+    await Promise.all([mkdir(plain), mkdir(linked), mkdir(invalid)]);
+    execFileSync("git", ["init", "--bare", "--quiet", bare]);
+    execFileSync("git", [
+      "-C",
+      bare,
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/example/project",
     ]);
-    await writeFile(
-      join(callerBin, process.platform === "win32" ? "git.exe" : "git"),
-      process.platform === "win32"
-        ? "untrusted executable fixture\n"
-        : '#!/bin/sh\nprintf executed > "$TEST_LOCAL_IMPORT_GIT_MARKER"\nexit 1\n',
-      { mode: 0o700 },
+    await mkdir(nested);
+    await Promise.all([
+      writeFile(join(linked, "HEAD"), "ref: refs/heads/main\n"),
+      writeFile(join(linked, "commondir"), `${bare}\n`),
+      writeFile(join(invalid, ".git"), "not a Git file\n"),
+    ]);
+    const sourceRepositories = [{ url: "https://github.com/example/other" }];
+    const withoutGit = {
+      ...Object.fromEntries(
+        Object.entries(environment).filter(
+          ([name]) => name.toUpperCase() !== "PATH",
+        ),
+      ),
+      PATH: "",
+    };
+    const prepared = await prepareNormalizedLocalImport(
+      input(),
+      { repository: plain, ...source },
+      { environment: withoutGit, sourceRepositories },
     );
-    const inheritedPath = Object.entries(environment).find(
-      ([name]) => name.toUpperCase() === "PATH",
-    )?.[1];
-    const module = new URL("../src/external-findings-local.ts", import.meta.url)
-      .href;
-    const script = `
+    expect(prepared.preview.repository).toBe(plain);
+    for (const selected of [repository, bare, nested, linked]) {
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository: selected, ...source },
+          { environment, sourceRepositories },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository: selected, ...source },
+          { environment: withoutGit, sourceRepositories },
+        ),
+      ).rejects.toThrow("Git is not available on a trusted PATH");
+    }
+    const git = spawnSync("git", ["-C", invalid, "remote"], {
+      encoding: "utf8",
+      env: { ...environment, LC_ALL: "C" },
+    });
+    expect(git.status).toBe(128);
+    expect(git.stderr).toContain("fatal: invalid gitfile format");
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository: invalid, ...source },
+        { environment, sourceRepositories },
+      ),
+    ).rejects.toMatchObject({ code: git.status, stderr: git.stderr });
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test.each(["checkout", "plain"])(
+    "repository matching ignores Git executables in a separate %s caller directory",
+    async (kind) => {
+      const { root, repository, stateDirectory, environment } = await fixture({
+        remote: "https://github.com/example/project",
+      });
+      const caller = join(root, "caller");
+      const callerDirectory = join(caller, "src");
+      const callerBin =
+        kind === "checkout"
+          ? join(caller, "tools")
+          : join(callerDirectory, "node_modules", ".bin");
+      const marker = join(root, "caller-git-executed");
+      await Promise.all([
+        mkdir(callerDirectory, { recursive: true }),
+        mkdir(callerBin, { recursive: true }),
+      ]);
+      if (kind === "checkout") await mkdir(join(caller, ".git"));
+      await writeFile(
+        join(callerBin, process.platform === "win32" ? "git.exe" : "git"),
+        process.platform === "win32"
+          ? "untrusted executable fixture\n"
+          : '#!/bin/sh\nprintf executed > "$TEST_LOCAL_IMPORT_GIT_MARKER"\nexit 1\n',
+        { mode: 0o700 },
+      );
+      const inheritedPath = Object.entries(environment).find(
+        ([name]) => name.toUpperCase() === "PATH",
+      )?.[1];
+      const module = new URL(
+        "../src/external-findings-local.ts",
+        import.meta.url,
+      ).href;
+      const script = `
       import { rejects } from "node:assert/strict";
       const { prepareNormalizedLocalImport } = await import(${JSON.stringify(module)});
       const input = { read: 0, findings: [], excluded: [] };
@@ -848,23 +1129,35 @@ describe("local normalized scanner findings", () => {
         /does not match a configured remote/,
       );
     `;
-    const result = spawnSync(process.execPath, ["-e", script], {
-      cwd: callerDirectory,
-      encoding: "utf8",
-      env: {
-        ...Object.fromEntries(
-          Object.entries(environment).filter(
-            ([name]) => name.toUpperCase() !== "PATH",
+      const result = spawnSync(process.execPath, ["-e", script], {
+        cwd: callerDirectory,
+        encoding: "utf8",
+        env: {
+          ...Object.fromEntries(
+            Object.entries(environment).filter(
+              ([name]) =>
+                name.toUpperCase() !== "PATH" &&
+                (kind === "checkout" ||
+                  name.toUpperCase() !== "CODEX_SECURITY_STATE_DIR"),
+            ),
           ),
-        ),
-        PATH: [callerBin, inheritedPath ?? ""].join(delimiter),
-        TEST_LOCAL_IMPORT_GIT_MARKER: marker,
-      },
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(existsSync(marker)).toBe(false);
-    expect(existsSync(stateDirectory)).toBe(false);
-  });
+          ...(kind === "plain"
+            ? {
+                HOME: callerDirectory,
+                USERPROFILE: callerDirectory,
+                CODEX_HOME: join(callerDirectory, ".codex"),
+              }
+            : {}),
+          PATH: [callerBin, inheritedPath ?? ""].join(delimiter),
+          TEST_LOCAL_IMPORT_GIT_MARKER: marker,
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(stateDirectory)).toBe(false);
+      expect(existsSync(join(callerDirectory, ".codex", "state"))).toBe(false);
+    },
+  );
 
   test("matches custom GitHub Enterprise names without changing other VCS identities", async () => {
     const { repository, stateDirectory, environment } = await fixture({
