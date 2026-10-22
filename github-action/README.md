@@ -120,12 +120,12 @@ sandbox requirements apply on both supported GitHub Cloud hosts.
 The CLI configures the provider and validates its model requirements. The Action
 uses the same provider names and forwards only the selected provider's credentials:
 
-| `provider` | Step environment |
-| --- | --- |
-| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback |
-| `amazon-bedrock` | AWS credentials and region; see the OIDC example below |
-| `openrouter` | `OPENROUTER_API_KEY` |
-| `fireworks` | `FIREWORKS_API_KEY` |
+| `provider`         | Step environment                                       |
+| ------------------ | ------------------------------------------------------ |
+| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback     |
+| `amazon-bedrock`   | AWS credentials and region; see the OIDC example below |
+| `openrouter`       | `OPENROUTER_API_KEY`                                   |
+| `fireworks`        | `FIREWORKS_API_KEY`                                    |
 
 OpenAI retains the `gpt-5.6-sol` default. Other providers require an explicit
 model ID your credentials can access. For example, replace the scan step in the
@@ -360,11 +360,11 @@ findings policy. Completion does not certify that every vulnerability was found.
 
 The Action follows the CLI outcome consistently:
 
-| CLI exit | Action result |
-| --- | --- |
-| `0` | `scan-status: completed`, `policy-status: passed`; the step succeeds. |
-| `1` | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
-| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails. |
+| CLI exit                      | Action result                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `0`                           | `scan-status: completed`, `policy-status: passed`; the step succeeds.          |
+| `1`                           | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
+| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails.         |
 
 Usable reports retained after an execution failure remain available, but are not
 eligible for SARIF upload. Invalid or missing required reports, a changed
@@ -487,28 +487,12 @@ the next product version. This development pin does not necessarily track the
 latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
-Releases use the product version from `sdk/typescript/package.json`. Before npm
-publication, the release workflow exercises the Action's compatibility suite
-against the packed CLI candidate. After publication and provenance verification,
-the Action release workflow starts from that exact CLI source commit, updates
-the runtime pin and integrity lock, and fetches the locked runtime through
-Socket Firewall with an empty cache before running the CLI. The lock keeps
-public npm URLs for Action consumers. The workflow rebuilds the bundles and
-runs the Action checks in a job with read-only repository permissions.
-A fresh publisher takes only the tested runtime lock, rebuilds
-from the same source, and verifies the bundle hashes without executing the CLI.
-It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`. The companion Action release includes the manifest
-and SBOM before publication, lists the full distribution commit SHA, and links
-to the npm release's canonical changelog. It is never marked Latest.
-
-The Action distribution commit differs from the CLI source commit because the
-registry integrity lock is finalized after publication. Release metadata records
-both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm or changing its immutable release assets.
-Recovery verifies existing Action assets and can finish a partial draft release.
-Existing version tags are never moved.
-See [the release process](../RELEASING.md) for the orchestration and recovery flow.
+The `action-vX.Y.Z` release uses the same version as the corresponding
+`npm-vX.Y.Z` CLI release. Its distribution commit includes the built bundles and
+final runtime lock and differs from the CLI source commit. Pin the full Action
+distribution SHA listed in the Action release, which also includes its manifest,
+SBOM, and a link to the product changelog. See [the release process](../RELEASING.md)
+for publication, verification, and recovery instructions.
 
 <!-- prettier-ignore-start -->
 

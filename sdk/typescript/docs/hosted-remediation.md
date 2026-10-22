@@ -124,7 +124,9 @@ the final execution receipt so usage and session identity survive cancellation.
 The transport emits one terminal result. Preparation failures are JSON-RPC
 errors; a mismatched HEAD includes `error.data.reason: "revision_mismatch"`.
 
-Run the deterministic installed-package smoke check without model credentials:
+To run the deterministic installed-package smoke check, use a source checkout
+of this repository and run the following from `sdk/typescript`. The script is
+not included in the npm package and needs no model credentials:
 
 ```sh
 node scripts/smoke-hosted-remediation.mjs /path/to/node_modules/@openai/codex-security

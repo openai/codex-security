@@ -1,6 +1,16 @@
 import {
   CodexSecurity,
+  importGitHubCodeScanningAlerts,
+  importGitHubAdvisories,
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
   prepareExternalPublication,
+  prepareLocalExternalImport,
+  prepareNormalizedLocalImport,
+  listLocalExternalFindings,
+  type NormalizedLocalImportOptions,
+  type StoredExternalFinding,
+  normalizeSnykFindingsExport,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type ExternalPublicationOptions,
@@ -300,6 +310,38 @@ export async function externalPublication(
   return prepared.publish();
 }
 
+export async function publishGitHubAlerts(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubCodeScanningAlerts({
+    repository: "example/project",
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubCodeScanningAlerts(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/code-scanning",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
+export async function publishGitHubAdvisories(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubAdvisories({
+    repository: "example/project",
+    source: "global",
+    advisoryIds: ["GHSA-2345-6789-cfgh"],
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubAdvisories(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/security-advisories",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
 export async function publishNormalizedVendorEvidence(
   input: ExternalFindings,
 ): Promise<ExternalPublicationResult> {
@@ -370,3 +412,24 @@ const localOptions: ScanOptions = {
   hosted: {},
 };
 void localOptions;
+
+export async function importLocalEvidence(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareNormalizedLocalImport(input, options);
+  await prepared.import();
+  return listLocalExternalFindings({ repository: options.repository });
+}
+
+export async function importLocalFile(
+  file: string,
+  options: ExternalPublicationOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareLocalExternalImport(file, options);
+  return (await prepared.import()).findings;
+}
+
+export function snykPluginFindings(bundle: unknown): ExternalFindings {
+  return normalizeSnykFindingsExport(bundle);
+}

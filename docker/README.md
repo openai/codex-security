@@ -118,15 +118,16 @@ also requires `latest` to reference that digest. `bootstrap` and
 not start a findings service or implement another workflow engine. It passes
 commands, output, and exit codes through the existing scanner entrypoint.
 
-Run these commands from the repository root. After the selected scanner release
-is available, prepare private directories and choose the host user's UID/GID so
-the runner can write its bind mounts:
+Run these commands from the repository root after
+[verifying an image](#image-metadata-and-verification). Keep the verified
+`reference` in the same shell. Prepare private directories and choose the host
+user's UID/GID so the runner can write its bind mounts:
 
 ```bash
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
+export CODEX_SECURITY_IMAGE="$reference"
 docker compose -f compose.runner.yaml pull
 docker compose -f compose.runner.yaml run --rm codex-security login --device-auth
 ```

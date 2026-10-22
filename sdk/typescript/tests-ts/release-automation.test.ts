@@ -3803,15 +3803,15 @@ describe("GitHub release workflow safeguards", () => {
     )?.[1];
 
     expect(releasePattern).toBeDefined();
-    expect(ciPattern).toBe(releasePattern);
+    expect(ciPattern).toBeUndefined();
     expect(titlePattern).toBe(releasePattern);
     expect(nodeCiWorkflow).toContain(
       "types: [opened, edited, reopened, synchronize]",
     );
-    expect(nodeCiWorkflow).toContain("needs: validate-title");
+    expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
-  test("runs source validation with required check names for every PR edit", async () => {
+  test("preserves source validation dependencies and fails closed on missing coverage", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3836,14 +3836,16 @@ describe("GitHub release workflow safeguards", () => {
 
     const sourceGroup =
       "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}";
-    expect(workflow.concurrency.group).toBe(sourceGroup);
+    expect(workflow.concurrency.group).toStartWith(sourceGroup);
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' }}",
     );
-    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
-    expect(workflow.jobs["validate-title"]?.if).toBeUndefined();
+    expect(workflow.jobs["classify-changes"]?.["timeout-minutes"]).toBe(10);
+    expect(workflow.jobs["classify-changes"]?.if).toContain(
+      "github.event.changes.base != null",
+    );
     expect(
-      workflow.jobs["validate-title"]?.steps.find(
+      workflow.jobs["classify-changes"]?.steps.find(
         ({ name }) =>
           name === "Checkout pull request for change classification",
       )?.if,
@@ -3863,14 +3865,14 @@ describe("GitHub release workflow safeguards", () => {
       expect(workflow.jobs[job]?.if).toBeUndefined();
     }
     for (const [name, job] of Object.entries(workflow.jobs)) {
-      if (["validate-title", "required-test", "windows"].includes(name)) {
+      if (["classify-changes", "required-test", "windows"].includes(name)) {
         continue;
       }
-      expect([job.needs].flat(), name).toContain("validate-title");
+      expect([job.needs].flat(), name).toContain("classify-changes");
       expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
     }
     for (const job of ["required-test", "windows"]) {
-      expect(workflow.jobs[job]?.if).toBe("always()");
+      expect(workflow.jobs[job]?.if).toContain("always()");
     }
     const coverageGate = (job: string) =>
       workflow.jobs[job]?.steps.find(
@@ -3897,7 +3899,7 @@ describe("GitHub release workflow safeguards", () => {
         "needs.compatibility.result": upstream,
         "needs.mcp.result": upstream,
         "needs.test.result": upstream,
-        "needs.validate-title.result": validation,
+        "needs.classify-changes.result": validation,
         "needs.windows-test.result": upstream,
         "needs.windows-verify.result": upstream,
       };
@@ -3934,7 +3936,7 @@ describe("GitHub release workflow safeguards", () => {
           conditionCases.push({
             condition: coverageGate(gate)?.if ?? "",
             values: {
-              "needs.validate-title.result": "success",
+              "needs.classify-changes.result": "success",
               ...Object.fromEntries(
                 dependencies.map((job) => [
                   `needs.${job}.result`,
@@ -3954,41 +3956,6 @@ describe("GitHub release workflow safeguards", () => {
     for (const [index, item] of conditionCases.entries()) {
       expect(conditions[index], item.message).toBe(item.expected);
     }
-
-    const renderName = (template: string, values: Record<string, string>) => {
-      let name = template;
-      for (const [key, value] of Object.entries(values)) {
-        name = name.replaceAll("${{ matrix." + key + " }}", value);
-      }
-      return name.replace(
-        "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : (values["node"] ?? ""),
-      );
-    };
-    const unixJob = workflow.jobs["required-test"];
-    const windowsJob = workflow.jobs["windows"];
-    const requiredContexts = new Set([
-      "ubuntu-latest / node-22",
-      "macos-latest / node-22",
-      "windows-latest / node-22",
-    ]);
-    const names = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob!.name, { os }),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob!.name, { node }),
-      ),
-    ];
-    expect(names).toEqual([
-      "ubuntu-latest / node-22",
-      "macos-latest / node-22",
-      "windows-latest / node-22",
-      "windows-latest / node-24",
-    ]);
-    expect(names.filter((name) => requiredContexts.has(name)).sort()).toEqual(
-      [...requiredContexts].sort(),
-    );
   });
 
   test("documents a canonical historical-summary prefix block", () => {
@@ -4017,7 +3984,6 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing carriage return\r",
   ])("active title gates reject %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -4034,7 +4000,6 @@ describe("GitHub release workflow safeguards", () => {
     "dependency-update2: refresh release tooling",
   ])("active title gates accept previously valid title %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(

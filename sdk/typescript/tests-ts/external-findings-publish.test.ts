@@ -23,6 +23,7 @@ import {
   prepareNormalizedExternalPublication,
   type ExternalPublicationProgress,
 } from "../src/external-findings-publish.js";
+import { readGitHubFindings } from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
   validateExternalEvidence,
@@ -36,6 +37,10 @@ import type {
 } from "../src/external-import-models.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
+import {
+  importedAlert,
+  importedAdvisory,
+} from "./support/github-import-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -143,7 +148,11 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
   expect(contactedCloud).toBe(false);
 });
 
-async function fixture(records: unknown = [normalized()]) {
+async function fixture(
+  records: unknown = [normalized()],
+  repositoryUrl = "https://github.com/example/project",
+  repoConnectorId = "github",
+) {
   const root = await mkdtemp(join(tmpdir(), "external-findings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "selected findings.json");
@@ -184,8 +193,8 @@ async function fixture(records: unknown = [normalized()]) {
   const destination = () => ({
     id: options.repository,
     object: "security.repository",
-    repo_connector_id: "github",
-    url: "https://github.com/example/project",
+    repo_connector_id: repoConnectorId,
+    url: repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
     import_environment_id: state.environmentId,
@@ -1703,7 +1712,7 @@ test.each(["JSON", "JSONL"])(
     });
     expect(stdout).not.toContain("\u001b");
     expect(stderr).toContain(
-      "Could not read vendor findings as UTF-8 JSON or JSONL:",
+      "Could not read vendor findings as UTF-8 JSON, JSONL, or Wiz CSV:",
     );
     expect(stderr).toContain("malformed");
     expect(stderr).not.toContain("\u001b");
@@ -2599,6 +2608,137 @@ test("normalized SDK publication preserves caller evidence and exclusion account
   expect(result.verified).toBe(1);
 });
 
+test("GitHub publication previews, imports, re-imports, updates and resumes selected-ref evidence", async () => {
+  const imported = importedAlert();
+  const f = await fixture([imported]);
+  const githubOptions = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/code-scanning",
+  };
+  const command = f.command.map((arg) =>
+    arg === "wiz"
+      ? "github"
+      : arg === options.sourceKey
+        ? githubOptions.sourceKey
+        : arg,
+  );
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli([...command, "--dry-run", "--format", "json"], f.cliDeps),
+  ).toBe(0);
+  expect(f.posts).toHaveLength(0);
+  expect(JSON.parse(cli.stdout.text()).source.provider).toBe("github");
+  const first = await (
+    await prepareExternalPublication(f.file, githubOptions, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const repeated = await (
+    await prepareExternalPublication(f.file, githubOptions, f.deps)
+  ).publish();
+  expect(repeated.counts.unchanged).toBe(1);
+  imported.alert.most_recent_instance.state = "fixed";
+  await writeFile(f.file, JSON.stringify([imported]));
+  f.state.loseResponse = true;
+  await expect(
+    (await prepareExternalPublication(f.file, githubOptions, f.deps)).publish(),
+  ).rejects.toBeInstanceOf(ExternalPublicationError);
+  const prepared = await prepareExternalPublication(
+    f.file,
+    githubOptions,
+    f.deps,
+  );
+  expect(prepared.preview.resumed).toBe(true);
+  const resumed = await prepared.publish();
+  expect(resumed.counts.updated).toBe(1);
+  expect(resumed.verified).toBe(1);
+  expect([...f.reports.values()][0]).toMatchObject({
+    source: { provider: "github" },
+    evidence: { details: { source_status: "fixed" }, source_data: imported },
+    assessment: { state: "not_assessed" },
+  });
+  await writeFile(f.file, JSON.stringify([importedAlert("refs/heads/review")]));
+  const differentRef = await (
+    await prepareExternalPublication(f.file, githubOptions, f.deps)
+  ).publish();
+  expect(differentRef.counts.created).toBe(1);
+  expect(f.reports.size).toBe(2);
+});
+
+test("GitHub imports reject a different Cloud destination before uploading", async () => {
+  const imported = importedAlert("refs/heads/main", "git.example.test");
+  const f = await fixture([imported]);
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...options, provider: "github" },
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(0);
+});
+
+test("global GHSA publication retains unassessed applicability through repeat import and withdrawal", async () => {
+  const imported = importedAdvisory("global");
+  const f = await fixture([imported]);
+  const selected = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/security-advisories",
+  };
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, selected, f.deps)
+      ).publish()
+    ).counts.created,
+  ).toBe(1);
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, selected, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  const withdrawn = {
+    ...imported,
+    advisory: { ...imported.advisory, withdrawn_at: "2026-01-03T00:00:00Z" },
+  };
+  await writeFile(f.file, JSON.stringify([withdrawn]));
+  const result = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(result.counts.updated).toBe(1);
+  expect(result.verified).toBe(1);
+  const report = [...f.reports.values()][0]!;
+  expect(report.evidence.details).toMatchObject({
+    kind: "advisory",
+    advisory: { source: "global" },
+    source_status: "withdrawn",
+  });
+  expect(report.evidence.details).not.toHaveProperty("repository");
+  expect(report.assessment?.state).toBe("not_assessed");
+  expect(report.evidence.packages![0]!.installed_version).toBeNull();
+});
+
+test("saved GitHub JSONL and gzip preserve evidence while malformed UTF-8 cannot change identities", async () => {
+  const imported = [importedAlert(), importedAdvisory("global")];
+  const f = await fixture(imported);
+  const jsonl = imported.map((record) => JSON.stringify(record)).join("\n");
+  for (const bytes of [Buffer.from(jsonl), gzipSync(jsonl)]) {
+    await writeFile(f.file, bytes);
+    const parsed = await readGitHubFindings(f.file);
+    expect(parsed.read).toBe(2);
+    expect(parsed.excluded).toEqual([]);
+    expect(
+      parsed.findings.map((finding) => finding.evidence.source_data) as unknown,
+    ).toEqual(imported);
+  }
+  await writeFile(f.file, Buffer.from([0xff]));
+  await expect(readGitHubFindings(f.file)).rejects.toThrow("UTF-8");
+});
+
 test("normalized publication omits only new null fields to match canonical Cloud readback", async () => {
   const f = await fixture();
   const evidence = {
@@ -2705,6 +2845,42 @@ test("normalized SDK publication detaches raw evidence aliases before validating
   expect(prepared.preview.findings).toEqual(fromFile.preview.findings);
 });
 
+test.each(["code-scanning", "advisory"])(
+  "%s imports bind an explicit default port to the matching Cloud repository",
+  async (family) => {
+    const alert = importedAlert("refs/heads/main", "github.com:443");
+    const advisory = importedAdvisory();
+    advisory.githubHost = "github.com:443";
+    advisory.url = advisory.advisory.html_url = advisory.url.replace(
+      "github.com",
+      advisory.githubHost,
+    );
+    const f = await fixture([family === "code-scanning" ? alert : advisory]);
+    const selected = { ...options, provider: "github" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    const matching = {
+      ...f.deps,
+      fetch: async (url: string, init: RequestInit) => {
+        const response = await f.deps.fetch(url, init);
+        if (new URL(url).pathname.endsWith("/repositories")) {
+          const body = await response.json();
+          body.data[0].url = "https://github.com:443/example/project";
+          return Response.json(body);
+        }
+        return response;
+      },
+    };
+    const result = await (
+      await prepareExternalPublication(f.file, selected, matching)
+    ).publish();
+    expect(result.counts.created).toBe(1);
+    expect(result.verified).toBe(1);
+  },
+);
+
 test("normalized SDK publication rejects nonfinite raw evidence without JSON coercion", async () => {
   const f = await fixture();
   const input = {
@@ -2771,4 +2947,824 @@ test("normalized SDK publication accepts Cloud providers without their file read
   expect(prepared.preview.source.provider).toBe("endor");
   expect((await prepared.publish()).verified).toBe(1);
   expect(JSON.parse(f.posts[0]!).source.provider).toBe("endor");
+});
+
+test.each([
+  { run: "scan-123" },
+  { run: { versionControlProvenance: "opaque scanner metadata" } },
+])(
+  "normalized Snyk publication preserves opaque source metadata: %j",
+  async (sourceData) => {
+    const original = normalized();
+    const finding = {
+      ...original,
+      evidence: validateExternalEvidence({
+        ...original.evidence,
+        source_data: sourceData,
+      }),
+    };
+    const f = await fixture();
+    const prepared = await prepareNormalizedExternalPublication(
+      { read: 1, findings: [finding], excluded: [] },
+      { ...options, provider: "snyk" },
+      f.deps,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    expect([...f.reports.values()][0]!.evidence.source_data).toEqual(
+      sourceData,
+    );
+  },
+);
+
+test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input = snykSarif();
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "snyk" as const,
+    sourceKey: "organization/project/main",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  const second = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(second.counts.unchanged).toBe(1);
+  input.runs[0]!.results[0]!.message.text = "Updated source evidence";
+  await writeFile(f.file, JSON.stringify(input));
+  const third = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(third.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.version).toBe(2);
+});
+
+test("Snyk CLI dry run selects its adapter without writing an import", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const f = await fixture(snykSarif());
+  const command = [...f.command, "--dry-run"];
+  command[command.indexOf("--provider") + 1] = "snyk";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each([
+  { uris: ["https://github.com/other/project"] },
+  {
+    uris: [
+      "https://github.com/example/project",
+      "https://github.com/other/project",
+    ],
+  },
+  { uris: ["https://github.com:443/example/project"] },
+])(
+  "Snyk source repository provenance binds both publication entrypoints: %p",
+  async ({ uris }) => {
+    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+    const { normalizeSnykSarif } = await import("../src/snyk-findings.js");
+    const input: any = snykSarif();
+    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
+      repositoryUri,
+    }));
+    const f = await fixture(input);
+    const selected = { ...options, provider: "snyk" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeSnykSarif(input),
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(f.reports.size).toBe(0);
+  },
+);
+
+test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input: any = snykSarif();
+  input.runs[0].versionControlProvenance = [
+    {
+      repositoryUri: "https://GITHUB.COM/EXAMPLE/PROJECT.git",
+      revisionId: "synthetic-revision",
+    },
+  ];
+  const original = structuredClone(input);
+  const f = await fixture(input);
+  const selected = { ...options, provider: "snyk" as const };
+  const first = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(first.verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    run: {
+      versionControlProvenance: original.runs[0].versionControlProvenance,
+    },
+  });
+  const changedDestination = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.endsWith("/repositories")) {
+        const body = await response.json();
+        body.data[0].url = "https://github.com/other/project";
+        return Response.json(body);
+      }
+      return response;
+    },
+  };
+  const posted = f.posts.length;
+  await expect(
+    prepareExternalPublication(f.file, selected, changedDestination),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(posted);
+  expect(input).toEqual(original);
+});
+
+async function snykRepositoryEvidence(
+  format: "plugin" | "SARIF",
+  repository: string,
+) {
+  const { snykPluginExport, snykSarif } =
+    await import("./support/snyk-import-fixtures.js");
+  const { normalizeSnykFindingsExport, normalizeSnykSarif } =
+    await import("../src/snyk-findings.js");
+  if (format === "plugin") {
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    return {
+      input,
+      normalized: normalizeSnykFindingsExport(input),
+      original: { collection: input.collection, finding: input.findings[0] },
+    };
+  }
+  const sarif = snykSarif();
+  const provenance = [{ repositoryUri: repository }];
+  const input = {
+    ...sarif,
+    runs: sarif.runs.map((run) => ({
+      ...run,
+      versionControlProvenance: provenance,
+    })),
+  };
+  return {
+    input,
+    normalized: normalizeSnykSarif(input),
+    original: { run: { versionControlProvenance: provenance } },
+  };
+}
+
+const snykRepositoryAliases: [string, string][] = [
+  [
+    "https://github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  ["git@github.com:example/project.git", "https://github.com/example/project"],
+  [
+    "ssh://git@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@github.com:22/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  // Preserve the existing generic git-user aliases for connected catalog hosts.
+  [
+    "git@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "git@GIT.EXAMPLE.TEST:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "https://git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+];
+
+test.each([
+  ...snykRepositoryAliases.flatMap(([repository, destination]) =>
+    (["plugin", "SARIF"] as const).map(
+      (format) => [format, repository, destination] as const,
+    ),
+  ),
+  ["plugin", "unknown", "https://github.com/example/project"] as const,
+])(
+  "Snyk %s export imports and replays with repository remote %s",
+  async (format, repository, destination) => {
+    const { input, normalized, original } = await snykRepositoryEvidence(
+      format,
+      repository,
+    );
+    const f = await fixture(input, destination, "connector-selected");
+    const selected = {
+      ...options,
+      provider: "snyk" as const,
+      sourceKey: "example/project/main/plugin-sca",
+    };
+    const first = await (
+      await prepareExternalPublication(f.file, selected, f.deps)
+    ).publish();
+    expect(first.counts.created).toBe(1);
+    expect(first.verified).toBe(1);
+    expect(JSON.parse(f.posts[0]!).repository.repo_connector_id).toBe(
+      "connector-selected",
+    );
+    expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject(
+      original,
+    );
+    const second = await (
+      await prepareNormalizedExternalPublication(normalized, selected, f.deps)
+    ).publish();
+    expect(second.counts.unchanged).toBe(1);
+  },
+);
+
+const snykRepositoryMismatches: [string, string][] = [
+  ...["\t", "\r", "\n"].flatMap((control): [string, string][] => [
+    [
+      `ssh://git@github.${control}com/example/project.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://git@github.com/example/pro${control}ject.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://tenant@tenant.${control}ghe.com/example/project.git`,
+      "https://tenant.ghe.com/example/project",
+    ],
+    [
+      `ssh://tenant@tenant.ghe.com/example/pro${control}ject.git`,
+      "https://tenant.ghe.com/example/project",
+    ],
+    [
+      `ssh://git@ssh.github.${control}com:443/example/project.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://git@ssh.github.com:443/example/pro${control}ject.git`,
+      "https://github.com/example/project",
+    ],
+  ]),
+  [
+    "ssh://tenant@other:synthetic@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@other:@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@other:synthetic@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@other:@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://te\nnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://te\tnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://te\rnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://gi\nt@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://tenant@other@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "other@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://other@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://other.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://tenant@api.tenant.ghe.com/example/project.git",
+    "https://api.tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant:synthetic@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant:@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:443/example/project.git",
+    "https://tenant.ghe.com:443/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com:443/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:other/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@ssh.github.com:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "http://tenant.ghe.com/example/project",
+  ],
+  ["git@github.com:other/project.git", "https://github.com/example/project"],
+  [
+    "ssh://git@github.com:2222/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:2222/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:2222/example/project.git",
+    "https://git.example.test:2222/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:443/example/project.git",
+    "https://git.example.test:443/example/project",
+  ],
+  [
+    "ssh://git@github.com:2222/example/project.git",
+    "https://github.com:2222/example/project",
+  ],
+  [
+    "ssh://git@github.com:443/example/project.git",
+    "https://github.com:443/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:2222/example/project.git",
+    "https://tenant.ghe.com:2222/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:2222/example/project.git",
+    "https://ssh.github.com:2222/example/project",
+  ],
+  [
+    "git@other.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@git.example.test:other/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test:443/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test:22/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "http://git.example.test/example/project",
+  ],
+];
+
+test.each([
+  ...snykRepositoryMismatches.flatMap(([repository, destination]) =>
+    (["plugin", "SARIF"] as const).map(
+      (format) => [format, repository, destination] as const,
+    ),
+  ),
+  ["SARIF", "unknown", "https://github.com/example/project"] as const,
+])(
+  "Snyk %s repository claim %s cannot target %s",
+  async (format, repository, destination) => {
+    const { input, normalized, original } = await snykRepositoryEvidence(
+      format,
+      repository,
+    );
+    const f = await fixture(input, destination);
+    const selected = { ...options, provider: "snyk" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(normalized, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(normalized.findings[0]!.evidence.source_data).toMatchObject(
+      original,
+    );
+  },
+);
+
+test("native Snyk JSON publishes selected dependency occurrences and replays their evidence", async () => {
+  const { snykJson } = await import("./support/snyk-import-fixtures.js");
+  const input = snykJson();
+  const f = await fixture(input);
+  const selected = {
+    ...options,
+    provider: "snyk" as const,
+    sourceKey: "example/project/main/root/native-sca",
+  };
+  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  expect(prepared.preview.excluded).toEqual([]);
+  const first = await prepared.publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence).toMatchObject({
+    locations: [],
+    packages: [{ name: "@example/package", manifest_path: null }],
+    source_data: { vulnerability: input.vulnerabilities[0] },
+  });
+  const second = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(second.counts.unchanged).toBe(1);
+});
+
+test("Semgrep publication preserves identity across JSON and SARIF with explicit repository provenance", async () => {
+  const { semgrepJson, semgrepSarif } =
+    await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture(semgrepJson());
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original.source.provider).toBe("semgrep");
+  expect(original.evidence.details?.kind).toBe("sast");
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  await writeFile(f.file, JSON.stringify(semgrepSarif()));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.source_data).toMatchObject({
+    result: semgrepSarif().runs[0]!.results[0],
+  });
+});
+
+test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
+  const { semgrepJson, semgrepSarif } =
+    await import("./support/semgrep-import-fixtures.js");
+  const paths = [
+    "src/my file.ts",
+    "src/my%20file.ts",
+    "src/100%.ts",
+    "src/100%25.ts",
+  ];
+  const json: any = semgrepJson();
+  const sarif: any = semgrepSarif();
+  delete json.results[0].extra.fingerprint;
+  delete sarif.runs[0].results[0].fingerprints;
+  json.results = paths.map((path) => ({ ...json.results[0], path }));
+  const run = sarif.runs[0];
+  run.results = paths.map((path) => {
+    const result = structuredClone(run.results[0]);
+    result.locations[0].physicalLocation.artifactLocation.uri = path;
+    return result;
+  });
+  const f = await fixture(json);
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(paths.length);
+  expect(first.verified).toBe(paths.length);
+  const originalIds = [...f.reports.values()]
+    .map((report) => [report.id, report.canonical_finding_id])
+    .sort();
+  await writeFile(f.file, JSON.stringify(sarif));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.created).toBe(0);
+  expect(changed.counts.updated).toBe(paths.length);
+  expect(changed.verified).toBe(paths.length);
+  expect(
+    [...f.reports.values()]
+      .map((report) => [report.id, report.canonical_finding_id])
+      .sort(),
+  ).toEqual(originalIds);
+  expect(
+    [...f.reports.values()]
+      .map((report) => report.evidence.locations?.[0]?.path)
+      .sort(),
+  ).toEqual(paths.toSorted());
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(paths.length);
+});
+
+test("Semgrep publication retains unsupported SARIF bases without repository locations", async () => {
+  const { semgrepSarif } = await import("./support/semgrep-import-fixtures.js");
+  const input: any = semgrepSarif();
+  const run = input.runs[0];
+  run.results[0].locations[0].physicalLocation.artifactLocation.uriBaseId =
+    "ROOT";
+  run.originalUriBaseIds = { ROOT: { uri: "file:///outside/" } };
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "semgrep" as const,
+    sourceKey: "organization/project/main",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original.evidence.locations).toEqual([]);
+  expect(original.evidence.source_data).toMatchObject({
+    result: run.results[0],
+    runContext: { originalUriBaseIds: run.originalUriBaseIds },
+  });
+  expect(JSON.parse(f.posts[0]!).items[0].evidence.locations).toEqual([]);
+
+  run.originalUriBaseIds.ROOT.uri = "subproject/";
+  await writeFile(f.file, JSON.stringify(input));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.locations).toEqual([]);
+  expect(updated.evidence.source_data).toMatchObject({
+    runContext: { originalUriBaseIds: run.originalUriBaseIds },
+  });
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+});
+
+test("Semgrep refuses missing source identity and a conflicting Cloud destination without uploads", async () => {
+  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture(semgrepJson());
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      { ...options, provider: "semgrep" },
+      f.deps,
+    ),
+  ).rejects.toThrow("sourceRepositoryUrl");
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider: "semgrep",
+        sourceRepositoryUrl: "https://github.com/other/project",
+      },
+      f.deps,
+    ),
+  ).rejects.toThrow(/repository/i);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("Semgrep CLI dry-run preserves explicit source repository and does not upload", async () => {
+  const { semgrepJson } = await import("./support/semgrep-import-fixtures.js");
+  const f = await fixture(semgrepJson());
+  const command = [
+    ...f.command,
+    "--dry-run",
+    "--source-repository-url",
+    "https://github.com/example/project",
+  ];
+  command[command.indexOf("--provider") + 1] = "semgrep";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async () => {
+  const { endorFinding, endorSarif } =
+    await import("./support/endor-import-fixtures.js");
+  const input = endorFinding();
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "endor" as const,
+    sourceKey: "namespace/project/main",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(
+    (
+      await (
+        await prepareExternalPublication(f.file, settings, f.deps)
+      ).publish()
+    ).counts.unchanged,
+  ).toBe(1);
+  const sarif = endorSarif();
+  await writeFile(f.file, JSON.stringify(sarif));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  expect(changed.verified).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.evidence.source_data).toMatchObject({
+    result: sarif.runs[0]!.results[0],
+  });
+});
+test("Endor CLI dry-run recognizes SARIF without writing imports", async () => {
+  const { endorSarif } = await import("./support/endor-import-fixtures.js");
+  const f = await fixture(endorSarif());
+  const command = [...f.command, "--dry-run"];
+  command[command.indexOf("--provider") + 1] = "endor";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each([
+  { uris: ["https://github.com/other/project"] },
+  {
+    uris: [
+      "https://github.com/example/project",
+      "https://github.com/other/project",
+    ],
+  },
+  { uris: ["https://github.com:443/example/project"] },
+])(
+  "Endor source repository provenance binds both publication entrypoints: %p",
+  async ({ uris }) => {
+    const { endorSarif } = await import("./support/endor-import-fixtures.js");
+    const { normalizeEndorFindings } = await import("../src/endor-findings.js");
+    const input: any = endorSarif();
+    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
+      repositoryUri,
+    }));
+    const f = await fixture(input);
+    const selected = { ...options, provider: "endor" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeEndorFindings(input),
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(f.reports.size).toBe(0);
+  },
+);
+
+test("Endor source repository binding preserves immutable requests across a repository rename", async () => {
+  const { endorSarif } = await import("./support/endor-import-fixtures.js");
+  const input: any = endorSarif();
+  input.runs[0].versionControlProvenance = [
+    {
+      repositoryUri: "https://GITHUB.COM/EXAMPLE/PROJECT.git",
+      revisionId: "synthetic-revision",
+    },
+  ];
+  const original = structuredClone(input);
+  const f = await fixture(input);
+  const selected = { ...options, provider: "endor" as const };
+  f.state.loseResponse = true;
+  const first = await prepareExternalPublication(f.file, selected, f.deps);
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const changedDestination = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.endsWith("/repositories")) {
+        const body = await response.json();
+        body.data[0].url = "https://github.com/other/project";
+        return Response.json(body);
+      }
+      return response;
+    },
+  };
+  const retry = await prepareExternalPublication(
+    f.file,
+    selected,
+    changedDestination,
+  );
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).status).toBe("complete");
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    runContext: {
+      versionControlProvenance: original.runs[0].versionControlProvenance,
+    },
+  });
+  const posted = f.posts.length;
+  await expect(
+    prepareExternalPublication(f.file, selected, changedDestination),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(posted);
+  expect(input).toEqual(original);
 });

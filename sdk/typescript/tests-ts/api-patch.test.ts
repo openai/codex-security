@@ -143,12 +143,17 @@ describe("CodexSecurity headless patching", () => {
       repositoryPath: repository,
       finding: "Candidate finding",
     };
+    const projectTrustKey =
+      process.platform === "win32"
+        ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+        : repository;
     return {
       client,
       options,
       captured,
       workbench,
       codexHome,
+      projectTrustKey,
     };
   }
 
@@ -388,7 +393,8 @@ describe("CodexSecurity headless patching", () => {
   });
 
   test("keeps the patch workspace untrusted across native config layers", async () => {
-    const { client, options, captured, codexHome } = await patchClient();
+    const { client, options, captured, codexHome, projectTrustKey } =
+      await patchClient();
     await using security = client;
     await security.patch(options);
     expect(
@@ -406,7 +412,7 @@ describe("CodexSecurity headless patching", () => {
         },
       },
       project_root_markers: [],
-      projects: { [options.repositoryPath]: { trust_level: "untrusted" } },
+      projects: { [projectTrustKey]: { trust_level: "untrusted" } },
     });
     expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);
   });
@@ -425,9 +431,8 @@ describe("CodexSecurity headless patching", () => {
           refresh_interval_ms: 1000,
         },
       };
-      const { client, options, captured, codexHome } = await patchClient(
-        undefined,
-        {
+      const { client, options, captured, codexHome, projectTrustKey } =
+        await patchClient(undefined, {
           ...(selection === "profile"
             ? {
                 profile: "review",
@@ -435,8 +440,7 @@ describe("CodexSecurity headless patching", () => {
               }
             : { model_provider: "synthetic.provider" }),
           model_providers: { "synthetic.provider": provider },
-        },
-      );
+        });
       await using security = client;
       expect(await security.patch(options)).toMatchObject(verified);
       expect(captured.codex?.nativeProfile).toBeDefined();
@@ -465,7 +469,7 @@ describe("CodexSecurity headless patching", () => {
           },
         },
         project_root_markers: [],
-        projects: { [options.repositoryPath]: { trust_level: "untrusted" } },
+        projects: { [projectTrustKey]: { trust_level: "untrusted" } },
       });
       expect(captured.codex?.config).not.toHaveProperty("model_providers");
       expect(captured.codex?.apiKey).toBeUndefined();
