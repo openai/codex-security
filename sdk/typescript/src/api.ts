@@ -1011,7 +1011,12 @@ export class CodexSecurity {
         temporaryRoot,
       );
       // Pin an untrusted root before --cd can trust it and load repository MCP
-      // servers. Raw overrides keep the path as one quoted TOML key.
+      // servers. An inline table keeps the path out of CLI dotted-key parsing.
+      // Codex prefers an exact ASCII-lowercase trust key on Windows.
+      const projectTrustKey =
+        process.platform === "win32"
+          ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+          : repository;
       const configured = scanModelConfiguration(session.effectiveConfig);
       const model = options.model ?? configured.model;
       const reasoningEffort =
@@ -1034,7 +1039,7 @@ export class CodexSecurity {
         [
           `permissions.${SCAN_PERMISSION_PROFILE}.network.enabled=false`,
           "project_root_markers=[]",
-          `projects.${JSON.stringify(repository)}.trust_level="untrusted"`,
+          `projects=${inlineToml({ [projectTrustKey]: { trust_level: "untrusted" } })}`,
         ],
       );
       tracker = new ScanCostTracker({
