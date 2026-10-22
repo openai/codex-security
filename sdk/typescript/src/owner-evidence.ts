@@ -31,6 +31,8 @@ export interface OwnerEvidence {
   kind: "source" | "blame" | "history" | "codeowners";
   path: string;
   commit: string;
+  /** Original blamed commit; blame citations keep commit at the checkout revision. */
+  blameCommit?: string;
   startLine?: number;
   endLine?: number;
   rule?: string;
@@ -319,7 +321,7 @@ export async function collectOwnerEvidence(
           const previous = context.evidence.at(-1);
           if (
             previous?.kind === "blame" &&
-            previous.content === `Authored in ${commit}.` &&
+            previous.blameCommit === commit &&
             previous.identityIndex === index &&
             previous.endLine === line - 1
           ) {
@@ -329,6 +331,7 @@ export async function collectOwnerEvidence(
               kind: "blame",
               path,
               commit: revision,
+              blameCommit: commit,
               startLine: line,
               endLine: line,
               content: `Authored in ${commit}.`,

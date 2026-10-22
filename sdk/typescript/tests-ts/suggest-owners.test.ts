@@ -9,6 +9,7 @@ import { InvalidTargetError } from "../src/errors.js";
 import type { OwnerContext } from "../src/owner-evidence.js";
 import {
   suggestOwners,
+  suggestOwnersFromScan,
   type OwnerFinding,
   type SuggestOwnersOptions,
 } from "../src/suggest-owners.js";
@@ -524,6 +525,62 @@ test("keeps renamed-file blame citations at HEAD and inherits SDK model settings
     reasoningEffort: "low",
   });
 });
+
+test.each(["author", "checkout"] as const)(
+  "scan hints after a rename validate the %s commit against blame",
+  async (supportingCommit) => {
+    const repo = await repository();
+    const path = "record [1].ts";
+    await repo.git("mv", "handler.ts", path);
+    await repo.git(
+      "-c",
+      "user.name=Blair Example",
+      "-c",
+      "user.email=blair@example.test",
+      "commit",
+      "-qm",
+      "Rename record handler",
+    );
+    const revision = await repo.git("rev-parse", "HEAD");
+    const { codex, calls } = fakeCodex();
+    const report = await suggestOwnersFromScan(
+      repo.path,
+      [
+        {
+          ...finding,
+          sourceRevision: revision,
+          locations: [{ path, startLine: 2, endLine: 3 }],
+          extensions: {
+            ownerSuggestion: {
+              email: "alex@example.test",
+              commit: supportingCommit === "author" ? repo.original : revision,
+              reason: "Alex authored the affected lines before the rename.",
+            },
+          },
+        },
+      ],
+      { codex },
+    );
+    expect(calls).toHaveLength(0);
+    const result = report.results[0]!;
+    if (supportingCommit === "author") {
+      expect(result).toMatchObject({
+        status: "identified",
+        owner: { name: "Alex Example", email: "alex@example.test" },
+      });
+      expect(result.evidence.find(({ kind }) => kind === "blame")).toEqual({
+        id: expect.any(String),
+        kind: "blame",
+        path,
+        commit: revision,
+        startLine: 2,
+        endLine: 3,
+      });
+    } else {
+      expect(result).toMatchObject({ status: "error", owner: null });
+    }
+  },
+);
 
 test("rejects invented identities and citations and preserves later results", async () => {
   const repo = await repository();

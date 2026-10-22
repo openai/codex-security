@@ -239,9 +239,12 @@ files can set `scan.owner_suggestions: true`. The report uses the scan's finding
 IDs and frozen revision; it does not change the sealed findings or assign users.
 Owner failures leave the base scan completed and appear as
 `result.ownerSuggestionsError`; successful reports set `result.ownerSuggestionsPath`.
-Owner inference uses the scan's model and reasoning effort. Owner enrichment is
-skipped with a warning when `maxCostUsd` is set, because its inference cannot yet
-share the scan cost limit. Working-tree and directory snapshots are unsupported.
+The scan records optional owner hints within its existing session and budget.
+Report finalization applies CODEOWNERS and validates Git evidence without another
+model call, including when `maxCostUsd` is set. Missing hints abstain and invalid
+hints produce per-finding errors. Working-tree and directory snapshots are
+unsupported. Explicit owner-only analysis remains available through `suggestOwners`
+and `suggest-owners`, sharing the same evidence validation and report code.
 
 ### Scan a diff
 
