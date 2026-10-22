@@ -3058,6 +3058,32 @@ test.each([
 );
 
 const snykRepositoryMismatches: [string, string][] = [
+  ...["\t", "\r", "\n"].flatMap((control): [string, string][] => [
+    [
+      `ssh://git@github.${control}com/example/project.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://git@github.com/example/pro${control}ject.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://tenant@tenant.${control}ghe.com/example/project.git`,
+      "https://tenant.ghe.com/example/project",
+    ],
+    [
+      `ssh://tenant@tenant.ghe.com/example/pro${control}ject.git`,
+      "https://tenant.ghe.com/example/project",
+    ],
+    [
+      `ssh://git@ssh.github.${control}com:443/example/project.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://git@ssh.github.com:443/example/pro${control}ject.git`,
+      "https://github.com/example/project",
+    ],
+  ]),
   [
     "ssh://tenant@other:synthetic@tenant.ghe.com/example/project.git",
     "https://tenant.ghe.com/example/project",

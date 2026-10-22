@@ -714,6 +714,27 @@ const snykRepositoryContexts: [string, string][] = [
   ],
 ];
 
+test.each(["\t", "\r", "\n"])(
+  "SSH repository claims retain literal hostname and path bytes: %j",
+  (control) => {
+    const repository = `ssh://git@github.${control}com/example/pro${control}ject.git`;
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    const source =
+      normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
+    expect(
+      snykRepositoryUrls(source, {
+        cloudRepositoryUrl: "https://github.com/example/project",
+      }),
+    ).toEqual([repository]);
+    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(snykRepositoryUrls(source, { normalizeGitRemote: false })).toEqual([
+      repository,
+    ]);
+    expect(source).toMatchObject({ collection: input.collection });
+  },
+);
+
 test.each(snykRepositoryContexts)(
   "Plugin repository claims stay raw without Cloud context or when normalization is disabled: %s",
   (repository, cloudRepositoryUrl) => {
