@@ -57,7 +57,7 @@ export interface OwnerSuggestion {
   status: "identified" | "abstained" | "error";
   owner: OwnerIdentity | CodeownerIdentity | null;
   reason: string;
-  evidence: Omit<OwnerEvidence, "identityIndex" | "content">[];
+  evidence: Omit<OwnerEvidence, "identityIndex" | "content" | "blameCommit">[];
   limitations: string[];
 }
 
@@ -129,8 +129,12 @@ export async function suggestOwnersInternal(
         result.status = "identified";
         result.reason = "Declared owner of an affected file in CODEOWNERS.";
         result.evidence = context.evidence.map(
-          ({ content: _content, identityIndex: _index, ...citation }) =>
-            citation,
+          ({
+            content: _content,
+            identityIndex: _index,
+            blameCommit: _blameCommit,
+            ...citation
+          }) => citation,
         );
         continue;
       }
@@ -187,7 +191,12 @@ export async function suggestOwnersInternal(
       result.status = owner === null ? "abstained" : "identified";
       result.reason = decision.reason;
       result.evidence = cited.map(
-        ({ content: _content, identityIndex: _index, ...citation }) => citation,
+        ({
+          content: _content,
+          identityIndex: _index,
+          blameCommit: _blameCommit,
+          ...citation
+        }) => citation,
       );
     } catch (error) {
       options.signal?.throwIfAborted();
@@ -226,7 +235,10 @@ export async function suggestOwnersFromScan(
       );
       const cited = context.evidence.filter(
         (item) =>
-          item.identityIndex === identityIndex && item.commit === hint.commit,
+          item.identityIndex === identityIndex &&
+          (item.kind === "blame"
+            ? item.blameCommit === hint.commit
+            : item.commit === hint.commit),
       );
       if (identityIndex < 0 || cited.length === 0)
         throw new CodexSecurityError(
