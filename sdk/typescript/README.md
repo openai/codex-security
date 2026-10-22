@@ -11,6 +11,9 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
+- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
+  official plugin JSON or native CLI JSON locally or into Cloud; Open Source
+  SARIF is also supported. License findings and other Snyk products are excluded.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -658,6 +661,64 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 `preview` plus a separate `publish()` operation. Inspect the preview before
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
+
+Prefer each provider's supported native JSON for local and Cloud imports. Keep
+the same acquisition format for repeat imports: SARIF and CSV are compatibility
+options where supported, and changing formats can change record identities or
+replace richer evidence with less detail. See the
+[import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
+
+For Wiz, prefer supported native JSON acquired through an authorized MCP or API
+connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
+repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
+complete code-to-cloud coverage. Both formats support gzip. The acquisition path
+still needs validation with an authorized Wiz tenant.
+
+For GitHub, save complete JSON from `import github` or `import github-advisories`;
+the configured GitHub plugin can help select alerts before collection. The
+[separate readers and mappings](docs/cli.md#import-github-findings-locally-or-to-cloud)
+retain code-scanning evidence or GHSA disclosures. **GHSA import does not
+establish an installed dependency or applicability to the repository.** This
+integration does not import Dependabot or secret-scanning alerts or write back
+to GitHub.
+
+Use `publish findings FILE --to local --repository PATH --provider wiz
+--source-key KEY` to store the same vendor evidence in the local workbench SQLite
+database. Preview with `--dry-run --format json`, then confirm interactively or
+use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
+repository defaults to the current directory. No Cloud login or model call is
+needed. Use `--provider snyk` for native CLI JSON, a Snyk plugin SCA bundle or
+Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
+target; switching formats creates separate source identities. See
+[local imports](docs/cli.md#import-vendor-findings-locally).
+
+Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
+accepted as a lossy compatibility format. See
+[Endor imports](docs/cli.md#import-endor-labs-findings).
+
+For saved GitHub code-scanning alerts or GHSA advisories, use
+`--provider github` with a separate stable source key for each finding family.
+See [local imports](docs/cli.md#import-vendor-findings-locally).
+
+The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
+separate `import()` operation. `prepareNormalizedLocalImport(findings,
+options)` accepts already normalized evidence, and
+`listLocalExternalFindings({ repository })` reads the stored records. Imports
+remain unassessed source evidence, separate from native scan findings. Repeated
+imports update the same repository/provider/source-key/source-ID record; omitted
+records remain stored, and unknown evidence fields are not inferred.
+
+File imports forward repository references from the reader automatically. Direct
+normalized callers should provide additional known references in the third
+argument's `sourceRepositories` when they are absent from
+`evidence.details.repository.url`. For a known GitHub custom host, include
+`platform: "github"`, for example `{ sourceRepositories: [{ url:
+"https://git.example.test/example/project", platform: "github" }] }`. Named Wiz
+reports carry this platform in their repository inventory. If you export only the
+normalized finding rows to JSONL, supply that metadata separately; the original
+finding evidence does not include the surrounding inventory.
+
+See [Semgrep Code imports](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md) for native CLI/CI JSON, SARIF compatibility, and local or Cloud imports. Platform API and Guardian/MCP responses need a separate mapping.
 
 ## Findings storage and deduplication
 

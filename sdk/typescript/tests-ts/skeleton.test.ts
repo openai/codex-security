@@ -179,7 +179,7 @@ describe("TypeScript package skeleton", () => {
     );
     expect(jobs["required-test"]?.name).toEndWith("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
-      "validate-title",
+      "classify-changes",
       "workflow-quality",
       "static-checks",
       "package",
@@ -191,7 +191,7 @@ describe("TypeScript package skeleton", () => {
       "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
-      "validate-title",
+      "classify-changes",
       "static-checks",
       "plugin-host",
       "plugin-source",
@@ -421,8 +421,8 @@ describe("TypeScript package skeleton", () => {
   test("runs static checks independently and keeps diagnostic uploads non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps ?? []);
-    expect(jobs["static-checks"]?.needs).toBe("validate-title");
-    expect(jobs["package"]?.needs).toEqual(["validate-title", "native"]);
+    expect(jobs["static-checks"]?.needs).toBe("classify-changes");
+    expect(jobs["package"]?.needs).toEqual(["classify-changes", "native"]);
     for (const [name, job] of [
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
@@ -490,8 +490,8 @@ describe("TypeScript package skeleton", () => {
       "workflow_dispatch",
     ]);
     expect(ci.jobs["test-quality"]).toMatchObject({
-      needs: ["validate-title", "native"],
-      if: "needs.validate-title.outputs.test-quality == 'true'",
+      needs: ["classify-changes", "native"],
+      if: "needs.classify-changes.outputs.test-quality == 'true'",
       uses: "./.github/workflows/test-quality.yml",
       with: { "native-artifacts-ready": true },
     });
