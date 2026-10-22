@@ -192,13 +192,21 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
     const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
       record(r, "Endor rule"),
     );
+    const rulesById = new Map<
+      unknown,
+      { rule: Record<string, unknown>; index: number } | null
+    >();
+    for (const [index, rule] of rules.entries()) {
+      const id = rule["id"];
+      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
+    }
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
     return array(run["results"] ?? [], "Endor results").map((result) => ({
       result,
-      rules,
+      rulesById,
       documentContext,
       runContext,
       driverContext,
@@ -207,7 +215,7 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rules, ...context }, id) => {
+    ({ result: value, rulesById, ...context }, id) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -215,15 +223,15 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
       );
       requiredText(properties["project-uuid"], "Endor project-uuid");
       const ruleId = requiredText(result["ruleId"], "Endor ruleId");
-      const matches = rules.filter((rule) => rule["id"] === ruleId);
-      if (matches.length !== 1)
+      const selectedRule = rulesById.get(ruleId);
+      if (!selectedRule)
         throw new Error(
           "Endor result must reference exactly one rule in its run.",
         );
-      const rule = matches[0]!;
+      const { rule, index: ruleIndex } = selectedRule;
       if (
         result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== rules.indexOf(rule)
+        result["ruleIndex"] !== ruleIndex
       )
         throw new Error("Endor ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
@@ -232,7 +240,7 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
           reference["toolComponent"] !== undefined ||
           (reference["id"] !== undefined && reference["id"] !== ruleId) ||
           (reference["index"] !== undefined &&
-            reference["index"] !== rules.indexOf(rule)) ||
+            reference["index"] !== ruleIndex) ||
           (reference["guid"] !== undefined &&
             reference["guid"] !== rule["guid"])
         )

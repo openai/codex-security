@@ -430,6 +430,9 @@ test("SARIF requires vendor identity, producer and consistent rule references", 
     (r: any) => delete r.results[0].properties["project-uuid"],
     (r: any) => (r.results[0].ruleIndex = 1),
     (r: any) => (r.results[0].rule = { id: "other" }),
+    (r: any) => (r.results[0].rule = { index: 1 }),
+    (r: any) => (r.results[0].rule = { guid: "other" }),
+    (r: any) => (r.tool.driver.rules = []),
     (r: any) =>
       r.tool.driver.rules.push(structuredClone(r.tool.driver.rules[0])),
   ]) {
@@ -440,6 +443,51 @@ test("SARIF requires vendor identity, producer and consistent rule references", 
   const input = endorSarif();
   input.runs[0]!.tool.driver.name = "other";
   expect(() => normalizeEndorSarif(input)).toThrow("endorctl");
+});
+
+test("Endor SARIF selects exact rule IDs and original indexes within each run", () => {
+  const input = endorSarif();
+  const originalRun = input.runs[0]!;
+  const originalRule = originalRun.tool.driver.rules[0]!;
+  const originalResult = originalRun.results[0]!;
+  const runs = [0, 1].map((index) => {
+    const rule = {
+      ...originalRule,
+      guid: `rule-guid-${index}`,
+      shortDescription: { text: `Finding from run ${index}` },
+    };
+    const otherRule = { ...originalRule, id: ` ${originalRule.id} ` };
+    return {
+      ...originalRun,
+      tool: {
+        driver: {
+          ...originalRun.tool.driver,
+          rules: index === 0 ? [rule, otherRule] : [otherRule, rule],
+        },
+      },
+      results: [
+        {
+          ...originalResult,
+          ruleIndex: index,
+          rule: { id: rule.id, index, guid: rule.guid },
+          properties: {
+            ...originalResult.properties,
+            "finding-uuid": `finding-from-run-${index}`,
+          },
+        },
+      ],
+    };
+  });
+  const output = normalizeEndorSarif({ ...input, runs });
+  expect(output.excluded).toEqual([]);
+  expect(output.findings).toHaveLength(2);
+  for (const [index, finding] of output.findings.entries()) {
+    expect(finding.source_finding_id).toBe(`finding-from-run-${index}`);
+    expect(finding.evidence.title).toBe(`Finding from run ${index}`);
+    expect(finding.evidence.source_data!["rule"]).toEqual(
+      runs[index]!.tool.driver.rules[index],
+    );
+  }
 });
 
 test("distinct finding UUIDs survive a reordered export", () => {
