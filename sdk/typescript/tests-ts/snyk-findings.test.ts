@@ -51,7 +51,7 @@ test("Snyk retains the full selected result, rule, producer and unknown context"
 test("severity and export time changes retain identity; manifests remain distinct", () => {
   const input = snykSarif();
   const original = normalizeSnykSarif(input).findings[0]!;
-  input.runs[0]!.automationDetails.id = "Snyk/Open Source/project/4/new-export";
+  input.runs[0]!.automationDetails.id = "Snyk/Open Source/example/4/new-export";
   input.runs[0]!.tool.driver.rules[0]!.shortDescription.text =
     "Low severity - synthetic vulnerability";
   const changed = normalizeSnykSarif(input).findings[0]!;
@@ -76,6 +76,56 @@ test("unknown severity remains unknown, without inferring it from SARIF level or
   );
 });
 
+test("SARIF projects with the same advisory and manifest keep distinct, stable identities", () => {
+  const input = snykSarif();
+  input.runs = ["workspace/api", "@example/web"].map((project, index) => ({
+    ...structuredClone(input.runs[0]!),
+    automationDetails: {
+      id: `Snyk/Open Source/${project}/${index}/2026-01-01T00:00:00.000Z`,
+    },
+  }));
+  const original = structuredClone(input);
+  const before = normalizeSnykSarif(input);
+  expect(before.findings).toHaveLength(2);
+  expect(before.excluded).toEqual([]);
+  expect(new Set(before.findings.map((f) => f.source_finding_id)).size).toBe(2);
+  expect(input).toEqual(original);
+
+  input.runs.reverse();
+  input.runs.forEach((run, index) => {
+    run.automationDetails.id = run.automationDetails.id.replace(
+      /\/\d+\/[^/]+$/u,
+      `/${index}/2026-02-01T00:00:00.000Z`,
+    );
+  });
+  const after = normalizeSnykSarif(input);
+  expect(after.excluded).toEqual([]);
+  expect(after.findings.map((f) => f.source_finding_id).sort()).toEqual(
+    before.findings.map((f) => f.source_finding_id).sort(),
+  );
+});
+
+test.each(["example/", ""])(
+  "run indexes and export times do not distinguish duplicate project %j findings",
+  (project) => {
+    const input = snykSarif();
+    input.runs = ["2026-01-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z"].map(
+      (timestamp, index) => ({
+        ...structuredClone(input.runs[0]!),
+        automationDetails: {
+          id: `Snyk/Open Source/${project}${index}/${timestamp}`,
+        },
+      }),
+    );
+    const output = normalizeSnykSarif(input);
+    expect(output.findings).toEqual([]);
+    expect(output.excluded.map((e) => e.position)).toEqual([1, 2]);
+    expect(output.excluded.every((e) => e.reason.includes("duplicate"))).toBe(
+      true,
+    );
+  },
+);
+
 test.each(["Snyk Code", "Snyk Container", "Snyk IaC", "Other"])(
   "rejects unsupported producer %s",
   (producer) => {
@@ -95,6 +145,8 @@ test("licenses, malformed rules, conflicting references and external property fi
     (r: any) => (r.results[0].rule = { id: "different" }),
     (r: any) => (r.results[0].rule = { index: true }),
     (r: any) => (r.results[0].rule = { toolComponent: { index: 0 } }),
+    (r: any) => (r.results[0].rule = { guid: "different" }),
+    (r: any) => (r.results[0].ruleId = "SNYK-MISSING"),
     (r: any) =>
       r.tool.driver.rules.push(structuredClone(r.tool.driver.rules[0])),
   ]) {
@@ -115,6 +167,40 @@ test("licenses, malformed rules, conflicting references and external property fi
     results: [{ location: { uri: "https://example.invalid/data" } }],
   };
   expect(() => normalizeSnykSarif(input)).toThrow("self-contained");
+});
+
+test("rule references use original indexes and ignore unrelated duplicate or missing IDs", () => {
+  const input = snykSarif();
+  const run = input.runs[0]!;
+  const rule = { ...run.tool.driver.rules[0]!, guid: "synthetic-guid" };
+  const report = {
+    ...input,
+    runs: [
+      {
+        ...run,
+        tool: {
+          ...run.tool,
+          driver: {
+            ...run.tool.driver,
+            rules: [{ id: "unrelated" }, rule, { id: "unrelated" }, {}],
+          },
+        },
+        results: [
+          {
+            ...run.results[0]!,
+            ruleIndex: 1,
+            rule: { id: rule.id, index: 1, guid: rule.guid },
+          },
+        ],
+      },
+    ],
+  };
+  const original = structuredClone(report);
+  const output = normalizeSnykSarif(report);
+  expect(output.findings).toHaveLength(1);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({ rule });
+  expect(report).toEqual(original);
 });
 
 test("every ambiguous duplicate is excluded instead of keeping an arbitrary project", () => {

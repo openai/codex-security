@@ -14,7 +14,7 @@ import {
   text,
 } from "./scanner-import.js";
 
-function snykIdentity(value: unknown): string {
+function snykIdentity(value: unknown, project: string | null): string {
   const result = record(value, "SARIF result");
   const id = requiredText(result["ruleId"], "Snyk advisory ruleId");
   const paths = array(result["locations"] ?? [], "Result locations")
@@ -37,7 +37,16 @@ function snykIdentity(value: unknown): string {
       return text(artifact["uri"]);
     })
     .filter((path): path is string => path !== null);
-  return stableId("snyk-sarif", [id, [...new Set(paths)].sort()]);
+  const fields: unknown[] = [id, [...new Set(paths)].sort()];
+  if (project !== null) fields.push(project);
+  return stableId("snyk-sarif", fields);
+}
+
+function snykSarifProject(run: Record<string, unknown>): string | null {
+  const details = run["automationDetails"];
+  const id = isRecord(details) ? text(details["id"]) : null;
+  // The formatter appends a run index and export timestamp after the project name.
+  return /^Snyk\/Open Source\/(.+)\/\d+\/[^/]+$/su.exec(id ?? "")?.[1] ?? null;
 }
 
 function pluginIdentity(value: unknown): string {
@@ -246,6 +255,15 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
     const rules = array(driver["rules"], "SARIF rules").map((rule) =>
       record(rule, "SARIF rule"),
     );
+    const rulesById = new Map<
+      unknown,
+      { rule: Record<string, unknown>; index: number } | null
+    >();
+    rules.forEach((rule, index) => {
+      const id = rule["id"];
+      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
+    });
+    const project = snykSarifProject(run);
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = record(
@@ -256,7 +274,8 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
     const { runs: _runs, ...documentContext } = document;
     return array(run["results"], "SARIF results").map((result) => ({
       result,
-      rules,
+      rulesById,
+      project,
       runContext,
       driverContext,
       documentContext,
@@ -265,16 +284,15 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
   return normalizeRecords(
     entries,
     (
-      { result: value, rules, runContext, driverContext, documentContext },
+      { result: value, rulesById, runContext, driverContext, documentContext },
       sourceFindingId,
     ) => {
       const result = record(value, "SARIF result");
       const id = requiredText(result["ruleId"], "Snyk advisory ruleId");
-      const matches = rules.filter((rule) => rule["id"] === id);
-      if (matches.length !== 1)
+      const match = rulesById.get(id);
+      if (!match)
         throw new Error("Result must reference exactly one rule in its run.");
-      const rule = matches[0]!;
-      const index = rules.indexOf(rule);
+      const { rule, index } = match;
       if (result["ruleIndex"] !== undefined && result["ruleIndex"] !== index)
         throw new Error("Result ruleIndex and ruleId disagree.");
       if (result["rule"] !== undefined) {
@@ -342,8 +360,7 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
         }
       }
       const description = [message, help].join("\n\n");
-      // Use the advisory group + literal manifest set within the caller's stable project/branch namespace.
-      // Automation IDs contain export timestamps and run indexes, so are provenance only.
+      // Use the project, advisory group, and literal manifest set within the caller's namespace.
       return {
         source_finding_id: sourceFindingId,
         evidence: validateExternalEvidence({
@@ -380,7 +397,7 @@ export function normalizeSnykSarif(input: unknown): ExternalFindings {
         }),
       };
     },
-    ({ result }) => snykIdentity(result),
+    ({ result, project }) => snykIdentity(result, project),
   );
 }
 
