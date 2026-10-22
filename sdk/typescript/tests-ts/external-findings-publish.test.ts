@@ -2985,6 +2985,19 @@ const snykRepositoryAliases: [string, string][] = [
     "https://git.example.test/example/project",
   ],
   [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  // Preserve the existing generic git-user aliases for connected catalog hosts.
+  [
     "git@tenant.ghe.com:example/project.git",
     "https://tenant.ghe.com/example/project",
   ],
@@ -3045,6 +3058,74 @@ test.each([
 );
 
 const snykRepositoryMismatches: [string, string][] = [
+  [
+    "ssh://te\nnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://te\tnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://te\rnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://gi\nt@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://tenant@other@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "other@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://other@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://other.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://tenant@api.tenant.ghe.com/example/project.git",
+    "https://api.tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant:synthetic@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant:@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:443/example/project.git",
+    "https://tenant.ghe.com:443/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com:443/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:other/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@ssh.github.com:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "http://tenant.ghe.com/example/project",
+  ],
   ["git@github.com:other/project.git", "https://github.com/example/project"],
   [
     "ssh://git@github.com:2222/example/project.git",
@@ -3075,7 +3156,7 @@ const snykRepositoryMismatches: [string, string][] = [
     "https://github.com:443/example/project",
   ],
   [
-    "ssh://git@tenant.ghe.com:2222/example/project.git",
+    "ssh://tenant@tenant.ghe.com:2222/example/project.git",
     "https://tenant.ghe.com:2222/example/project",
   ],
   [

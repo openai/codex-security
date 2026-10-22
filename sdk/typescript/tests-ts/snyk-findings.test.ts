@@ -691,14 +691,25 @@ test.each([
   "git@git.example.test:example/project.git",
   "ssh://git@git.example.test/example/project.git",
   "ssh://git@git.example.test:22/example/project.git",
+  "tenant@tenant.ghe.com:example/project.git",
+  "ssh://tenant@tenant.ghe.com/example/project.git",
+  "ssh://tenant@tenant.ghe.com:22/example/project.git",
 ])(
-  "Snyk repository claim stays unchanged without Cloud context: %s",
+  "Plugin repository claims stay raw without Cloud context or when normalization is disabled: %s",
   (repository) => {
     const input = snykPluginExport();
     input.collection.target.repository = repository;
     const source =
       normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data;
     expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(
+      snykRepositoryUrls(source, {
+        normalizeGitRemote: false,
+        cloudRepositoryUrl: repository.includes("tenant.ghe.com")
+          ? "https://tenant.ghe.com/example/project"
+          : "https://git.example.test/example/project",
+      }),
+    ).toEqual([repository]);
     expect(source).toMatchObject({ collection: input.collection });
   },
 );
@@ -707,6 +718,9 @@ test.each([
   "git@git.example.test:example/project.git",
   "ssh://git@git.example.test/example/project.git",
   "ssh://git@git.example.test:22/example/project.git",
+  "tenant@tenant.ghe.com:example/project.git",
+  "ssh://tenant@tenant.ghe.com/example/project.git",
+  "ssh://tenant@tenant.ghe.com:22/example/project.git",
 ])(
   "SARIF repository claims stay raw without Cloud context or when normalization is disabled: %s",
   (repository) => {
@@ -724,7 +738,9 @@ test.each([
     expect(
       snykRepositoryUrls(source, {
         normalizeGitRemote: false,
-        cloudRepositoryUrl: "https://git.example.test/example/project",
+        cloudRepositoryUrl: repository.includes("tenant.ghe.com")
+          ? "https://tenant.ghe.com/example/project"
+          : "https://git.example.test/example/project",
       }),
     ).toEqual([repository]);
     expect(source).toMatchObject({
