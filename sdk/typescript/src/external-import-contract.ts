@@ -34,7 +34,9 @@ const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
  * Keep protocols and explicit ports distinct, matching the Cloud URL contract. */
 export function repositoryUrlKey(value: string): string {
   const normalized = value.replace(/\/$/u, "").replace(/\.git$/u, "");
-  const parts = /^(https?):\/\/([^/?#]+)([^?#]*)(.*)$/iu.exec(normalized);
+  const parts = /^(https?):\/\/([^/?#]+)((?:\/[^?#]*)?)((?:[?#].*)?)$/iu.exec(
+    normalized,
+  );
   if (!parts) return normalized;
   const authority = parts[2]!.toLowerCase();
   const hostname = authority.replace(/:\d+$/u, "");

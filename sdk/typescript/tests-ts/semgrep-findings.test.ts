@@ -435,6 +435,35 @@ test("SARIF matches custom GitHub Enterprise repository casing without merging p
   }
 });
 
+test("SARIF repository binding preserves query, fragment and malformed suffixes", () => {
+  const input: any = semgrepSarif();
+  const repositoryUri = "HTTPS://GITHUB.COM/Example/Project?ref=Main#Finding";
+  input.runs[0].versionControlProvenance = [{ repositoryUri }];
+  const sourceRepositoryUrl =
+    "https://github.com/example/project?ref=Main#Finding";
+  const output = normalizeSarif(input, { sourceRepositoryUrl });
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]!.evidence.details?.repository?.url).toBe(
+    sourceRepositoryUrl,
+  );
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({
+    runContext: { versionControlProvenance: [{ repositoryUri }] },
+  });
+  for (const suffix of [
+    "",
+    "?ref=Other#Finding",
+    "?ref=Main#Other",
+    ...["\n", "\r", "\u2028", "\u2029"].map(
+      (newline) => `?ref=${newline}Main#Finding`,
+    ),
+  ]) {
+    input.runs[0].versionControlProvenance[0].repositoryUri = `https://github.com/example/project${suffix}`;
+    expect(() => normalizeSarif(input, { sourceRepositoryUrl })).toThrow(
+      "does not match",
+    );
+  }
+});
+
 test.each([
   [
     "external base",
