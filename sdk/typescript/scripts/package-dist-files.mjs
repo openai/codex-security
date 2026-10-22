@@ -66,6 +66,8 @@ const distModules = [
   "findings-import",
   "git-remote",
   "github",
+  "github-advisories",
+  "github-findings",
   "host-records-protocol",
   "index",
   "import-scan",

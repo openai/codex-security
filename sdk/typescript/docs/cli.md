@@ -1211,7 +1211,10 @@ evidence or deduplicate equivalent vulnerabilities across different source IDs.
 
 Use the same vendor input and parser as Cloud publication, selecting a local
 repository path instead of a Cloud repository ID or URL. Supported inputs include
-Wiz findings and [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings):
+Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
+[Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
+[Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
+and [saved GitHub alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
 
 ```bash
 codex-security publish findings selected-wiz.json \
@@ -2272,6 +2275,158 @@ The installer can update older `npx` hooks when the severity matches. New hooks
 record absolute Node/CLI paths. If those change, back up and remove the verified
 generated hook, then reinstall with the same threshold. Restore the backup if
 installation fails. The installer respects `core.hooksPath`.
+
+## Import GitHub findings locally or to Cloud
+
+Acquire code-scanning findings with the existing `import github` collector and
+save its complete JSON output. In Codex, the official
+[GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
+can help select the repository, alert numbers and ref through GitHub's MCP
+server; pass that selection to the collector. This integration reads
+code-scanning alerts and GHSA advisories. It does not import Dependabot or
+secret-scanning alerts or write back to GitHub. Preview local storage with a
+repository path:
+
+```bash
+codex-security import github example/project --format json > /path/outside/repository/alerts.json
+codex-security publish findings /path/outside/repository/alerts.json \
+  --to local --provider github --repository ./project \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+```
+
+Or preview publication to a connected Cloud repository:
+
+```bash
+codex-security publish findings /path/outside/repository/alerts.json \
+  --to cloud --provider github --repository https://github.com/example/project \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+```
+
+The importer fetches every page, retrieves alert details, and retains the selected
+ref's instance. It writes the saved input for publication; no website download or
+hand-written JSON mapping is needed. Use `--github-alert NUMBER` repeatedly for
+selected alerts or `--github-ref REF` for another ref. Defaults are open alerts on
+the default branch. MCP list calls are paginated separately, and raw MCP/API
+responses are not the saved import format accepted by `--provider github`.
+
+The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
+the plugin's connection does not sign in `gh`. Reading alerts requires
+[code-scanning access](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository):
+**Code scanning alerts: read** for a fine-grained token, or `security_events` for
+a classic token (`public_repo` is sufficient for public repositories). The source
+repository must have code scanning available. For Cloud publication, the
+destination must be connected in the selected Cloud account. For local import,
+the source repository must match a configured Git remote when remotes are
+available; no Cloud login is required to store the acquired evidence.
+
+Review the destination, source, exclusions and evidence in the preview. Repeat the
+selected command without `--dry-run` and confirm it, or add `--yes` for a
+previously reviewed input. Local persistence and readback follow the
+[local import flow](#import-vendor-findings-locally); use
+`codex-security findings imported ./project --format json` to read the records.
+Cloud authentication, batching, saved receipts, partial results and
+interrupted-upload recovery follow the [publication flow](#import-wiz-findings).
+JSON, JSONL and gzip are supported. Save complete import output without field or
+token filters or `--full-output`.
+
+Use a stable source key for the GitHub host, repository and finding family.
+Code-scanning identities include the selected ref, so branches retain separate
+evidence. The original alert, rule, scanner, location, revision and source state
+remain attached. An alert-wide dismissal takes precedence over the selected
+instance's open/fixed state. Missing security severity stays `unknown`;
+SARIF error/warning/note levels are not vulnerability ratings. Imported evidence
+remains unassessed by Codex.
+
+The SDK offers the same preview and publication boundary for Cloud:
+
+```ts
+import {
+  importGitHubCodeScanningAlerts,
+  normalizeGitHubCodeScanningAlerts,
+  prepareNormalizedExternalPublication,
+} from "@openai/codex-security";
+
+const alerts = await importGitHubCodeScanningAlerts({
+  repository: "example/project",
+});
+const prepared = await prepareNormalizedExternalPublication(
+  normalizeGitHubCodeScanningAlerts(alerts),
+  {
+    provider: "github",
+    repository: "https://github.com/example/project",
+    sourceKey: "github.com/example/project/code-scanning",
+  },
+);
+console.log(prepared.preview);
+// After reviewing the preview:
+const receipt = await prepared.publish();
+```
+
+For local storage, pass the same normalized evidence to
+`prepareNormalizedLocalImport()` with `repository: "/path/to/project"`, inspect
+its preview, and call `import()`. `prepareLocalExternalImport()` accepts the saved
+import file directly. Read records with `listLocalExternalFindings({ repository })`.
+
+### Import GHSA advisories separately
+
+**Importing a GHSA advisory does not establish an installed dependency or
+applicability to the destination repository.** Repository advisories are
+disclosures maintained by a repository; global advisories describe affected
+software in GitHub's public advisory database. Both are evidence for
+investigation, not Dependabot alerts. Check the repository’s dependency versions
+and applicability separately.
+
+```bash
+# Read only published advisories for this repository.
+codex-security import github-advisories example/project --format json > /path/outside/repository/advisories.json
+
+# Select individual public database records without enumerating the database.
+codex-security import github-advisories example/project \
+  --github-advisory-source global --github-advisory GHSA-2345-6789-cfgh \
+  --format json > /path/outside/repository/advisories.json
+
+codex-security publish findings /path/outside/repository/advisories.json \
+  --to cloud --provider github --repository https://github.com/example/project \
+  --source-key github.com/example/project/security-advisories --dry-run --format json
+```
+
+For local storage, use the same advisory file, provider and source key with
+`--to local --repository ./project`. Follow the [local import flow](#import-vendor-findings-locally)
+to review, confirm and read the stored evidence.
+
+`--github-advisory-source` defaults to `repository`. Repeat `--github-advisory`
+to select exact IDs from that API, regardless of advisory state. Repository
+lists default to `--github-state published`; `draft`, `triage`, and `closed`
+require explicit selection. A nondefault state cannot be combined with exact
+IDs. Global selection requires at least one ID and never lists the advisory
+database. Both readers use `GH_HOST` and GitHub CLI authentication by default;
+the SDK also accepts `githubHost` and `githubToken`. Private or unpublished
+[repository advisories](https://docs.github.com/en/rest/security-advisories/repository-advisories#list-repository-security-advisories)
+require **Repository security advisories: read**, or the classic `repo` or
+`repository_advisories:read` scope, plus access to the advisory. Public records
+need no additional advisory permission.
+
+Review the saved evidence before local import or Cloud publication, including any
+selected private advisories. Acquisition failure returns no partial selection.
+Both destinations report invalid records as exclusions. Cloud publication retains
+acknowledged receipts if a later batch or readback fails.
+
+Advisory evidence retains GHSA/CVE IDs, affected version ranges, available
+patched versions, source status and original JSON. It does not infer an installed
+version or source location. Global advisories omit a source repository; the
+explicit local or Cloud destination binds the import for investigation. Repository
+advisories retain their source repository and check it against the Cloud target
+or configured local Git remotes when available. Withdrawal remains vendor
+state, and all imported evidence remains not assessed by Codex. Use a separate
+source key from code-scanning alerts; shared advisory IDs do not combine source
+records from different providers.
+
+In the SDK, call `importGitHubAdvisories()` and `normalizeGitHubAdvisories()`
+with `prepareNormalizedExternalPublication()` for Cloud or
+`prepareNormalizedLocalImport()` for local storage as described above.
+`importGitHubAdvisories()` defaults to `{ source: "repository", state: "published" }`; use
+`{ source: "global", advisoryIds: ["GHSA-2345-6789-cfgh"] }` for selected database
+records. Both forms require `repository: "OWNER/REPO"` as source or target context.
 
 ## Import alerts from the CLI
 

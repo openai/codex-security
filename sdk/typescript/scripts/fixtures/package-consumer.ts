@@ -1,5 +1,9 @@
 import {
   CodexSecurity,
+  importGitHubCodeScanningAlerts,
+  importGitHubAdvisories,
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
   prepareExternalPublication,
   prepareLocalExternalImport,
   prepareNormalizedLocalImport,
@@ -303,6 +307,38 @@ export async function externalPublication(
   fromFile.preview.requests[0]?.source.provider satisfies
     "wiz" | "endor" | "snyk" | "github" | "semgrep" | undefined;
   const prepared = await prepareNormalizedExternalPublication(input, options);
+  return prepared.publish();
+}
+
+export async function publishGitHubAlerts(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubCodeScanningAlerts({
+    repository: "example/project",
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubCodeScanningAlerts(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/code-scanning",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
+export async function publishGitHubAdvisories(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubAdvisories({
+    repository: "example/project",
+    source: "global",
+    advisoryIds: ["GHSA-2345-6789-cfgh"],
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubAdvisories(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/security-advisories",
+      repository: "https://github.com/example/project",
+    },
+  );
   return prepared.publish();
 }
 

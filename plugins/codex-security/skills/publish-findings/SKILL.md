@@ -1,6 +1,6 @@
 ---
 name: publish-findings
-description: Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
 ---
 
 # Publish external findings
@@ -83,6 +83,35 @@ For existing findings, the official [Semgrep Guardian Codex plugin](https://docs
 Import the native report with `--provider semgrep`, a stable organization/project/branch `--source-key`, and `--source-repository-url` identifying the actual source repository. Use `--to local --repository /path/to/project` for local storage or `--to cloud --repository URL_OR_ID` for Cloud. The source URL is checked against configured local Git remotes or the Cloud destination. Preview with `--dry-run --format json` before confirming the import.
 
 Keep supplied fingerprints. Reimporting the same fingerprint after code moves updates the existing source record with the new range. If the fingerprint is absent or `requires login`, the fallback uses rule, literal path and range: movement creates a second retained record, and the earlier record remains stored. Do not infer a merge or deletion. Read the persisted evidence with `codex-security findings imported /path/to/project --format json` before assessment. Source rule, CWE, snippets, traces and status are vendor evidence, not Codex assessments. Do not infer a report revision from the current checkout. Resolve scan errors and review all exclusions before uploading; do not remove error metadata to force acceptance.
+
+## GitHub alerts and advisories
+
+Acquire code-scanning findings with `codex-security import github OWNER/REPO --format json` and save its complete JSON output for local import or Cloud publication. This existing collector completes pagination, fetches alert details, and retains the selected ref's instance. In Codex, use the official [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github) for discovery and selecting alerts, then pass that selection to the collector. Its GitHub MCP server paginates each list call separately. Do not ask the user to download JSON from a website or reconstruct an import envelope from MCP summaries; raw MCP/API responses are not accepted by `--provider github`.
+
+The importer uses the user's GitHub CLI authentication and `GH_HOST`; plugin authentication is separate. It defaults to open alerts on the default branch. Use repeated `--github-alert NUMBER` for exact alerts or `--github-ref REF` for another ref. Save complete output without field/token filters or `--full-output`. Reading code-scanning alerts requires a token with Code scanning alerts read permission (classic: `security_events`, or `public_repo` for public repositories), along with repository access.
+
+**GHSA import stages advisory evidence for investigation; it does not establish an installed dependency or applicability to the destination repository.** Keep advisories separate from code scanning. `codex-security import github-advisories OWNER/REPO --format json` reads published repository disclosures by default. Repeated `--github-advisory GHSA-xxxx-xxxx-xxxx` selects exact IDs; `--github-state draft|triage|closed` explicitly selects an unpublished list and cannot be combined with exact IDs. Add `--github-advisory-source global` for exact public database IDs. This does not enumerate the global database. Private advisory access needs Repository security advisories read permission and access to those records. Stop on a read failure instead of publishing an incomplete selection.
+
+```sh
+codex-security import github example/project --format json > /path/to/alerts.json
+codex-security publish findings /path/to/alerts.json \
+  --to local --repository /path/to/project --provider github \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+codex-security publish findings /path/to/alerts.json \
+  --to cloud --repository https://github.com/example/project --provider github \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+
+codex-security import github-advisories example/project \
+  --github-advisory-source global --github-advisory GHSA-2345-6789-cfgh \
+  --format json > /path/to/advisories.json
+codex-security publish findings /path/to/advisories.json \
+  --to cloud --repository https://github.com/example/project --provider github \
+  --source-key github.com/example/project/security-advisories --dry-run --format json
+```
+
+Choose the local or Cloud preview for the intended destination. GHSA input supports the same choice: use `--to local --repository /path/to/project` with the advisory file and source key. Follow [local imports](#local-imports) for confirmation and readback or [Cloud publication](#review-and-publish-to-cloud) for upload review.
+
+Use separate stable source keys for the two families. Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. This path does not import Dependabot or secret-scanning alerts or write back to GitHub.
 
 ## Review and publish to Cloud
 

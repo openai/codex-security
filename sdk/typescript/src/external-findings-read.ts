@@ -7,13 +7,14 @@ import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
+import { readGitHubFindings } from "./github-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 
 /** File readers available in this SDK, shared by local and Cloud imports. */
 export interface ExternalFindingsReaderOptions {
-  provider: "wiz" | "snyk" | "semgrep" | "endor";
+  provider: "wiz" | "snyk" | "semgrep" | "endor" | "github";
   sourceRepositoryUrl?: string;
 }
 
@@ -73,6 +74,8 @@ export async function readExternalFindings(
       ),
     };
   }
+  if (options.provider === "github")
+    return { findings: await readGitHubFindings(path) };
   const publication = await readVendorFindingsForPublication(path);
   // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(

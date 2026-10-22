@@ -213,6 +213,10 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import {
+  GITHUB_ADVISORY_STATES,
+  importGitHubAdvisories,
+} from "./github-advisories.js";
+import {
   GITHUB_ALERT_STATES,
   importGitHubCodeScanningAlerts,
 } from "./github.js";
@@ -1244,6 +1248,7 @@ interface CliDependencies {
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
+  importGitHubAdvisories?: typeof importGitHubAdvisories;
   importScan?: typeof importScan;
   readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
@@ -3531,15 +3536,15 @@ export async function main(
   });
   publication.command("findings", {
     description:
-      "Preview and import selected Wiz, Snyk, Semgrep Code, or Endor findings locally or to Cloud.",
-    hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      "Preview and import selected Wiz, Snyk, Semgrep Code, Endor, or GitHub findings locally or to Cloud.",
+    hint: "For Snyk Open Source SCA vulnerabilities only, prefer native snyk test JSON or an official plugin snyk-findings-export/v1 bundle; Open Source SARIF 2.1.0 is also supported. Snyk licenses, Code, Container, IaC and platform backlogs are unsupported. For Semgrep Code, supply native JSON or SARIF and --source-repository-url. For Endor, supply native Finding JSON or endorctl SARIF 2.1.0. For GitHub, supply complete JSON/JSONL saved by import github or import github-advisories. GHSA advisories do not establish an installed dependency or applicability. For Wiz, prefer a native package vulnerability JSON report or named SAST/repository-secret/IaC JSON collections with repository metadata. Normalized JSONL and repository package-vulnerability CSV (SCA only, GitHub repositories) are also supported. Gzip is supported for each format; Wiz CSV does not cover SAST or cloud posture. Other Wiz CSV profiles, scan events, workload secrets, and cloud configuration exports are not supported. --to local stores unassessed evidence for a local repository path without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
     destructive: true,
     mcp: false,
     args: z.object({
       file: z
         .string()
         .describe(
-          "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
+          "Snyk native test JSON, plugin SCA bundle or Open Source SARIF; Semgrep Code JSON/SARIF; Endor Finding JSON/endorctl SARIF; saved GitHub import output; native Wiz JSON, normalized JSONL, or repository package-vulnerability CSV.",
         ),
     }),
     options: z.object({
@@ -3548,8 +3553,8 @@ export async function main(
         "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
       ),
       provider: z
-        .enum(["wiz", "snyk", "semgrep", "endor"])
-        .describe("Vendor that produced these findings."),
+        .enum(["wiz", "snyk", "semgrep", "endor", "github"])
+        .describe("Provider that produced these findings."),
       sourceRepositoryUrl: optionValue("--source-repository-url")
         .optional()
         .describe(
@@ -3823,10 +3828,10 @@ export async function main(
     },
   });
   const imports = Cli.create("import", {
-    description: "Read GitHub code scanning alerts.",
+    description: "Read GitHub code scanning alerts and security advisories.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
-    hint: "To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
+    hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
     mcp: false,
     args: z.object({
@@ -3899,6 +3904,101 @@ export async function main(
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
         throw error;
+      } finally {
+        removeSignals();
+      }
+    },
+  });
+  imports.command("github-advisories", {
+    description: "Read GitHub security advisories without changing GitHub.",
+    hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
+    destructive: false,
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .min(1)
+        .describe(
+          "Source repository, or target context for global IDs, in OWNER/REPO form.",
+        ),
+    }),
+    options: z.object({
+      githubAdvisory: z
+        .array(
+          optionValue("--github-advisory").regex(
+            /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/iu,
+            "GitHub advisory IDs must use GHSA-xxxx-xxxx-xxxx form.",
+          ),
+        )
+        .default([])
+        .describe(
+          "Exact GHSA ID; repeat to select a subset. Required for global advisories.",
+        ),
+      githubAdvisorySource: z
+        .enum(["repository", "global"])
+        .default("repository")
+        .describe(
+          "Advisory API to read; global requires exact IDs and never lists the database.",
+        ),
+      githubState: z
+        .enum(GITHUB_ADVISORY_STATES)
+        .default("published")
+        .describe(
+          "Repository advisory list state; omit when selecting exact GHSA IDs.",
+        ),
+    }),
+    output: z
+      .array(
+        z.object({
+          source: z.literal("github-security-advisory"),
+          selection: z.enum(["repository", "global"]),
+          repository: z.string(),
+          githubHost: z.string(),
+          ghsaId: z.string(),
+          url: z.string(),
+          advisory: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .optional(),
+    async run({ args, options, error: incurError }) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        return await (
+          dependencies.importGitHubAdvisories ?? importGitHubAdvisories
+        )(
+          {
+            repository: args.repository,
+            advisoryIds: options.githubAdvisory,
+            source: options.githubAdvisorySource,
+            state: options.githubState,
+            signal: controller.signal,
+          },
+          {
+            environment: dependencies.environment,
+            currentDirectory: dependencies.currentDirectory(),
+          },
+        );
+      } catch (error) {
+        const signal = controller.signal.reason;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          exitCode = signal === "SIGINT" ? 130 : 143;
+          errorOutput.write(
+            `codex-security: GitHub advisory import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
+          );
+        } else {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+        }
+        if (argv.includes("--full-output")) {
+          structuredError = true;
+          return incurError({
+            code: "GITHUB_IMPORT_FAILED",
+            message: diagnosticValue(error),
+            exitCode,
+          });
+        }
+        return undefined;
       } finally {
         removeSignals();
       }
