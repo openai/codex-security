@@ -12,6 +12,7 @@
 - add hosted remediation commands and static verification ([#1854](https://github.com/openai/codex-security/pull/1854))
 - add shared Cloud findings publisher ([#1441](https://github.com/openai/codex-security/pull/1441))
 - store external findings locally ([#1847](https://github.com/openai/codex-security/pull/1847))
+- serialize patch project trust overrides correctly ([#1861](https://github.com/openai/codex-security/pull/1861))
 
 <!-- release-section: highlights:end -->
 
