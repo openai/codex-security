@@ -10,6 +10,11 @@ import {
   listDedupeGroups,
   storeDedupeGroups,
 } from "./duplicates";
+import {
+  listExternalFindings,
+  storeExternalFindings,
+  type ExternalFindingsImport,
+} from "./external-findings";
 
 import {
   readSeverityClassification,
@@ -76,11 +81,23 @@ export async function workbenchCommand(
     {
       deferred:
         command !== "store-findings" &&
+        command !== "store-external-findings" &&
         command !== "store-dedupe-groups" &&
         command !== "severity-classification",
     },
   );
   try {
+    if (command === "store-external-findings")
+      return storeExternalFindings(
+        database,
+        payload as ExternalFindingsImport,
+        new Date().toISOString(),
+      );
+    if (command === "list-external-findings")
+      return listExternalFindings(
+        database,
+        payload as { repository: string; id?: string },
+      );
     if (command === "severity-classification")
       return severityCheckpoint(
         database,

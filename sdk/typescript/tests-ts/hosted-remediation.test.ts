@@ -1,6 +1,5 @@
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import {
   runHostedRemediation,
@@ -12,7 +11,8 @@ import {
   parseFindingPatch,
   parseFindingVerifications,
 } from "../src/remediation.js";
-import { capture } from "./cli-fixtures.js";
+import { main } from "../src/cli.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { writeSource } from "./support/shell.js";
@@ -46,13 +46,24 @@ async function fixture(
   );
 }
 
-test.each(["patch", "verify"] as const)(
-  "%s reuses skill context, explicit instructions, and the requested sandbox",
-  async (operation) => {
+test.each([
+  ["patch", "standard"],
+  ["verify", "standard"],
+  ["patch", "static"],
+  ["verify", "static"],
+] as const)(
+  "%s preserves skill context, instructions, and permissions in %s mode",
+  async (operation, mode) => {
+    const staticVerification = mode === "static";
     const input = {
       ...(await fixture(operation)),
       reasoningEffort: "provider-specific-effort",
+      verificationMode: staticVerification ? mode : undefined,
+      validationInstructions: "Install dependencies and run regression tests.",
     };
+    const evidence =
+      "guard.ts rejects unauthorized requests before dispatch and preserves authorized callers. Runtime checks were not performed.";
+    const staticChecks = [{ ...passedChecks[1]!, evidence }];
     const run = mock<RemediationExecutor["run"]>(async (request, options) => {
       expect(request).toMatchObject({
         operation,
@@ -66,14 +77,42 @@ test.each(["patch", "verify"] as const)(
       });
       expect(request.prompt).toContain(input.finding.context);
       expect(request.prompt).toContain(input.instructions!);
-      expect(request.prompt).toContain(input.validationInstructions!);
+      expect(request.prompt).toContain(input.validationInstructions);
       expect(request.prompt).toContain(
         operation === "patch"
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
       options.onEvent?.({ type: "activity", description: "Checking guard" });
-      return receipt(request);
+      if (!staticVerification) return receipt(request);
+      expect(request.prompt).toContain("Verification mode: static");
+      expect(request.prompt).toContain("without executing requested setup");
+      expect(request.prompt).not.toContain(
+        "instructions for dynamic validation",
+      );
+      expect(request.prompt).not.toContain(
+        "only after the original issue no longer reproduces",
+      );
+      return receipt(request, {
+        finalResponse: JSON.stringify(
+          operation === "patch"
+            ? {
+                patches: [
+                  {
+                    occurrenceId: input.finding.id,
+                    status: "verified",
+                    files: ["guard.ts"],
+                    verification: evidence,
+                  },
+                ],
+              }
+            : {
+                results: [
+                  { ...verificationResult, evidence, checks: staticChecks },
+                ],
+              },
+        ),
+      });
     });
     const result = await runHostedRemediation(input, {
       executor: { run },
@@ -94,8 +133,20 @@ test.each(["patch", "verify"] as const)(
         ? result.patch?.status
         : result.verification?.status,
     ).toBe(operation === "patch" ? "verified" : "fixed");
+    expect(result.patch?.verification ?? result.verification?.evidence).toBe(
+      staticVerification ? evidence : verificationResult.evidence,
+    );
     if (operation === "verify")
-      expect(result.verification?.checks).toEqual(passedChecks);
+      expect(result.verification?.checks).toEqual(
+        staticVerification ? staticChecks : passedChecks,
+      );
+    if (!staticVerification) {
+      await runHostedRemediation(
+        { ...input, verificationMode: "standard" },
+        { executor: { run } },
+      );
+      expect(run.mock.calls[1]![0].prompt).toBe(run.mock.calls[0]![0].prompt);
+    }
   },
 );
 
@@ -268,14 +319,55 @@ test.each([
   ["verify", false],
   ["verify", true],
 ] as const)(
-  "SDK protocol pipes execute %s with cancellation=%p",
+  "CLI protocol pipes execute %s with cancellation=%p",
   async (operation, cancel) => {
-    const input = await fixture(operation);
-    const entrypoint = pathToFileURL(
-      join(import.meta.dirname, "../src/index.ts"),
-    ).href;
-    await exerciseRemediationProtocol(process.execPath, entrypoint, input, {
-      cancel,
-    });
+    await exerciseRemediationProtocol(
+      process.execPath,
+      join(import.meta.dirname, "../src/cli.ts"),
+      await fixture(operation),
+      { cancel },
+    );
   },
 );
+
+test.each(["patch", "verify-fix"])(
+  "%s --host rejects a mismatched operation without execution",
+  async (command) => {
+    const input = new PassThrough();
+    const stdout = capture();
+    const stderr = capture();
+    const completed = main([command, "--host"], stdout.stream, stderr.stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    input.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "run",
+        method: "run",
+        params: await fixture(command === "patch" ? "verify" : "patch"),
+      }) + "\n",
+    );
+    expect(await completed).toBe(2);
+    expect(stderr.text()).toBe("");
+    const messages = parseJsonLines(stdout.text());
+    expect(messages).toHaveLength(1);
+    expect(messages[0].error.code).toBe(-32602);
+    expect(messages[0].error.message).toContain("requires operation");
+    input.destroy();
+  },
+);
+
+test.each([
+  { args: ["patch", "--host=true"] },
+  { args: ["patch", "--host", "--create-pr"] },
+  { args: ["verify-fix", "finding.md", "--host"] },
+])("hosted remediation rejects mixed arguments $args", async ({ args }) => {
+  const stdout = capture();
+  const stderr = capture();
+  expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
+    2,
+  );
+  expect(stdout.text()).toBe("");
+  expect(stderr.text()).toContain("--host must be used alone");
+});

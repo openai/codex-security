@@ -1,0 +1,167 @@
+[
+  {
+    "name": "sast-sparse-code-rule",
+    "input": {
+      "kind": "sast",
+      "repository": {
+        "url": "https://github.com/example/project"
+      },
+      "code": {
+        "snippet": "  "
+      },
+      "rule": {
+        "id": "example-rule"
+      }
+    },
+    "expected": {
+      "kind": "sast",
+      "repository": {
+        "url": "https://github.com/example/project",
+        "id": null,
+        "name": null
+      },
+      "source_status": null,
+      "scanner_origin": null,
+      "scanner_verdict": null,
+      "rule": {
+        "id": "example-rule",
+        "short_id": null,
+        "name": null
+      },
+      "weakness_ids": [],
+      "remediation_instructions": null,
+      "code": {
+        "end_line": null,
+        "snippet": "  "
+      },
+      "secret": null,
+      "configuration": null,
+      "file_url": null
+    }
+  },
+  {
+    "name": "secret-empty-models",
+    "input": {
+      "kind": "secret",
+      "repository": {
+        "url": "https://github.com/example/project"
+      },
+      "secret": {},
+      "rule": {}
+    },
+    "expected": {
+      "kind": "secret",
+      "repository": {
+        "url": "https://github.com/example/project",
+        "id": null,
+        "name": null
+      },
+      "source_status": null,
+      "scanner_origin": null,
+      "scanner_verdict": null,
+      "rule": {
+        "id": null,
+        "short_id": null,
+        "name": null
+      },
+      "weakness_ids": [],
+      "remediation_instructions": null,
+      "code": null,
+      "secret": {
+        "type": null,
+        "confidence": null,
+        "validation_status": null,
+        "is_encrypted": null,
+        "is_managed": null,
+        "introduced_commit": null
+      },
+      "configuration": null,
+      "file_url": null
+    }
+  },
+  {
+    "name": "iac-empty-comparison",
+    "input": {
+      "kind": "iac",
+      "repository": {
+        "url": "https://github.com/example/project"
+      },
+      "configuration": {
+        "expected": "",
+        "actual": "  "
+      },
+      "rule": {
+        "short_id": "EXAMPLE-1"
+      }
+    },
+    "expected": {
+      "kind": "iac",
+      "repository": {
+        "url": "https://github.com/example/project",
+        "id": null,
+        "name": null
+      },
+      "source_status": null,
+      "scanner_origin": null,
+      "scanner_verdict": null,
+      "rule": {
+        "id": null,
+        "short_id": "EXAMPLE-1",
+        "name": null
+      },
+      "weakness_ids": [],
+      "remediation_instructions": null,
+      "code": null,
+      "secret": null,
+      "configuration": {
+        "platform": null,
+        "cloud_platform": null,
+        "expected": "",
+        "actual": "  "
+      },
+      "file_url": null
+    }
+  },
+  {
+    "name": "iac-empty-models",
+    "input": {
+      "kind": "iac",
+      "repository": {
+        "url": "https://github.com/example/project"
+      },
+      "configuration": {},
+      "rule": {},
+      "code": {}
+    },
+    "expected": {
+      "kind": "iac",
+      "repository": {
+        "url": "https://github.com/example/project",
+        "id": null,
+        "name": null
+      },
+      "source_status": null,
+      "scanner_origin": null,
+      "scanner_verdict": null,
+      "rule": {
+        "id": null,
+        "short_id": null,
+        "name": null
+      },
+      "weakness_ids": [],
+      "remediation_instructions": null,
+      "code": {
+        "end_line": null,
+        "snippet": null
+      },
+      "secret": null,
+      "configuration": {
+        "platform": null,
+        "cloud_platform": null,
+        "expected": null,
+        "actual": null
+      },
+      "file_url": null
+    }
+  }
+]

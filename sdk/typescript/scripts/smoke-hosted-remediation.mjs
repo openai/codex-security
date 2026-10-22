@@ -1,10 +1,9 @@
-// Exercise an installed SDK over real pipes with a fake host, without inference.
+// Exercise the installed CLI over real pipes with a fake host, without inference.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import {
   exerciseRemediationProtocol,
   remediationInput,
@@ -12,7 +11,7 @@ import {
 
 const packageRoot = resolve(process.argv[2] ?? join(import.meta.dirname, ".."));
 const node = process.argv[3] ?? process.execPath;
-const entrypoint = pathToFileURL(join(packageRoot, "dist", "index.js")).href;
+const entrypoint = join(packageRoot, "bin", "codex-security.mjs");
 const repository = await mkdtemp(join(tmpdir(), "hosted-remediation-smoke-"));
 const git = (...args) =>
   execFileSync(

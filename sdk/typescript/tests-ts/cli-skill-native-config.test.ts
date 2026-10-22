@@ -19,7 +19,7 @@ import {
 import { capture } from "./cli-fixtures.js";
 
 test.each([0, 23])(
-  "native configuration fixture preserves early exit %s with its input still open",
+  "native configuration fixture preserves early exit %p with its input still open",
   async (exitCode) => {
     const child = spawn(
       process.execPath,

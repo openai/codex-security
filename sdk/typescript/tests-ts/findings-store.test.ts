@@ -324,7 +324,7 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
 
 for (const location of ["vector", "extension", "boxed extension"] as const) {
   test.each([NaN, Infinity, -Infinity])(
-    `rejects %s in a later entry's ${location} without changing stored findings`,
+    `rejects %p in a later entry's ${location} without changing stored findings`,
     async (value) => {
       const { store, environment } = await fixture();
       const original = embedded(1);

@@ -47,6 +47,19 @@ a required check that cannot run without repository changes is a proof gap,
 not permission to edit. Generation's ordinary skill checks and standalone
 verification are separate operations.
 
+Set `verificationMode: "static"` to review attack paths, bypasses, and legitimate
+behavior from source and diffs, without installing dependencies or executing
+builds, tests, reproducers, or the application. Select it for both `patch` and
+`verify` requests when both stages should be static. Omitted or `"standard"`
+retains the existing behavior.
+
+Static mode treats validation instructions as source-review questions. Missing
+runtime tooling alone is not a blocker; material proof gaps still produce
+`blocked` or `inconclusive`. Results must cite source evidence and state that
+runtime checks were not performed. Hosts should retain and display the selected
+mode with each attempt. This is an assessment policy; sandbox permissions remain
+unchanged and do not enforce the static scope.
+
 The executor receives one request with a unique `requestId`, operation,
 repository/revision, identity, finding ID, prompt, model, reasoning effort,
 `sandbox` (`workspace-write` for patch, `read-only` for verify), and
@@ -88,15 +101,19 @@ finding closed. Retrying persistence must not resubmit execution.
 
 ## JSON-RPC launcher
 
-The SDK exports `runHostedRemediationProtocol`. An installed npm package can run it
-without adding any public CLI flag:
+Use the public CLI to run the hosted protocol:
 
-```sh
-node --input-type=module -e '
-import { runHostedRemediationProtocol } from "@openai/codex-security";
-process.exitCode = await runHostedRemediationProtocol(process.stdin, process.stdout);
-'
+```bash
+codex-security patch --host
+codex-security verify-fix --host
 ```
+
+Use `--host` alone with either command. The `run` request supplies all settings,
+and its `operation` must match the command: `patch` or `verify`, respectively.
+Neither command falls back to local inference. Ordinary patching and verification
+remain unchanged when `--host` is omitted.
+
+The SDK also exports `runHostedRemediationProtocol` for in-process hosts.
 
 Use the existing newline-delimited host transport: send one `run` request whose
 `params` are the input above; respond to `execution.run` with the executor

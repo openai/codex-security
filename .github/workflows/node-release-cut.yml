@@ -227,6 +227,7 @@ jobs:
             --silent
 
       - name: Dispatch the protected npm release
+        id: dispatch
         if: steps.release.outputs.changed == 'true'
         shell: bash
         env:
@@ -234,6 +235,22 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          gh workflow run node-release.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$RELEASE_TAG"
+          run_id="$(gh api --method POST \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/node-release.yml/dispatches" \
+            -f "ref=$RELEASE_TAG" --jq '.workflow_run_id')"
+          printf 'run-id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Start release progress observer
+        if: steps.dispatch.outputs.run-id != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.dispatch.outputs.run-id }}
+        run: |
+          # Explicitly observe token-dispatched runs without relying on chained
+          # workflow_run events. Progress notification remains best-effort.
+          timeout --kill-after=5s 10s gh workflow run release-progress.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main \
+            -f "run-id=$RELEASE_RUN_ID" -f watch=true

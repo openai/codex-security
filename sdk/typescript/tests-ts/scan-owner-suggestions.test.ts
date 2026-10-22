@@ -131,7 +131,7 @@ test("rejects a changed checkout before starting owner inference", async () => {
 });
 
 test.each([true, false])(
-  "subdirectory owners use Git-root paths (root collision=%s)",
+  "subdirectory owners use Git-root paths (root collision=%p)",
   async (collision) => {
     const { repository, result } = await fixture();
     const service = join(repository, "service");

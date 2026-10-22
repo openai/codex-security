@@ -39,5 +39,7 @@ jobs:
         run: |
           actionlint -color
           shellcheck docker/verify-container-compose.sh
+      - name: Test release progress reporting
+        run: node --test .github/scripts/test_release_progress.mjs
       - name: Check workflow security
         run: zizmor --offline --strict-collection --min-severity medium --format github --config .github/zizmor.yml .github

@@ -272,7 +272,10 @@ for that exact commit:
 1. `node-release-cut` verifies that the version increased, checks the reviewed
    summary, and creates the exact `npm-vX.Y.Z` tag.
 2. `node-release` installs the committed dependency graph, tests and packs the
-   package, publishes it to npm, and records npm provenance.
+   package, publishes it to npm, and records npm provenance. Three TypeScript
+   test shards and the MCP tests run in parallel with package verification.
+   Every shard and package check must pass before the protected npm job can
+   publish the verified archive.
 3. `node-github-release` verifies the public package, provenance, tag, and
    archive before publishing the GitHub release. It prepends the reviewed
    summary to GitHub's categorized notes.
@@ -313,6 +316,31 @@ registry errors fail immediately.
 `plugins/codex-security/` during `prepack`. The generated
 `sdk/typescript/_bundled_plugin/` directory is not a committed release input;
 do not prepare a release by editing or committing files there.
+
+The merged release PR receives one progress comment covering post-merge CI,
+release verification, protected npm approval, public-package provenance,
+installation checks, Action publication, and container approval and publication.
+It links to the relevant workflow
+runs and updates at workflow boundaries. Each automatic release dispatch starts
+a separate observer using the returned run ID; this does not depend on chained
+`workflow_run` events from the built-in token. The observer checks release jobs
+every 30 seconds, including while protected approval is pending, and requests a refresh
+when a milestone changes. Reruns update the same comment using their latest
+results. Queued duplicates keep the active run and its approval link visible.
+Historical stages without a recorded run are marked **Not recorded**. Completion
+covers the automated workflows; Marketplace publication remains a separate step.
+
+Observers are subject to GitHub's job time limit. To resume observation after a
+long approval wait, run `release-progress` on `main` with the release `run-id`
+and `watch` enabled. GitHub publication starts its own observer after npm succeeds.
+
+The observer and comment writer execute only helpers from protected `main`.
+Only the comment writer can update PR comments, and only the observer can request
+a refresh. Both run outside the publication workflows. Verification and
+publication jobs retain their existing permissions. The dispatch jobs use their
+existing Actions permission for a best-effort notification bounded to 15 seconds,
+within the downstream resolver's 60-second completion wait. Progress-reporting
+failures do not block publication; workflow results remain authoritative.
 
 Monitor all three workflows and the final status in `node-github-release`.
 The automated release is complete when npm and GitHub publication, exact-version

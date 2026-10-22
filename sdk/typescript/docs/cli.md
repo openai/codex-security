@@ -377,7 +377,16 @@ try {
 `preflightPolicy()` checks local inputs. `previewPolicy()` previews the supplied
 in-memory draft and escapes terminal controls; editing its saved file does not
 change that object. `securityPolicyDiff()` returns a raw diff for files and other
-non-terminal uses, with an optional Python interpreter.
+non-terminal uses. Both preview methods compute the diff in Node without
+discovering or launching Python; `pythonPath` and `PYTHON` do not affect previews.
+
+The optional second argument to `securityPolicyDiff(draft, python, signal)` is
+deprecated. Interpreter paths, including paths returned by a resolver callback,
+no longer select an executable or get validated. For compatibility, an explicitly
+supplied resolver is still awaited when the draft changes, and any error it throws
+propagates. Omit that argument for new code, or pass `undefined` when supplying a
+cancellation signal. Source freshness is checked before and after computing the
+diff.
 
 `generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
 `maxCostUsd`, `signal`, and progress/cost callbacks. `answerQuestions` receives
@@ -600,6 +609,9 @@ metadata only. Completion means import finished; no security analysis occurred.
 Import needs no model calls or authentication. `--dry-run` validates without
 saving; `--output-dir` and `--archive-existing` control output. `scans rerun`
 reimports the retained input.
+
+For vendor exports, use [local vendor import](#import-vendor-findings-locally)
+instead. That flow retains unassessed source evidence without creating a scan.
 
 ### Generate mock scan results
 
@@ -868,24 +880,26 @@ For filesystem and approval behavior, see the
 
 ### Environment variables
 
-| Variable                                                                    | Effect                                                             |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                      |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                  |
-| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                          |
-| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                            |
-| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.             |
-| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.         |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                   |
-| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.          |
-| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                   |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                           |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.             |
-| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                         |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                              |
-| `CI`                                                                        | Disable interactive update notices.                                |
-| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`. |
+| Variable                                                                    | Effect                                                                                                               |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                        |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                    |
+| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
+| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
+| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
+| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
+| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                     |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                             |
+| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`. |
+| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                            |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                               |
+| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                           |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                  |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                |
+| `CI`                                                                        | Disable interactive update notices.                                                                                  |
+| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                   |
 
 Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
@@ -1184,7 +1198,465 @@ failure or incomplete/invalid output fails the scan. Deferred candidates remain
 follow-up notes and do not fail the scan. An incompatible plugin stops the scan.
 Supply the validation prompt again when rerunning.
 
+## Import vendor findings locally
+
+Prefer the provider's supported native JSON from its CLI, plugin, or API. Native
+reports can retain details omitted by SARIF. Use SARIF or CSV as compatibility
+inputs only for providers and report profiles that support them. A JSON API
+summary is not automatically a supported report; follow the provider's acquisition
+instructions and retain the original records. The readers detect supported input
+formats; `--format json` selects command output, not the input format.
+
+Keep the acquisition format consistent across imports. Depending on the provider,
+switching formats can create separate records for the same vulnerability or
+replace a richer evidence snapshot with less detail. The importer does not merge
+evidence or deduplicate equivalent vulnerabilities across different source IDs.
+
+Use the same vendor input and parser as Cloud publication, selecting a local
+repository path instead of a Cloud repository ID or URL. Supported inputs include
+Wiz findings, [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings),
+[Endor Labs Finding JSON and SARIF](#import-endor-labs-findings),
+[Semgrep Code JSON and SARIF](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md),
+and [saved GitHub alerts and GHSA advisories](#import-github-findings-locally-or-to-cloud):
+
+```bash
+codex-security publish findings selected-wiz.json \
+  --to local --repository ./project --provider wiz \
+  --source-key TENANT_ID/vulnerability-finding --dry-run --format json
+```
+
+Review the normalized evidence, repository, source namespace, and exclusions.
+Run the same command without `--dry-run` to confirm interactively, or add `--yes`
+after reviewing the preview. `--to` is required; there is no default destination.
+Local import uses the workbench SQLite database and requires no Cloud login,
+network connection, or model call. `--dry-run` does not write findings.
+
+Read the saved evidence with:
+
+```bash
+codex-security findings imported ./project --format json
+```
+
+The repository argument defaults to the current directory. Local imports are
+separate from the assessed findings shown by `findings list`: they remain
+`not_assessed`, retain the original vendor evidence, and do not create a completed
+scan or automatically validate or patch findings. Missing revisions, locations,
+and assessment fields stay unknown. When the source includes a repository URL and the local checkout has configured
+Git remotes, the URL must match one of those remotes; the importer does not
+substitute the checkout's current commit for an unknown scanner revision.
+
+Repeated imports update the same record by repository, provider, source key, and
+source finding ID. The result reports created, updated, and unchanged counts.
+Keep the source key stable across exports. Records omitted from a later selection
+remain stored; omission does not resolve or delete a finding. Excluded records
+are reported, and an import with exclusions exits with status 1. The same
+supported vendor formats and evidence requirements apply locally and in Cloud.
+
+`scan import --json` and `scan import --csv` remain separate commands for importing
+Codex Security's findings schema as a saved scan; they do not accept vendor
+exports.
+
+## Import Endor Labs findings
+
+For local or Cloud import, prefer complete native Finding JSON from authenticated
+`endorctl`, scoped to one project and context. Omit `--field-mask` and use
+`--list-all` to finish pagination:
+
+```sh
+endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
+  --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
+  --list-all --output-type json > endor-findings.json
+codex-security publish findings endor-findings.json --to local \
+  --provider endor --repository ./project \
+  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run
+```
+
+Replace the example namespace, project UUID and local repository with your selection.
+Review the preview, remove `--dry-run` to confirm, then read the stored evidence
+with `codex-security findings imported ./project --format json`. To publish to
+Cloud instead, use `--to cloud --repository "CLOUD_REPOSITORY_ID"` with the same
+file, provider and source key. The official
+[Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit)
+can help with setup and investigation, but summaries, counts and field-masked
+results do not replace complete Finding objects. `endorctl` reads the Endor API;
+the importer reads the saved export without maintaining an API connection or
+writing changes back to Endor.
+
+Native JSON retains severity, package and advisory data, primary SAST/AI SAST
+locations and the scanned commit. Existing self-contained endorctl SARIF 2.1.0
+reports are a lossy compatibility format, retaining finding links and UUIDs;
+unavailable severity and revisions stay unknown. Both formats use the Endor UUID
+within the selected repository and stable source key as identity. Importing SARIF
+after native JSON for that UUID updates the same record by replacing its evidence
+snapshot, not merging it. Native detail absent from SARIF is removed from the
+snapshot. Use native JSON consistently for ongoing imports.
+
+Local and Cloud records remain unassessed source evidence. Local imports use the
+SQLite readback described above; Cloud imports use the login, preview,
+confirmation and retry flow below.
+
 ## Publish findings to Cloud
+
+### Import Snyk Open Source findings
+
+Import **Open Source SCA vulnerabilities only**. Licenses, Code, Container, IaC,
+SBOM results and platform backlog ingestion are outside this adapter.
+
+Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
+with its `snyk-findings-export` skill to collect SCA findings from the repository's
+Git root. It runs a fresh local scan and writes a `snyk-findings-export/v1` bundle;
+it does not retrieve existing platform project findings.
+
+The same saved bundle supports [local import](#import-vendor-findings-locally)
+without a Cloud login:
+
+```sh
+codex-security publish findings snyk-findings.json --to local \
+  --provider snyk --repository ./project \
+  --source-key github.com/example/project/main/root/plugin-sca --dry-run
+```
+
+Or preview publication to a connected Cloud repository:
+
+```sh
+codex-security publish findings snyk-findings.json --to cloud \
+  --provider snyk --repository https://github.com/example/project \
+  --source-key github.com/example/project/main/root/plugin-sca --dry-run
+```
+
+Check the collection's scan outcomes and limitations. Only Open Source SCA
+vulnerabilities are imported; other products and licenses are explicit exclusions.
+The importer retains the selected finding, native MCP record and collection
+context. MCP may shorten descriptions and omit dependency paths. Plugin paths
+remain in original evidence because v1 lacks their offset from the Git root.
+
+For automation, prefer native JSON from
+`snyk test --file=package.json --json-file-output=snyk.json`. Exit 1 means findings;
+stop on other nonzero exits before importing. The existing `--provider snyk`
+autodetects a single project object or an `--all-projects` array; any project error
+stops the import. Use default ungrouped output, without `--group-issues`.
+Native JSON preserves individual dependency paths and remediation fields. Its
+paths remain original evidence because it does not establish their Git-root offset.
+
+Open Source SARIF from `snyk test --sarif-file-output=snyk.sarif` remains supported
+for compatibility. Its target-relative manifest paths and synthetic line numbers
+remain original evidence, without being projected as repository locations or
+package manifest paths. All three formats accept either destination. Use a consistent
+format and stable source key per repository, branch and scan target, for example
+`github.com/example/project/main/root/native-sca` for native JSON. Their source
+identities differ: use separate keys when switching acquisition formats. Imports
+do not deduplicate across formats or remove earlier imported records.
+
+Known repository claims must
+match the selected Cloud repository or, when available, a configured local Git
+remote. Unknown repository context still requires selecting the correct target;
+the importer does not infer provenance from the current checkout.
+
+Remove `--dry-run` from the selected command to review and confirm the import, or
+use `--yes` after reviewing the preview. Read local records with
+`codex-security findings imported ./project --format json`. Imported source
+evidence is not a Codex assessment. No Snyk-side triage state is changed. See the
+[Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) for format limits and
+acquisition details.
+
+### Import Wiz findings
+
+Import selected Wiz package vulnerabilities, SAST findings, repository secrets,
+and IaC findings without creating a scan. Imported records retain vendor evidence
+and remain **not assessed by Codex**, including when Wiz marks them resolved or
+reports an AI verdict. Workload secrets, cloud configuration findings, and external
+network findings are not supported by this repository importer. Cloud destinations
+currently support connected GitHub and GitHub Enterprise repositories, including
+custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations.
+
+Use an authorized [Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or Wiz API
+connection to acquire findings and save the supported native JSON. A configured
+plugin may provide that connection; an official Codex plugin is not a prerequisite.
+The publisher reads the saved records. It does not fetch from Wiz or require a
+manual website download. The acquisition path still needs validation against
+actual responses from an authorized Wiz tenant; local parser checks do not
+establish that qualification.
+
+Inspect the connection's actual response before importing it. MCP summaries,
+Wiz Issues, and local Wiz CLI scan results are not automatically compatible with
+this finding mapper. Keep the original occurrence IDs and evidence; use the
+named collections below when the response contains repository findings.
+
+Before the first import:
+
+1. Select an existing repository in Codex Security Cloud and copy its URL or
+   Cloud repository ID. The repository needs an
+   authorized environment, but does not need a completed native scan.
+2. Read the selected records through the authorized connection and save their
+   JSON. For **package vulnerabilities**, include `id`, `name`, `detailedName`,
+   `vendorSeverity` (or `severity`), and `vulnerableAsset.id`; retain available
+   package, image, and source metadata. For SAST, repository secrets, and IaC,
+   retain the named API collections and repository metadata described below.
+   Complete the selected pages before importing; a summary or unfinished page
+   is not a complete finding selection.
+3. Choose a stable source key such as `TENANT_ID/vulnerability-finding`. Reuse it
+   for that Wiz tenant and finding class across exports. Do not create a new key
+   for each project filter or import; that creates different source identities.
+4. Check the ChatGPT account used by your existing file-backed Codex Security
+   login. API-key-only and keyring-only logins are not supported for Cloud
+   publication. See the credential-storage instructions below.
+
+Prefer the supported native JSON. Existing package-vulnerability CSV reports are
+accepted as a compatibility input. **CSV support covers repository package
+vulnerabilities (SCA) only; it does not add SAST, cloud posture (CSPM), or complete
+Wiz code-to-cloud coverage.** The named JSON readers described below handle their
+respective finding families separately.
+
+When a UI report is needed, retain the repository and finding filters in Wiz
+**Vulnerability Findings**, choose **Save as → Report**, select **Repository
+Branch**, **JSON** or **CSV**, and **Detailed** columns, then download the completed
+report. CSV must use the columns described below and a comma delimiter. Plain and
+gzip-compressed JSON or CSV are accepted; gzip is detected regardless of the
+filename extension. **Raw Event** on Code & Build Scans contains scan metadata
+rather than findings.
+
+For an alternate Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its
+API root before previewing or uploading, for example
+`https://cloud.example.test/backend-api/aardvark`. Remote APIs require HTTPS;
+HTTP is accepted only for loopback development (`localhost`, `127.0.0.0/8`, or
+`::1`). Use a login issued by that deployment and an isolated
+`CODEX_SECURITY_STATE_DIR` for testing. The endpoint
+does not change your login or sign you into another deployment. An invalid or
+empty configured URL stops the import before authentication or network requests.
+With the variable unset, the existing production endpoint remains the default.
+The older `CODEX_SECURITY_CLOUD_PUBLISH_URL` overrides only the final native scan
+publication endpoint; it does not route vendor imports.
+
+If that deployment serves its UI separately, set `CODEX_SECURITY_CLOUD_WEB_URL`
+to the full Cloud app URL shown in the browser. The import handoff supplies both
+deployment settings. The preview and result include a repository-specific
+`cloudUrl`, and terminal completion prints the link. This setting only controls
+the return link; all API requests still use `CODEX_SECURITY_CLOUD_BASE_URL`.
+For custom API destinations without a configured app URL, completion retains
+the manual navigation guidance rather than guessing a UI host or port.
+
+Preview the selection and destination:
+
+```bash
+codex-security publish findings selected-wiz.json \
+  --to cloud --repository https://github.com/example/project --provider wiz \
+  --source-key TENANT_ID/vulnerability-finding --dry-run --format json
+```
+
+`--repository` accepts the repository's URL or ID. Both resolve to the same Cloud
+destination and resume the same saved submission. This command reads the
+authorized destination and current source versions during
+preview. It uses the same saved ChatGPT file login as scan publication. The Cloud
+repository needs an existing environment; no native scan is required. Review the
+Cloud API endpoint, account, repository, environments, findings, and exclusions,
+then rerun without
+`--dry-run`. The default terminal prompt is No; `--yes` confirms a previously
+reviewed input for scripts or the plugin. Without a terminal or `--yes`, no upload
+occurs. Existing source findings keep their Cloud environment; new findings use
+the repository’s current authorized default. Preview shows the environments that
+will receive the selected findings. The terminal preview summarizes severities,
+shows up to five finding IDs and titles, and identifies the evidence file and
+exclusions. `--dry-run --format json` retains all normalized findings and complete
+evidence for inspection. A prompt explicitly includes any records that will be
+skipped.
+
+Native package input can be a Wiz JSON vulnerability report, a vulnerability
+finding, an array, a complete `data.vulnerabilityFindings.nodes` response, or JSONL
+with one package record per line. The repository package-vulnerability CSV
+profile below is also supported. Plain and gzip-compressed files are accepted.
+A response that advertises another page is rejected. Complete the requested pages
+or save only the explicitly selected records; retain the named collection for
+SAST, repository secrets, and IaC.
+
+The CSV mapper requires `ID`, `Name`, `DetailedName`, `AssetID`, `WizURL`,
+`CloudPlatform`, and `CloudProviderURL`. Check the actual report headers against
+this profile; other Wiz report types use different fields.
+For repository imports, `CloudPlatform` must identify GitHub and
+`CloudProviderURL` must identify a repository branch. The repository URL must
+match the selected Cloud repository or, for local import, one of the checkout's
+Git remotes when configured. This also applies when the parsed findings are saved and
+read again as normalized JSONL. Other resource types are excluded.
+
+CSV imports use `ID` as the occurrence identity and retain every parsed field,
+including unknown columns and quoted multiline values, in `source_data.row`.
+Severity comes from `Severity`, then `VendorSeverity`, then `CVSSSeverity`.
+Vendor resolution status stays in the original evidence. The importer does not
+derive a branch or revision from a tree URL, or treat last-detected time as a
+record-update timestamp. Duplicate headers, damaged CSV rows, invalid UTF-8,
+and duplicate occurrence IDs among otherwise importable records stop the import.
+Review any excluded records in the preview before publishing.
+
+Normalized JSONL is also accepted:
+
+```json
+{
+  "source_finding_id": "vendor-finding-42",
+  "evidence": {
+    "title": "Vulnerable example package",
+    "severity": "high",
+    "source_data": { "id": "vendor-finding-42" }
+  }
+}
+```
+
+Use Wiz's finding `id` (`ID` in CSV), not a CVE, as identity. Keep the source key stable across
+exports; a selected project filter does not change the vendor namespace. Confirm
+that the selected assets or builds map to this repository. The raw Wiz adapter
+retains each record in `source_data`, uses reported severity, and leaves unknown
+branch/revision empty. Repository-branch findings retain their repository-relative
+file paths; container and other workload paths remain vendor evidence rather than
+source-code locations. It does not
+fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
+Findings from external network scans are excluded from this package vulnerability
+mapping.
+
+For SAST, repository secrets, and IaC, save the documented JSON API collection:
+
+| Finding family     | Collection                   | Raw occurrence identity |
+| ------------------ | ---------------------------- | ----------------------- |
+| SAST               | `data.sastFindings.nodes`    | `sast:<id>`             |
+| Repository secrets | `data.secretInstances.nodes` | `secret:<id>`           |
+| IaC                | `data.iacFindings.nodes`     | `iac:<id>`              |
+
+The collection identifies the mapping. Bare arrays of these raw findings are
+excluded because their overlapping fields do not identify a family. An export
+may contain multiple named collections. GraphQL errors and unfinished pages stop
+the import. Secret resources must have `type: "REPOSITORY_BRANCH"`; a workload's
+relationship to source code does not make it a repository secret.
+
+Each new finding needs a verified source repository URL. Supply `repository.url`
+in the finding's repository metadata, or include the matching repository inventory
+in `data.versionControlResources.nodes`. For secrets, repository metadata is under
+`resource.typedProperties.repository`. The importer joins the inventory's
+`repository.id` to that source ID and uses `repository.url`; inventory node IDs,
+`providerID`, names, and Wiz UUIDs are not Cloud repository IDs. A supplied URL
+must agree with the inventory and with the selected Cloud repository before any
+finding is uploaded. Keep each inventory node's `platform` field: `GITHUB`
+establishes case-insensitive repository matching on custom GitHub Enterprise
+hosts. Fresh imports preserve the reported branch name literally. Duplicate
+entries for one repository ID must agree on their platform and repository URL.
+For example, this synthetic selection supplies the inventory alongside its SAST
+collection:
+
+```json
+{
+  "data": {
+    "sastFindings": {
+      "nodes": [
+        {
+          "id": "finding-42",
+          "name": "Untrusted query construction",
+          "severity": "HIGH",
+          "repository": { "id": "source-repository-1" },
+          "filePath": "src/query.ts",
+          "startLine": 10,
+          "endLine": 12
+        }
+      ]
+    },
+    "versionControlResources": {
+      "nodes": [
+        {
+          "repository": {
+            "id": "source-repository-1",
+            "url": "https://github.com/example/project"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+The adapters preserve each selected raw node exactly in `source_data`. Typed
+`evidence.details` carries `kind`, verified `repository`, vendor `source_status`,
+and family-specific evidence:
+
+| Family             | Evidence retained in typed fields                                                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| SAST               | CWE IDs, first location's end line and snippet, scanner origin and verdict, remediation instructions                                           |
+| Repository secrets | Detector rule, type, confidence, vendor validation status, encryption/management flags, introduced commit when supplied                        |
+| IaC                | Rule IDs and name, first location's range and matched content, platform, expected/actual content, separate file link, remediation instructions |
+
+Vendor status and verdict remain separate from Codex assessment. A secret's
+introduced commit is not its scanned revision. Missing source revisions and scan
+IDs stay unknown. A logical IaC resource is retained in the original record and
+does not establish that it is deployed. Precise original timestamps remain in
+`source_data`; only an explicit record-update timestamp maps to the whole-second
+`source_updated_at` field. SAST creation time and IaC last-seen time are not update
+timestamps.
+
+Native SAST and secret report downloads can be CSV, including gzip-compressed
+CSV. Those CSV profiles are not parsed directly. Convert a selected report with a reviewed mapping
+for its actual column headers into normalized JSONL, preserving each original row
+in `source_data`. Set `details.kind` and `details.repository.url` explicitly after
+verifying the source repository. Use the same prefixed occurrence ID shown above
+so API and report imports update the same finding; normalized IDs are accepted
+exactly as supplied. Never substitute a rule ID, CWE, title, token, or file path
+for a vendor occurrence ID. Missing IDs or severity must be corrected at the
+source rather than invented.
+
+For repository-secret reports, select `path` and `lineNumber` for source
+navigation, detector fields under `rule`, and `vcsDetails.initialCommitHash` only
+as the introduced commit. The standard secret metadata API does not supply a
+path or line. For IaC reports, explicitly select `filePath`, `startLine`, `endLine`,
+`rule.id`, `rule.shortId`, `expectedContent`, `foundContent`, `matchContent`, and
+repository/branch metadata. Preserve the original fields; source locations must
+be repository-relative, and an end line requires a start line. Keep credential
+values out of the metadata selection; the importer does not retrieve or test
+credentials or apply remediation instructions.
+
+Inputs must be valid UTF-8. Integer-valued evidence outside JavaScript's safe
+integer range is rejected; export those values as strings to preserve them
+exactly. Invalid records appear in `excluded` with their source ID and reason.
+
+Requests contain at most 100 findings and respect the Cloud payload limits.
+Before uploading, the publisher saves request IDs and bodies privately under
+the configured Codex Security state directory. After an uncertain response,
+repeat the same command with unchanged input and Cloud API endpoint to resume those
+requests. Different deployments have separate saved submissions, including when
+their account and repository IDs match. The preview and result include
+`cloudApiUrl` so scripts can verify which API received the findings; this is an
+API endpoint, not a link to the Cloud UI. A reset
+retires the old request without republishing; review and explicitly approve a
+fresh invocation.
+
+Results distinguish completion from partial or interrupted work:
+
+| Status        | Exit code | Meaning                                                                                            |
+| ------------- | --------- | -------------------------------------------------------------------------------------------------- |
+| `complete`    | 0         | All selected records were acknowledged and their source records read back.                         |
+| `partial`     | 1         | The import finished, but some records were excluded locally or rejected by Cloud.                  |
+| `interrupted` | 2         | Upload, verification, or receipt persistence stopped; acknowledged work is included in the result. |
+| `failed`      | 2         | Preparation failed before uploading; structured output includes the error.                         |
+
+For finding imports, `--full-output` requires `--format json` or `--format jsonl`.
+Failed and interrupted imports set the envelope's `ok` to `false`, with
+`error.code: "IMPORT_FAILED"`, while retaining available results, receipts, and
+counts under `data`. Other full-output format combinations are rejected before
+reading the input or contacting Cloud; omit `--full-output` to use those formats.
+
+Ctrl-C and SIGTERM retain exit codes 130 and 143. Interrupted JSON output preserves
+`receipts`, `counts`, `failures` with vendor source IDs, `excluded`, `verified`, and
+`unacknowledged`. A lost response can mean unacknowledged findings were accepted;
+resume the saved submission rather than treating them as never uploaded. When
+available, `savedSubmission` identifies the checkpoint to resume by repeating the
+same command. Review `error` before retrying; a repository reset retires the old
+submission and requires fresh approval. Correct local exclusions or final source
+conflicts before preparing a new submission.
+
+Counts are cumulative for the saved submission: a resumed result includes
+batches acknowledged by earlier invocations, not just the latest upload attempt.
+
+Terminal progress reports preparation, acknowledged uploads, and verification
+on stderr; JSON results stay on stdout. Lookups and readback use at most four
+concurrent requests, while uploads remain sequential. Successful receipts are
+saved locally. Verification reads the imported source records and checks their
+identities and evidence against the receipts. This does not establish a Codex
+assessment or visibility in the shared Cloud Findings view.
+When available, `cloudUrl` links to the destination repository in Cloud.
+
+### Publish completed scans
 
 Preview selected completed scans before uploading:
 
@@ -1521,6 +1993,7 @@ least eight characters.
 | `scans match --all`                                   | Match completed scans across worktrees/clones.             |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
+| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.         |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
@@ -1806,6 +2279,158 @@ record absolute Node/CLI paths. If those change, back up and remove the verified
 generated hook, then reinstall with the same threshold. Restore the backup if
 installation fails. The installer respects `core.hooksPath`.
 
+## Import GitHub findings locally or to Cloud
+
+Acquire code-scanning findings with the existing `import github` collector and
+save its complete JSON output. In Codex, the official
+[GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
+can help select the repository, alert numbers and ref through GitHub's MCP
+server; pass that selection to the collector. This integration reads
+code-scanning alerts and GHSA advisories. It does not import Dependabot or
+secret-scanning alerts or write back to GitHub. Preview local storage with a
+repository path:
+
+```bash
+codex-security import github example/project --format json > /path/outside/repository/alerts.json
+codex-security publish findings /path/outside/repository/alerts.json \
+  --to local --provider github --repository ./project \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+```
+
+Or preview publication to a connected Cloud repository:
+
+```bash
+codex-security publish findings /path/outside/repository/alerts.json \
+  --to cloud --provider github --repository https://github.com/example/project \
+  --source-key github.com/example/project/code-scanning --dry-run --format json
+```
+
+The importer fetches every page, retrieves alert details, and retains the selected
+ref's instance. It writes the saved input for publication; no website download or
+hand-written JSON mapping is needed. Use `--github-alert NUMBER` repeatedly for
+selected alerts or `--github-ref REF` for another ref. Defaults are open alerts on
+the default branch. MCP list calls are paginated separately, and raw MCP/API
+responses are not the saved import format accepted by `--provider github`.
+
+The importer uses GitHub CLI authentication (`gh auth login`) and `GH_HOST`;
+the plugin's connection does not sign in `gh`. Reading alerts requires
+[code-scanning access](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository):
+**Code scanning alerts: read** for a fine-grained token, or `security_events` for
+a classic token (`public_repo` is sufficient for public repositories). The source
+repository must have code scanning available. For Cloud publication, the
+destination must be connected in the selected Cloud account. For local import,
+the source repository must match a configured Git remote when remotes are
+available; no Cloud login is required to store the acquired evidence.
+
+Review the destination, source, exclusions and evidence in the preview. Repeat the
+selected command without `--dry-run` and confirm it, or add `--yes` for a
+previously reviewed input. Local persistence and readback follow the
+[local import flow](#import-vendor-findings-locally); use
+`codex-security findings imported ./project --format json` to read the records.
+Cloud authentication, batching, saved receipts, partial results and
+interrupted-upload recovery follow the [publication flow](#import-wiz-findings).
+JSON, JSONL and gzip are supported. Save complete import output without field or
+token filters or `--full-output`.
+
+Use a stable source key for the GitHub host, repository and finding family.
+Code-scanning identities include the selected ref, so branches retain separate
+evidence. The original alert, rule, scanner, location, revision and source state
+remain attached. An alert-wide dismissal takes precedence over the selected
+instance's open/fixed state. Missing security severity stays `unknown`;
+SARIF error/warning/note levels are not vulnerability ratings. Imported evidence
+remains unassessed by Codex.
+
+The SDK offers the same preview and publication boundary for Cloud:
+
+```ts
+import {
+  importGitHubCodeScanningAlerts,
+  normalizeGitHubCodeScanningAlerts,
+  prepareNormalizedExternalPublication,
+} from "@openai/codex-security";
+
+const alerts = await importGitHubCodeScanningAlerts({
+  repository: "example/project",
+});
+const prepared = await prepareNormalizedExternalPublication(
+  normalizeGitHubCodeScanningAlerts(alerts),
+  {
+    provider: "github",
+    repository: "https://github.com/example/project",
+    sourceKey: "github.com/example/project/code-scanning",
+  },
+);
+console.log(prepared.preview);
+// After reviewing the preview:
+const receipt = await prepared.publish();
+```
+
+For local storage, pass the same normalized evidence to
+`prepareNormalizedLocalImport()` with `repository: "/path/to/project"`, inspect
+its preview, and call `import()`. `prepareLocalExternalImport()` accepts the saved
+import file directly. Read records with `listLocalExternalFindings({ repository })`.
+
+### Import GHSA advisories separately
+
+**Importing a GHSA advisory does not establish an installed dependency or
+applicability to the destination repository.** Repository advisories are
+disclosures maintained by a repository; global advisories describe affected
+software in GitHub's public advisory database. Both are evidence for
+investigation, not Dependabot alerts. Check the repository’s dependency versions
+and applicability separately.
+
+```bash
+# Read only published advisories for this repository.
+codex-security import github-advisories example/project --format json > /path/outside/repository/advisories.json
+
+# Select individual public database records without enumerating the database.
+codex-security import github-advisories example/project \
+  --github-advisory-source global --github-advisory GHSA-2345-6789-cfgh \
+  --format json > /path/outside/repository/advisories.json
+
+codex-security publish findings /path/outside/repository/advisories.json \
+  --to cloud --provider github --repository https://github.com/example/project \
+  --source-key github.com/example/project/security-advisories --dry-run --format json
+```
+
+For local storage, use the same advisory file, provider and source key with
+`--to local --repository ./project`. Follow the [local import flow](#import-vendor-findings-locally)
+to review, confirm and read the stored evidence.
+
+`--github-advisory-source` defaults to `repository`. Repeat `--github-advisory`
+to select exact IDs from that API, regardless of advisory state. Repository
+lists default to `--github-state published`; `draft`, `triage`, and `closed`
+require explicit selection. A nondefault state cannot be combined with exact
+IDs. Global selection requires at least one ID and never lists the advisory
+database. Both readers use `GH_HOST` and GitHub CLI authentication by default;
+the SDK also accepts `githubHost` and `githubToken`. Private or unpublished
+[repository advisories](https://docs.github.com/en/rest/security-advisories/repository-advisories#list-repository-security-advisories)
+require **Repository security advisories: read**, or the classic `repo` or
+`repository_advisories:read` scope, plus access to the advisory. Public records
+need no additional advisory permission.
+
+Review the saved evidence before local import or Cloud publication, including any
+selected private advisories. Acquisition failure returns no partial selection.
+Both destinations report invalid records as exclusions. Cloud publication retains
+acknowledged receipts if a later batch or readback fails.
+
+Advisory evidence retains GHSA/CVE IDs, affected version ranges, available
+patched versions, source status and original JSON. It does not infer an installed
+version or source location. Global advisories omit a source repository; the
+explicit local or Cloud destination binds the import for investigation. Repository
+advisories retain their source repository and check it against the Cloud target
+or configured local Git remotes when available. Withdrawal remains vendor
+state, and all imported evidence remains not assessed by Codex. Use a separate
+source key from code-scanning alerts; shared advisory IDs do not combine source
+records from different providers.
+
+In the SDK, call `importGitHubAdvisories()` and `normalizeGitHubAdvisories()`
+with `prepareNormalizedExternalPublication()` for Cloud or
+`prepareNormalizedLocalImport()` for local storage as described above.
+`importGitHubAdvisories()` defaults to `{ source: "repository", state: "published" }`; use
+`{ source: "global", advisoryIds: ["GHSA-2345-6789-cfgh"] }` for selected database
+records. Both forms require `repository: "OWNER/REPO"` as source or target context.
+
 ## Import alerts from the CLI
 
 ```bash
@@ -2002,6 +2627,18 @@ text/files, and Linear inputs. Paths resolve from the invocation directory, even
 when the finding belongs to another repository. The file must be nonempty and
 regular, is read before patching, and cannot combine with `--resume-pr`.
 
+Use `--verification-mode static` to assess a patch from source and diff evidence
+without installing dependencies or running builds, tests, reproducers, or the
+application. Validation instructions become questions for that source review.
+The default is `standard`, which retains the existing verification checks.
+Static results identify the evidence and state that runtime checks were not
+performed; material proof gaps can still block verification.
+
+```bash
+codex-security patch finding.md --verification-mode static
+codex-security verify-fix finding.md --verification-mode static
+```
+
 `--assess-patch-risk` runs an advisory assessment after patching. Human-readable
 output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
@@ -2064,6 +2701,9 @@ credentials out of the patch subprocess. URLs must match the selected workspace.
 `verify-fix` checks fixes in a read-only sandbox. It accepts descriptions, saved
 finding IDs, `--scan`, and the Linear issue/project selectors above. Explicitly
 filter for completed Linear issues to check a finished backlog.
+
+`--verification-mode static` selects source-only assessment, as described above
+for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are

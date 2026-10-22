@@ -286,7 +286,7 @@ export function createGitRepository(directory) {
   };
 }
 
-export async function readReleaseHistory(repo, mainSha, github) {
+export function readVersionHistory(repo, mainSha) {
   repo.ensureCommit(mainSha);
   const packageText = repo.readFile(mainSha, packagePath);
   const baseVersion = releaseVersion(JSON.parse(packageText));
@@ -300,6 +300,14 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit = sha;
   }
 
+  return { baseVersion, baseCommit, packageText };
+}
+
+export async function readReleaseHistory(repo, mainSha, github) {
+  const { baseVersion, baseCommit, packageText } = readVersionHistory(
+    repo,
+    mainSha,
+  );
   const commits = repo
     .git("rev-list", "--first-parent", "--reverse", `${baseCommit}..${mainSha}`)
     .trim()

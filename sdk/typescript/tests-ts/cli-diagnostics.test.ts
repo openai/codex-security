@@ -26,7 +26,7 @@ describe("CLI diagnostics", () => {
     ["validate", "Synthetic finding"],
     ["verify-fix", "Synthetic finding"],
     ["init"],
-  ])("does not format a success result after %j fails", async (...command) => {
+  ])("does not format success after %j fails (case %#)", async (...command) => {
     for (const flags of [["--full-output"], ["--token-count"]]) {
       const { stdout, stderr, runCli } = createCliTest(main);
       const deps = dependencies();

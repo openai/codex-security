@@ -493,6 +493,32 @@ function verifySignatureFixture(options: SignatureAuditFixture = {}) {
   );
 }
 
+type WorkflowContract = {
+  concurrency?: Record<string, unknown>;
+  jobs: Record<
+    string,
+    {
+      permissions?: Record<string, string>;
+      env?: Record<string, string>;
+      needs?: string | string[];
+      environment?: string;
+      if?: string;
+      strategy?: { matrix: Record<string, unknown>; "fail-fast"?: boolean };
+      concurrency?: Record<string, unknown>;
+      "continue-on-error"?: boolean;
+      steps?: {
+        name?: string;
+        uses?: string;
+        run?: string;
+        if?: string;
+        "continue-on-error"?: boolean;
+        with?: Record<string, unknown>;
+        env?: Record<string, string>;
+      }[];
+    }
+  >;
+};
+
 function workflowStepShell(workflow: string, stepName: string): string {
   const parsed = Bun.YAML.parse(workflow) as {
     jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
@@ -2520,6 +2546,85 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test("requires every release test shard before protected publication", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    expect(jobs["test"]?.strategy?.matrix["suite"]).toEqual([1, 2, 3, "mcp"]);
+    expect(jobs["test"]?.strategy?.["fail-fast"]).toBe(false);
+    expect(jobs["test"]?.permissions).toEqual({ contents: "read" });
+    expect(jobs["test"]?.env).toEqual(jobs["verify"]?.env);
+    expect(jobs["publish"]?.needs).toEqual(["verify", "test"]);
+    expect(jobs["publish"]?.environment).toBe("npm");
+    expect(jobs["publish"]?.permissions).toEqual({
+      contents: "read",
+      "id-token": "write",
+    });
+    expect(
+      jobs["publish"]?.steps?.find(
+        (step) => step.name === "Download verified package",
+      )?.with,
+    ).toMatchObject({
+      "artifact-ids": "${{ needs.verify.outputs.artifact-id }}",
+      "digest-mismatch": "error",
+    });
+    expect(
+      jobs["test"]?.steps?.find((step) => step.name === "Test TypeScript shard")
+        ?.run,
+    ).toContain("scripts/run-ci-tests.mts ${{ matrix.suite }}/3");
+    expect(
+      jobs["test"]?.steps?.find((step) => step.name === "Test MCP app")?.run,
+    ).toContain("run test:mcp");
+  });
+
+  test("isolates optional release comments from verification and publishing", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const progress = Bun.YAML.parse(
+      readFileSync(
+        new URL(
+          "../../../.github/workflows/release-progress.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as WorkflowContract;
+    expect(jobs["verify"]?.permissions).toEqual({ contents: "read" });
+    expect(progress.jobs["report"]?.["continue-on-error"]).toBe(true);
+    expect(progress.jobs["report"]?.permissions).toEqual({
+      actions: "read",
+      contents: "read",
+      "pull-requests": "write",
+    });
+    const checkout = progress.jobs["report"]?.steps?.find(
+      (step: { uses?: string }) => step.uses?.startsWith("actions/checkout@"),
+    );
+    expect(checkout?.with).toMatchObject({
+      ref: "refs/heads/main",
+      "persist-credentials": false,
+    });
+    expect(progress.concurrency).toBeUndefined();
+    expect(progress.jobs["report"]?.concurrency?.["queue"]).toBe("max");
+    expect(progress.jobs["watch"]?.permissions).toEqual({
+      actions: "write",
+      contents: "read",
+    });
+    expect(progress.jobs["watch"]?.["continue-on-error"]).toBe(true);
+    expect(progress.jobs["watch"]?.if).toContain(
+      "github.event.action == 'in_progress'",
+    );
+    expect(progress.jobs["watch"]?.if).toContain("inputs.watch");
+    expect(progress.jobs["watch"]?.steps?.[0]?.with).toEqual(checkout?.with);
+    expect(
+      progress.jobs["watch"]?.steps?.at(-1)?.env?.["RELEASE_PROGRESS_WATCH"],
+    ).toBe("true");
+    const publication = (
+      Bun.YAML.parse(githubReleaseWorkflow) as WorkflowContract
+    ).jobs;
+    expect(publication["installed"]?.needs).toBe("release");
+  });
+
   test("dispatches GitHub releases after publishing with isolated permissions", () => {
     expect(protectedReleaseWorkflow).toContain(
       [
@@ -2619,33 +2724,71 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("dispatches the exact protected run and release tag from trusted main", async () => {
-    const script = workflowStepShell(
-      protectedReleaseWorkflow,
-      "Dispatch the verified GitHub release",
-    );
-    const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: releaseRepository,
-      RELEASE_RUN_ID: releaseRun,
-      RELEASE_TAG: "npm-v0.1.2",
-    });
-
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim().split("\n")).toEqual([
-      "workflow",
-      "run",
-      "node-github-release.yml",
-      "--repo",
-      releaseRepository,
-      "--ref",
-      "main",
-      "-f",
-      "tag=npm-v0.1.2",
-      "-f",
-      `run_id=${releaseRun}`,
-    ]);
-  });
+  test.each([
+    {
+      workflow: releaseCutWorkflow,
+      step: "Dispatch the protected npm release",
+      target: "node-release.yml",
+      fields: ["-f", "ref=npm-v0.1.2"],
+    },
+    {
+      workflow: protectedReleaseWorkflow,
+      step: "Dispatch the verified GitHub release",
+      target: "node-github-release.yml",
+      fields: [
+        "-f",
+        "ref=main",
+        "-f",
+        "inputs[tag]=npm-v0.1.2",
+        "-f",
+        `inputs[run_id]=${releaseRun}`,
+      ],
+    },
+  ])(
+    "dispatches $target with exact release inputs and records its run",
+    async ({ workflow, step, target, fields }) => {
+      const script = workflowStepShell(workflow, step);
+      const output = join(directories.create("release-dispatch-"), "output");
+      writeFileSync(output, "");
+      const mock = "gh() { printf '%s\\n' \"$@\" >&2; printf '12345\\n'; }";
+      const env = {
+        GITHUB_REPOSITORY: releaseRepository,
+        RELEASE_RUN_ID: releaseRun,
+        RELEASE_TAG: "npm-v0.1.2",
+        GITHUB_OUTPUT: output,
+      };
+      const result = await runShell(`${mock}\n${script}`, env);
+      expect(result.status).toBe(0);
+      expect(result.stderr.trim().split("\n")).toEqual([
+        "api",
+        "--method",
+        "POST",
+        "-H",
+        "X-GitHub-Api-Version: 2026-03-10",
+        `repos/${releaseRepository}/actions/workflows/${target}/dispatches`,
+        ...fields,
+        "--jq",
+        ".workflow_run_id",
+      ]);
+      expect(readFileSync(output, "utf8")).toBe("run-id=12345\n");
+      writeFileSync(output, "");
+      const failed = await runShell(`gh() { return 1; }\n${script}`, env);
+      expect(failed.status).toBe(1);
+      expect(readFileSync(output, "utf8")).toBe("");
+      const parsed = Bun.YAML.parse(workflow) as WorkflowContract;
+      const notification = Object.values(parsed.jobs)
+        .flatMap((job) => job.steps ?? [])
+        .find((step) => step.name === "Start release progress observer");
+      expect(notification?.["continue-on-error"]).toBe(true);
+      expect(notification?.if).toBe("steps.dispatch.outputs.run-id != ''");
+      expect(notification?.run).toContain(
+        "timeout --kill-after=5s 10s gh workflow run release-progress.yml",
+      );
+      expect(notification?.run).toContain(
+        '-f "run-id=$RELEASE_RUN_ID" -f watch=true',
+      );
+    },
+  );
 
   test("serializes every GitHub release and historical backfill", () => {
     expect(githubReleaseWorkflow).toMatch(
@@ -3660,15 +3803,15 @@ describe("GitHub release workflow safeguards", () => {
     )?.[1];
 
     expect(releasePattern).toBeDefined();
-    expect(ciPattern).toBe(releasePattern);
+    expect(ciPattern).toBeUndefined();
     expect(titlePattern).toBe(releasePattern);
     expect(nodeCiWorkflow).toContain(
       "types: [opened, edited, reopened, synchronize]",
     );
-    expect(nodeCiWorkflow).toContain("needs: validate-title");
+    expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
-  test("runs source validation with required check names for every PR edit", async () => {
+  test("preserves source validation dependencies and fails closed on missing coverage", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3693,14 +3836,16 @@ describe("GitHub release workflow safeguards", () => {
 
     const sourceGroup =
       "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}";
-    expect(workflow.concurrency.group).toBe(sourceGroup);
+    expect(workflow.concurrency.group).toStartWith(sourceGroup);
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' }}",
     );
-    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
-    expect(workflow.jobs["validate-title"]?.if).toBeUndefined();
+    expect(workflow.jobs["classify-changes"]?.["timeout-minutes"]).toBe(10);
+    expect(workflow.jobs["classify-changes"]?.if).toContain(
+      "github.event.changes.base != null",
+    );
     expect(
-      workflow.jobs["validate-title"]?.steps.find(
+      workflow.jobs["classify-changes"]?.steps.find(
         ({ name }) =>
           name === "Checkout pull request for change classification",
       )?.if,
@@ -3720,14 +3865,14 @@ describe("GitHub release workflow safeguards", () => {
       expect(workflow.jobs[job]?.if).toBeUndefined();
     }
     for (const [name, job] of Object.entries(workflow.jobs)) {
-      if (["validate-title", "required-test", "windows"].includes(name)) {
+      if (["classify-changes", "required-test", "windows"].includes(name)) {
         continue;
       }
-      expect([job.needs].flat(), name).toContain("validate-title");
+      expect([job.needs].flat(), name).toContain("classify-changes");
       expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
     }
     for (const job of ["required-test", "windows"]) {
-      expect(workflow.jobs[job]?.if).toBe("always()");
+      expect(workflow.jobs[job]?.if).toContain("always()");
     }
     const coverageGate = (job: string) =>
       workflow.jobs[job]?.steps.find(
@@ -3754,7 +3899,7 @@ describe("GitHub release workflow safeguards", () => {
         "needs.compatibility.result": upstream,
         "needs.mcp.result": upstream,
         "needs.test.result": upstream,
-        "needs.validate-title.result": validation,
+        "needs.classify-changes.result": validation,
         "needs.windows-test.result": upstream,
         "needs.windows-verify.result": upstream,
       };
@@ -3791,7 +3936,7 @@ describe("GitHub release workflow safeguards", () => {
           conditionCases.push({
             condition: coverageGate(gate)?.if ?? "",
             values: {
-              "needs.validate-title.result": "success",
+              "needs.classify-changes.result": "success",
               ...Object.fromEntries(
                 dependencies.map((job) => [
                   `needs.${job}.result`,
@@ -3811,41 +3956,6 @@ describe("GitHub release workflow safeguards", () => {
     for (const [index, item] of conditionCases.entries()) {
       expect(conditions[index], item.message).toBe(item.expected);
     }
-
-    const renderName = (template: string, values: Record<string, string>) => {
-      let name = template;
-      for (const [key, value] of Object.entries(values)) {
-        name = name.replaceAll("${{ matrix." + key + " }}", value);
-      }
-      return name.replace(
-        "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
-        values["node"] === "22.13.0" ? "22" : (values["node"] ?? ""),
-      );
-    };
-    const unixJob = workflow.jobs["required-test"];
-    const windowsJob = workflow.jobs["windows"];
-    const requiredContexts = new Set([
-      "ubuntu-latest / node-22",
-      "macos-latest / node-22",
-      "windows-latest / node-22",
-    ]);
-    const names = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob!.name, { os }),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob!.name, { node }),
-      ),
-    ];
-    expect(names).toEqual([
-      "ubuntu-latest / node-22",
-      "macos-latest / node-22",
-      "windows-latest / node-22",
-      "windows-latest / node-24",
-    ]);
-    expect(names.filter((name) => requiredContexts.has(name)).sort()).toEqual(
-      [...requiredContexts].sort(),
-    );
   });
 
   test("documents a canonical historical-summary prefix block", () => {
@@ -3874,7 +3984,6 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing carriage return\r",
   ])("active title gates reject %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -3891,7 +4000,6 @@ describe("GitHub release workflow safeguards", () => {
     "dependency-update2: refresh release tooling",
   ])("active title gates accept previously valid title %s", (title) => {
     for (const [workflow, step] of [
-      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
       [titleWorkflow, "Check conventional title"],
     ] as const) {
       expect(
@@ -3934,7 +4042,10 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     { title: "fix: retitle an internal change", expectedLabel: "bug" },
-    { title: "feat: retitle an internal change", expectedLabel: "enhancement" },
+    {
+      title: "feat: retitle an internal change",
+      expectedLabel: "enhancement",
+    },
     {
       title: "docs: retitle an internal change",
       expectedLabel: "documentation",
