@@ -133,10 +133,12 @@ and SARIF advisory groups. Switching does not remove earlier imported records.
 
 Unsafe or absolute paths remain in original evidence. Known source repository
 claims must match the selected Cloud repository or, for local imports when Git
-remotes are configured, one of those remotes. Standard GitHub SSH remotes in plugin
-bundles, including `ssh://git@ssh.github.com:443/owner/repository.git`, are recognized;
-unknown repository context requires the user to select the
-correct destination. Gzip and UTF-8 BOM input are supported. All three file formats
+remotes are configured, one of those remotes. For Cloud publication, public
+`github.com` SSH remotes using the default port or port 22, and the public
+`ssh://git@ssh.github.com:443/owner/repository.git` endpoint, match their HTTPS
+repository. Other SSH hosts and ports remain distinct from HTTPS repository URLs.
+Unknown repository context requires the user to select the correct destination.
+Gzip and UTF-8 BOM input are supported. All three file formats
 normalize to the Cloud evidence model before either local import or Cloud publication.
 Records exceeding that model's field or total-size limits appear as exclusions in
 the preview, without truncation. The normalized local SDK import API has a separate

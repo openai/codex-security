@@ -130,21 +130,20 @@ export function normalizeSnykFindingsExport(input: unknown): ExternalFindings {
 function pluginRepositoryUrl(value: unknown): string | null {
   const repository = text(value);
   if (repository === null || repository === "unknown") return null;
-  // git remote get-url commonly returns GitHub's SSH clone syntax. Compare
-  // the repository over HTTPS while retaining the original remote in evidence.
+  // Only public GitHub's documented SSH endpoints identify the same HTTPS
+  // repository. Other hosts and SSH ports remain distinct Cloud identities.
   const scp = /^git@([^/:]+):(.+)$/u.exec(repository);
-  if (scp) return `https://${scp[1]}/${scp[2]}`;
+  if (scp?.[1]?.toLowerCase() === "github.com")
+    return `https://github.com/${scp[2]}`;
   if (repository.startsWith("ssh://git@")) {
     const url = new URL(repository);
+    const hostname = url.hostname.toLowerCase();
+    const githubSsh =
+      hostname === "github.com" && (url.port === "" || url.port === "22");
     const githubSshOverHttps =
-      url.hostname.toLowerCase() === "ssh.github.com" && url.port === "443";
-    // Keep nondefault SSH ports distinct from the default HTTPS repository.
-    const host = githubSshOverHttps
-      ? "github.com"
-      : url.port === "22"
-        ? url.hostname
-        : url.host;
-    return `https://${host}${url.pathname}`;
+      hostname === "ssh.github.com" && url.port === "443";
+    if (githubSsh || githubSshOverHttps)
+      return `https://github.com${url.pathname}`;
   }
   return repository;
 }

@@ -143,7 +143,10 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
   expect(contactedCloud).toBe(false);
 });
 
-async function fixture(records: unknown = [normalized()]) {
+async function fixture(
+  records: unknown = [normalized()],
+  repositoryUrl = "https://github.com/example/project",
+) {
   const root = await mkdtemp(join(tmpdir(), "external-findings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "selected findings.json");
@@ -185,7 +188,7 @@ async function fixture(records: unknown = [normalized()]) {
     id: options.repository,
     object: "security.repository",
     repo_connector_id: "github",
-    url: "https://github.com/example/project",
+    url: repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
     import_environment_id: state.environmentId,
@@ -2959,20 +2962,77 @@ test.each([
 );
 
 test.each([
-  "git@github.com:other/project.git",
-  "ssh://git@github.com:2222/example/project.git",
-  "ssh://git@ssh.github.com:2222/example/project.git",
-  "ssh://git@git.example.test:443/example/project.git",
+  [
+    "git@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  ["git@github.com:other/project.git", "https://github.com/example/project"],
+  [
+    "ssh://git@github.com:2222/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:2222/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:2222/example/project.git",
+    "https://git.example.test:2222/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:443/example/project.git",
+    "https://git.example.test:443/example/project",
+  ],
+  [
+    "ssh://git@github.com:2222/example/project.git",
+    "https://github.com:2222/example/project",
+  ],
+  [
+    "ssh://git@github.com:443/example/project.git",
+    "https://github.com:443/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com:2222/example/project.git",
+    "https://tenant.ghe.com:2222/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:2222/example/project.git",
+    "https://ssh.github.com:2222/example/project",
+  ],
 ])(
-  "Snyk plugin repository claim %s binds both publication entrypoints",
-  async (repository) => {
+  "Snyk plugin repository claim %s cannot target %s",
+  async (repository, destination) => {
     const { snykPluginExport } =
       await import("./support/snyk-import-fixtures.js");
     const { normalizeSnykFindingsExport } =
       await import("../src/snyk-findings.js");
     const input = snykPluginExport();
     input.collection.target.repository = repository;
-    const f = await fixture(input);
+    const f = await fixture(input, destination);
     const selected = { ...options, provider: "snyk" as const };
     await expect(
       prepareExternalPublication(f.file, selected, f.deps),
@@ -2985,6 +3045,9 @@ test.each([
       ),
     ).rejects.toThrow("does not match the selected Cloud repository");
     expect(f.posts).toHaveLength(0);
+    expect(
+      normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data,
+    ).toMatchObject({ collection: input.collection });
   },
 );
 
