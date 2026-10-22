@@ -82,13 +82,17 @@ codex-security publish findings snyk-open-source.json --to cloud \
 Snyk exits 1 when it finds vulnerabilities. Other failures must stop acquisition;
 do not publish an older report after a failed scan. `snyk test --json` emits the
 same result to stdout. A single project object and the array produced by
-`--all-projects` under one scan root are supported. Keep independent scan roots
+`--all-projects` under one scan root are supported. For multiple projects, replace
+`--file=package.json` with `--all-projects --fail-fast` and keep the exit-code
+handling above. Snyk's [`--fail-fast` option](https://github.com/snyk/cli/blob/main/help/cli-commands/test.md#--fail-fast)
+stops the scan when a project fails. Without it, Snyk continues and omits
+vulnerability results for projects it could not scan. Keep independent scan roots
 in separate reports and source keys; identical manifest and dependency paths from
-different roots otherwise have ambiguous identities. A project error stops the import, including an
-error mixed with successful results. A successful empty scan has zero findings;
-a license-only report instead lists its records as exclusions. Use the default
-ungrouped JSON output; `--group-issues` combines package and dependency-path fields
-and is not supported.
+different roots otherwise have ambiguous identities. A project error in the
+supplied JSON stops the import, including an error mixed with successful results.
+A successful empty scan has zero findings; a license-only report instead lists
+its records as exclusions. Use the default ungrouped JSON output;
+`--group-issues` combines package and dependency-path fields and is not supported.
 
 The mapper follows the CLI's [native result types and dependency-path producer](https://github.com/snyk/cli/blob/main/src/lib/snyk-test/legacy.ts).
 It preserves the complete selected vulnerability and the surrounding project
@@ -107,7 +111,8 @@ To store this JSON locally, use the same file, provider and source key with
 
 Existing Open Source SARIF exports are still accepted. Generate one with
 `snyk test --file=package.json --sarif-file-output=snyk-open-source.sarif` and
-handle the exit code as above. Import with `--provider snyk` and a stable source
+handle the exit code as above. For multiple projects, use `--all-projects --fail-fast`
+with the same exit-code handling. Import with `--provider snyk` and a stable source
 key ending in `sarif-sca`. The mapper follows the
 [Open Source SARIF formatter](https://github.com/snyk/cli/blob/main/src/lib/formatters/open-source-sarif-output.ts).
 It retains the selected rule, result and report context. Unrelated artifact
