@@ -1210,7 +1210,8 @@ replace a richer evidence snapshot with less detail. The importer does not merge
 evidence or deduplicate equivalent vulnerabilities across different source IDs.
 
 Use the same vendor input and parser as Cloud publication, selecting a local
-repository path instead of a Cloud repository ID or URL:
+repository path instead of a Cloud repository ID or URL. Supported inputs include
+Wiz findings and [Snyk Open Source JSON and SARIF](#import-snyk-open-source-findings):
 
 ```bash
 codex-security publish findings selected-wiz.json \
@@ -1250,6 +1251,68 @@ Codex Security's findings schema as a saved scan; they do not accept vendor
 exports.
 
 ## Publish findings to Cloud
+
+### Import Snyk Open Source findings
+
+Import **Open Source SCA vulnerabilities only**. Licenses, Code, Container, IaC,
+SBOM results and platform backlog ingestion are outside this adapter.
+
+Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
+with its `snyk-findings-export` skill to collect SCA findings from the repository's
+Git root. It runs a fresh local scan and writes a `snyk-findings-export/v1` bundle;
+it does not retrieve existing platform project findings.
+
+The same saved bundle supports [local import](#import-vendor-findings-locally)
+without a Cloud login:
+
+```sh
+codex-security publish findings snyk-findings.json --to local \
+  --provider snyk --repository ./project \
+  --source-key github.com/example/project/main/root/plugin-sca --dry-run
+```
+
+Or preview publication to a connected Cloud repository:
+
+```sh
+codex-security publish findings snyk-findings.json --to cloud \
+  --provider snyk --repository https://github.com/example/project \
+  --source-key github.com/example/project/main/root/plugin-sca --dry-run
+```
+
+Check the collection's scan outcomes and limitations. Only Open Source SCA
+vulnerabilities are imported; other products and licenses are explicit exclusions.
+The importer retains the selected finding, native MCP record and collection
+context. MCP may shorten descriptions and omit dependency paths. Plugin paths
+remain in original evidence because v1 lacks their offset from the Git root.
+
+For automation, prefer native JSON from
+`snyk test --file=package.json --json-file-output=snyk.json`. Exit 1 means findings;
+stop on other nonzero exits before importing. The existing `--provider snyk`
+autodetects a single project object or an `--all-projects` array; any project error
+stops the import. Use default ungrouped output, without `--group-issues`.
+Native JSON preserves individual dependency paths and remediation fields. Its
+paths remain original evidence because it does not establish their Git-root offset.
+
+Open Source SARIF from `snyk test --sarif-file-output=snyk.sarif` remains supported
+for compatibility. Its target-relative manifest paths and synthetic line numbers
+remain original evidence, without being projected as repository locations or
+package manifest paths. All three formats accept either destination. Use a consistent
+format and stable source key per repository, branch and scan target, for example
+`github.com/example/project/main/root/native-sca` for native JSON. Their source
+identities differ: use separate keys when switching acquisition formats. Imports
+do not deduplicate across formats or remove earlier imported records.
+
+Known repository claims must
+match the selected Cloud repository or, when available, a configured local Git
+remote. Unknown repository context still requires selecting the correct target;
+the importer does not infer provenance from the current checkout.
+
+Remove `--dry-run` from the selected command to review and confirm the import, or
+use `--yes` after reviewing the preview. Read local records with
+`codex-security findings imported ./project --format json`. Imported source
+evidence is not a Codex assessment. No Snyk-side triage state is changed. See the
+[Snyk import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) for format limits and
+acquisition details.
 
 ### Import Wiz findings
 

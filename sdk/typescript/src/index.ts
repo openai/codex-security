@@ -312,3 +312,9 @@ export type {
 } from "./validation-records.js";
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  normalizeSnykFindingsExport,
+  normalizeSnykJson,
+  normalizeSnykSarif,
+  readSnykFindings,
+} from "./snyk-findings.js";

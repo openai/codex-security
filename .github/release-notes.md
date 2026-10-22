@@ -15,6 +15,7 @@
 - serialize patch project trust overrides correctly ([#1861](https://github.com/openai/codex-security/pull/1861))
 - add local report import and readback ([#1848](https://github.com/openai/codex-security/pull/1848))
 - import repository vulnerability CSV reports ([#1693](https://github.com/openai/codex-security/pull/1693))
+- import Open Source JSON findings ([#1687](https://github.com/openai/codex-security/pull/1687))
 
 <!-- release-section: highlights:end -->
 

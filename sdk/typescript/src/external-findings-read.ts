@@ -4,13 +4,14 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 
 /** File readers available in this SDK, shared by local and Cloud imports. */
 export interface ExternalFindingsReaderOptions {
-  provider: "wiz";
+  provider: "wiz" | "snyk";
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -24,8 +25,19 @@ export interface ReadExternalFindings {
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
-  _options: ExternalFindingsReaderOptions,
+  options: ExternalFindingsReaderOptions,
 ): Promise<ReadExternalFindings> {
+  if (options.provider === "snyk") {
+    const findings = await readSnykFindings(path);
+    return {
+      findings,
+      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
+        snykRepositoryUrls(evidence.source_data, {
+          normalizeGitRemote: false,
+        }).map((url) => ({ url })),
+      ),
+    };
+  }
   const publication = await readVendorFindingsForPublication(path);
   // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(

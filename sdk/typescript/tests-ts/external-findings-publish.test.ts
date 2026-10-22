@@ -143,7 +143,11 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
   expect(contactedCloud).toBe(false);
 });
 
-async function fixture(records: unknown = [normalized()]) {
+async function fixture(
+  records: unknown = [normalized()],
+  repositoryUrl = "https://github.com/example/project",
+  repoConnectorId = "github",
+) {
   const root = await mkdtemp(join(tmpdir(), "external-findings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "selected findings.json");
@@ -184,8 +188,8 @@ async function fixture(records: unknown = [normalized()]) {
   const destination = () => ({
     id: options.repository,
     object: "security.repository",
-    repo_connector_id: "github",
-    url: "https://github.com/example/project",
+    repo_connector_id: repoConnectorId,
+    url: repositoryUrl,
     default_branch: "main",
     reset_marker: state.marker,
     import_environment_id: state.environmentId,
@@ -2771,4 +2775,508 @@ test("normalized SDK publication accepts Cloud providers without their file read
   expect(prepared.preview.source.provider).toBe("endor");
   expect((await prepared.publish()).verified).toBe(1);
   expect(JSON.parse(f.posts[0]!).source.provider).toBe("endor");
+});
+
+test.each([
+  { run: "scan-123" },
+  { run: { versionControlProvenance: "opaque scanner metadata" } },
+])(
+  "normalized Snyk publication preserves opaque source metadata: %j",
+  async (sourceData) => {
+    const original = normalized();
+    const finding = {
+      ...original,
+      evidence: validateExternalEvidence({
+        ...original.evidence,
+        source_data: sourceData,
+      }),
+    };
+    const f = await fixture();
+    const prepared = await prepareNormalizedExternalPublication(
+      { read: 1, findings: [finding], excluded: [] },
+      { ...options, provider: "snyk" },
+      f.deps,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    expect([...f.reports.values()][0]!.evidence.source_data).toEqual(
+      sourceData,
+    );
+  },
+);
+
+test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input = snykSarif();
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "snyk" as const,
+    sourceKey: "organization/project/main",
+  };
+  const first = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  const original = structuredClone([...f.reports.values()][0]!);
+  const second = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(second.counts.unchanged).toBe(1);
+  input.runs[0]!.results[0]!.message.text = "Updated source evidence";
+  await writeFile(f.file, JSON.stringify(input));
+  const third = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(third.counts.updated).toBe(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated.id).toBe(original.id);
+  expect(updated.canonical_finding_id).toBe(original.canonical_finding_id);
+  expect(updated.version).toBe(2);
+});
+
+test("Snyk CLI dry run selects its adapter without writing an import", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const f = await fixture(snykSarif());
+  const command = [...f.command, "--dry-run"];
+  command[command.indexOf("--provider") + 1] = "snyk";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
+test.each([
+  { uris: ["https://github.com/other/project"] },
+  {
+    uris: [
+      "https://github.com/example/project",
+      "https://github.com/other/project",
+    ],
+  },
+  { uris: ["https://github.com:443/example/project"] },
+])(
+  "Snyk source repository provenance binds both publication entrypoints: %p",
+  async ({ uris }) => {
+    const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+    const { normalizeSnykSarif } = await import("../src/snyk-findings.js");
+    const input: any = snykSarif();
+    input.runs[0].versionControlProvenance = uris.map((repositoryUri) => ({
+      repositoryUri,
+    }));
+    const f = await fixture(input);
+    const selected = { ...options, provider: "snyk" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(
+        normalizeSnykSarif(input),
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(f.reports.size).toBe(0);
+  },
+);
+
+test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
+  const { snykSarif } = await import("./support/snyk-import-fixtures.js");
+  const input: any = snykSarif();
+  input.runs[0].versionControlProvenance = [
+    {
+      repositoryUri: "https://GITHUB.COM/EXAMPLE/PROJECT.git",
+      revisionId: "synthetic-revision",
+    },
+  ];
+  const original = structuredClone(input);
+  const f = await fixture(input);
+  const selected = { ...options, provider: "snyk" as const };
+  const first = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(first.verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    run: {
+      versionControlProvenance: original.runs[0].versionControlProvenance,
+    },
+  });
+  const changedDestination = {
+    ...f.deps,
+    fetch: async (url: string, init: RequestInit) => {
+      const response = await f.deps.fetch(url, init);
+      if (new URL(url).pathname.endsWith("/repositories")) {
+        const body = await response.json();
+        body.data[0].url = "https://github.com/other/project";
+        return Response.json(body);
+      }
+      return response;
+    },
+  };
+  const posted = f.posts.length;
+  await expect(
+    prepareExternalPublication(f.file, selected, changedDestination),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(posted);
+  expect(input).toEqual(original);
+});
+
+async function snykRepositoryEvidence(
+  format: "plugin" | "SARIF",
+  repository: string,
+) {
+  const { snykPluginExport, snykSarif } =
+    await import("./support/snyk-import-fixtures.js");
+  const { normalizeSnykFindingsExport, normalizeSnykSarif } =
+    await import("../src/snyk-findings.js");
+  if (format === "plugin") {
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    return {
+      input,
+      normalized: normalizeSnykFindingsExport(input),
+      original: { collection: input.collection, finding: input.findings[0] },
+    };
+  }
+  const sarif = snykSarif();
+  const provenance = [{ repositoryUri: repository }];
+  const input = {
+    ...sarif,
+    runs: sarif.runs.map((run) => ({
+      ...run,
+      versionControlProvenance: provenance,
+    })),
+  };
+  return {
+    input,
+    normalized: normalizeSnykSarif(input),
+    original: { run: { versionControlProvenance: provenance } },
+  };
+}
+
+const snykRepositoryAliases: [string, string][] = [
+  [
+    "https://github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  ["git@github.com:example/project.git", "https://github.com/example/project"],
+  [
+    "ssh://git@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@github.com:22/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  // Preserve the existing generic git-user aliases for connected catalog hosts.
+  [
+    "git@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "git@GIT.EXAMPLE.TEST:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "https://git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+];
+
+test.each([
+  ...snykRepositoryAliases.flatMap(([repository, destination]) =>
+    (["plugin", "SARIF"] as const).map(
+      (format) => [format, repository, destination] as const,
+    ),
+  ),
+  ["plugin", "unknown", "https://github.com/example/project"] as const,
+])(
+  "Snyk %s export imports and replays with repository remote %s",
+  async (format, repository, destination) => {
+    const { input, normalized, original } = await snykRepositoryEvidence(
+      format,
+      repository,
+    );
+    const f = await fixture(input, destination, "connector-selected");
+    const selected = {
+      ...options,
+      provider: "snyk" as const,
+      sourceKey: "example/project/main/plugin-sca",
+    };
+    const first = await (
+      await prepareExternalPublication(f.file, selected, f.deps)
+    ).publish();
+    expect(first.counts.created).toBe(1);
+    expect(first.verified).toBe(1);
+    expect(JSON.parse(f.posts[0]!).repository.repo_connector_id).toBe(
+      "connector-selected",
+    );
+    expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject(
+      original,
+    );
+    const second = await (
+      await prepareNormalizedExternalPublication(normalized, selected, f.deps)
+    ).publish();
+    expect(second.counts.unchanged).toBe(1);
+  },
+);
+
+const snykRepositoryMismatches: [string, string][] = [
+  ...["\t", "\r", "\n"].flatMap((control): [string, string][] => [
+    [
+      `ssh://git@github.${control}com/example/project.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://git@github.com/example/pro${control}ject.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://tenant@tenant.${control}ghe.com/example/project.git`,
+      "https://tenant.ghe.com/example/project",
+    ],
+    [
+      `ssh://tenant@tenant.ghe.com/example/pro${control}ject.git`,
+      "https://tenant.ghe.com/example/project",
+    ],
+    [
+      `ssh://git@ssh.github.${control}com:443/example/project.git`,
+      "https://github.com/example/project",
+    ],
+    [
+      `ssh://git@ssh.github.com:443/example/pro${control}ject.git`,
+      "https://github.com/example/project",
+    ],
+  ]),
+  [
+    "ssh://tenant@other:synthetic@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@other:@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://git@other:synthetic@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@other:@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://te\nnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://te\tnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://te\rnant@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://gi\nt@github.com/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://tenant@other@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "other@tenant.ghe.com:example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://other@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "https://other.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@git.example.test/example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "ssh://tenant@api.tenant.ghe.com/example/project.git",
+    "https://api.tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant:synthetic@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant:@tenant.ghe.com/example/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:443/example/project.git",
+    "https://tenant.ghe.com:443/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:22/example/project.git",
+    "https://tenant.ghe.com:443/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:other/project.git",
+    "https://tenant.ghe.com/example/project",
+  ],
+  [
+    "ssh://tenant@ssh.github.com:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "tenant@tenant.ghe.com:example/project.git",
+    "http://tenant.ghe.com/example/project",
+  ],
+  ["git@github.com:other/project.git", "https://github.com/example/project"],
+  [
+    "ssh://git@github.com:2222/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:2222/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:443/example/project.git",
+    "https://github.com/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:2222/example/project.git",
+    "https://git.example.test:2222/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:443/example/project.git",
+    "https://git.example.test:443/example/project",
+  ],
+  [
+    "ssh://git@github.com:2222/example/project.git",
+    "https://github.com:2222/example/project",
+  ],
+  [
+    "ssh://git@github.com:443/example/project.git",
+    "https://github.com:443/example/project",
+  ],
+  [
+    "ssh://tenant@tenant.ghe.com:2222/example/project.git",
+    "https://tenant.ghe.com:2222/example/project",
+  ],
+  [
+    "ssh://git@ssh.github.com:2222/example/project.git",
+    "https://ssh.github.com:2222/example/project",
+  ],
+  [
+    "git@other.example.test:example/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@git.example.test:other/project.git",
+    "https://git.example.test/example/project",
+  ],
+  [
+    "git@git.example.test:example/project.git",
+    "https://git.example.test:443/example/project",
+  ],
+  [
+    "ssh://git@git.example.test:22/example/project.git",
+    "https://git.example.test:22/example/project",
+  ],
+  [
+    "ssh://git@git.example.test/example/project.git",
+    "http://git.example.test/example/project",
+  ],
+];
+
+test.each([
+  ...snykRepositoryMismatches.flatMap(([repository, destination]) =>
+    (["plugin", "SARIF"] as const).map(
+      (format) => [format, repository, destination] as const,
+    ),
+  ),
+  ["SARIF", "unknown", "https://github.com/example/project"] as const,
+])(
+  "Snyk %s repository claim %s cannot target %s",
+  async (format, repository, destination) => {
+    const { input, normalized, original } = await snykRepositoryEvidence(
+      format,
+      repository,
+    );
+    const f = await fixture(input, destination);
+    const selected = { ...options, provider: "snyk" as const };
+    await expect(
+      prepareExternalPublication(f.file, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(
+      prepareNormalizedExternalPublication(normalized, selected, f.deps),
+    ).rejects.toThrow("does not match the selected Cloud repository");
+    expect(f.posts).toHaveLength(0);
+    expect(normalized.findings[0]!.evidence.source_data).toMatchObject(
+      original,
+    );
+  },
+);
+
+test("native Snyk JSON publishes selected dependency occurrences and replays their evidence", async () => {
+  const { snykJson } = await import("./support/snyk-import-fixtures.js");
+  const input = snykJson();
+  const f = await fixture(input);
+  const selected = {
+    ...options,
+    provider: "snyk" as const,
+    sourceKey: "example/project/main/root/native-sca",
+  };
+  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  expect(prepared.preview.excluded).toEqual([]);
+  const first = await prepared.publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence).toMatchObject({
+    locations: [],
+    packages: [{ name: "@example/package", manifest_path: null }],
+    source_data: { vulnerability: input.vulnerabilities[0] },
+  });
+  const second = await (
+    await prepareExternalPublication(f.file, selected, f.deps)
+  ).publish();
+  expect(second.counts.unchanged).toBe(1);
 });

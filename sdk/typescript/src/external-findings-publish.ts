@@ -29,6 +29,7 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { snykRepositoryUrls } from "./snyk-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -709,6 +710,11 @@ async function preparePublicationInput(
         finding.evidence.details?.repository?.url,
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
+          : []),
+        ...(options.provider === "snyk"
+          ? snykRepositoryUrls(finding.evidence.source_data, {
+              cloudRepositoryUrl: destination.url,
+            })
           : []),
       ];
       for (const sourceRepository of sourceRepositories)
