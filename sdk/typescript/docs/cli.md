@@ -1261,11 +1261,13 @@ network findings are not supported by this repository importer. Cloud destinatio
 currently support connected GitHub and GitHub Enterprise repositories, including
 custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations.
 
-Use an authorized Wiz connection to acquire findings. If a Wiz plugin is available
-in your Codex workspace, use its MCP connection; otherwise configure
-[Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or use the Wiz API.
-The publisher reads the selected records saved by that connection. It does not
-fetch from Wiz or require a manual website download.
+Use an authorized [Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or Wiz API
+connection to acquire findings and save the supported native JSON. A configured
+plugin may provide that connection; an official Codex plugin is not a prerequisite.
+The publisher reads the saved records. It does not fetch from Wiz or require a
+manual website download. The acquisition path still needs validation against
+actual responses from an authorized Wiz tenant; local parser checks do not
+establish that qualification.
 
 Inspect the connection's actual response before importing it. MCP summaries,
 Wiz Issues, and local Wiz CLI scan results are not automatically compatible with
@@ -1291,11 +1293,19 @@ Before the first import:
    login. API-key-only and keyring-only logins are not supported for Cloud
    publication. See the credential-storage instructions below.
 
-Saved package-vulnerability reports are also supported. In Wiz **Vulnerability
-Findings**, retain the repository and finding filters, choose **Save as → Report**,
-select **Repository Branch**, **JSON**, and **Detailed** columns, then download
-the completed report. Gzip is detected regardless of the filename extension.
-**Raw Event** on Code & Build Scans contains scan metadata rather than findings.
+Prefer the supported native JSON. Existing package-vulnerability CSV reports are
+accepted as a compatibility input. **CSV support covers repository package
+vulnerabilities (SCA) only; it does not add SAST, cloud posture (CSPM), or complete
+Wiz code-to-cloud coverage.** The named JSON readers described below handle their
+respective finding families separately.
+
+When a UI report is needed, retain the repository and finding filters in Wiz
+**Vulnerability Findings**, choose **Save as → Report**, select **Repository
+Branch**, **JSON** or **CSV**, and **Detailed** columns, then download the completed
+report. CSV must use the columns described below and a comma delimiter. Plain and
+gzip-compressed JSON or CSV are accepted; gzip is detected regardless of the
+filename extension. **Raw Event** on Code & Build Scans contains scan metadata
+rather than findings.
 
 For an alternate Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its
 API root before previewing or uploading, for example
@@ -1342,12 +1352,33 @@ exclusions. `--dry-run --format json` retains all normalized findings and comple
 evidence for inspection. A prompt explicitly includes any records that will be
 skipped.
 
-Package input can be a downloaded Wiz JSON vulnerability report, a vulnerability
+Native package input can be a Wiz JSON vulnerability report, a vulnerability
 finding, an array, a complete `data.vulnerabilityFindings.nodes` response, or JSONL
-with one package record per line. Plain and gzip-compressed files are accepted.
+with one package record per line. The repository package-vulnerability CSV
+profile below is also supported. Plain and gzip-compressed files are accepted.
 A response that advertises another page is rejected. Complete the requested pages
 or save only the explicitly selected records; retain the named collection for
-SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
+SAST, repository secrets, and IaC.
+
+The CSV mapper requires `ID`, `Name`, `DetailedName`, `AssetID`, `WizURL`,
+`CloudPlatform`, and `CloudProviderURL`. Check the actual report headers against
+this profile; other Wiz report types use different fields.
+For repository imports, `CloudPlatform` must identify GitHub and
+`CloudProviderURL` must identify a repository branch. The repository URL must
+match the selected Cloud repository or, for local import, one of the checkout's
+Git remotes when configured. This also applies when the parsed findings are saved and
+read again as normalized JSONL. Other resource types are excluded.
+
+CSV imports use `ID` as the occurrence identity and retain every parsed field,
+including unknown columns and quoted multiline values, in `source_data.row`.
+Severity comes from `Severity`, then `VendorSeverity`, then `CVSSSeverity`.
+Vendor resolution status stays in the original evidence. The importer does not
+derive a branch or revision from a tree URL, or treat last-detected time as a
+record-update timestamp. Duplicate headers, damaged CSV rows, invalid UTF-8,
+and duplicate occurrence IDs among otherwise importable records stop the import.
+Review any excluded records in the preview before publishing.
+
+Normalized JSONL is also accepted:
 
 ```json
 {
@@ -1360,7 +1391,7 @@ SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
 }
 ```
 
-Use Wiz's finding `id`, not a CVE, as identity. Keep the source key stable across
+Use Wiz's finding `id` (`ID` in CSV), not a CVE, as identity. Keep the source key stable across
 exports; a selected project filter does not change the vendor namespace. Confirm
 that the selected assets or builds map to this repository. The raw Wiz adapter
 retains each record in `source_data`, uses reported severity, and leaves unknown
@@ -1448,7 +1479,7 @@ does not establish that it is deployed. Precise original timestamps remain in
 timestamps.
 
 Native SAST and secret report downloads can be CSV, including gzip-compressed
-CSV. CSV is not parsed directly. Convert a selected report with a reviewed mapping
+CSV. Those CSV profiles are not parsed directly. Convert a selected report with a reviewed mapping
 for its actual column headers into normalized JSONL, preserving each original row
 in `source_data`. Set `details.kind` and `details.repository.url` explicitly after
 verifying the source repository. Use the same prefixed occurrence ID shown above

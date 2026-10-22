@@ -3,6 +3,7 @@ import type {
   ExternalPublicationInput,
   ExternalSourceRepository,
 } from "./external-findings.js";
+import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
@@ -29,6 +30,8 @@ export async function readExternalFindings(
   // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(
     ({ evidence }) => {
+      const csvUrl = wizCsvRepositoryUrl(evidence);
+      if (csvUrl) return [{ url: csvUrl, platform: "github" as const }];
       const asset = evidence.source_data?.["vulnerableAsset"];
       if (!isRecord(asset) || typeof asset["cloudProviderURL"] !== "string")
         return [];

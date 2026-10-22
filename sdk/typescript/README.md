@@ -665,6 +665,12 @@ options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
 
+For Wiz, prefer supported native JSON acquired through an authorized MCP or API
+connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
+repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or
+complete code-to-cloud coverage. Both formats support gzip. The acquisition path
+still needs validation with an authorized Wiz tenant.
+
 Use `publish findings FILE --to local --repository PATH --provider wiz
 --source-key KEY` to store the same vendor evidence in the local workbench SQLite
 database. Preview with `--dry-run --format json`, then confirm interactively or

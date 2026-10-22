@@ -31,6 +31,7 @@ const distModules = [
   "external-findings-publish",
   "external-import-contract",
   "external-import-models",
+  "wiz-csv",
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
