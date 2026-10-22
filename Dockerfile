@@ -43,6 +43,7 @@ COPY --from=package /build/package/ /tmp/codex-security-package/
 
 RUN npm install --global --include=optional --no-audit --no-fund \
         /tmp/codex-security-package/*.tgz \
+    && node /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js --version \
     && codex-security --version \
     && codex-security bulk-scan --help \
     && rm -rf /tmp/codex-security-package \
