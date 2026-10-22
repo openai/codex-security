@@ -306,13 +306,22 @@ export function normalizeSemgrepSarif(
     const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
       record(r, "Semgrep rule"),
     );
+    const rulesById = new Map<
+      unknown,
+      { rule: Record<string, unknown>; index: number } | null
+    >();
+    for (const [index, rule] of rules.entries()) {
+      const id = rule["id"];
+      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
+    }
     const { runs: _runs, ...documentContext } = document;
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
     const { driver: _driver, ...toolContext } = tool;
     return array(run["results"] ?? [], "Semgrep results").map((result) => ({
       result,
-      rules,
+      rulesById,
+      hasRules: rules.length > 0,
       documentContext,
       runContext,
       driverContext,
@@ -321,7 +330,7 @@ export function normalizeSemgrepSarif(
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rules, ...context }, sourceFindingId) => {
+    ({ result: value, rulesById, hasRules, ...context }, sourceFindingId) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -335,13 +344,13 @@ export function normalizeSemgrepSarif(
           "This adapter supports Semgrep SAST; Supply Chain reports need separate qualification.",
         );
       const ruleId = requiredText(result["ruleId"], "Semgrep ruleId");
-      const matches = rules.filter((r) => r["id"] === ruleId);
-      if (matches.length > 1 || (rules.length > 0 && matches.length !== 1))
+      const selectedRule = rulesById.get(ruleId);
+      if (selectedRule === null || (hasRules && selectedRule === undefined))
         throw new Error(
           "Semgrep result must reference exactly one rule in its run.",
         );
-      const rule = matches[0];
-      const ruleIndex = rule === undefined ? undefined : rules.indexOf(rule);
+      const rule = selectedRule?.rule;
+      const ruleIndex = selectedRule?.index;
       if (
         result["ruleIndex"] !== undefined &&
         result["ruleIndex"] !== ruleIndex

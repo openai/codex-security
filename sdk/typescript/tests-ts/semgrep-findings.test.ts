@@ -642,6 +642,47 @@ test.each(["omitted", "empty"])(
   },
 );
 
+test("SARIF selects the exact rule ID and preserves its original index and GUID", () => {
+  const input: any = semgrepSarif();
+  const run = input.runs[0];
+  const rule = {
+    ...run.tool.driver.rules[0],
+    id: " example.synthetic-rule ",
+    guid: "synthetic-rule-guid",
+  };
+  run.tool.driver.rules.push(rule);
+  Object.assign(run.results[0], {
+    ruleId: rule.id,
+    ruleIndex: 1,
+    rule: { id: rule.id, index: 1, guid: rule.guid },
+  });
+  const output = normalizeSemgrepSarif(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]!.evidence.details?.rule?.id).toBe(rule.id);
+  expect(output.findings[0]!.evidence.source_data?.["rule"]).toEqual(rule);
+});
+
+test.each(["missing", "duplicate", "wrong index", "wrong GUID"])(
+  "SARIF excludes a result with a %s rule reference",
+  (kind) => {
+    const input: any = semgrepSarif();
+    const run = input.runs[0];
+    const rule = run.tool.driver.rules[0];
+    if (kind === "missing") rule.id = "another-rule";
+    else if (kind === "duplicate")
+      run.tool.driver.rules.push(structuredClone(rule));
+    else if (kind === "wrong index") run.results[0].ruleIndex = 1;
+    else {
+      rule.guid = "synthetic-rule-guid";
+      run.results[0].rule = { guid: "another-rule-guid" };
+    }
+    const output = normalizeSemgrepSarif(input);
+    expect(output.findings).toEqual([]);
+    expect(output.excluded).toHaveLength(1);
+  },
+);
+
 test.each([
   { ruleIndex: 0 },
   { ruleIndex: -1 },
