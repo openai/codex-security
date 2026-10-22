@@ -30,6 +30,7 @@ import {
 } from "./external-findings-read.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
+import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -716,6 +717,9 @@ async function preparePublicationInput(
           ? snykRepositoryUrls(finding.evidence.source_data, {
               cloudRepositoryUrl: destination.url,
             })
+          : []),
+        ...(options.provider === "endor"
+          ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
       ];
       for (const sourceRepository of sourceRepositories)

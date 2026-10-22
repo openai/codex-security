@@ -684,6 +684,10 @@ Open Source SARIF. Prefer JSON, and keep one format and stable source key per sc
 target; switching formats creates separate source identities. See
 [local imports](docs/cli.md#import-vendor-findings-locally).
 
+Use `--provider endor` with native Endor Finding JSON; existing endorctl SARIF is
+accepted as a lossy compatibility format. See
+[Endor imports](docs/cli.md#import-endor-labs-findings).
+
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,
 options)` accepts already normalized evidence, and

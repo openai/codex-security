@@ -1250,6 +1250,45 @@ supported vendor formats and evidence requirements apply locally and in Cloud.
 Codex Security's findings schema as a saved scan; they do not accept vendor
 exports.
 
+## Import Endor Labs findings
+
+For local or Cloud import, prefer complete native Finding JSON from authenticated
+`endorctl`, scoped to one project and context. Omit `--field-mask` and use
+`--list-all` to finish pagination:
+
+```sh
+endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
+  --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
+  --list-all --output-type json > endor-findings.json
+codex-security publish findings endor-findings.json --to local \
+  --provider endor --repository ./project \
+  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run
+```
+
+Replace the example namespace, project UUID and local repository with your selection.
+Review the preview, remove `--dry-run` to confirm, then read the stored evidence
+with `codex-security findings imported ./project --format json`. To publish to
+Cloud instead, use `--to cloud --repository "CLOUD_REPOSITORY_ID"` with the same
+file, provider and source key. The official
+[Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit)
+can help with setup and investigation, but summaries, counts and field-masked
+results do not replace complete Finding objects. `endorctl` reads the Endor API;
+the importer reads the saved export without maintaining an API connection or
+writing changes back to Endor.
+
+Native JSON retains severity, package and advisory data, primary SAST/AI SAST
+locations and the scanned commit. Existing self-contained endorctl SARIF 2.1.0
+reports are a lossy compatibility format, retaining finding links and UUIDs;
+unavailable severity and revisions stay unknown. Both formats use the Endor UUID
+within the selected repository and stable source key as identity. Importing SARIF
+after native JSON for that UUID updates the same record by replacing its evidence
+snapshot, not merging it. Native detail absent from SARIF is removed from the
+snapshot. Use native JSON consistently for ongoing imports.
+
+Local and Cloud records remain unassessed source evidence. Local imports use the
+SQLite readback described above; Cloud imports use the login, preview,
+confirmation and retry flow below.
+
 ## Publish findings to Cloud
 
 ### Import Snyk Open Source findings
