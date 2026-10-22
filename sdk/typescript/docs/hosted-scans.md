@@ -101,17 +101,16 @@ invalid hints produce per-finding owner errors. Neither invalid hints nor report
 failures invalidate sealed findings. A completed receipt includes the artifact
 when available, or `ownerSuggestionsError` if finalization fails.
 
-There are no `owner.infer` or `owner.cancel` protocol requests. Hosts only execute
-the normal scan request and capture its optional report. The legacy SDK
-`ownerCodex` option is unused by automatic scan reporting. The separate explicit
-`suggestOwners` API / `suggest-owners` command still supports model inference;
-automatic reporting instead uses `suggestOwnersFromScan` to validate recorded hints.
-Both entry points share CODEOWNERS precedence, Git evidence collection, identity
-validation and report formatting. Explicit owner-only jobs keep their own budget;
-an absent scan hint never starts such a job automatically.
-Owner reporting also works with the SDK's `maxCostUsd`: it requires no remaining
-inference budget. A scan that runs out of budget may not have recorded a hint;
-report generation does not start another turn to fill that gap.
+Hosts run the normal scan request and capture the optional owner report.
+Automatic reporting uses `suggestOwnersFromScan`; it does not use the legacy
+`ownerCodex` option or send `owner.infer` / `owner.cancel` requests.
+
+The standalone `suggestOwners` API and `suggest-owners` command can call a
+model under their own budget. Both paths use the same CODEOWNERS rules, Git
+evidence, identity checks, and report format.
+
+Report generation works after the scan reaches `maxCostUsd`. It uses the
+hints already recorded and never starts another model call to fill gaps.
 
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
