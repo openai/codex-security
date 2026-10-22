@@ -46,16 +46,22 @@ const musl = Bun.YAML.parse(
 const bashTest = test.skipIf(process.platform === "win32");
 
 bashTest(
-  "selects workflow checks for workflow changes and main pushes",
+  "selects workflow and runner checks for relevant changes and main pushes",
   async () => {
     const scope = ci.jobs["validate-title"]!.steps.find(
       (step) => step.name === "Select additional checks",
     )!;
     const directory = await mkdtemp(join(tmpdir(), "workflow-quality-"));
     try {
-      for (const [event, baseChanged, paths, expected] of [
+      for (const [
+        event,
+        baseChanged,
+        paths,
+        expected,
+        runnerExpected = "false",
+      ] of [
         ["push", false, [], "true"],
-        ["pull_request", true, [], "true"],
+        ["pull_request", true, [], "true", "true"],
         ["pull_request", false, [".github/workflows/node-release.yml"], "true"],
         [
           "pull_request",
@@ -86,6 +92,37 @@ bashTest(
         ["pull_request", false, ["docker/verify-container-compose.sh"], "true"],
         ["pull_request", false, ["sdk/typescript/src/index.ts"], "false"],
         ["pull_request", false, ["README.md"], "false"],
+        [
+          "pull_request",
+          false,
+          [".github/workflows/node-ci.yml"],
+          "true",
+          "true",
+        ],
+        [
+          "pull_request",
+          false,
+          [".github/workflows/test-quality.yml"],
+          "true",
+          "true",
+        ],
+        [
+          "pull_request",
+          false,
+          [".github/actions/setup-tools/action.yml"],
+          "true",
+          "true",
+        ],
+        ...[
+          "sdk/typescript/bunfig.toml",
+          "sdk/typescript/scripts/compare-test-reports.mts",
+          "sdk/typescript/scripts/prepare-windows-test-root.ps1",
+          "sdk/typescript/scripts/run-ci-tests.mts",
+          "sdk/typescript/scripts/test-shards.mts",
+          "sdk/typescript/scripts/test-timings.json",
+        ].map(
+          (path) => ["pull_request", false, [path], "false", "true"] as const,
+        ),
       ] as const) {
         const output = join(directory, "output");
         await rm(output, { force: true });
@@ -116,6 +153,7 @@ bashTest(
             .map((line) => line.split("=")),
         );
         expect(outputs["workflow-quality"], paths.join(",")).toBe(expected);
+        expect(outputs["test-quality"], paths.join(",")).toBe(runnerExpected);
       }
     } finally {
       await rm(directory, { recursive: true, force: true });

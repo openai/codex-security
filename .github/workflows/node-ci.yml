@@ -78,9 +78,16 @@ jobs:
                   ;;
                 .github/workflows/node-ci.yml | .github/actions/setup-tools/*)
                   container_validate=true
-                  test_quality=true
                   ;;
-                .github/workflows/test-quality.yml)
+              esac
+              case "$path" in
+                .github/workflows/node-ci.yml | .github/workflows/test-quality.yml | \
+                  .github/actions/setup-tools/* | sdk/typescript/bunfig.toml | \
+                  sdk/typescript/scripts/compare-test-reports.mts | \
+                  sdk/typescript/scripts/prepare-windows-test-root.ps1 | \
+                  sdk/typescript/scripts/run-ci-tests.mts | \
+                  sdk/typescript/scripts/test-shards.mts | \
+                  sdk/typescript/scripts/test-timings.json)
                   test_quality=true
                   ;;
               esac

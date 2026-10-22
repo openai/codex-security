@@ -94,6 +94,7 @@ test.each([
   ["pull_request", false, ".github/workflows/node-ci.yml", true],
   ["pull_request", false, ".github/actions/setup-tools/action.yml", true],
   ["pull_request", false, "sdk/typescript/src/index.ts", true],
+  ["pull_request", false, "sdk/typescript/scripts/run-ci-tests.mts", true],
   [
     "pull_request",
     false,

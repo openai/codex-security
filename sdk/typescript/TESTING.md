@@ -119,7 +119,8 @@ The requirements file is the single list of pinned Python test dependencies. Ruf
 - Add property tests for meaningful invariants, with accepted and rejected
   inputs. Keep example-based regression tests for readable failure cases.
 - Give parameterized cases distinct names. Use `%p`, `%j`, or `%#` for values
-  that are not strings. The JUnit comparison rejects duplicate identities.
+  that are not strings. Duplicate identities remain valid; the JUnit comparison
+  checks their occurrence and outcome counts.
 
 Property tests use a fixed default seed. Fast-check prints the seed, shrink
 path, and counterexample on failure. To replay one property, select its file
@@ -174,8 +175,10 @@ Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow or runner tooling. It compares
-Bun's default runner, `--isolate`, and `--parallel=2` on Linux, macOS, and Windows.
+and runs on pull requests that change its workflow, setup tools, Bun configuration,
+shard runner, timing metadata, report comparator, or Windows test-root helper.
+It compares Bun's default runner, `--isolate`, and `--parallel=2` on Linux, macOS,
+and Windows.
 Each mode uses the same duration-based file assignment and production shard count:
 three on Linux/macOS and seven on Windows. This gives 39 sharded runner jobs in place
 of 19 jobs that included an unsharded Windows baseline. It measures the production
