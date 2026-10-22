@@ -174,19 +174,30 @@ Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow file. It compares Bun's
-default runner, `--isolate`, `--parallel=2`, and seven-way Windows sharding.
-Every mode uses the same seed for property cases and test ordering: pull
-requests replay seed 1; scheduled and manual runs use the workflow run number.
-The workflow compares test identities and outcomes against the unsharded
-default run and records timings, including failed shards, in the job summary.
-It is not a required check or part of the release trigger.
+and runs on pull requests that change its workflow or runner tooling. It compares
+Bun's default runner, `--isolate`, and `--parallel=2` on Linux, macOS, and Windows.
+Each mode uses the same duration-based file assignment and production shard count:
+three on Linux/macOS and seven on Windows. This gives 39 sharded runner jobs in place
+of 19 jobs that included an unsharded Windows baseline. It measures the production
+partition rather than cross-file interactions across one unsharded suite; local
+full-suite runs still cover that ordering. More jobs add setup overhead, so compare
+workflow wall time and runner minutes, alongside shard test timings, before
+adopting a runner change.
 
-Runner trials use Bun 1.4.2 to avoid the
-[async-module initialization bug in 1.3.14](https://github.com/oven-sh/bun/issues/31410)
-that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
-release passes the full SDK suite in every mode. Required CI and the mutation
-trial remain on Bun 1.3.14.
+Every mode uses the same seed for property cases and test ordering: pull requests
+replay seed 1; scheduled and manual runs use the workflow run number. Reports have
+unique OS/mode/shard names. The workflow compares complete shard groups by test
+identity, outcome, and occurrence count, retaining legitimate repeated names from
+parameterized tests while detecting missing or extra instances. It records every
+shard's timing, including failed shards, in the job summary. It is not a required
+check or part of the release trigger.
+
+Runner trials use Bun 1.4.3, including the
+[isolated subprocess fix](https://github.com/oven-sh/bun/pull/44581).
+`--parallel=2` runs files in two worker processes and isolates each file; it does
+not make tests inside one file concurrent. Required CI and the mutation trial
+remain on Bun 1.3.14 until a newer release passes the full SDK suite in every mode
+on all three platforms.
 
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
