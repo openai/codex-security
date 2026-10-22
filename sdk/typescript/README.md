@@ -11,6 +11,9 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
 - Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
   findings to Linear or a findings service.
+- Import [Snyk Open Source findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md) from
+  official plugin JSON or native CLI JSON locally or into Cloud; Open Source
+  SARIF is also supported. License findings and other Snyk products are excluded.
 - Automate scans across repositories and project components.
 
 See the [CLI reference](docs/cli.md),
@@ -676,7 +679,10 @@ Use `publish findings FILE --to local --repository PATH --provider wiz
 database. Preview with `--dry-run --format json`, then confirm interactively or
 use `--yes`. Read it with `findings imported [REPOSITORY] --format json`; the
 repository defaults to the current directory. No Cloud login or model call is
-needed. See [local imports](docs/cli.md#import-vendor-findings-locally).
+needed. Use `--provider snyk` for native CLI JSON, a Snyk plugin SCA bundle or
+Open Source SARIF. Prefer JSON, and keep one format and stable source key per scan
+target; switching formats creates separate source identities. See
+[local imports](docs/cli.md#import-vendor-findings-locally).
 
 The SDK's `prepareLocalExternalImport(file, options)` returns a `preview` and a
 separate `import()` operation. `prepareNormalizedLocalImport(findings,

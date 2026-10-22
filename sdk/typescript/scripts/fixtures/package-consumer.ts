@@ -6,6 +6,7 @@ import {
   listLocalExternalFindings,
   type NormalizedLocalImportOptions,
   type StoredExternalFinding,
+  normalizeSnykFindingsExport,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type ExternalPublicationOptions,
@@ -391,4 +392,8 @@ export async function importLocalFile(
 ): Promise<StoredExternalFinding[]> {
   const prepared = await prepareLocalExternalImport(file, options);
   return (await prepared.import()).findings;
+}
+
+export function snykPluginFindings(bundle: unknown): ExternalFindings {
+  return normalizeSnykFindingsExport(bundle);
 }
