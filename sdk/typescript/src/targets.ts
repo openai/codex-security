@@ -759,6 +759,7 @@ export function gitOutput(
   workingDirectory?: string,
   encoding?: "utf8",
   protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
 ): Promise<string>;
 export function gitOutput(
   repository: string,
@@ -768,6 +769,7 @@ export function gitOutput(
   workingDirectory: string | undefined,
   encoding: "buffer",
   protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
 ): Promise<Buffer>;
 export async function gitOutput(
   repository: string,
@@ -777,6 +779,7 @@ export async function gitOutput(
   workingDirectory = repository,
   encoding: "utf8" | "buffer" = "utf8",
   protectedRoots: string | readonly string[] = [],
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -788,6 +791,7 @@ export async function gitOutput(
         (args[0] === "remote" &&
           (args.length === 1 ||
             (args[1] === "get-url" && args[2] === "--all"))),
+      sourceEnvironment,
     ),
     [
       (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,

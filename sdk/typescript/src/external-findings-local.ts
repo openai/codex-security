@@ -95,6 +95,7 @@ function remoteRepositoryKey(
   value: string,
   provider: Provider,
 ): string | undefined {
+  if (/^[A-Za-z]:[\\/]/u.test(value)) return undefined;
   let remote;
   try {
     remote = parseGitRemote(value);
@@ -105,12 +106,20 @@ function remoteRepositoryKey(
     return undefined;
   const url = remote.url;
   const protocol = url.protocol === "ssh:" ? "https:" : url.protocol;
-  const port = url.protocol === "ssh:" && url.port === "22" ? "" : url.port;
+  const githubSshOverHttps =
+    url.protocol === "ssh:" &&
+    url.hostname.toLowerCase() === "ssh.github.com" &&
+    url.port === "443";
+  const hostname = githubSshOverHttps ? "github.com" : url.hostname;
+  const port =
+    githubSshOverHttps || (url.protocol === "ssh:" && url.port === "22")
+      ? ""
+      : url.port;
   // A GitHub source identifies a case-insensitive repository on custom Enterprise
   // hosts too; other providers can refer to VCS hosts with case-sensitive paths.
   const key = provider === "github" ? cloudRepositoryUrlKey : repositoryUrlKey;
   return key(
-    `${protocol}//${url.hostname}${port ? `:${port}` : ""}/${remote.path}`,
+    `${protocol}//${hostname}${port ? `:${port}` : ""}/${remote.path}`,
   );
 }
 
@@ -119,6 +128,7 @@ async function requireMatchingRepository(
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
   protectedRoots: WorkbenchCommandOptions["protectedRoot"],
+  environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
 ): Promise<void> {
   if (sources.length === 0) return;
@@ -131,6 +141,7 @@ async function requireMatchingRepository(
       undefined,
       "utf8",
       protectedRoots,
+      environment,
     );
   let remoteNames: string;
   try {
@@ -179,10 +190,7 @@ async function localContext(
   selectedRepository: string,
   dependencies: LocalExternalImportDependencies,
   mode: "import" | "read" = "import",
-): Promise<{
-  repository: string;
-  options: Omit<WorkbenchCommandOptions, "python">;
-}> {
+) {
   dependencies.signal?.throwIfAborted();
   const environment = workbenchEnvironment(
     dependencies.environment ?? process.env,
@@ -195,7 +203,7 @@ async function localContext(
   const protectedRoot = [
     ...new Set([
       repository,
-      ...(await gitProtectionRoots(repository, dependencies.signal)),
+      ...(await gitProtectionRoots(path, dependencies.signal)),
       ...(await gitProtectionRoots(process.cwd(), dependencies.signal)),
     ]),
   ];
@@ -255,6 +263,7 @@ export async function prepareNormalizedLocalImport(
     options.provider,
     [...sources.values()],
     workbenchOptions.protectedRoot,
+    workbenchOptions.environment,
     dependencies.signal,
   );
   dependencies.signal?.throwIfAborted();
@@ -283,8 +292,26 @@ export async function prepareNormalizedLocalImport(
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
+      const protectedRoot = [
+        ...new Set([
+          ...workbenchOptions.protectedRoot,
+          ...(await gitProtectionRoots(process.cwd(), dependencies.signal)),
+        ]),
+      ];
+      requireOutputOutsideRepositories(
+        protectedRoot,
+        await abortable(
+          () =>
+            canonicalizeModelSafePath(
+              workbenchOptions.environment.CODEX_SECURITY_STATE_DIR,
+            ),
+          dependencies.signal,
+        ),
+        "runtime",
+      );
+      dependencies.signal?.throwIfAborted();
       const result = await (dependencies.runWorkbench ?? runWorkbench)(
-        workbenchOptions,
+        { ...workbenchOptions, protectedRoot },
         ["store-external-findings"],
         payload,
       );

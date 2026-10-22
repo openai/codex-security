@@ -238,6 +238,77 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
+  test("refreshes caller protections when importing a previously prepared payload", async () => {
+    const { root, repository, stateDirectory, environment } = await fixture();
+    const originalCaller = await fixture();
+    const nextCaller = await fixture();
+    const originalBin = join(originalCaller.repository, "tools");
+    const nextBin = join(nextCaller.repository, "tools");
+    const nextDirectory = join(nextCaller.repository, "src");
+    const unsafeState = join(nextCaller.repository, "state");
+    const marker = join(root, "caller-node-executed");
+    await Promise.all([
+      mkdir(originalBin),
+      mkdir(nextBin),
+      mkdir(nextDirectory),
+    ]);
+    await Promise.all(
+      [originalBin, nextBin].map((bin) =>
+        writeFile(
+          join(bin, process.platform === "win32" ? "node.exe" : "node"),
+          process.platform === "win32"
+            ? "untrusted executable fixture\n"
+            : '#!/bin/sh\nprintf executed > "$TEST_LOCAL_IMPORT_NODE_MARKER"\nexit 1\n',
+          { mode: 0o700 },
+        ),
+      ),
+    );
+    const inheritedPath = Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
+    const module = new URL("../src/external-findings-local.ts", import.meta.url)
+      .href;
+    const script = `
+      import { deepEqual, equal, rejects } from "node:assert/strict";
+      const { prepareNormalizedLocalImport } = await import(${JSON.stringify(module)});
+      const input = ${JSON.stringify(input())};
+      const options = ${JSON.stringify({ repository, ...source })};
+      const prepared = await prepareNormalizedLocalImport(input, options);
+      const unsafeEnvironment = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: ${JSON.stringify(unsafeState)},
+      };
+      const unsafe = await prepareNormalizedLocalImport(input, options, {
+        environment: unsafeEnvironment,
+      });
+      unsafeEnvironment.CODEX_SECURITY_STATE_DIR = ${JSON.stringify(stateDirectory)};
+      process.chdir(${JSON.stringify(nextDirectory)});
+      await rejects(unsafe.import(), /outside/);
+      const result = await prepared.import();
+      equal(result.repository, options.repository);
+      deepEqual(result.counts, { created: 2, updated: 0, unchanged: 0 });
+      console.log("IMPORTED");
+    `;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: originalCaller.repository,
+      encoding: "utf8",
+      env: {
+        ...Object.fromEntries(
+          Object.entries(environment).filter(
+            ([name]) => name.toUpperCase() !== "PATH",
+          ),
+        ),
+        PATH: [nextBin, originalBin, inheritedPath ?? ""].join(delimiter),
+        TEST_LOCAL_IMPORT_NODE_MARKER: marker,
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("IMPORTED");
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(unsafeState)).toBe(false);
+    expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
+  });
+
   test("cancels readback while repository path resolution is pending", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const module = new URL("../src/external-findings-local.ts", import.meta.url)
@@ -361,6 +432,77 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(join(repository, "state"))).toBe(false);
   });
 
+  test("protects the checkout containing a directory link when selecting another repository", async () => {
+    const { root, repository, stateDirectory, environment } = await fixture({
+      remote: "https://github.com/example/project",
+    });
+    const outer = await fixture();
+    const link = join(outer.repository, "linked-repository");
+    await symlink(
+      repository,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const unsafeState = join(outer.repository, "state");
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository: link, ...source },
+        {
+          environment: {
+            ...environment,
+            CODEX_SECURITY_STATE_DIR: unsafeState,
+          },
+        },
+      ),
+    ).rejects.toThrow("outside");
+
+    const bin = join(outer.repository, "tools");
+    const marker = join(root, "linked-checkout-git-executed");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, process.platform === "win32" ? "git.exe" : "git"),
+      process.platform === "win32"
+        ? "untrusted executable fixture\n"
+        : '#!/bin/sh\nprintf executed > "$TEST_LOCAL_IMPORT_GIT_MARKER"\nexit 1\n',
+      { mode: 0o700 },
+    );
+    const inheritedPath = Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
+    const selectedEnvironment = {
+      ...Object.fromEntries(
+        Object.entries(environment).filter(
+          ([name]) => name.toUpperCase() !== "PATH",
+        ),
+      ),
+      PATH: [bin, inheritedPath ?? ""].join(delimiter),
+      TEST_LOCAL_IMPORT_GIT_MARKER: marker,
+    };
+    const prepared = await prepareNormalizedLocalImport(
+      input(),
+      { repository: link, ...source },
+      {
+        environment: selectedEnvironment,
+        sourceRepositories: [{ url: "https://github.com/example/project" }],
+      },
+    );
+    expect(prepared.preview.repository).toBe(repository);
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository: link, ...source },
+        {
+          environment: selectedEnvironment,
+          sourceRepositories: [{ url: "https://github.com/example/other" }],
+        },
+      ),
+    ).rejects.toThrow("does not match a configured remote");
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(unsafeState)).toBe(false);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
   test("matches source repository context against SSH remotes and reader metadata", async () => {
     const { repository, stateDirectory, environment } = await fixture({
       remote: "git@github.com:Example/Project.git",
@@ -410,6 +552,50 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
+  test.each(["ssh.github.com", "SSH.GITHUB.COM"])(
+    "matches %s over the HTTPS port without equating other SSH ports",
+    async (host) => {
+      const { repository, stateDirectory, environment } = await fixture({
+        remote: `ssh://git@${host}:443/example/project.git`,
+      });
+      const dependencies = {
+        environment,
+        sourceRepositories: [{ url: "https://github.com/example/project" }],
+      };
+      await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        dependencies,
+      );
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          {
+            environment,
+            sourceRepositories: [{ url: "https://github.com/example/other" }],
+          },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+      execFileSync("git", [
+        "-C",
+        repository,
+        "remote",
+        "set-url",
+        "origin",
+        "ssh://git@ssh.github.com:2222/example/project.git",
+      ]);
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          dependencies,
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
   test.each(["local", "global"])(
     "matches all effective fetch URLs with %s Git URL rewrites",
     async (scope) => {
@@ -456,6 +642,123 @@ describe("local normalized scanner findings", () => {
         env: gitEnvironment,
       });
       expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
+  test.each(["HOME", "GIT_CONFIG_GLOBAL"])(
+    "isolates concurrent injected %s configurations without redirecting the selected repository",
+    async (setting) => {
+      const { root, repository, stateDirectory, environment } = await fixture({
+        remote: "gh:project.git",
+      });
+      const other = await fixture({
+        remote: "https://github.com/redirected/project",
+      });
+      const configurations = await Promise.all(
+        ["first", "second"].map(async (name) => {
+          const home = join(root, name);
+          await mkdir(home);
+          const config = join(home, ".gitconfig");
+          await writeFile(
+            config,
+            `[url "https://github.com/${name}/"]\n\tinsteadOf = gh:\n`,
+          );
+          return {
+            url: `https://github.com/${name}/project`,
+            environment: {
+              ...environment,
+              ...(setting === "HOME" ? { HOME: home, USERPROFILE: home } : {}),
+              GIT_CONFIG_GLOBAL:
+                setting === "GIT_CONFIG_GLOBAL" ? config : undefined,
+              XDG_CONFIG_HOME: join(home, "config"),
+              GIT_CONFIG_NOSYSTEM: "1",
+              GIT_DIR: join(other.repository, ".git"),
+              GIT_WORK_TREE: other.repository,
+            },
+          };
+        }),
+      );
+      const originalEnvironments = configurations.map((configuration) => ({
+        ...configuration.environment,
+      }));
+      await Promise.all(
+        configurations.map((configuration) =>
+          prepareNormalizedLocalImport(
+            input(),
+            { repository, ...source },
+            {
+              environment: configuration.environment,
+              sourceRepositories: [{ url: configuration.url }],
+            },
+          ),
+        ),
+      );
+      await Promise.all(
+        configurations.map((configuration, index) =>
+          expect(
+            prepareNormalizedLocalImport(
+              input(),
+              { repository, ...source },
+              {
+                environment: configuration.environment,
+                sourceRepositories: [{ url: configurations[1 - index]!.url }],
+              },
+            ),
+          ).rejects.toThrow("does not match a configured remote"),
+        ),
+      );
+      expect(
+        configurations.map((configuration) => configuration.environment),
+      ).toEqual(originalEnvironments);
+      expect(existsSync(stateDirectory)).toBe(false);
+      expect(existsSync(other.stateDirectory)).toBe(false);
+    },
+  );
+
+  test.each([
+    "C:\\repos\\source",
+    "C:/repos/source",
+    "/synthetic/repos/source",
+    "file:///C:/repos/source",
+  ])(
+    "ignores local remote %s while enforcing any network remote",
+    async (remote) => {
+      const { repository, stateDirectory, environment } = await fixture({
+        remote,
+      });
+      const dependencies = {
+        environment,
+        sourceRepositories: [{ url: "https://github.com/example/project" }],
+      };
+      await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        dependencies,
+      );
+      execFileSync("git", [
+        "-C",
+        repository,
+        "remote",
+        "add",
+        "upstream",
+        "https://github.com/example/project",
+      ]);
+      await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        dependencies,
+      );
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          {
+            environment,
+            sourceRepositories: [{ url: "https://github.com/example/other" }],
+          },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
       expect(existsSync(stateDirectory)).toBe(false);
     },
   );
