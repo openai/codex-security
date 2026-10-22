@@ -67,16 +67,8 @@ To use Codex's Daybreak toggle, pass `--codex daybreak=true`. It defaults off
 and requires compatible access. See [Daybreak configuration](sdk/typescript/docs/cli.md#daybreak-opt-in)
 for SDK and plugin usage, including Deep Scan workers.
 
-Scans use your existing `SECURITY.md` guidance. To define or update it,
-optionally [draft a policy](#generate-securitymd):
-
-```bash
-cs policy .
-```
-
-The draft is saved outside your repository. Review the diff and notes, edit the
-draft, then copy only `SECURITY.md` to the **Policy target** shown. You can scan
-without generating a policy.
+Scans use your existing `SECURITY.md` guidance. You can optionally
+[draft or update a policy](#generate-securitymd) before scanning.
 
 To run without a global installation, replace `cs` in these examples with
 `npx @openai/codex-security`, for example:

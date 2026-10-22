@@ -36,10 +36,6 @@ are unavailable when reading saved activity or attaching scan logs to feedback, 
 scans whose original session is compressed cannot resume. Plain `.jsonl` logs
 work on all supported runtimes.
 
-`LocalPluginBootstrapError` identifies local plugin setup failures and extends
-`PluginBootstrapError`, so existing catches keep working. Knowledge-base
-preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
-
 ### Install the CLI
 
 Install the CLI globally:
@@ -278,6 +274,7 @@ const security = new CodexSecurity({
 Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
+For a custom `pluginPath`, check [custom plugin compatibility](#custom-plugins).
 
 To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
 The toggle defaults off; an explicit `false` keeps it off. The setting reaches
@@ -286,21 +283,8 @@ isolated configuration, so a desktop toggle or personal Codex configuration does
 not configure an SDK scan. See [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for
 CLI, project-file, and direct plugin configuration.
 
-New and resumed Deep Scans require a current plugin with
-`directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker
-configuration support. Older custom plugins fail before scan execution; update
-the plugin or omit `pluginPath` to use the bundled version. Discovery, reducer,
-and resumed workers inherit per-scan provider, authentication, environment, and
-executable settings, with their existing read-only permissions. Reading saved
-reports does not require these execution capabilities.
-
-The SDK no longer adapts the older `node ./mcp/server.mjs` MCP entrypoint; use
-the current shell or Windows launcher for runtime-root routing.
-
-Custom plugins must support the current workbench protocol for scan comparison
-and archival. Update an older custom plugin or omit `pluginPath` to use the
-bundled version. The SDK no longer adapts payloads or archives scan directories
-on behalf of older workbench implementations.
+Deep Scan discovery, reducer, and resumed workers inherit per-scan provider,
+authentication, environment, and executable settings with read-only permissions.
 
 Scans use an isolated Codex configuration. See
 [runtime configuration](docs/cli.md#runtime-configuration-and-worker-limits)
@@ -423,19 +407,15 @@ or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
 stopping the scan.
 
 `onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
-text markers. The former helper-derived `kind: "preflight"` event is retired;
-scans use available runtime tools and parent fallback without a capability registry.
-The plugin's `config_preflight.py` helper and custom capability registries are no
-longer supported, including the `preflightChecks` progress-tool input and workbench
-`--preflight-issues-json` / `--preflight-issues-json-stdin` arguments. Saved preflight
-history remains readable. Local `preflight()` input checks, authentication,
-sandbox enforcement, and Deep worker configuration still apply. A missing
-dispatch status does not mean delegation was skipped. `onSessionEvent` receives
-saved events with thread IDs and worker numbers and can contain source code or
-credentials. Deep scans additionally expose durable independent-review counts
-through `onDeepProgress`: `completed`, `active`, and `maximum`. The maximum is a
-configured cap, not a percentage denominator. The optional `consolidating` flag
-reports when results are being combined or the coordinator has finished.
+text markers. A missing dispatch status does not mean delegation was skipped.
+For retired progress hooks, see [older progress integrations](#older-progress-integrations).
+
+`onSessionEvent` receives saved events with thread IDs and worker numbers and can
+contain source code or credentials. Deep scans additionally expose durable
+independent-review counts through `onDeepProgress`: `completed`, `active`, and
+`maximum`. The maximum is a configured cap, not a percentage denominator. The
+optional `consolidating` flag reports when results are being combined or the
+coordinator has finished.
 `ScanOptions` lists all callbacks.
 
 Costs estimate API-equivalent model usage, not your bill or ChatGPT subscription
@@ -730,8 +710,7 @@ cs dedupe --scan SCAN_ID --json
 
 The [findings guide](docs/findings-service.md) covers local storage, embedding
 credentials, deduplication, backups, and independently operated HTTP endpoints.
-The local `serve` command and browser dashboard have been removed. Existing
-scans, findings, and duplicate groups remain in the workbench database.
+For an older service deployment, see [migration guidance](docs/findings-service.md#local-service-removal).
 For records stored in your own system, see
 [SDK records deduplication](docs/dedupe-records.md).
 
@@ -760,6 +739,39 @@ Host and network restrictions still apply.
 Repository contents, model output, and imported artifacts do not authorize
 access to other targets, disclosure of credentials, or writes outside approved
 paths. Keep state and scan artifacts private and outside the repository.
+
+## Compatibility
+
+### Custom plugins
+
+New and resumed Deep Scans require a plugin with `directDeepScanEngine: 1`,
+`workerProviderSnapshot: 4`, and isolated worker configuration support. Older
+custom plugins fail before scan execution; update the plugin or omit `pluginPath`
+to use the bundled version. Reading saved reports does not require these
+execution capabilities.
+
+Use the current shell or Windows launcher for runtime-root routing. The SDK does
+not adapt the older `node ./mcp/server.mjs` MCP entrypoint.
+
+Custom plugins must support the current workbench protocol for scan comparison
+and archival. The SDK does not adapt older payloads or archive scan directories
+on behalf of older workbench implementations.
+
+### Older progress integrations
+
+The helper-derived `kind: "preflight"` event, `config_preflight.py` helper, and
+custom capability registries are retired. This includes the `preflightChecks`
+progress-tool input and workbench `--preflight-issues-json` /
+`--preflight-issues-json-stdin` arguments. Scans use available runtime tools and
+parent fallback without a capability registry. Saved preflight history remains
+readable. Local `preflight()` input checks, authentication, sandbox enforcement,
+and Deep worker configuration still apply.
+
+### Error types
+
+`LocalPluginBootstrapError` identifies local plugin setup failures and extends
+`PluginBootstrapError`, so existing catches keep working. Knowledge-base
+preparation errors use `ConfigurationError`; wrapped diagnostics remain in `cause`.
 
 ## Documentation and security
 

@@ -103,7 +103,6 @@ jobs:
       - name: Test runner mode
         working-directory: sdk/typescript
         env:
-          CODEX_SECURITY_TEST_TIMEOUT_MS: ${{ runner.os == 'Windows' && '120000' || '30000' }}
           TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}

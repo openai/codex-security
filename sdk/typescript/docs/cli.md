@@ -23,6 +23,28 @@ findings file in local scan history, use
 GitHub import returns upstream alerts for validation; file import saves findings
 without running security analysis.
 
+## Find a workflow
+
+- [Sign in or configure a provider](#authentication).
+- [Scan a repository or selected paths](#scan-options-and-output),
+  [configure a Deep Scan](#configure-deep-scans), or
+  [save project settings](#project-files).
+- [Review one system across repositories](#review-one-system-across-repositories)
+  or [run independent bulk scans](#bulk-scans).
+- [Import vendor findings locally](#import-vendor-findings-locally),
+  [save findings as a scan](#import-findings-as-a-saved-scan), or
+  [retrieve GitHub alerts](#import-alerts-from-the-cli).
+- [Inspect saved scans and rerun them](#scan-history-and-reruns),
+  [classify severity](#classify-finding-severity), or
+  [suggest owners](#suggest-finding-owners).
+- [Validate and patch findings](#validate-and-patch-findings) or
+  [verify an existing fix](#verify-fixes).
+- [Publish to Cloud](#publish-findings-to-cloud) or
+  [Linear](#publish-completed-scans-to-linear), or [export results](#exports-and-ci).
+- [Draft a security policy](#generate-a-security-policy).
+- [Use a hosted executor](#hosted-standard-scan) or
+  [run bulk scans in containers](#containerized-bulk-scans).
+
 ## Authentication
 
 Sign in with ChatGPT, or supply an API key for CI:
@@ -739,16 +761,9 @@ not to planning, result matching, or the total campaign.
 
 ### Configure deep scans
 
-```ts
-await security.run("/path/to/repository", {
-  mode: "deep",
-  workers: 2,
-  subagents: 0,
-  stopAfterNoNew: 3,
-  stopAfterConsecutiveErrors: 2,
-  maxDiscoveryRuns: 10,
-  maxTimeMinutes: 90,
-});
+```bash
+codex-security scan . --mode deep --workers 2 --subagents 0 \
+  --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
 For `scan --mode deep`, `--workers` controls discovery concurrency and
@@ -757,11 +772,13 @@ For `scan --mode deep`, `--workers` controls discovery concurrency and
 or duration. At the deadline, discovery stops; the scan then combines and returns
 completed findings.
 
+For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
+
 Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
 that `subagents` can be zero. Discovery time accepts positive fractional minutes;
-its default and maximum remain 5760 minutes (96 hours). Unlike Standard's
-advisory allowance, this existing Deep discovery limit is enforced. Resuming a
+its default and maximum are 5760 minutes (96 hours). Unlike Standard's
+advisory allowance, the Deep discovery limit is enforced. Resuming a
 Deep scan keeps its original deadline; rerunning starts a new scan.
 `--max-time-hours`, SDK `maxTimeHours`, project `scan.deep.max_time_hours`, and
 legacy TOML `deep_scan.max_time_hours` remain deprecated Deep-only aliases in
@@ -1366,6 +1383,8 @@ network findings are not supported by this repository importer. Cloud destinatio
 currently support connected GitHub and GitHub Enterprise repositories, including
 custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations.
 
+#### Select findings and a destination
+
 Use an authorized [Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or Wiz API
 connection to acquire findings and save the supported native JSON. A configured
 plugin may provide that connection; an official Codex plugin is not a prerequisite.
@@ -1412,6 +1431,8 @@ gzip-compressed JSON or CSV are accepted; gzip is detected regardless of the
 filename extension. **Raw Event** on Code & Build Scans contains scan metadata
 rather than findings.
 
+#### Configure an alternate Cloud deployment
+
 For an alternate Cloud deployment, set `CODEX_SECURITY_CLOUD_BASE_URL` to its
 API root before previewing or uploading, for example
 `https://cloud.example.test/backend-api/aardvark`. Remote APIs require HTTPS;
@@ -1431,6 +1452,8 @@ deployment settings. The preview and result include a repository-specific
 the return link; all API requests still use `CODEX_SECURITY_CLOUD_BASE_URL`.
 For custom API destinations without a configured app URL, completion retains
 the manual navigation guidance rather than guessing a UI host or port.
+
+#### Preview and publish
 
 Preview the selection and destination:
 
@@ -1456,6 +1479,8 @@ shows up to five finding IDs and titles, and identifies the evidence file and
 exclusions. `--dry-run --format json` retains all normalized findings and complete
 evidence for inspection. A prompt explicitly includes any records that will be
 skipped.
+
+#### Package vulnerability inputs
 
 Native package input can be a Wiz JSON vulnerability report, a vulnerability
 finding, an array, a complete `data.vulnerabilityFindings.nodes` response, or JSONL
@@ -1506,6 +1531,8 @@ source-code locations. It does not
 fetch from Wiz, assess findings, or change vendor or Cloud triage decisions.
 Findings from external network scans are excluded from this package vulnerability
 mapping.
+
+#### SAST, repository secrets, and IaC inputs
 
 For SAST, repository secrets, and IaC, save the documented JSON API collection:
 
@@ -1565,6 +1592,8 @@ collection:
 }
 ```
 
+#### Preserved evidence
+
 The adapters preserve each selected raw node exactly in `source_data`. Typed
 `evidence.details` carries `kind`, verified `repository`, vendor `source_status`,
 and family-specific evidence:
@@ -1582,6 +1611,8 @@ does not establish that it is deployed. Precise original timestamps remain in
 `source_data`; only an explicit record-update timestamp maps to the whole-second
 `source_updated_at` field. SAST creation time and IaC last-seen time are not update
 timestamps.
+
+#### Convert CSV reports
 
 Native SAST and secret report downloads can be CSV, including gzip-compressed
 CSV. Those CSV profiles are not parsed directly. Convert a selected report with a reviewed mapping
@@ -1607,6 +1638,8 @@ Inputs must be valid UTF-8. Integer-valued evidence outside JavaScript's safe
 integer range is rejected; export those values as strings to preserve them
 exactly. Invalid records appear in `excluded` with their source ID and reason.
 
+#### Resume interrupted imports
+
 Requests contain at most 100 findings and respect the Cloud payload limits.
 Before uploading, the publisher saves request IDs and bodies privately under
 the configured Codex Security state directory. After an uncertain response,
@@ -1617,6 +1650,8 @@ their account and repository IDs match. The preview and result include
 API endpoint, not a link to the Cloud UI. A reset
 retires the old request without republishing; review and explicitly approve a
 fresh invocation.
+
+#### Results and exit codes
 
 Results distinguish completion from partial or interrupted work:
 
@@ -1768,7 +1803,7 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` runs classification with the [built-in severity rubric](../src/default-severity-rubric.ts).
+Omitting `--rubric` runs classification with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
 from severity; missing proof alone does not justify a downgrade. An explicit
@@ -2721,6 +2756,10 @@ scan, triage, patch, and verification workflows, see the
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).
 
+### Hosted Standard scan
+
+`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor. Use it alone; it never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.
+
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans), then run
@@ -2760,7 +2799,3 @@ capabilities, no-new-privileges, and seccomp policy. Hosts that permit nested us
 namespaces do not need it. The legacy Landlock fallback is unsupported.
 See the [Docker guide](https://github.com/openai/codex-security/blob/main/docker/README.md)
 for deployment and source-build instructions.
-
-### Hosted Standard scan
-
-`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor. Use it alone; it never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.

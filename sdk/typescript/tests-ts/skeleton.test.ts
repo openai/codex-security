@@ -560,10 +560,6 @@ describe("TypeScript package skeleton", () => {
     );
     expect(execution).toMatchObject({
       "working-directory": "sdk/typescript",
-      env: {
-        CODEX_SECURITY_TEST_TIMEOUT_MS:
-          "${{ runner.os == 'Windows' && '120000' || '30000' }}",
-      },
     });
     expect(execution?.run).toContain(
       "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }} ${{ matrix.mode.args }}",
