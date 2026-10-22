@@ -186,7 +186,8 @@ adopting a runner change.
 
 Every mode uses the same seed for property cases and test ordering: pull requests
 replay seed 1; scheduled and manual runs use the workflow run number. Reports have
-unique OS/mode/shard names. The workflow compares complete shard groups by test
+unique OS/mode/shard names. The workflow requires every expected shard report
+before accepting comparisons, then compares complete shard groups by test
 identity, outcome, and occurrence count, retaining legitimate repeated names from
 parameterized tests while detecting missing or extra instances. It records every
 shard's timing, including failed shards, in the job summary. It is not a required

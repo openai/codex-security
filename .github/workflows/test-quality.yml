@@ -136,7 +136,24 @@ jobs:
         shell: bash
         run: |
           comparison_status=0
+          shopt -s nullglob
           for os in ubuntu-latest macos-latest windows-latest; do
+            shards=3
+            if [[ "$os" == windows-latest ]]; then shards=7; fi
+            for mode in baseline isolated parallel; do
+              reports=(reports/runner-"$os"-"$mode"-*.xml)
+              if (( ${#reports[@]} != shards )); then
+                echo "Expected $shards reports for $os/$mode, found ${#reports[@]}" >&2
+                comparison_status=1
+              fi
+              for ((shard=1; shard<=shards; shard++)); do
+                report="reports/runner-$os-$mode-$shard.xml"
+                if [[ ! -f "$report" ]]; then
+                  echo "Missing shard report: $report" >&2
+                  comparison_status=1
+                fi
+              done
+            done
             for mode in isolated parallel; do
               node --experimental-strip-types sdk/typescript/scripts/compare-test-reports.mts "reports/runner-$os-baseline-*.xml" "reports/runner-$os-$mode-*.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
             done

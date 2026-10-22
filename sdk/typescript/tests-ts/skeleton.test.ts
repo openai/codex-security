@@ -499,15 +499,6 @@ describe("TypeScript package skeleton", () => {
       "false",
     );
     expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
-    for (let shard = 1; shard <= 7; shard += 1) {
-      expect(
-        quality.jobs["runner"]?.strategy?.matrix["include"],
-      ).toContainEqual({
-        os: "windows-latest",
-        mode: `shard-${shard}`,
-        args: `--shard=${shard}/7`,
-      });
-    }
   });
 
   test("keeps runner modes reproducible and report uploads rerunnable", async () => {
@@ -518,36 +509,56 @@ describe("TypeScript package skeleton", () => {
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
     expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
-    expect(runner.strategy?.matrix["mode"]).toEqual([
-      "baseline",
-      "isolated",
-      "parallel",
-    ]);
-    for (const [mode, args] of [
-      ["baseline", ""],
-      ["isolated", "--isolate"],
-      ["parallel", "--parallel=2"],
+    const unixMatrix = ci.jobs["test"]!.strategy!.matrix;
+    const unixShards = unixMatrix["shard"] as number[];
+    const windowsShards = ci.jobs["windows-test"]!.strategy!.matrix[
+      "shard"
+    ] as number[];
+    expect(runner.strategy?.matrix).toEqual({
+      target: [
+        ...(unixMatrix["os"] as string[]).flatMap((os) =>
+          unixShards.map((shard) => ({ os, shard, count: unixShards.length })),
+        ),
+        ...windowsShards.map((shard) => ({
+          os: "windows-latest",
+          shard,
+          count: windowsShards.length,
+        })),
+      ],
+      mode: [
+        { name: "baseline", args: "" },
+        { name: "isolated", args: "--isolate" },
+        { name: "parallel", args: "--parallel=2" },
+      ],
+    });
+    for (const [job, version] of [
+      [runner, "1.4.3"],
+      [ci.jobs["test"]!, "1.3.14"],
+      [ci.jobs["windows-test"]!, "1.3.14"],
+      [quality.jobs["mutation"]!, "1.3.14"],
     ] as const) {
-      expect(runner.strategy?.matrix["include"]).toContainEqual({
-        mode,
-        args,
-      });
+      expect(
+        job
+          .steps!.filter((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
+          .map((step) => step.with?.["bun-version"]),
+      ).toEqual([version]);
     }
-    for (let shard = 1; shard <= 7; shard += 1) {
-      expect(runner.strategy?.matrix["include"]).toContainEqual({
-        os: "windows-latest",
-        mode: `isolated-${shard}`,
-        args: `--isolate --shard=${shard}/7`,
-      });
-    }
-    const command = runner.steps!.find(
+    const execution = runner.steps!.find(
       (step) => step.name === "Test runner mode",
-    )?.run;
-    expect(command).toContain(
-      "${{ runner.os == 'Windows' && '--timeout=120000' || '' }}",
     );
-    expect(command).toContain("${{ matrix.args }}");
-    expect(command).toContain("--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}");
+    expect(execution).toMatchObject({
+      "working-directory": "sdk/typescript",
+      env: {
+        CODEX_SECURITY_TEST_TIMEOUT_MS:
+          "${{ runner.os == 'Windows' && '120000' || '30000' }}",
+      },
+    });
+    expect(execution?.run).toContain(
+      "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }} ${{ matrix.mode.args }}",
+    );
+    expect(execution?.run).toContain(
+      "--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}",
+    );
 
     const uploads = [...Object.values(ci.jobs), ...Object.values(quality.jobs)]
       .flatMap((job) => job.steps ?? [])
@@ -558,9 +569,13 @@ describe("TypeScript package skeleton", () => {
     expect(
       uploads.find((step) => step.name === "Upload mutation report"),
     ).toMatchObject({ "continue-on-error": true });
-    expect(
-      uploads.find((step) => step.name === "Upload runner report"),
-    ).not.toHaveProperty("continue-on-error");
+    const runnerUpload = uploads.find(
+      (step) => step.name === "Upload runner report",
+    );
+    expect(runnerUpload).not.toHaveProperty("continue-on-error");
+    expect(runnerUpload?.with?.["name"]).toBe(
+      "runner-${{ matrix.target.os }}-${{ matrix.mode.name }}-${{ matrix.target.shard }}",
+    );
     expect(
       quality.jobs["mutation"]?.steps!.find(
         (step) => step.name === "Run mutation trial",

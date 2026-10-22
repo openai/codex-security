@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { bashCommand, readSubprocess } from "./support/shell.js";
@@ -32,6 +32,43 @@ async function fixtures() {
   };
 }
 
+async function workflowFixtures() {
+  const fixture = await fixtures();
+  const workflow = Bun.YAML.parse(
+    await readFile(
+      new URL("../../../.github/workflows/test-quality.yml", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    jobs: {
+      runner: {
+        strategy: {
+          matrix: {
+            target: Array<{ os: string; shard: number }>;
+            mode: Array<{ name: string }>;
+          };
+        };
+      };
+      compare: { steps: Array<{ name?: string; run?: string }> };
+    };
+  };
+  await mkdir(join(fixture.root, "reports"));
+  const { target, mode } = workflow.jobs.runner.strategy.matrix;
+  for (const { os, shard } of target) {
+    for (const { name } of mode) {
+      await fixture.report(`reports/runner-${os}-${name}-${shard}.xml`, [
+        testcase(`${os} shard ${shard}`),
+      ]);
+    }
+  }
+  return {
+    ...fixture,
+    script: workflow.jobs.compare.steps.find(
+      (step) => step.name === "Compare inventories and outcomes",
+    )!.run!,
+  };
+}
+
 function testcase(name: string, status = "") {
   return `<testcase file="tests-ts/example.test.ts" classname="example" name="${name}">${status}</testcase>`;
 }
@@ -54,18 +91,8 @@ async function compare(baseline: string, ...candidates: string[]) {
 
 describe("JUnit inventory comparison", () => {
   test("runs every workflow comparison before reporting a mismatch", async () => {
-    const fixture = await fixtures();
-    const workflow = Bun.YAML.parse(
-      await readFile(
-        new URL("../../../.github/workflows/test-quality.yml", import.meta.url),
-        "utf8",
-      ),
-    ) as {
-      jobs: { compare: { steps: Array<{ name?: string; run?: string }> } };
-    };
-    const script = workflow.jobs.compare.steps.find(
-      (step) => step.name === "Compare inventories and outcomes",
-    )!.run!;
+    const fixture = await workflowFixtures();
+    const script = fixture.script;
     const expected = [
       "ubuntu-latest",
       "macos-latest",
@@ -103,6 +130,71 @@ describe("JUnit inventory comparison", () => {
       );
     }
   });
+
+  for (const scenario of [
+    { name: "missing Linux shard", os: "ubuntu-latest", missing: 3 },
+    { name: "missing Windows shard", os: "windows-latest", missing: 7 },
+    {
+      name: "missing shard replaced by an unexpected index",
+      os: "ubuntu-latest",
+      missing: 3,
+      extra: 4,
+    },
+    { name: "extra shard", os: "windows-latest", extra: 8 },
+  ]) {
+    test(`rejects identically incomplete workflow groups: ${scenario.name}`, async () => {
+      const fixture = await workflowFixtures();
+      for (const mode of ["baseline", "isolated", "parallel"]) {
+        if (scenario.missing !== undefined) {
+          await rm(
+            join(
+              fixture.root,
+              `reports/runner-${scenario.os}-${mode}-${scenario.missing}.xml`,
+            ),
+          );
+        }
+        if (scenario.extra !== undefined) {
+          await fixture.report(
+            `reports/runner-${scenario.os}-${mode}-${scenario.extra}.xml`,
+            [testcase("unexpected shard")],
+          );
+        }
+      }
+      const child = Bun.spawn({
+        cmd: [
+          bash,
+          "-e",
+          "-o",
+          "pipefail",
+          "-c",
+          `node() { printf '%s\\n' "$3|$4"; }\n${fixture.script}`,
+        ],
+        cwd: fixture.root,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+        env: { ...process.env, GITHUB_STEP_SUMMARY: "summary.md" },
+        timeout: 10_000,
+      });
+      const { status, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(1);
+      if (scenario.missing !== undefined) {
+        expect(stderr).toContain(
+          `Missing shard report: reports/runner-${scenario.os}-baseline-${scenario.missing}.xml`,
+        );
+      } else {
+        expect(stderr).toContain(
+          `Expected 7 reports for ${scenario.os}/baseline, found 8`,
+        );
+      }
+      // Missing artifacts must not prevent the other OS/mode diagnostics.
+      expect(
+        (await readFile(join(fixture.root, "summary.md"), "utf8"))
+          .trim()
+          .split(/\r?\n/u),
+      ).toHaveLength(6);
+    });
+  }
 
   test("merges native shards without depending on test order", async () => {
     const fixture = await fixtures();
