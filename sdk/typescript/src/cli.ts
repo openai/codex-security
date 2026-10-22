@@ -26,6 +26,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  opendir,
   mkdtemp,
   readFile,
   readdir,
@@ -209,6 +210,7 @@ import {
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
   errorMessage,
+  scanCostLimitFailureMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -9016,6 +9018,20 @@ function incurErrorMessage(output: string): string {
   return typeof parsed === "string" ? parsed : message;
 }
 
+async function hasPartialOutput(path: string): Promise<boolean> {
+  try {
+    for await (const _entry of await opendir(path)) return true;
+    return false;
+  } catch (error: unknown) {
+    return !(
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    );
+  }
+}
+
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticLines(value: unknown): string {
@@ -9806,12 +9822,21 @@ async function executeScan(
     }
   }
 
+  const partialOutput =
+    (failed || requestedSignal !== null) &&
+    scanDir !== null &&
+    (await hasPartialOutput(scanDir));
+
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
+      partial_output: partialOutput,
     });
-    const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
+    const exitCode = interruptedExit(
+      requestedSignal,
+      partialOutput ? scanDir : null,
+      errorOutput,
+    );
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
       exitCode,
@@ -9828,11 +9853,19 @@ async function executeScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(
-            failure,
-            selectedAuthentication,
-            providerOptions.provider,
-          );
+        : costLimitFailure !== undefined
+          ? diagnosticValue(
+              scanCostLimitFailureMessage(
+                costLimitFailure.maxCostUsd,
+                costLimitFailure.cost,
+                partialOutput ? costLimitFailure.scanDir : null,
+              ),
+            )
+          : scanFailureMessage(
+              failure,
+              selectedAuthentication,
+              providerOptions.provider,
+            );
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -9840,7 +9873,7 @@ async function executeScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
+      partial_output: partialOutput,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
       cost_estimate:
@@ -9849,7 +9882,11 @@ async function executeScan(
           : formatScanCost(costLimitFailure.cost),
     });
     errorOutput.write(`${message}\n`);
-    if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
+    if (
+      !(failure instanceof ScanInterruptedError) &&
+      partialOutput &&
+      scanDir !== null
+    ) {
       errorOutput.write(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
@@ -10397,7 +10434,7 @@ function printFailedScanReference(
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
-      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+      `Output directory: ${diagnosticValue(scan["scanDir"])}\n` +
         "Inspect the saved scan status before choosing resume or rerun.\n",
     );
     const prompts = [

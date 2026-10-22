@@ -96,11 +96,20 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     cost: Readonly<ScanCost>,
     scanDir: string,
   ) {
-    super(
-      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; partial output remains at ${scanDir}.`,
-      scanDir,
-    );
+    super(scanCostLimitFailureMessage(maxCostUsd, cost, scanDir), scanDir);
     this.maxCostUsd = maxCostUsd;
     this.cost = cost;
   }
+}
+
+export function scanCostLimitFailureMessage(
+  maxCostUsd: number,
+  cost: Readonly<ScanCost>,
+  scanDir: string | null,
+): string {
+  const output =
+    scanDir === null
+      ? "no partial output was kept"
+      : `partial output remains at ${scanDir}`;
+  return `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; ${output}.`;
 }
