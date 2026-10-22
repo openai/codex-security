@@ -428,6 +428,7 @@ describe("TypeScript package skeleton", () => {
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
       ["Check MCP formatting", "static-checks"],
+      ["Audit production dependencies", "static-checks"],
     ] as const) {
       expect(
         jobs[job]!.steps!.filter((step) => step.name === name),
