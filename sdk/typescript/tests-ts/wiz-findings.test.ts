@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { gzipSync } from "node:zlib";
+import { isDeepStrictEqual } from "node:util";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -580,7 +581,7 @@ async function cloudFixture(payload: unknown) {
       const results = request.items.map((item) => {
         const previous = reports.get(item.source_finding_id);
         const outcome = previous
-          ? JSON.stringify(previous.evidence) === JSON.stringify(item.evidence)
+          ? isDeepStrictEqual(previous.evidence, item.evidence)
             ? "unchanged"
             : "updated"
           : "created";
@@ -753,6 +754,342 @@ test("a wrong source repository stops raw and normalized imports before source l
   expect(
     await readdir(join(f.root, "state")).catch(() => undefined),
   ).toBeUndefined();
+});
+
+const csvRow: Record<string, string> = {
+  ID: "csv-occurrence-1",
+  WizURL: "https://app.wiz.io/vulnerability-findings/csv-occurrence-1",
+  Name: "CVE-2026-0001",
+  DetailedName: "example-package",
+  AssetID: "synthetic-repository-branch",
+  AssetName: "example/project/feature/parser",
+  CloudPlatform: "GitHub",
+  CloudProviderURL: "https://github.com/example/project/tree/feature/parser",
+  Severity: "HIGH",
+  VendorSeverity: "LOW",
+  CVSSSeverity: "CRITICAL",
+  Description: 'A quoted "description", with a comma.\r\nAnd another line.',
+  LocationPath: "/package-lock.json",
+  Version: "1.0.0",
+  FixedVersion: "2.0.0",
+  DetectionMethod: "Library",
+  FindingStatus: "Resolved",
+  LastDetected: "2026-01-02T03:04:05Z",
+};
+
+function csvReport(
+  rows: Record<string, string>[],
+  headers = Object.keys(rows[0] ?? csvRow),
+): string {
+  const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+  return [headers, ...rows.map((row) => headers.map((key) => row[key] ?? ""))]
+    .map((cells) => cells.map(quote).join(","))
+    .join("\r\n");
+}
+
+test.each(["", "\n \r\n"])(
+  "JSONL retains CSV-like column names as evidence with prefix %j",
+  async (prefix) => {
+    const f = await fixture({});
+    const records = ["first", "second"].map((id) => ({
+      source_finding_id: id,
+      evidence: {
+        title: "Synthetic normalized finding",
+        severity: "high",
+        source_data: { columns: ["extra", ...Object.keys(csvRow), "other"] },
+      },
+    }));
+    await writeFile(
+      f.file,
+      prefix + records.map((record) => JSON.stringify(record)).join("\r\n"),
+    );
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings.map((finding) => finding.source_finding_id)).toEqual(
+      ["first", "second"],
+    );
+    expect(
+      parsed.findings.map((finding) => finding.evidence.source_data),
+    ).toEqual(records.map((record) => record.evidence.source_data));
+  },
+);
+
+test.each(["plain", "gzip", "bom"])(
+  "Wiz Code CSV maps source claims and retains every original cell (%s)",
+  async (encoding) => {
+    const f = await fixture({});
+    const csv = csvReport([csvRow]);
+    await writeFile(
+      f.file,
+      encoding === "gzip"
+        ? gzipSync(csv)
+        : (encoding === "bom" ? "\ufeff" : "") + csv,
+    );
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.read).toBe(1);
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings[0]).toMatchObject({
+      source_finding_id: "csv-occurrence-1",
+      evidence: {
+        title: "example-package 1.0.0 CVE-2026-0001",
+        description: csvRow["Description"],
+        severity: "high",
+        advisory_ids: ["CVE-2026-0001"],
+        packages: [
+          {
+            name: "example-package",
+            ecosystem: null,
+            installed_version: "1.0.0",
+            manifest_path: "package-lock.json",
+            fixed_versions: ["2.0.0"],
+          },
+        ],
+        locations: [{ path: "package-lock.json", line: null }],
+        branch: null,
+        code_revision: null,
+        source_scan_id: null,
+        source_updated_at: null,
+        source_data: { format: "wiz-code-vulnerability-csv", row: csvRow },
+      },
+    });
+    expect(parsed.findings[0]!.evidence.details).toBeUndefined();
+  },
+);
+
+test("Wiz CSV keeps opaque columns and formula-like text without interpreting them", async () => {
+  const row = Object.fromEntries([
+    ...Object.entries(csvRow),
+    ["__proto__", '{"admin":true}'],
+    ["constructor", "opaque constructor"],
+    ["source_finding_id", "opaque source id"],
+    ["evidence", "opaque evidence"],
+    ["Extra", "'=SUM(1,2)"],
+  ]);
+  const f = await fixture({});
+  await writeFile(f.file, csvReport([row]));
+  const parsed = await readVendorFindings(f.file);
+  expect(parsed.excluded).toEqual([]);
+  expect(parsed.findings[0]!.source_finding_id).toBe(csvRow["ID"]!);
+  expect(parsed.findings[0]!.evidence.source_data!["row"]).toEqual(row);
+  expect(
+    Object.getPrototypeOf(parsed.findings[0]!.evidence.source_data!["row"]),
+  ).toBe(Object.prototype);
+});
+
+test.each([
+  {
+    Severity: "",
+    VendorSeverity: "MEDIUM",
+    CVSSSeverity: "HIGH",
+    expected: "medium",
+  },
+  { Severity: "", VendorSeverity: "", CVSSSeverity: "LOW", expected: "low" },
+  {
+    Severity: "Informational",
+    VendorSeverity: "",
+    CVSSSeverity: "",
+    expected: "informational",
+  },
+])(
+  "Wiz CSV uses the reported severity fallback %j",
+  async ({ expected, ...severity }) => {
+    const f = await fixture({});
+    await writeFile(f.file, csvReport([{ ...csvRow, ...severity }]));
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.findings[0]!.evidence.severity).toBe(expected);
+  },
+);
+
+test.each([
+  { ID: "" },
+  { AssetID: "" },
+  { DetailedName: "" },
+  { Severity: "not-a-severity" },
+  { CloudPlatform: "AWS" },
+  { CloudProviderURL: "https://github.com/example/project" },
+  { CloudProviderURL: "not a URL" },
+  { LocationPath: "/../outside/package.json" },
+  { LocationPath: "C:\\outside\\package.json" },
+] as Record<string, string>[])(
+  "Wiz CSV excludes a malformed or unsupported occurrence without losing other rows: %j",
+  async (change) => {
+    const f = await fixture({});
+    await writeFile(
+      f.file,
+      csvReport([csvRow, { ...csvRow, ID: "bad-row", ...change }]),
+    );
+    const parsed = await readVendorFindings(f.file);
+    expect(parsed.read).toBe(2);
+    expect(parsed.findings.map((finding) => finding.source_finding_id)).toEqual(
+      [csvRow["ID"]!],
+    );
+    expect(parsed.excluded).toHaveLength(1);
+    expect(parsed.excluded[0]!.position).toBe(2);
+  },
+);
+
+test("Wiz CSV accepts an empty report and never uses an advisory as occurrence identity", async () => {
+  const f = await fixture({});
+  await writeFile(f.file, csvReport([]));
+  expect(await readVendorFindings(f.file)).toEqual({
+    read: 0,
+    findings: [],
+    excluded: [],
+  });
+  await writeFile(
+    f.file,
+    csvReport([csvRow, { ...csvRow, ID: "csv-occurrence-2" }]),
+  );
+  expect(
+    (await readVendorFindings(f.file)).findings.map(
+      (finding) => finding.source_finding_id,
+    ),
+  ).toEqual(["csv-occurrence-1", "csv-occurrence-2"]);
+  await writeFile(f.file, csvReport([csvRow, csvRow]));
+  await expect(readVendorFindings(f.file)).rejects.toThrow(
+    "Duplicate source finding id",
+  );
+});
+
+test.each([
+  "duplicate header",
+  "short row",
+  "long row",
+  "unterminated quote",
+  "invalid UTF-8",
+])(
+  "Wiz CSV rejects a damaged report before publication (%s)",
+  async (damage) => {
+    const f = await cloudFixture({});
+    let contents = csvReport([csvRow]);
+    if (damage === "duplicate header")
+      contents = csvReport([csvRow], [...Object.keys(csvRow), "ID"]);
+    if (damage === "short row") contents = csvReport([]) + '\r\n"short"';
+    if (damage === "long row") contents += ',"extra"';
+    if (damage === "unterminated quote") contents = contents.slice(0, -1);
+    await writeFile(
+      f.file,
+      damage === "invalid UTF-8"
+        ? Buffer.concat([Buffer.from(contents), Buffer.from([0xff])])
+        : contents,
+    );
+    await expect(
+      prepareExternalPublication(f.file, f.options, f.deps),
+    ).rejects.toThrow();
+    expect(f.posts).toEqual([]);
+  },
+);
+
+test.each([false, true])(
+  "Wiz CSV binds the source repository before uploads, including normalized input (%p)",
+  async (normalized) => {
+    const f = await cloudFixture({});
+    await writeFile(
+      f.file,
+      csvReport([
+        {
+          ...csvRow,
+          CloudProviderURL: "https://github.com/other/project/tree/main",
+        },
+      ]),
+    );
+    if (normalized)
+      await writeFile(
+        f.file,
+        JSON.stringify((await readVendorFindings(f.file)).findings),
+      );
+    await expect(
+      prepareExternalPublication(f.file, f.options, f.deps),
+    ).rejects.toThrow("does not match");
+    expect(f.posts).toEqual([]);
+    expect(f.calls.filter((call) => call.includes("/source_reports"))).toEqual(
+      [],
+    );
+  },
+);
+
+for (const normalized of [false, true]) {
+  test.each([
+    [
+      "https://github.example.test:443",
+      "https://github.example.test:443",
+      true,
+    ],
+    ["http://github.example.test:80", "http://github.example.test:80", true],
+    [
+      "https://github.example.test:8443",
+      "https://github.example.test:8443",
+      true,
+    ],
+    ["https://github.example.test:443", "https://github.example.test", false],
+    ["http://github.example.test:80", "http://github.example.test", false],
+    ["https://github.example.test", "https://github.example.test:443", false],
+    ["http://github.example.test", "http://github.example.test:80", false],
+  ])(
+    `Wiz CSV preserves repository ports in ${normalized ? "normalized JSONL" : "native CSV"}: %s → %s`,
+    async (source, destination, matches) => {
+      const f = await cloudFixture({});
+      f.destination.url = `${destination}/example/project`;
+      const options = { ...f.options, repository: f.destination.id };
+      const rows = ["csv-occurrence-1", "csv-occurrence-2"].map((ID) => ({
+        ...csvRow,
+        ID,
+        CloudProviderURL: `${source}/example/project/tree/main`,
+      }));
+      await writeFile(f.file, csvReport(rows));
+      if (normalized)
+        await writeFile(
+          f.file,
+          (await readVendorFindings(f.file)).findings
+            .map((finding) => JSON.stringify(finding))
+            .join("\n"),
+        );
+      if (matches) {
+        const prepared = await prepareExternalPublication(
+          f.file,
+          options,
+          f.deps,
+        );
+        expect(prepared.preview.findings).toHaveLength(2);
+        expect(prepared.preview.excluded).toEqual([]);
+      } else {
+        await expect(
+          prepareExternalPublication(f.file, options, f.deps),
+        ).rejects.toThrow("does not match");
+        expect(
+          f.calls.filter((call) => call.includes("/source_reports")),
+        ).toEqual([]);
+      }
+      expect(f.posts).toEqual([]);
+    },
+  );
+}
+
+test("Wiz CSV retries retain acknowledged requests across column reordering and repeated imports stay unchanged", async () => {
+  const f = await cloudFixture({});
+  const rows = [csvRow, { ...csvRow, ID: "csv-occurrence-2" }];
+  await writeFile(f.file, csvReport(rows));
+  const original = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(f.posts).toEqual([]);
+  f.state.failReadback = true;
+  await expect(original.publish()).rejects.toBeInstanceOf(
+    ExternalPublicationError,
+  );
+  await writeFile(f.file, csvReport(rows, Object.keys(csvRow).reverse()));
+  const resumed = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(resumed.preview.resumed).toBe(true);
+  expect(resumed.preview.requests).toEqual(original.preview.requests);
+  f.state.failReadback = false;
+  expect((await resumed.publish()).verified).toBe(2);
+  expect(f.posts).toHaveLength(1);
+  const repeated = await prepareExternalPublication(f.file, f.options, f.deps);
+  const result = await repeated.publish();
+  expect(result.verified).toBe(2);
+  expect(result.receipts[0]!.counts.unchanged).toBe(2);
+  expect([...f.reports.values()].map((report) => report.version)).toEqual([
+    1, 1,
+  ]);
+  expect(f.posts[0]!.items[0]!.evidence.source_data!["row"]).toEqual(csvRow);
 });
 
 test("saved typed requests resume by repository ID after a repository rename", async () => {
@@ -1028,58 +1365,89 @@ test("unidentified source hosts still require exact supplied and inventory URL p
   expect(parsed.excluded[0]!.reason).toContain("conflicting repository URLs");
 });
 
-test("Node reads a large complete named collection without a function argument limit", async () => {
-  const count = 150_000;
-  const records = Array.from({ length: count }, (_, index) => ({
-    id: `vendor-${index}`,
-    name: "CVE-2099-0001",
-    detailedName: "example-package",
-    severity: "HIGH",
-    vulnerableAsset: { id: "synthetic-asset" },
-  }));
-  const f = await fixture(envelope("vulnerabilityFindings", records, false));
-  // Run the actual parser under Node; Bun does not have the same argument limit.
-  const bundle = await mkdtemp(join(import.meta.dir, "..", ".wiz-parser-"));
-  directories.push(bundle);
-  const runner = join(bundle, "large-input.mts");
-  await writeFile(
-    runner,
-    `
-    import { readVendorFindings } from "../src/wiz-findings.js";
-    const parsed = await readVendorFindings(process.argv[2]!);
+test.each(["named collection", "normalized JSONL"])(
+  "Node reads a large %s without parsing limits",
+  async (format) => {
+    const count = 150_000;
+    const records = Array.from({ length: count }, (_, index) => ({
+      id: `vendor-${index}`,
+      name: "CVE-2099-0001",
+      detailedName: "example-package",
+      severity: "HIGH",
+      vulnerableAsset: { id: "synthetic-asset" },
+    }));
+    const f = await fixture(envelope("vulnerabilityFindings", records, false));
+    if (format === "normalized JSONL")
+      await writeFile(
+        f.file,
+        records
+          .map((record) =>
+            JSON.stringify({
+              source_finding_id: record.id,
+              evidence: {
+                title: "Synthetic package vulnerability",
+                severity: "high",
+                source_data: {
+                  ...record,
+                  vendorSeverity: "HIGH",
+                  description: "Synthetic package vulnerability evidence.",
+                },
+              },
+            }),
+          )
+          .join("\n"),
+      );
+    // Run the actual parser under Node; Bun does not have the same argument limit.
+    const bundle = await mkdtemp(join(import.meta.dir, "..", ".wiz-parser-"));
+    directories.push(bundle);
+    const runner = join(bundle, "large-input.mts");
+    await writeFile(
+      runner,
+      `
+    import { readVendorFindings, readVendorFindingsForPublication } from "../src/wiz-findings.js";
+    const parsed = process.argv[3] === "normalized JSONL"
+      ? (await readVendorFindingsForPublication(process.argv[2]!)).current
+      : await readVendorFindings(process.argv[2]!);
     console.log(JSON.stringify({
       read: parsed.read, ready: parsed.findings.length, excluded: parsed.excluded.length,
       first: parsed.findings[0]?.source_finding_id,
       last: parsed.findings.at(-1)?.source_finding_id,
     }));
   `,
-  );
-  const built = await Bun.build({
-    entrypoints: [runner],
-    outdir: bundle,
-    target: "node",
-    format: "esm",
-    packages: "external",
-  });
-  expect(built.success).toBe(true);
-  const child = Bun.spawn(
-    [Bun.which("node")!, built.outputs[0]!.path, f.file],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  expect(exitCode, stderr).toBe(0);
-  expect(JSON.parse(stdout)).toEqual({
-    read: count,
-    ready: count,
-    excluded: 0,
-    first: "vendor-0",
-    last: `vendor-${count - 1}`,
-  });
-});
+    );
+    const built = await Bun.build({
+      entrypoints: [runner],
+      outdir: bundle,
+      target: "node",
+      format: "esm",
+      packages: "external",
+    });
+    expect(built.success).toBe(true);
+    const child = Bun.spawn(
+      [
+        Bun.which("node")!,
+        ...(format === "normalized JSONL" ? ["--max-old-space-size=256"] : []),
+        built.outputs[0]!.path,
+        f.file,
+        format,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      read: count,
+      ready: count,
+      excluded: 0,
+      first: "vendor-0",
+      last: `vendor-${count - 1}`,
+    });
+  },
+);
 
 test.each(["migrate", "distinct", "duplicate"])(
   "Unicode readback resumes historical checkpoints (%s)",
