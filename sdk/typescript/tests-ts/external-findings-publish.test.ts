@@ -2921,7 +2921,40 @@ test("Snyk source repository binding is rechecked for a fresh import after compl
   expect(input).toEqual(original);
 });
 
-test.each([
+async function snykRepositoryEvidence(
+  format: "plugin" | "SARIF",
+  repository: string,
+) {
+  const { snykPluginExport, snykSarif } =
+    await import("./support/snyk-import-fixtures.js");
+  const { normalizeSnykFindingsExport, normalizeSnykSarif } =
+    await import("../src/snyk-findings.js");
+  if (format === "plugin") {
+    const input = snykPluginExport();
+    input.collection.target.repository = repository;
+    return {
+      input,
+      normalized: normalizeSnykFindingsExport(input),
+      original: { collection: input.collection, finding: input.findings[0] },
+    };
+  }
+  const sarif = snykSarif();
+  const provenance = [{ repositoryUri: repository }];
+  const input = {
+    ...sarif,
+    runs: sarif.runs.map((run) => ({
+      ...run,
+      versionControlProvenance: provenance,
+    })),
+  };
+  return {
+    input,
+    normalized: normalizeSnykSarif(input),
+    original: { run: { versionControlProvenance: provenance } },
+  };
+}
+
+const snykRepositoryAliases: [string, string][] = [
   [
     "https://github.com/example/project.git",
     "https://github.com/example/project",
@@ -2971,15 +3004,22 @@ test.each([
     "https://git.example.test/example/project.git",
     "https://git.example.test/example/project",
   ],
+];
+
+test.each([
+  ...snykRepositoryAliases.flatMap(([repository, destination]) =>
+    (["plugin", "SARIF"] as const).map(
+      (format) => [format, repository, destination] as const,
+    ),
+  ),
+  ["plugin", "unknown", "https://github.com/example/project"] as const,
 ])(
-  "Snyk plugin export imports and replays with repository remote %s",
-  async (repository, destination) => {
-    const { snykPluginExport } =
-      await import("./support/snyk-import-fixtures.js");
-    const { normalizeSnykFindingsExport } =
-      await import("../src/snyk-findings.js");
-    const input = snykPluginExport();
-    input.collection.target.repository = repository;
+  "Snyk %s export imports and replays with repository remote %s",
+  async (format, repository, destination) => {
+    const { input, normalized, original } = await snykRepositoryEvidence(
+      format,
+      repository,
+    );
     const f = await fixture(input, destination, "connector-selected");
     const selected = {
       ...options,
@@ -2994,22 +3034,17 @@ test.each([
     expect(JSON.parse(f.posts[0]!).repository.repo_connector_id).toBe(
       "connector-selected",
     );
-    expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
-      collection: input.collection,
-      finding: input.findings[0],
-    });
+    expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject(
+      original,
+    );
     const second = await (
-      await prepareNormalizedExternalPublication(
-        normalizeSnykFindingsExport(input),
-        selected,
-        f.deps,
-      )
+      await prepareNormalizedExternalPublication(normalized, selected, f.deps)
     ).publish();
     expect(second.counts.unchanged).toBe(1);
   },
 );
 
-test.each([
+const snykRepositoryMismatches: [string, string][] = [
   ["git@github.com:other/project.git", "https://github.com/example/project"],
   [
     "ssh://git@github.com:2222/example/project.git",
@@ -3067,31 +3102,34 @@ test.each([
     "ssh://git@git.example.test/example/project.git",
     "http://git.example.test/example/project",
   ],
+];
+
+test.each([
+  ...snykRepositoryMismatches.flatMap(([repository, destination]) =>
+    (["plugin", "SARIF"] as const).map(
+      (format) => [format, repository, destination] as const,
+    ),
+  ),
+  ["SARIF", "unknown", "https://github.com/example/project"] as const,
 ])(
-  "Snyk plugin repository claim %s cannot target %s",
-  async (repository, destination) => {
-    const { snykPluginExport } =
-      await import("./support/snyk-import-fixtures.js");
-    const { normalizeSnykFindingsExport } =
-      await import("../src/snyk-findings.js");
-    const input = snykPluginExport();
-    input.collection.target.repository = repository;
+  "Snyk %s repository claim %s cannot target %s",
+  async (format, repository, destination) => {
+    const { input, normalized, original } = await snykRepositoryEvidence(
+      format,
+      repository,
+    );
     const f = await fixture(input, destination);
     const selected = { ...options, provider: "snyk" as const };
     await expect(
       prepareExternalPublication(f.file, selected, f.deps),
     ).rejects.toThrow("does not match the selected Cloud repository");
     await expect(
-      prepareNormalizedExternalPublication(
-        normalizeSnykFindingsExport(input),
-        selected,
-        f.deps,
-      ),
+      prepareNormalizedExternalPublication(normalized, selected, f.deps),
     ).rejects.toThrow("does not match the selected Cloud repository");
     expect(f.posts).toHaveLength(0);
-    expect(
-      normalizeSnykFindingsExport(input).findings[0]!.evidence.source_data,
-    ).toMatchObject({ collection: input.collection });
+    expect(normalized.findings[0]!.evidence.source_data).toMatchObject(
+      original,
+    );
   },
 );
 

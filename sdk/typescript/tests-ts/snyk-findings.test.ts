@@ -702,3 +702,33 @@ test.each([
     expect(source).toMatchObject({ collection: input.collection });
   },
 );
+
+test.each([
+  "git@git.example.test:example/project.git",
+  "ssh://git@git.example.test/example/project.git",
+  "ssh://git@git.example.test:22/example/project.git",
+])(
+  "SARIF repository claims stay raw without Cloud context or when normalization is disabled: %s",
+  (repository) => {
+    const sarif = snykSarif();
+    const provenance = [{ repositoryUri: repository }];
+    const input = {
+      ...sarif,
+      runs: sarif.runs.map((run) => ({
+        ...run,
+        versionControlProvenance: provenance,
+      })),
+    };
+    const source = normalizeSnykSarif(input).findings[0]!.evidence.source_data;
+    expect(snykRepositoryUrls(source)).toEqual([repository]);
+    expect(
+      snykRepositoryUrls(source, {
+        normalizeGitRemote: false,
+        cloudRepositoryUrl: "https://git.example.test/example/project",
+      }),
+    ).toEqual([repository]);
+    expect(source).toMatchObject({
+      run: { versionControlProvenance: provenance },
+    });
+  },
+);

@@ -127,12 +127,10 @@ export function normalizeSnykFindingsExport(input: unknown): ExternalFindings {
   );
 }
 
-function pluginRepositoryUrl(
-  value: unknown,
+function normalizeGitRepositoryUrl(
+  repository: string,
   cloudRepositoryUrl?: string,
-): string | null {
-  const repository = text(value);
-  if (repository === null || repository === "unknown") return null;
+): string {
   // Cloud's selected catalog repository supplies connected GitHub host context;
   // imported evidence alone cannot establish an Enterprise host's SSH aliases.
   const destination = cloudRepositoryUrl
@@ -182,10 +180,13 @@ export function snykRepositoryUrls(
   if (source["format"] === "snyk-findings-export/v1") {
     const collection = record(source["collection"], "Snyk collection");
     const target = record(collection["target"], "Snyk target");
-    const url = normalizeGitRemote
-      ? pluginRepositoryUrl(target["repository"], cloudRepositoryUrl)
-      : text(target["repository"]);
-    return url && url !== "unknown" ? [url] : [];
+    const repository = text(target["repository"]);
+    if (repository === null || repository === "unknown") return [];
+    return [
+      normalizeGitRemote
+        ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
+        : repository,
+    ];
   }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
@@ -202,12 +203,15 @@ export function snykRepositoryUrls(
   return array(
     record(run, "Snyk run context")["versionControlProvenance"] ?? [],
     "Snyk version control provenance",
-  ).map((entry) =>
-    requiredText(
+  ).map((entry) => {
+    const repository = requiredText(
       record(entry, "Snyk repository provenance")["repositoryUri"],
       "Snyk repository URI",
-    ),
-  );
+    );
+    return normalizeGitRemote
+      ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
+      : repository;
+  });
 }
 
 /** Snyk Open Source's formatter groups all dependency paths for an advisory in a project. */
