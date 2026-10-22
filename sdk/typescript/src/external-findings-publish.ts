@@ -24,7 +24,11 @@ import {
   createWindowsOutputDirectory,
   validatePreparedOutputDir,
 } from "./runtime.js";
-import { readVendorFindingsForPublication } from "./wiz-findings.js";
+import {
+  readExternalFindings,
+  type ExternalFindingsReaderOptions,
+} from "./external-findings-read.js";
+import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -56,7 +60,7 @@ export interface NormalizedExternalPublicationOptions {
 
 /** File readers accept the vendor formats installed in this SDK. */
 export interface ExternalPublicationOptions extends NormalizedExternalPublicationOptions {
-  provider: "wiz";
+  provider: ExternalFindingsReaderOptions["provider"];
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
@@ -339,8 +343,14 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
-  const input = await readVendorFindingsForPublication(path);
-  return preparePublicationInput(input, options, dependencies);
+  const parsed = await readExternalFindings(path, options);
+  return parsed.publication
+    ? preparePublicationInput(parsed.publication, options, dependencies)
+    : prepareNormalizedExternalPublication(
+        parsed.findings,
+        options,
+        dependencies,
+      );
 }
 
 /** Prepare normalized provider evidence without reading a vendor export. */
@@ -695,15 +705,21 @@ async function preparePublicationInput(
   let requests = saved?.requests;
   if (!requests) {
     for (const finding of parsed.findings) {
-      const sourceRepository = finding.evidence.details?.repository;
-      if (
-        sourceRepository &&
-        cloudRepositoryUrlKey(sourceRepository.url) !==
-          cloudRepositoryUrlKey(destination.url)
-      )
-        throw new CodexSecurityError(
-          `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository.url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
-        );
+      const sourceRepositories = [
+        finding.evidence.details?.repository?.url,
+        ...(options.provider === "wiz"
+          ? [wizCsvRepositoryUrl(finding.evidence)]
+          : []),
+      ];
+      for (const sourceRepository of sourceRepositories)
+        if (
+          sourceRepository &&
+          cloudRepositoryUrlKey(sourceRepository) !==
+            cloudRepositoryUrlKey(destination.url)
+        )
+          throw new CodexSecurityError(
+            `Finding ${JSON.stringify(finding.source_finding_id)} belongs to ${JSON.stringify(sourceRepository)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
+          );
     }
     let preparedCount = 0;
     progress({

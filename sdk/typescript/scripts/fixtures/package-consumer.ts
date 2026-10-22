@@ -1,6 +1,11 @@
 import {
   CodexSecurity,
   prepareExternalPublication,
+  prepareLocalExternalImport,
+  prepareNormalizedLocalImport,
+  listLocalExternalFindings,
+  type NormalizedLocalImportOptions,
+  type StoredExternalFinding,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type ExternalPublicationOptions,
@@ -370,3 +375,20 @@ const localOptions: ScanOptions = {
   hosted: {},
 };
 void localOptions;
+
+export async function importLocalEvidence(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareNormalizedLocalImport(input, options);
+  await prepared.import();
+  return listLocalExternalFindings({ repository: options.repository });
+}
+
+export async function importLocalFile(
+  file: string,
+  options: ExternalPublicationOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareLocalExternalImport(file, options);
+  return (await prepared.import()).findings;
+}

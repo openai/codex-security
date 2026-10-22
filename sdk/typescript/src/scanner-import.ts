@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import { isRecord } from "./record.js";
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -88,6 +89,86 @@ export async function readScannerJson(path: string): Promise<unknown> {
       { cause: error },
     );
   }
+}
+
+/** Empty reference containers and property-bag metadata do not externalize data. */
+export function hasSarifExternalPropertyReferences(value: unknown): boolean {
+  if (value == null) return false;
+  return Object.entries(
+    record(value, "SARIF external property references"),
+  ).some(
+    ([key, references]) =>
+      key !== "properties" &&
+      (!Array.isArray(references) || references.length > 0),
+  );
+}
+
+const sarifArtifactLocationFields = new Set([
+  "artifactLocation",
+  "analysisTarget",
+  "executableLocation",
+  "workingDirectory",
+  "stdin",
+  "stdout",
+  "stderr",
+  "stdoutStderr",
+  "mappedTo",
+  "displayBase",
+]);
+
+/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
+export function sarifRunContextForResult(
+  runContext: Record<string, unknown>,
+  ...selectedEvidence: unknown[]
+): Record<string, unknown> {
+  const { artifacts, ...context } = runContext;
+  if (!Array.isArray(artifacts) || artifacts.length === 0) return runContext;
+  const locations: Record<string, unknown>[] = [];
+  let hasArtifactLink = false;
+  function visit(value: unknown): void {
+    if (typeof value === "string") {
+      // SARIF message links can refer to an artifact without an artifactLocation.
+      if (/sarif:/iu.test(value)) hasArtifactLink = true;
+    } else if (Array.isArray(value)) value.forEach(visit);
+    else if (isRecord(value))
+      for (const [key, child] of Object.entries(value)) {
+        if (key === "properties") continue;
+        if (sarifArtifactLocationFields.has(key) && isRecord(child))
+          locations.push(child);
+        if (
+          ["locations", "responseFiles", "analysisToolLogFiles"].includes(
+            key,
+          ) &&
+          Array.isArray(child)
+        )
+          locations.push(...child.filter(isRecord));
+        if (key === "originalUriBaseIds" && isRecord(child))
+          locations.push(...Object.values(child).filter(isRecord));
+        visit(child);
+      }
+  }
+  visit([context, ...selectedEvidence]);
+  if (hasArtifactLink) return runContext;
+  const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
+  for (const location of locations) {
+    if (typeof location["index"] === "number" && location["index"] >= 0)
+      return runContext;
+    if (typeof location["uri"] !== "string") continue;
+    for (const artifact of artifacts) {
+      if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
+      const candidate = artifact["location"];
+      // Keep URI spellings that need resolution; evidence is never rewritten.
+      if (
+        location["uriBaseId"] !== candidate["uriBaseId"] ||
+        unresolvedUri.test(location["uri"]) ||
+        (typeof candidate["uri"] === "string" &&
+          unresolvedUri.test(candidate["uri"])) ||
+        location["uri"] === candidate["uri"]
+      )
+        return runContext;
+    }
+  }
+  return context;
 }
 
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */

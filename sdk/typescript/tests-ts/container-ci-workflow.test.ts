@@ -41,7 +41,7 @@ test("shares one native build and container matrix in automatic CI", () => {
     ),
   ).toEqual([ci.jobs["container-validate"]!]);
   expect(ci.jobs["container-validate"]).toMatchObject({
-    needs: ["validate-title", "native"],
+    needs: ["classify-changes", "native"],
     uses: "./.github/workflows/container-validate.yml",
   });
   expect(container.jobs["container"]).toMatchObject({
@@ -105,7 +105,7 @@ test.each([
   (eventName, baseChanged, path, selected) => {
     const directory = mkdtempSync(join(tmpdir(), "container-ci-scope-"));
     const output = join(directory, "outputs");
-    const script = ci.jobs["validate-title"]!.steps!.find(
+    const script = ci.jobs["classify-changes"]!.steps!.find(
       (step) => step.name === "Select additional checks",
     )!.run!;
     try {
@@ -142,7 +142,7 @@ test.each([
 test("required CI rejects failed, cancelled, or skipped selected container checks", () => {
   const gate = ci.jobs["required-test"]!;
   expect(gate.needs).toContain("container-validate");
-  expect(gate.if).toBe("always()");
+  expect(gate.if).toContain("always()");
   const step = gate.steps!.find(
     (step) => step.name === "Require selected container coverage",
   )!;
@@ -151,7 +151,7 @@ test("required CI rejects failed, cancelled, or skipped selected container check
     for (const result of ["success", "failure", "cancelled", "skipped"]) {
       const condition = step
         .if!.replaceAll(
-          "needs.validate-title.outputs.container-validate",
+          "needs.classify-changes.outputs.container-validate",
           `'${selected}'`,
         )
         .replaceAll("needs.container-validate.result", `'${result}'`);

@@ -1703,7 +1703,7 @@ test.each(["JSON", "JSONL"])(
     });
     expect(stdout).not.toContain("\u001b");
     expect(stderr).toContain(
-      "Could not read vendor findings as UTF-8 JSON or JSONL:",
+      "Could not read vendor findings as UTF-8 JSON, JSONL, or Wiz CSV:",
     );
     expect(stderr).toContain("malformed");
     expect(stderr).not.toContain("\u001b");

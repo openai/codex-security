@@ -31,7 +31,8 @@ without running security analysis.
   [save project settings](#project-files).
 - [Review one system across repositories](#review-one-system-across-repositories)
   or [run independent bulk scans](#bulk-scans).
-- [Import saved findings](#import-findings-as-a-saved-scan) or
+- [Import vendor findings locally](#import-vendor-findings-locally),
+  [save findings as a scan](#import-findings-as-a-saved-scan), or
   [retrieve GitHub alerts](#import-alerts-from-the-cli).
 - [Inspect saved scans and rerun them](#scan-history-and-reruns),
   [classify severity](#classify-finding-severity), or
@@ -628,6 +629,9 @@ Import needs no model calls or authentication. `--dry-run` validates without
 saving; `--output-dir` and `--archive-existing` control output. `scans rerun`
 reimports the retained input.
 
+For vendor exports, use [local vendor import](#import-vendor-findings-locally)
+instead. That flow retains unassessed source evidence without creating a scan.
+
 ### Generate mock scan results
 
 ```bash
@@ -1208,6 +1212,60 @@ failure or incomplete/invalid output fails the scan. Deferred candidates remain
 follow-up notes and do not fail the scan. An incompatible plugin stops the scan.
 Supply the validation prompt again when rerunning.
 
+## Import vendor findings locally
+
+Prefer the provider's supported native JSON from its CLI, plugin, or API. Native
+reports can retain details omitted by SARIF. Use SARIF or CSV as compatibility
+inputs only for providers and report profiles that support them. A JSON API
+summary is not automatically a supported report; follow the provider's acquisition
+instructions and retain the original records. The readers detect supported input
+formats; `--format json` selects command output, not the input format.
+
+Keep the acquisition format consistent across imports. Depending on the provider,
+switching formats can create separate records for the same vulnerability or
+replace a richer evidence snapshot with less detail. The importer does not merge
+evidence or deduplicate equivalent vulnerabilities across different source IDs.
+
+Use the same vendor input and parser as Cloud publication, selecting a local
+repository path instead of a Cloud repository ID or URL:
+
+```bash
+codex-security publish findings selected-wiz.json \
+  --to local --repository ./project --provider wiz \
+  --source-key TENANT_ID/vulnerability-finding --dry-run --format json
+```
+
+Review the normalized evidence, repository, source namespace, and exclusions.
+Run the same command without `--dry-run` to confirm interactively, or add `--yes`
+after reviewing the preview. `--to` is required; there is no default destination.
+Local import uses the workbench SQLite database and requires no Cloud login,
+network connection, or model call. `--dry-run` does not write findings.
+
+Read the saved evidence with:
+
+```bash
+codex-security findings imported ./project --format json
+```
+
+The repository argument defaults to the current directory. Local imports are
+separate from the assessed findings shown by `findings list`: they remain
+`not_assessed`, retain the original vendor evidence, and do not create a completed
+scan or automatically validate or patch findings. Missing revisions, locations,
+and assessment fields stay unknown. When the source includes a repository URL and the local checkout has configured
+Git remotes, the URL must match one of those remotes; the importer does not
+substitute the checkout's current commit for an unknown scanner revision.
+
+Repeated imports update the same record by repository, provider, source key, and
+source finding ID. The result reports created, updated, and unchanged counts.
+Keep the source key stable across exports. Records omitted from a later selection
+remain stored; omission does not resolve or delete a finding. Excluded records
+are reported, and an import with exclusions exits with status 1. The same
+supported vendor formats and evidence requirements apply locally and in Cloud.
+
+`scan import --json` and `scan import --csv` remain separate commands for importing
+Codex Security's findings schema as a saved scan; they do not accept vendor
+exports.
+
 ## Publish findings to Cloud
 
 ### Import Wiz findings
@@ -1222,11 +1280,13 @@ custom Enterprise hostnames. Named Wiz exports do not add other VCS destinations
 
 #### Select findings and a destination
 
-Use an authorized Wiz connection to acquire findings. If a Wiz plugin is available
-in your Codex workspace, use its MCP connection; otherwise configure
-[Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or use the Wiz API.
-The publisher reads the selected records saved by that connection. It does not
-fetch from Wiz or require a manual website download.
+Use an authorized [Wiz MCP](https://www.wiz.io/blog/introducing-wiz-mcp) or Wiz API
+connection to acquire findings and save the supported native JSON. A configured
+plugin may provide that connection; an official Codex plugin is not a prerequisite.
+The publisher reads the saved records. It does not fetch from Wiz or require a
+manual website download. The acquisition path still needs validation against
+actual responses from an authorized Wiz tenant; local parser checks do not
+establish that qualification.
 
 Inspect the connection's actual response before importing it. MCP summaries,
 Wiz Issues, and local Wiz CLI scan results are not automatically compatible with
@@ -1252,11 +1312,19 @@ Before the first import:
    login. API-key-only and keyring-only logins are not supported for Cloud
    publication. See the credential-storage instructions below.
 
-Saved package-vulnerability reports are also supported. In Wiz **Vulnerability
-Findings**, retain the repository and finding filters, choose **Save as → Report**,
-select **Repository Branch**, **JSON**, and **Detailed** columns, then download
-the completed report. Gzip is detected regardless of the filename extension.
-**Raw Event** on Code & Build Scans contains scan metadata rather than findings.
+Prefer the supported native JSON. Existing package-vulnerability CSV reports are
+accepted as a compatibility input. **CSV support covers repository package
+vulnerabilities (SCA) only; it does not add SAST, cloud posture (CSPM), or complete
+Wiz code-to-cloud coverage.** The named JSON readers described below handle their
+respective finding families separately.
+
+When a UI report is needed, retain the repository and finding filters in Wiz
+**Vulnerability Findings**, choose **Save as → Report**, select **Repository
+Branch**, **JSON** or **CSV**, and **Detailed** columns, then download the completed
+report. CSV must use the columns described below and a comma delimiter. Plain and
+gzip-compressed JSON or CSV are accepted; gzip is detected regardless of the
+filename extension. **Raw Event** on Code & Build Scans contains scan metadata
+rather than findings.
 
 #### Configure an alternate Cloud deployment
 
@@ -1309,12 +1377,33 @@ skipped.
 
 #### Package vulnerability inputs
 
-Package input can be a downloaded Wiz JSON vulnerability report, a vulnerability
+Native package input can be a Wiz JSON vulnerability report, a vulnerability
 finding, an array, a complete `data.vulnerabilityFindings.nodes` response, or JSONL
-with one package record per line. Plain and gzip-compressed files are accepted.
+with one package record per line. The repository package-vulnerability CSV
+profile below is also supported. Plain and gzip-compressed files are accepted.
 A response that advertises another page is rejected. Complete the requested pages
 or save only the explicitly selected records; retain the named collection for
-SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
+SAST, repository secrets, and IaC.
+
+The CSV mapper requires `ID`, `Name`, `DetailedName`, `AssetID`, `WizURL`,
+`CloudPlatform`, and `CloudProviderURL`. Check the actual report headers against
+this profile; other Wiz report types use different fields.
+For repository imports, `CloudPlatform` must identify GitHub and
+`CloudProviderURL` must identify a repository branch. The repository URL must
+match the selected Cloud repository or, for local import, one of the checkout's
+Git remotes when configured. This also applies when the parsed findings are saved and
+read again as normalized JSONL. Other resource types are excluded.
+
+CSV imports use `ID` as the occurrence identity and retain every parsed field,
+including unknown columns and quoted multiline values, in `source_data.row`.
+Severity comes from `Severity`, then `VendorSeverity`, then `CVSSSeverity`.
+Vendor resolution status stays in the original evidence. The importer does not
+derive a branch or revision from a tree URL, or treat last-detected time as a
+record-update timestamp. Duplicate headers, damaged CSV rows, invalid UTF-8,
+and duplicate occurrence IDs among otherwise importable records stop the import.
+Review any excluded records in the preview before publishing.
+
+Normalized JSONL is also accepted:
 
 ```json
 {
@@ -1327,7 +1416,7 @@ SAST, repository secrets, and IaC. Normalized JSONL is also accepted:
 }
 ```
 
-Use Wiz's finding `id`, not a CVE, as identity. Keep the source key stable across
+Use Wiz's finding `id` (`ID` in CSV), not a CVE, as identity. Keep the source key stable across
 exports; a selected project filter does not change the vendor namespace. Confirm
 that the selected assets or builds map to this repository. The raw Wiz adapter
 retains each record in `source_data`, uses reported severity, and leaves unknown
@@ -1421,7 +1510,7 @@ timestamps.
 #### Convert CSV reports
 
 Native SAST and secret report downloads can be CSV, including gzip-compressed
-CSV. CSV is not parsed directly. Convert a selected report with a reviewed mapping
+CSV. Those CSV profiles are not parsed directly. Convert a selected report with a reviewed mapping
 for its actual column headers into normalized JSONL, preserving each original row
 in `source_data`. Set `details.kind` and `details.repository.url` explicitly after
 verifying the source repository. Use the same prefixed occurrence ID shown above
@@ -1831,6 +1920,7 @@ least eight characters.
 | `scans match --all`                                   | Match completed scans across worktrees/clones.             |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
 | `findings list [REPOSITORY]`                          | List open findings.                                        |
+| `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.         |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
