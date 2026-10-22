@@ -757,6 +757,8 @@ export function gitOutput(
   signal?: AbortSignal,
   environment?: NodeJS.ProcessEnv,
   workingDirectory?: string,
+  encoding?: "utf8",
+  protectedRoots?: string | readonly string[],
 ): Promise<string>;
 export function gitOutput(
   repository: string,
@@ -765,6 +767,7 @@ export function gitOutput(
   environment: NodeJS.ProcessEnv | undefined,
   workingDirectory: string | undefined,
   encoding: "buffer",
+  protectedRoots?: string | readonly string[],
 ): Promise<Buffer>;
 export async function gitOutput(
   repository: string,
@@ -773,6 +776,7 @@ export async function gitOutput(
   environment: NodeJS.ProcessEnv = {},
   workingDirectory = repository,
   encoding: "utf8" | "buffer" = "utf8",
+  protectedRoots: string | readonly string[] = [],
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -780,7 +784,12 @@ export async function gitOutput(
     isolatedGitEnvironment(
       args[0] === "rev-parse" || args[0] === "config" || args[0] === "ls-files",
     ),
-    (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");

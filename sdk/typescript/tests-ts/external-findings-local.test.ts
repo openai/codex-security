@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { mkdir, symlink } from "node:fs/promises";
-import { join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
 import {
@@ -323,6 +323,64 @@ describe("local normalized scanner findings", () => {
       { repository, ...source },
       { environment },
     );
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test("repository matching ignores Git executables in a separate caller checkout", async () => {
+    const { root, repository, stateDirectory, environment } = await fixture({
+      remote: "https://github.com/example/project",
+    });
+    const caller = join(root, "caller");
+    const callerDirectory = join(caller, "src");
+    const callerBin = join(caller, "tools");
+    const marker = join(root, "caller-git-executed");
+    await Promise.all([
+      mkdir(join(caller, ".git"), { recursive: true }),
+      mkdir(callerDirectory, { recursive: true }),
+      mkdir(callerBin, { recursive: true }),
+    ]);
+    await writeFile(
+      join(callerBin, process.platform === "win32" ? "git.exe" : "git"),
+      process.platform === "win32"
+        ? "untrusted executable fixture\n"
+        : '#!/bin/sh\nprintf executed > "$TEST_LOCAL_IMPORT_GIT_MARKER"\nexit 1\n',
+      { mode: 0o700 },
+    );
+    const inheritedPath = Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
+    const module = new URL("../src/external-findings-local.ts", import.meta.url)
+      .href;
+    const script = `
+      import { rejects } from "node:assert/strict";
+      const { prepareNormalizedLocalImport } = await import(${JSON.stringify(module)});
+      const input = { read: 0, findings: [], excluded: [] };
+      const options = ${JSON.stringify({ repository, ...source })};
+      await prepareNormalizedLocalImport(input, options, {
+        sourceRepositories: [{ url: "https://github.com/example/project" }],
+      });
+      await rejects(
+        prepareNormalizedLocalImport(input, options, {
+          sourceRepositories: [{ url: "https://github.com/example/other" }],
+        }),
+        /does not match a configured remote/,
+      );
+    `;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: callerDirectory,
+      encoding: "utf8",
+      env: {
+        ...Object.fromEntries(
+          Object.entries(environment).filter(
+            ([name]) => name.toUpperCase() !== "PATH",
+          ),
+        ),
+        PATH: [callerBin, inheritedPath ?? ""].join(delimiter),
+        TEST_LOCAL_IMPORT_GIT_MARKER: marker,
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(false);
     expect(existsSync(stateDirectory)).toBe(false);
   });
 

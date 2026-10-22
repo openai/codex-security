@@ -116,6 +116,7 @@ async function requireMatchingRepository(
   repository: string,
   provider: Provider,
   sources: readonly ExternalSourceRepository[],
+  protectedRoots: WorkbenchCommandOptions["protectedRoot"],
   signal?: AbortSignal,
 ): Promise<void> {
   if (sources.length === 0) return;
@@ -125,6 +126,10 @@ async function requireMatchingRepository(
       repository,
       ["config", "--local", "--null", "--get-regexp", "^remote\\..*\\.url$"],
       signal,
+      undefined,
+      undefined,
+      "utf8",
+      protectedRoots,
     );
   } catch {
     signal?.throwIfAborted();
@@ -229,6 +234,7 @@ export async function prepareNormalizedLocalImport(
     repository,
     options.provider,
     [...sources.values()],
+    workbenchOptions.protectedRoot,
     dependencies.signal,
   );
   dependencies.signal?.throwIfAborted();
