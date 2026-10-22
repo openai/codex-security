@@ -1,7 +1,15 @@
 import { existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFile, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
 import {
@@ -309,6 +317,170 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
   });
 
+  test.each(["bare", "linked-metadata", "linked-worktree"] as const)(
+    "protects %s caller metadata during preparation, readback, and deferred import",
+    async (kind) => {
+      const { root, repository, stateDirectory, environment } = await fixture({
+        remote: "https://github.com/example/project",
+      });
+      const originalCaller = await fixture();
+      const caller = join(root, "caller");
+      const common = join(root, "common.git");
+      const git = (args: string[], stdin?: string): string =>
+        execFileSync("git", args, {
+          encoding: "utf8",
+          input: stdin,
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+      let metadataRoots: string[];
+      let pointerPaths: string[] = [];
+      if (kind === "bare") {
+        git(["init", "--quiet", "--bare", caller]);
+        metadataRoots = [caller];
+      } else {
+        git(["init", "--quiet", "--bare", common]);
+        if (kind === "linked-metadata") {
+          await mkdir(caller);
+          await writeFile(join(caller, "HEAD"), "ref: refs/heads/main\n");
+          await writeFile(join(caller, "commondir"), `${common}\n`);
+          metadataRoots = [caller, common];
+          pointerPaths = [join(caller, "commondir")];
+        } else {
+          const tree = git(["--git-dir", common, "mktree"], "");
+          const commit = git(
+            [
+              "--git-dir",
+              common,
+              "-c",
+              "user.name=Fixture",
+              "-c",
+              "user.email=fixture@example.test",
+              "-c",
+              "commit.gpgsign=false",
+              "commit-tree",
+              tree,
+            ],
+            "Synthetic worktree fixture\n",
+          );
+          git([
+            "--git-dir",
+            common,
+            "worktree",
+            "add",
+            "--detach",
+            caller,
+            commit,
+          ]);
+          const gitDirectory = git([
+            "-C",
+            caller,
+            "rev-parse",
+            "--absolute-git-dir",
+          ]);
+          metadataRoots = [gitDirectory, common];
+          pointerPaths = [
+            join(caller, ".git"),
+            join(gitDirectory, "commondir"),
+          ];
+        }
+        // A linked repository owns HEAD; its shared object store need not.
+        await rm(join(common, "HEAD"));
+      }
+      const callerDirectory = join(caller, "src");
+      await mkdir(callerDirectory);
+      const gitMarker = join(root, "metadata-git-executed");
+      const nodeMarker = join(root, "metadata-node-executed");
+      const bins = metadataRoots.map((directory) => join(directory, "tools"));
+      for (const bin of bins) {
+        await mkdir(bin);
+        for (const executable of ["git", "node"]) {
+          await writeFile(
+            join(
+              bin,
+              process.platform === "win32" ? `${executable}.exe` : executable,
+            ),
+            process.platform === "win32"
+              ? "untrusted executable fixture\n"
+              : `#!/bin/sh\nprintf executed > "$TEST_METADATA_${executable.toUpperCase()}_MARKER"\nexit 1\n`,
+            { mode: 0o700 },
+          );
+        }
+      }
+      const inheritedPath = Object.entries(environment).find(
+        ([name]) => name.toUpperCase() === "PATH",
+      )?.[1];
+      const module = new URL(
+        "../src/external-findings-local.ts",
+        import.meta.url,
+      ).href;
+      const script = `
+        import { deepEqual, equal, rejects } from "node:assert/strict";
+        import { existsSync, readFileSync } from "node:fs";
+        import { join } from "node:path";
+        const { prepareNormalizedLocalImport, listLocalExternalFindings } =
+          await import(${JSON.stringify(module)});
+        const input = ${JSON.stringify(input())};
+        const options = ${JSON.stringify({ repository, ...source })};
+        const pointerPaths = ${JSON.stringify(pointerPaths)};
+        const pointerContents = pointerPaths.map((path) => readFileSync(path, "utf8"));
+        for (const metadataRoot of ${JSON.stringify(metadataRoots)}) {
+          const state = join(metadataRoot, "security-state");
+          const environment = { ...process.env, CODEX_SECURITY_STATE_DIR: state };
+          process.chdir(${JSON.stringify(originalCaller.repository)});
+          const prepared = await prepareNormalizedLocalImport(input, options, {
+            environment,
+          });
+          equal(existsSync(state), false);
+          process.chdir(${JSON.stringify(callerDirectory)});
+          await rejects(
+            prepareNormalizedLocalImport(input, options, { environment }),
+            /outside/,
+          );
+          await rejects(
+            listLocalExternalFindings({ repository: options.repository }, { environment }),
+            /outside/,
+          );
+          await rejects(prepared.import(), /outside/);
+          equal(existsSync(state), false);
+        }
+        // The metadata shims must be excluded for both Git discovery and Node launch.
+        const prepared = await prepareNormalizedLocalImport(input, options, {
+          sourceRepositories: [{ url: "https://github.com/example/project" }],
+        });
+        const result = await prepared.import();
+        deepEqual(result.counts, { created: 2, updated: 0, unchanged: 0 });
+        equal(existsSync(${JSON.stringify(gitMarker)}), false);
+        equal(existsSync(${JSON.stringify(nodeMarker)}), false);
+        deepEqual(
+          pointerPaths.map((path) => readFileSync(path, "utf8")),
+          pointerContents,
+        );
+        console.log("PROTECTED");
+      `;
+      const result = spawnSync(process.execPath, ["-e", script], {
+        cwd: originalCaller.repository,
+        encoding: "utf8",
+        env: {
+          ...Object.fromEntries(
+            Object.entries(environment).filter(
+              ([name]) => name.toUpperCase() !== "PATH",
+            ),
+          ),
+          PATH: [...bins, inheritedPath ?? ""].join(delimiter),
+          TEST_METADATA_GIT_MARKER: gitMarker,
+          TEST_METADATA_NODE_MARKER: nodeMarker,
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("PROTECTED");
+      expect(existsSync(gitMarker)).toBe(false);
+      expect(existsSync(nodeMarker)).toBe(false);
+      for (const metadataRoot of metadataRoots)
+        expect(existsSync(join(metadataRoot, "security-state"))).toBe(false);
+      expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
+    },
+  );
+
   test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
@@ -598,6 +770,471 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(join(repository, "state"))).toBe(false);
   });
 
+  test.each(["bare", "linked", "ordinary"] as const)(
+    "protects selected %s roots through nested paths and aliases",
+    async (kind) => {
+      const { root, repository, environment } = await fixture();
+      const owner = join(root, "owner");
+      const common = join(root, "common.git");
+      if (kind === "linked") {
+        execFileSync("git", ["init", "--bare", "--quiet", common]);
+        await mkdir(owner);
+        await writeFile(join(owner, "HEAD"), "ref: refs/heads/main\n");
+        await writeFile(join(owner, "commondir"), "../common.git\n");
+      } else {
+        execFileSync("git", [
+          "init",
+          "--quiet",
+          ...(kind === "bare" ? ["--bare"] : []),
+          owner,
+        ]);
+      }
+      const nested = join(owner, "nested", "selected");
+      await mkdir(nested, { recursive: true });
+      const linkType = process.platform === "win32" ? "junction" : "dir";
+      await symlink(repository, join(owner, "to-selected"), linkType);
+      const alias = join(root, "owner-alias");
+      await symlink(owner, alias, linkType);
+      const selections = [
+        owner,
+        nested,
+        join(owner, "to-selected"),
+        join(alias, "to-selected"),
+      ];
+      if (kind === "bare") {
+        const inner = join(owner, "inner-worktree");
+        execFileSync("git", ["init", "--quiet", inner]);
+        selections.push(inner);
+      }
+      for (const protectedDirectory of kind === "linked"
+        ? [owner, common]
+        : [owner]) {
+        const state = join(protectedDirectory, "runtime-state");
+        let helperCalls = 0;
+        const dependencies = {
+          environment: { ...environment, CODEX_SECURITY_STATE_DIR: state },
+          runWorkbench: async () => {
+            helperCalls++;
+            return {
+              findings: [],
+              counts: { created: 0, updated: 0, unchanged: 0 },
+            };
+          },
+        };
+        for (const selected of selections) {
+          await expect(
+            (async () => {
+              const prepared = await prepareNormalizedLocalImport(
+                input(),
+                { repository: selected, ...source },
+                dependencies,
+              );
+              await prepared.import();
+            })(),
+          ).rejects.toThrow("must be outside the protected scan root");
+          await expect(
+            listLocalExternalFindings({ repository: selected }, dependencies),
+          ).rejects.toThrow("must be outside the protected scan root");
+          expect(helperCalls).toBe(0);
+          expect(existsSync(state)).toBe(false);
+        }
+      }
+    },
+  );
+
+  test.each([
+    ["gitdir", "spaces"],
+    ["commondir", "spaces"],
+    ["commondir", "nul-suffix"],
+    ["gitdir", "self-nul"],
+    ["commondir", "self-nul"],
+    ["commondir", "self-newline"],
+    ...(process.platform === "win32"
+      ? []
+      : [
+          ["gitdir", "newline-before-nul"],
+          ["commondir", "newline-before-nul"],
+        ]),
+  ])("preserves Git %s pointer format %s", async (kind, format) => {
+    const { root, stateDirectory, environment } = await fixture();
+    const common = join(
+      root,
+      format === "spaces"
+        ? process.platform === "win32"
+          ? "metadata with spaces"
+          : " metadata with spaces "
+        : format === "newline-before-nul"
+          ? "metadata.git\n"
+          : "metadata.git",
+    );
+    execFileSync("git", ["init", "--quiet", "--bare", common]);
+    execFileSync("git", [
+      "-C",
+      common,
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/example/project",
+    ]);
+    let repository = join(root, "pointer-source");
+    await mkdir(repository);
+    if (format.startsWith("self-")) {
+      if (kind === "gitdir") {
+        repository = common;
+        await writeFile(join(common, ".git"), "gitdir: \0ignored\r\n");
+      } else {
+        await writeFile(join(repository, ".git"), `gitdir: ${common}\n`);
+        await writeFile(
+          join(common, "commondir"),
+          format === "self-nul" ? "\0ignored\r\n" : "\r\n",
+        );
+      }
+    } else {
+      const pointer = `${common}${format === "spaces" ? "" : "\0ignored"}\r\n`;
+      if (kind === "gitdir")
+        await writeFile(join(repository, ".git"), `gitdir: ${pointer}`);
+      else {
+        await writeFile(join(repository, "HEAD"), "ref: refs/heads/main\n");
+        await writeFile(join(repository, "commondir"), pointer);
+      }
+    }
+    // Git accepts the exact bytes, including a path newline immediately before NUL.
+    expect(
+      execFileSync("git", ["-C", repository, "remote"], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("origin");
+    const bin = join(common, "tools");
+    const marker = join(root, "pointer-git-executed");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, process.platform === "win32" ? "git.exe" : "git"),
+      process.platform === "win32"
+        ? "untrusted executable fixture\n"
+        : '#!/bin/sh\nprintf executed > "$TEST_POINTER_GIT_MARKER"\nexit 61\n',
+      { mode: 0o700 },
+    );
+    const inheritedPath = Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
+    await prepareNormalizedLocalImport(
+      input(),
+      { repository, ...source },
+      {
+        environment: {
+          ...Object.fromEntries(
+            Object.entries(environment).filter(
+              ([name]) => name.toUpperCase() !== "PATH",
+            ),
+          ),
+          PATH: [bin, inheritedPath ?? ""].join(delimiter),
+          TEST_POINTER_GIT_MARKER: marker,
+        },
+        sourceRepositories: [{ url: "https://github.com/example/project" }],
+      },
+    );
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "Node protects associated metadata through POSIX path syntax",
+    async () => {
+      const { root, environment } = await fixture();
+      const storage = join(root, "storage");
+      await mkdir(join(storage, "child"), { recursive: true });
+      await symlink(join(storage, "child"), join(root, "pointer-link"), "dir");
+      const cases: { repository: string; state: string }[] = [];
+      for (const syntax of ["parent-traversal", "literal-backslash"]) {
+        const name =
+          syntax === "parent-traversal" ? "common.git" : "common\\data.git";
+        const common = join(storage, name);
+        execFileSync("git", ["init", "--quiet", "--bare", common]);
+        const pointer =
+          syntax === "parent-traversal"
+            ? "../pointer-link/../common.git"
+            : `../storage/${name}`;
+        for (const kind of ["gitdir", "commondir"]) {
+          const repository = join(root, `${syntax}-${kind}`);
+          await mkdir(repository);
+          if (kind === "gitdir") {
+            await writeFile(join(repository, ".git"), `gitdir: ${pointer}\n`);
+          } else {
+            await writeFile(join(repository, "HEAD"), "ref: refs/heads/main\n");
+            await writeFile(join(repository, "commondir"), `${pointer}\n`);
+          }
+          // Git must accept the pointer before testing the SDK's state boundary.
+          execFileSync("git", [
+            "-C",
+            repository,
+            "rev-parse",
+            "--git-common-dir",
+          ]);
+          cases.push({ repository, state: join(common, "runtime-state") });
+        }
+      }
+      // Exercise supported Node filesystem semantics, independent of Bun's realpath.
+      // Keep the bundle beneath the SDK so Node resolves external packages.
+      const bundle = await mkdtemp(
+        join(import.meta.dir, "..", ".import-metadata-"),
+      );
+      try {
+        const built = await Bun.build({
+          entrypoints: [
+            join(import.meta.dir, "..", "src", "external-findings-local.ts"),
+          ],
+          outdir: bundle,
+          target: "node",
+          format: "esm",
+          packages: "external",
+        });
+        expect(built.success).toBe(true);
+        const invocation = join(bundle, "invoke.mjs");
+        await writeFile(
+          invocation,
+          `
+          import assert from "node:assert/strict";
+          import { existsSync } from "node:fs";
+          import { listLocalExternalFindings, prepareNormalizedLocalImport } from ${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)};
+          for (const { repository, state } of ${JSON.stringify(cases)}) {
+            let helperCalls = 0;
+            const dependencies = {
+              environment: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+              runWorkbench: async () => {
+                helperCalls++;
+                return { findings: [], counts: { created: 0, updated: 0, unchanged: 0 } };
+              },
+            };
+            await assert.rejects(async () => {
+              const prepared = await prepareNormalizedLocalImport(
+                ${JSON.stringify(input())},
+                { repository, ...${JSON.stringify(source)} },
+                dependencies,
+              );
+              await prepared.import();
+            }, /must be outside the protected scan root/);
+            await assert.rejects(
+              listLocalExternalFindings({ repository }, dependencies),
+              /must be outside the protected scan root/,
+            );
+            assert.equal(helperCalls, 0, repository);
+            assert.equal(existsSync(state), false, state);
+          }
+          console.log("metadata-pointer-cases:4");
+        `,
+        );
+        const child = Bun.spawn([Bun.which("node")!, invocation], {
+          env: environment,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+        expect(stdout.trim()).toBe("metadata-pointer-cases:4");
+      } finally {
+        await rm(bundle, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "Node protects Windows metadata resolved from selected and discovered directories",
+    async () => {
+      const { root, environment } = await fixture();
+      const caller = join(root, "caller");
+      await mkdir(caller);
+      const bundle = await mkdtemp(
+        join(import.meta.dir, "..", ".import-metadata-"),
+      );
+      try {
+        const built = await Bun.build({
+          entrypoints: [
+            join(import.meta.dir, "..", "src", "external-findings-local.ts"),
+          ],
+          outdir: bundle,
+          target: "node",
+          format: "esm",
+          packages: "external",
+        });
+        expect(built.success).toBe(true);
+        const invocation = join(bundle, "invoke.mjs");
+        await writeFile(
+          invocation,
+          String.raw`
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import { existsSync } from "node:fs";
+          import { mkdir, realpath, writeFile } from "node:fs/promises";
+          import { join, parse } from "node:path";
+          import { listLocalExternalFindings, prepareNormalizedLocalImport } from ${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)};
+          const root = ${JSON.stringify(root)};
+          const drive = parse(root).root.slice(0, 2);
+          const git = (args) => execFileSync("git", args, {
+            encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim();
+          const createStore = (path) => {
+            git(["init", "--quiet", "--bare", path]);
+            // These stores back worktrees, so Git changes to the discovered checkout.
+            git(["config", "--file", join(path, "config"), "core.bare", "false"]);
+          };
+          const cases = [];
+          {
+            const checkout = join(root, "drive-relative-checkout");
+            const selected = join(checkout, "src");
+            const common = join(root, "drive-relative-common.git");
+            await mkdir(selected, { recursive: true });
+            createStore(common);
+            await writeFile(join(checkout, ".git"),
+              "gitdir: " + drive + "..\\..\\drive-relative-common.git\n");
+            cases.push({ selected, common, protectedRoots: [common] });
+          }
+          {
+            const checkout = join(root, "commondir-checkout");
+            const selected = join(checkout, "src");
+            const metadata = join(root, "linked-metadata");
+            const discoveryCommon = join(checkout, "common.git");
+            const configuredCommon = join(root, "common.git");
+            await mkdir(selected, { recursive: true });
+            await mkdir(metadata);
+            createStore(discoveryCommon);
+            createStore(configuredCommon);
+            await writeFile(join(checkout, ".git"), "gitdir: " + metadata + "\n");
+            await writeFile(join(metadata, "HEAD"), "ref: refs/heads/main\n");
+            await writeFile(join(metadata, "commondir"), drive + "..\\common.git\n");
+            cases.push({
+              selected,
+              common: configuredCommon,
+              protectedRoots: [discoveryCommon, configuredCommon],
+            });
+          }
+          let protectedRootCount = 0;
+          for (const { selected, common, protectedRoots } of cases) {
+            assert.notEqual(await realpath(process.cwd()), await realpath(selected));
+            // Check Git's final metadata resolution before relying on the fixture.
+            const actual = git(["-C", selected, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+            assert.equal(await realpath(actual), await realpath(common));
+            for (const protectedRoot of protectedRoots) {
+              const state = join(protectedRoot, "runtime-state");
+              let helperCalls = 0;
+              const dependencies = {
+                environment: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+                runWorkbench: async () => {
+                  helperCalls++;
+                  return { findings: [], counts: { created: 0, updated: 0, unchanged: 0 } };
+                },
+              };
+              await assert.rejects(async () => {
+                const prepared = await prepareNormalizedLocalImport(
+                  ${JSON.stringify(input())},
+                  { repository: selected, ...${JSON.stringify(source)} },
+                  dependencies,
+                );
+                await prepared.import();
+              }, /must be outside the protected scan root/);
+              await assert.rejects(
+                listLocalExternalFindings({ repository: selected }, dependencies),
+                /must be outside the protected scan root/,
+              );
+              assert.equal(helperCalls, 0, protectedRoot);
+              assert.equal(existsSync(state), false, state);
+              protectedRootCount++;
+            }
+          }
+          assert.equal(protectedRootCount, 3);
+          console.log("windows-metadata-roots:3");
+        `,
+        );
+        const child = Bun.spawn([Bun.which("node")!, invocation], {
+          cwd: caller,
+          env: environment,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+        expect(stdout.trim()).toBe("windows-metadata-roots:3");
+      } finally {
+        await rm(bundle, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("preserves Git pointer formats and invalid-pointer diagnostics", async () => {
+    const { root, environment, stateDirectory } = await fixture();
+    const repository = join(root, "linked");
+    const common = join(root, "common.git");
+    await mkdir(repository);
+    execFileSync("git", ["init", "--quiet", "--bare", common]);
+    execFileSync("git", [
+      "-C",
+      common,
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/example/project",
+    ]);
+    const marker = join(repository, ".git");
+    const dependencies = {
+      environment,
+      sourceRepositories: [{ url: "https://github.com/example/project" }],
+    };
+    await writeFile(marker, `gitdir: ${common}\0trailing\n`);
+    await prepareNormalizedLocalImport(
+      input(),
+      { repository, ...source },
+      dependencies,
+    );
+    await writeFile(marker, "gitdir: \0invalid\n");
+    const diagnostic = spawnSync(
+      "git",
+      ["-c", "core.fsmonitor=false", "-C", repository, "remote"],
+      {
+        encoding: "utf8",
+        env: environment,
+      },
+    );
+    expect(diagnostic.status).toBe(128);
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        dependencies,
+      ),
+    ).rejects.toMatchObject({
+      code: diagnostic.status,
+      stderr: diagnostic.stderr,
+    });
+    const unrelated = join(root, "unrelated");
+    for (const name of ["HEAD", "objects", "refs"])
+      await mkdir(join(unrelated, name), { recursive: true });
+    await writeFile(marker, `gitdir: ${unrelated}\n`);
+    let helperCalls = 0;
+    await listLocalExternalFindings(
+      { repository },
+      {
+        environment: {
+          ...environment,
+          CODEX_SECURITY_STATE_DIR: join(unrelated, "state"),
+        },
+        runWorkbench: async () => {
+          helperCalls++;
+          return { findings: [] };
+        },
+      },
+    );
+    expect(helperCalls).toBe(1);
+    expect(existsSync(stateDirectory)).toBe(false);
+    expect(existsSync(join(unrelated, "state"))).toBe(false);
+  });
+
   test("protects the checkout containing a directory link when selecting another repository", async () => {
     const { root, repository, stateDirectory, environment } = await fixture({
       remote: "https://github.com/example/project",
@@ -718,47 +1355,62 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
-  test.each(["", ":9418", ":19418"])(
-    "matches native Git transport remotes with port %s",
-    async (port) => {
-      const { repository, stateDirectory, environment } = await fixture({
-        remote: `git://git.example.test${port}/Example/Project.git`,
-      });
-      const expectedPort = port === ":19418" ? port : "";
-      await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        {
-          environment,
-          sourceRepositories: [
-            {
-              url: `https://git.example.test${expectedPort}/Example/Project`,
-            },
-          ],
-        },
-      );
-      for (const url of [
-        `https://git.example.test${expectedPort}/Example/Other`,
-        `https://git.example.test${expectedPort}/example/project`,
-        `https://git.example.test${expectedPort ? "" : ":19418"}/Example/Project`,
-      ]) {
-        await expect(
-          prepareNormalizedLocalImport(
-            input(),
-            { repository, ...source },
-            { environment, sourceRepositories: [{ url }] },
-          ),
-        ).rejects.toThrow("does not match a configured remote");
-      }
-      expect(existsSync(stateDirectory)).toBe(false);
-    },
-  );
+  test.each(
+    [
+      ["git", "9418"],
+      ["ftp", "21"],
+      ["ftps", "990"],
+      ["git+ssh", "22"],
+      ["ssh+git", "22"],
+    ].flatMap(([protocol, defaultPort]) =>
+      ["", `:${defaultPort}`, ":19418"].map(
+        (port) => [protocol, port] as const,
+      ),
+    ),
+  )("matches %s transport remotes with port %s", async (protocol, port) => {
+    const { repository, stateDirectory, environment } = await fixture({
+      remote: `${protocol}://git.example.test${port}/Example/Project.git`,
+    });
+    const expectedPort = port === ":19418" ? port : "";
+    await prepareNormalizedLocalImport(
+      input(),
+      { repository, ...source },
+      {
+        environment,
+        sourceRepositories: [
+          {
+            url: `https://git.example.test${expectedPort}/Example/Project`,
+          },
+        ],
+      },
+    );
+    for (const url of [
+      `https://git.example.test${expectedPort}/Example/Other`,
+      `https://git.example.test${expectedPort}/example/project`,
+      `https://git.example.test${expectedPort ? "" : ":19418"}/Example/Project`,
+    ]) {
+      await expect(
+        prepareNormalizedLocalImport(
+          input(),
+          { repository, ...source },
+          { environment, sourceRepositories: [{ url }] },
+        ),
+      ).rejects.toThrow("does not match a configured remote");
+    }
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
 
-  test.each(["ssh.github.com", "SSH.GITHUB.COM"])(
-    "matches %s over the HTTPS port without equating other SSH ports",
-    async (host) => {
+  test.each(
+    ["ssh", "git+ssh", "ssh+git"].flatMap((protocol) =>
+      ["ssh.github.com", "SSH.GITHUB.COM"].map(
+        (host) => [protocol, host] as const,
+      ),
+    ),
+  )(
+    "matches %s on %s over the HTTPS port without equating other SSH ports",
+    async (protocol, host) => {
       const { repository, stateDirectory, environment } = await fixture({
-        remote: `ssh://git@${host}:443/example/project.git`,
+        remote: `${protocol}://git@${host}:443/example/project.git`,
       });
       const dependencies = {
         environment,
@@ -785,7 +1437,7 @@ describe("local normalized scanner findings", () => {
         "remote",
         "set-url",
         "origin",
-        "ssh://git@ssh.github.com:2222/example/project.git",
+        `${protocol}://git@ssh.github.com:2222/example/project.git`,
       ]);
       await expect(
         prepareNormalizedLocalImport(
@@ -1082,7 +1734,7 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
-  test.each(["checkout", "plain"])(
+  test.each(["checkout", "plain", "plain-with-head-directory"])(
     "repository matching ignores Git executables in a separate %s caller directory",
     async (kind) => {
       const { root, repository, stateDirectory, environment } = await fixture({
@@ -1100,6 +1752,9 @@ describe("local normalized scanner findings", () => {
         mkdir(callerBin, { recursive: true }),
       ]);
       if (kind === "checkout") await mkdir(join(caller, ".git"));
+      if (kind === "plain-with-head-directory")
+        for (const name of ["HEAD", "objects", "refs"])
+          await mkdir(join(callerDirectory, name));
       await writeFile(
         join(callerBin, process.platform === "win32" ? "git.exe" : "git"),
         process.platform === "win32"
@@ -1141,7 +1796,7 @@ describe("local normalized scanner findings", () => {
                   name.toUpperCase() !== "CODEX_SECURITY_STATE_DIR"),
             ),
           ),
-          ...(kind === "plain"
+          ...(kind !== "checkout"
             ? {
                 HOME: callerDirectory,
                 USERPROFILE: callerDirectory,
@@ -1200,7 +1855,18 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
-  test("retains reader-provided GitHub identity for a matching typed repository URL", async () => {
+  test.each([
+    "https://git.example.test/Example/Project",
+    "https://git.example.test/example/project",
+    "https://git.example.test/example/project.git/",
+    "HTTPS://GIT.EXAMPLE.TEST/example/project",
+    "https://%67it.example.test/example/project",
+    "https://git.example.test/other/../example/project",
+    "https://git.example.test:443/example/project",
+    "git@git.example.test:example/project.git",
+    "ssh://git@git.example.test:22/example/project.git",
+    "git://git.example.test:9418/example/project.git",
+  ])("retains reader-provided GitHub identity from %s", async (metadataUrl) => {
     const { repository, stateDirectory, environment } = await fixture({
       remote: "git@git.example.test:example/project.git",
     });
@@ -1213,14 +1879,23 @@ describe("local normalized scanner findings", () => {
     ).rejects.toThrow("does not match a configured remote");
     const dependencies = {
       environment,
-      sourceRepositories: [{ url, platform: "github" as const }, { url }],
+      sourceRepositories: [
+        {
+          url: metadataUrl,
+          platform: "github" as const,
+          extra: { retained: true },
+        },
+        { url },
+      ],
     };
+    const originalSources = structuredClone(dependencies.sourceRepositories);
     const prepared = await prepareNormalizedLocalImport(
       data,
       options,
       dependencies,
     );
     expect(prepared.preview.findings).toEqual(data.findings);
+    expect(dependencies.sourceRepositories).toEqual(originalSources);
     for (const different of [
       "https://git.example.test/example/other",
       "https://other.example.test/example/project",
