@@ -1,6 +1,13 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +24,97 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
+
+test.each([
+  ["codex_security_deep_scan", true, false],
+  ["codex_security_deep_scan", true, true],
+  ["codex_security_deep_scan", false, false],
+  ["codex-security", true, false],
+] as const)(
+  "native configuration fixture owns preflight shutdown: client=%s, layers=%p, error=%p",
+  async (clientName, includeLayers, error) => {
+    const root = await mkdtemp(join(tmpdir(), "native-config-lifetime-"));
+    const exited = join(root, "native-exited");
+    const response = {
+      id: 2,
+      ...(error
+        ? { error: { code: -32603, message: "synthetic configuration error" } }
+        : {
+            result: {
+              config: { model: "synthetic-model", daybreak: true },
+              origins: { daybreak: { name: { type: "user" } } },
+              layers: [{ name: { type: "user" }, config: { daybreak: true } }],
+            },
+          }),
+    };
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("./fixtures/skill-native-config.mjs", import.meta.url),
+        ),
+        "-e",
+        `const { createInterface } = require("node:readline");
+         const { writeFileSync } = require("node:fs");
+         createInterface({ input: process.stdin }).on("line", line => {
+           const request = JSON.parse(line);
+           const response = request.method === "config/read"
+             ? ${JSON.stringify(response)}
+             : { id: request.id, result: {} };
+           process.stdout.write(JSON.stringify(response) + "\\n");
+         });
+         process.on("exit", () => writeFileSync(${JSON.stringify(exited)}, "exited"));`,
+      ],
+      {
+        env: { ...process.env, SYNTHETIC_NATIVE_CODEX: process.execPath },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    const closed = once(child, "close");
+    const lines = createInterface({ input: child.stdout });
+    const timeout = setTimeout(() => child.kill(), 10_000);
+    try {
+      child.stdin.write(
+        JSON.stringify({
+          id: 1,
+          method: "initialize",
+          params: { clientInfo: { name: clientName } },
+        }) + "\n",
+      );
+      await once(lines, "line");
+      child.stdin.write(
+        JSON.stringify({
+          id: 2,
+          method: "config/read",
+          params: { includeLayers },
+        }) + "\n",
+      );
+      const [line] = await once(lines, "line");
+      expect(line).toBe(JSON.stringify(response));
+      if (clientName === "codex_security_deep_scan" && includeLayers) {
+        expect(await readFile(exited, "utf8")).toBe("exited");
+        child.stdin.end();
+        child.kill("SIGTERM");
+      } else {
+        await expect(readFile(exited, "utf8")).rejects.toHaveProperty(
+          "code",
+          "ENOENT",
+        );
+        child.stdin.end();
+      }
+      await closed;
+      expect(await readFile(exited, "utf8")).toBe("exited");
+    } finally {
+      child.stdin.end();
+      await closed;
+      clearTimeout(timeout);
+      lines.close();
+      child.stderr.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test.each([0, 23])(
   "native configuration fixture preserves early exit %p with its input still open",
