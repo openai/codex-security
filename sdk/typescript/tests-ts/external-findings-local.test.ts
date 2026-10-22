@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
@@ -185,6 +185,38 @@ describe("local normalized scanner findings", () => {
     ).toBe(4);
   });
 
+  test("reads retained evidence after the checkout is removed and still requires a directory for new imports", async () => {
+    const { repository, environment } = await fixture();
+    const result = await (
+      await prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        { environment },
+      )
+    ).import();
+    await rm(repository, { recursive: true });
+    const reloaded = await listLocalExternalFindings(
+      { repository: result.repository },
+      { environment },
+    );
+    expect(new Map(reloaded.map((row) => [row.id, row]))).toEqual(
+      new Map(result.findings.map((row) => [row.id, row])),
+    );
+    expect(
+      await listLocalExternalFindings(
+        { repository: result.repository, id: result.findings[0]!.id },
+        { environment },
+      ),
+    ).toEqual([result.findings[0]!]);
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        { environment },
+      ),
+    ).rejects.toThrow("Repository is not a directory");
+  });
+
   test("preparation and cancellation leave the database untouched", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const controller = new AbortController();
@@ -203,6 +235,58 @@ describe("local normalized scanner findings", () => {
         { environment, signal: controller.signal },
       ),
     ).rejects.toThrow();
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test("cancels readback while repository path resolution is pending", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    const module = new URL("../src/external-findings-local.ts", import.meta.url)
+      .href;
+    const mocks = new URL("./support/module-mocks.ts", import.meta.url).href;
+    const script = `
+      import { strictEqual } from "node:assert/strict";
+      import * as fs from "node:fs/promises";
+      import { setImmediate } from "node:timers/promises";
+      import { mockFs } from ${JSON.stringify(mocks)};
+      const repository = ${JSON.stringify(repository)};
+      const originalRealpath = fs.realpath;
+      let enteredLookup, releaseLookup;
+      const entered = new Promise((resolve) => { enteredLookup = resolve; });
+      const lookup = new Promise((resolve) => { releaseLookup = resolve; });
+      mockFs(() => ({
+        realpath: (path, ...args) => {
+          if (path !== repository) return originalRealpath(path, ...args);
+          enteredLookup();
+          return lookup;
+        },
+      }));
+      const { listLocalExternalFindings } = await import(${JSON.stringify(module)});
+      const controller = new AbortController();
+      const reason = new Error("Synthetic readback cancellation");
+      let outcome;
+      const reading = listLocalExternalFindings(
+        { repository }, { signal: controller.signal },
+      ).then(
+        () => { outcome = "fulfilled"; },
+        (error) => { outcome = error; },
+      );
+      await entered;
+      controller.abort(reason);
+      await setImmediate();
+      try {
+        strictEqual(outcome, reason);
+      } finally {
+        releaseLookup(repository);
+        await reading;
+      }
+      console.log("CANCELLED");
+    `;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      env: environment,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("CANCELLED");
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
@@ -323,6 +407,101 @@ describe("local normalized scanner findings", () => {
       { repository, ...source },
       { environment },
     );
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test.each(["local", "global"])(
+    "matches all effective fetch URLs with %s Git URL rewrites",
+    async (scope) => {
+      const { root, repository, stateDirectory, environment } = await fixture({
+        remote: "gh:example/project.git",
+      });
+      const gitEnvironment = {
+        ...environment,
+        GIT_CONFIG_GLOBAL: join(root, "global-git-config"),
+        GIT_CONFIG_NOSYSTEM: "1",
+      };
+      for (const args of [
+        ["config", `--${scope}`, "url.https://github.com/.insteadOf", "gh:"],
+        ["config", "--add", "remote.origin.url", "gh:example/secondary.git"],
+        ["remote", "add", "upstream", "gh:example/library.git"],
+      ]) {
+        execFileSync("git", ["-C", repository, ...args], {
+          env: gitEnvironment,
+        });
+      }
+      const module = new URL(
+        "../src/external-findings-local.ts",
+        import.meta.url,
+      ).href;
+      const script = `
+        import { rejects } from "node:assert/strict";
+        const { prepareNormalizedLocalImport } = await import(${JSON.stringify(module)});
+        const input = { read: 0, findings: [], excluded: [] };
+        const options = ${JSON.stringify({ repository, ...source })};
+        for (const name of ["project", "secondary", "library"]) {
+          await prepareNormalizedLocalImport(input, options, {
+            sourceRepositories: [{ url: "https://github.com/example/" + name }],
+          });
+        }
+        await rejects(
+          prepareNormalizedLocalImport(input, options, {
+            sourceRepositories: [{ url: "https://github.com/example/other" }],
+          }),
+          /does not match a configured remote/,
+        );
+      `;
+      const result = spawnSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: gitEnvironment,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
+  test("preserves Git configuration errors during repository matching", async () => {
+    const { repository, stateDirectory, environment } = await fixture({
+      remote: "https://github.com/example/project",
+    });
+    await appendFile(join(repository, ".git", "config"), "[invalid\n");
+    const git = spawnSync("git", ["-C", repository, "remote"], {
+      encoding: "utf8",
+      env: { ...environment, LC_ALL: "C" },
+    });
+    expect(git.status).toBe(128);
+    expect(git.stderr).toContain("fatal: bad config line");
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        {
+          environment,
+          sourceRepositories: [{ url: "https://github.com/example/other" }],
+        },
+      ),
+    ).rejects.toMatchObject({ code: git.status, stderr: git.stderr });
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test("accepts repository context for checkouts without remotes and plain source directories", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    const dependencies = {
+      environment,
+      sourceRepositories: [{ url: "https://github.com/example/project" }],
+    };
+    await prepareNormalizedLocalImport(
+      input(),
+      { repository, ...source },
+      dependencies,
+    );
+    await rm(join(repository, ".git"), { recursive: true });
+    const prepared = await prepareNormalizedLocalImport(
+      input(),
+      { repository, ...source },
+      dependencies,
+    );
+    expect(prepared.preview.repository).toBe(repository);
     expect(existsSync(stateDirectory)).toBe(false);
   });
 

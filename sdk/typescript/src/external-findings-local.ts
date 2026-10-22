@@ -16,6 +16,7 @@ import { parseGitRemote } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import {
   bundledPluginRoot,
+  canonicalConfigPath,
   canonicalizeModelSafePath,
   expandHome,
   requireOutputOutsideRepositories,
@@ -24,6 +25,7 @@ import {
   type WorkbenchCommandOptions,
 } from "./runtime.js";
 import {
+  abortable,
   gitOutput,
   gitProtectionRoots,
   normalizeRepository,
@@ -120,26 +122,42 @@ async function requireMatchingRepository(
   signal?: AbortSignal,
 ): Promise<void> {
   if (sources.length === 0) return;
-  let configuration: string;
-  try {
-    configuration = await gitOutput(
+  const readGit = (args: readonly string[]) =>
+    gitOutput(
       repository,
-      ["config", "--local", "--null", "--get-regexp", "^remote\\..*\\.url$"],
+      args,
       signal,
-      undefined,
+      { LC_ALL: "C" },
       undefined,
       "utf8",
       protectedRoots,
     );
-  } catch {
+  let remoteNames: string;
+  try {
+    remoteNames = await readGit(["remote"]);
+  } catch (error) {
     signal?.throwIfAborted();
-    // A local directory need not be a Git checkout or have a configured remote.
-    return;
+    // A local source directory need not be a Git checkout.
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === 128 &&
+      "stderr" in error &&
+      typeof error.stderr === "string" &&
+      (error.stderr.trimEnd() ===
+        "fatal: not a git repository (or any of the parent directories): .git" ||
+        /^fatal: not a git repository \(or any parent up to mount point [^\r\n]+\)\r?\nStopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.$/u.test(
+          error.stderr.trimEnd(),
+        ))
+    )
+      return;
+    throw error;
   }
-  const remotes = configuration.split("\0").flatMap((record) => {
-    const separator = record.indexOf("\n");
-    return separator < 0 ? [] : [record.slice(separator + 1)];
-  });
+  const remotes: string[] = [];
+  for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
+    const urls = await readGit(["remote", "get-url", "--all", "--", name]);
+    remotes.push(...urls.split(/\r?\n/u));
+  }
   for (const source of sources) {
     const sourceProvider = source.platform === "github" ? "github" : provider;
     const remoteKeys = new Set(
@@ -160,6 +178,7 @@ async function requireMatchingRepository(
 async function localContext(
   selectedRepository: string,
   dependencies: LocalExternalImportDependencies,
+  mode: "import" | "read" = "import",
 ): Promise<{
   repository: string;
   options: Omit<WorkbenchCommandOptions, "python">;
@@ -168,10 +187,11 @@ async function localContext(
   const environment = workbenchEnvironment(
     dependencies.environment ?? process.env,
   );
-  const repository = await normalizeRepository(
-    expandHome(selectedRepository, environment),
-    dependencies.signal,
-  );
+  const path = expandHome(selectedRepository, environment);
+  const repository =
+    mode === "read"
+      ? await abortable(() => canonicalConfigPath(path), dependencies.signal)
+      : await normalizeRepository(path, dependencies.signal);
   const protectedRoot = [
     ...new Set([
       repository,
@@ -289,6 +309,7 @@ export async function listLocalExternalFindings(
   const { repository, options } = await localContext(
     selection.repository,
     dependencies,
+    "read",
   );
   dependencies.signal?.throwIfAborted();
   const result = await (dependencies.runWorkbench ?? runWorkbench)(

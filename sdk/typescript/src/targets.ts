@@ -782,7 +782,12 @@ export async function gitOutput(
   const command = await resolveTrustedExecutable(
     "git",
     isolatedGitEnvironment(
-      args[0] === "rev-parse" || args[0] === "config" || args[0] === "ls-files",
+      args[0] === "rev-parse" ||
+        args[0] === "config" ||
+        args[0] === "ls-files" ||
+        (args[0] === "remote" &&
+          (args.length === 1 ||
+            (args[1] === "get-url" && args[2] === "--all"))),
     ),
     [
       (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
