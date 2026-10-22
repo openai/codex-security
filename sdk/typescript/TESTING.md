@@ -200,6 +200,13 @@ not make tests inside one file concurrent. Required CI and the mutation trial
 remain on Bun 1.3.14 until a newer release passes the full SDK suite in every mode
 on all three platforms.
 
+Runner modes use the same property seed and coverage settings as each other.
+Required CI uses the default property seed and collects Linux coverage, while
+these diagnostics use the seed above and omit coverage instrumentation. Compare
+inventories across required CI and diagnostics, but measure scheduling speed
+between diagnostic modes to avoid attributing these differences to the runner.
+Both workflows install ripgrep on Linux so the inventory-path test executes.
+
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
 runtime are not necessarily part of Bun's import graph.

@@ -546,6 +546,18 @@ describe("TypeScript package skeleton", () => {
     const execution = runner.steps!.find(
       (step) => step.name === "Test runner mode",
     );
+    const ripgrep = runner.steps!.find(
+      (step) => step.name === "Install ripgrep",
+    );
+    expect(ripgrep).toMatchObject({
+      if: "runner.os == 'Linux'",
+      run: ci.jobs["test"]!.steps!.find(
+        (step) => step.name === "Install ripgrep",
+      )?.run,
+    });
+    expect(runner.steps!.indexOf(ripgrep!)).toBeLessThan(
+      runner.steps!.indexOf(execution!),
+    );
     expect(execution).toMatchObject({
       "working-directory": "sdk/typescript",
       env: {
