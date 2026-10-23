@@ -99196,8 +99196,8 @@ async function collectReports(result) {
 async function uploadReports(reports, inputs, tempRoot) {
   if (!reports.size) throw new Error("Artifact upload requested, but no validated reports are available.");
   const staging = await (0, import_promises9.mkdtemp)((0, import_node_path6.join)(tempRoot, "codex-security-upload-"));
-  await (0, import_promises9.chmod)(staging, 448);
   try {
+    await (0, import_promises9.chmod)(staging, 448);
     const files = [];
     for (const [name, bytes] of reports) {
       const dest = (0, import_node_path6.join)(staging, name === "exports/results.sarif" ? "results.sarif" : name);

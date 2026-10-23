@@ -18,6 +18,9 @@
 - preserve complete local vendor evidence ([#1886](https://github.com/openai/codex-security/pull/1886))
 - preserve MCP connections for large scan checkpoints ([#1873](https://github.com/openai/codex-security/pull/1873))
 - persist large scan usage at completion and failure ([#1874](https://github.com/openai/codex-security/pull/1874))
+- skip work cancelled before it starts ([#1733](https://github.com/openai/codex-security/pull/1733))
+- preserve scan directory identities and isolate Git fixtures ([#1833](https://github.com/openai/codex-security/pull/1833))
+- isolate artifact upload failures ([#1719](https://github.com/openai/codex-security/pull/1719))
 
 <!-- release-section: highlights:end -->
 

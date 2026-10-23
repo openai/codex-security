@@ -600,6 +600,7 @@ describe("CodexSecurity policy API", () => {
           ? ["--separate-git-dir", join(f.root, "other-git-data")]
           : []),
       );
+      policyGit(owner, "config", "--local", "core.autocrlf", "false");
       policyGit(owner, "commit", "--allow-empty", "--quiet", "-m", "initial");
       let checkout = owner;
       if (kind === "linked") {
@@ -692,6 +693,7 @@ describe("CodexSecurity policy API", () => {
       onPrepare,
     });
     policyGit(f.repository, "init", "--quiet");
+    policyGit(f.repository, "config", "--local", "core.autocrlf", "false");
     const nested = await addPolicySubmodule(
       f.repository,
       join(f.root, "submodule-source"),
