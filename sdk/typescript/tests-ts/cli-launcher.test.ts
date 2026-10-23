@@ -66,6 +66,35 @@ describe("CLI launcher", () => {
     }
   });
 
+  test("preserves installed-launcher startup failures while escaping C1 controls", async () => {
+    const root = await temporaryDirectory("codex-security-cli-bin-failure-");
+    const controls = String.fromCharCode(
+      ...Array.from({ length: 33 }, (_, index) => 0x7f + index),
+    );
+    try {
+      const launcher = join(root, "bin", "codex-security.mjs");
+      await mkdir(join(root, "bin"), { recursive: true });
+      await mkdir(join(root, "dist"), { recursive: true });
+      await copyFile(join(packageRoot, "bin", "codex-security.mjs"), launcher);
+      await writeFile(
+        join(root, "dist", "cli.js"),
+        `throw new Error(${JSON.stringify(`failed ${SYNTHETIC_CREDENTIALS}${controls} details`)});\n`,
+      );
+      const child = await runCommand("node", [launcher], {
+        env: { ...process.env, NODE_NO_WARNINGS: "1" },
+        timeout: 30_000,
+      });
+
+      expect(child.status).toBe(2);
+      expect(child.stdout).toBe("");
+      expect(child.stderr).toBe(
+        `codex-security: Failed to start Codex Security: failed ${SYNTHETIC_CREDENTIALS}${" ".repeat(controls.length)} details\n`,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test.each(["import", "main", "missing", "success"])(
     "preserves installed-launcher %s results",
     async (scenario) => {

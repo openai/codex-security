@@ -1,12 +1,13 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { readCodexHomeConfig } from "../src/auth.js";
 import { main } from "../src/cli.js";
-import { IncompleteScanError } from "../src/errors.js";
+import { ContractValidationError, IncompleteScanError } from "../src/errors.js";
+import { completedEvents, runEvents } from "./support/api-events.js";
 import { parseImportedFindings } from "../src/findings-import.js";
 import { runWorkbench } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -183,6 +184,12 @@ test.each([
     advice: "cannot access the configured model",
   },
   {
+    label: "stored API key authorization",
+    diagnostic: "403 synthetic model access denied",
+    advice: "The stored API key cannot access the configured model",
+    storedApiKey: true,
+  },
+  {
     label: "rate limit",
     diagnostic: "429 synthetic quota exceeded",
     advice: "reached its rate limit",
@@ -199,6 +206,14 @@ test.each([
     for (const json of [false, true]) {
       const { stdout, stderr, runCli } = createCliTest(main);
       const deps = dependencies({
+        onTurn: (_repository, options) => {
+          if ("storedApiKey" in scenario)
+            options.onAuthentication?.({
+              method: "stored_credentials",
+              credentialType: "api_key",
+              verified: false,
+            });
+        },
         onRun: () => {
           throw failure;
         },
@@ -292,3 +307,43 @@ for (const command of ["import", "owners"] as const) {
     }
   });
 }
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "preserves native artifact failures through the SDK and CLI",
+  async () => {
+    const root = await temporaryDirectory(
+      "artifact-permission-diagnostic-",
+      true,
+    );
+    const scanDir = await copyCompletedScan(root);
+    try {
+      await chmod(scanDir, 0o600);
+      const failure = await runEvents(scanDir, completedEvents()).catch(
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(ContractValidationError);
+      const cause = (failure as Error).cause as NodeJS.ErrnoException;
+      expect(cause.code).toBe("EACCES");
+      expect(cause.path).toBe(join(scanDir, "scan-manifest.json"));
+      expect((failure as Error).message).toContain(cause.message);
+
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scan", ".", "--json"],
+          dependencies({
+            onRun: () => {
+              throw failure;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(cause.message);
+      expect(JSON.parse(stdout.text()).message).toContain(cause.message);
+      expect((failure as Error).cause).toBe(cause);
+    } finally {
+      await chmod(scanDir, 0o700);
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

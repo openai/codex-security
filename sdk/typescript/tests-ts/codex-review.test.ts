@@ -119,14 +119,61 @@ test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
   },
 );
 
+const transportStatusScenarios = [408, 429, 500, 502, 503, 504, 401].flatMap(
+  (status) =>
+    ["request", "turn"].map((phase) => ({
+      scenario: `transport-${phase}-${status}`,
+      message: `Safety policy: request refused by upstream with ${status}`,
+      phase,
+      retryable: status !== 401,
+    })),
+);
 const failureReasons: Record<string, string> = {
+  ...Object.fromEntries(
+    transportStatusScenarios.map(({ scenario, message }) => [
+      scenario,
+      message,
+    ]),
+  ),
+  "transport-null-turn": "Request flagged for possible cybersecurity risk.",
+  "transport-wording-request":
+    "Request flagged for possible cybersecurity risk.",
+  "transport-timeout-turn":
+    "Safety policy: request refused because the service timed out",
+  "service-timeout-text": "Codex did not submit a validated review",
   "policy-turn-code": "Request blocked.",
   "policy-request-code": "Request blocked.",
   "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-accordance-turn":
+    "This request was refused in accordance with the safety policy.",
+  "policy-terse-turn": "Refused due to the safety policy",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-causal-refusal-text":
+    "This request was refused because it violates the safety policy.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
+  "policy-colon-refusal-text": "Request refused: safety policy.",
+  "policy-review-text": "Review refused: safety policy.",
+  "policy-suffix-explanation-text":
+    "Request refused: safety policy. I can offer a defensive alternative.",
+  "policy-colon-explanation-text":
+    "Safety policy: request refused due to disallowed content.",
+  "policy-harmful-content-text":
+    "Safety policy: this request is refused due to harmful content.",
+  "policy-bare-harmful-content-text":
+    "Safety policy: request refused due to harmful content.",
+  "policy-restrictions-text":
+    "Safety policy: this request is refused due to policy restrictions.",
+  "policy-bare-restrictions-text":
+    "Safety policy: request refused due to policy restrictions.",
+  "policy-service-impact-text":
+    "Safety policy: this request is refused because it would make the service unavailable.",
+  "policy-multiline-explanation-text":
+    "Safety policy: this request is refused.\nI can offer a defensive alternative.",
   "policy-reported-error":
-    "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
+    "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "rate-limit-turn": "Rate limit reached",
@@ -139,6 +186,20 @@ const failureReasons: Record<string, string> = {
   "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error-policy-file":
+    "Required review check could not be completed: Connection refused while fetching content-policy.ts",
+  "required-source-error-upload-policy":
+    "Required review check could not be completed: Artifact upload was blocked by the content policy.",
+  "required-source-error-upload-content-policy-violation":
+    "Required review check could not be completed: Artifact upload failed due to content policy violation",
+  "required-source-error-upload-safety-policy-violation":
+    "Required review check could not be completed: Artifact upload failed due to safety policy violation",
+  "required-source-error-publication-policy":
+    "Required review check could not be completed: Artifact publication was refused due to the content policy.",
+  "required-source-error-publication-refusal":
+    "Required review check could not be completed: Artifact publication refusal due to the content policy.",
+  "required-source-error-policy-requires-refusal":
+    "Required review check could not be completed: Artifact upload failed because the content policy requires refusal of unsupported media",
   "required-source-error":
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
@@ -152,6 +213,13 @@ const failureReasons: Record<string, string> = {
     "Permission profile synthetic_profile was rejected: café 🔒\n",
 };
 const retriedFailures = new Set([
+  ...transportStatusScenarios
+    .filter(({ retryable }) => retryable)
+    .map(({ scenario }) => scenario),
+  "transport-null-turn",
+  "transport-wording-request",
+  "transport-timeout-turn",
+  "service-timeout-text",
   "text-only",
   "failed-turn",
   "rate-limit-turn",
@@ -173,8 +241,15 @@ const recoveredScenarios: Record<string, string> = {
   "recover-no-submission": "text-only",
 };
 const modelFailures = new Set([
+  ...transportStatusScenarios
+    .filter(({ phase }) => phase === "turn")
+    .map(({ scenario }) => scenario),
+  "transport-null-turn",
+  "transport-timeout-turn",
   "policy-turn-code",
   "policy-turn",
+  "policy-accordance-turn",
+  "policy-terse-turn",
   "failed-turn",
   "rate-limit-turn",
   "server-error",
@@ -499,7 +574,7 @@ for (const {
             ? "refusal"
             : scenario === "invalid-submission"
               ? "validation"
-              : scenario === "text-only"
+              : ["text-only", "service-timeout-text"].includes(scenario)
                 ? "no-submission"
                 : modelFailures.has(scenario) || reportsBlocker
                   ? "model"
@@ -508,6 +583,7 @@ for (const {
             ([
               "invalid-submission",
               "text-only",
+              "service-timeout-text",
               "required-source-error-after-text",
             ].includes(scenario)
               ? 2
@@ -516,13 +592,15 @@ for (const {
             ? "The model refused the deduplication review."
             : scenario === "invalid-submission"
               ? "The submitted review failed semantic validation."
-              : scenario === "text-only"
+              : ["text-only", "service-timeout-text"].includes(scenario)
                 ? "Codex did not submit a validated review."
                 : modelFailures.has(scenario)
                   ? "Codex review turn failed."
                   : reportsBlocker
                     ? "A required review check could not be completed."
-                    : ["request-error", "credential-error"].includes(scenario)
+                    : scenario.startsWith("transport-request-") ||
+                        scenario === "transport-wording-request" ||
+                        ["request-error", "credential-error"].includes(scenario)
                       ? "Codex rejected the review request."
                       : "Codex review transport failed.",
         });
@@ -620,6 +698,7 @@ for (const {
             : ([
                 "invalid-submission",
                 "text-only",
+                "service-timeout-text",
                 "retry-correction",
                 "text-only-correction",
                 "cancel-continuation",
@@ -627,6 +706,10 @@ for (const {
               ].includes(scenario)
                 ? 2
                 : [
+                      ...transportStatusScenarios
+                        .filter(({ phase }) => phase === "request")
+                        .map(({ scenario }) => scenario),
+                      "transport-wording-request",
                       "request-error",
                       "credential-error",
                       "policy-request",
@@ -867,19 +950,82 @@ test.each(["capture", "throw", "reject", "pending"])(
 test.each([
   "cyber_policy",
   "Request blocked by a safety policy violation.",
+  "This request was blocked by the content policy.",
+  "The review has been blocked under the safety policy.",
+  "Review blocked because it violates the safety policy.",
+  "The review was refused due to the content policy.",
+  "This request was refused under the safety policy",
+  "This request was refused under the content policy",
   "Request flagged for potentially high-risk cyber activity.",
   "I cannot help with this request.",
   "I’m sorry, but I can’t assist with your request.",
+  "Request refused by cybersecurity policy.",
+  "Request refusal due to the safety policy.",
+  "Review refusal due to the content policy.",
+  "Refusal due to the content policy.",
+  "Refused due to the safety policy",
+  "This request was refused because of the safety policy.",
+  "This request was refused in accordance with the safety policy.",
+  "This request was refused because it violates the safety policy.",
+  "The content policy requires refusal of this request.",
+  "The content policy requires refusal of review.",
+  "The safety policy requires a refusal of your review.",
+  "Under the safety policy, this request is refused.",
+  "Cybersecurity policy: this request is refused.",
+  "Content policy: your request has been blocked.",
+  "Safety policy: the request was refused.",
+  "Request refused: safety policy.",
+  "Review refused: safety policy.",
+  "Request refused: safety policy. I can offer a defensive alternative.",
+  "Request refused: safety policy! Please ask for defensive guidance instead.",
+  "Safety policy: request refused.",
+  "Safety policy: request was refused.",
+  "Safety policy: request refused due to disallowed content.",
+  "Safety policy: request refused due to potentially harmful content.",
+  "Safety policy: request refused due to harmful assistance.",
+  "Safety policy: this review is refused because complying would violate applicable restrictions.",
+  "Safety policy: request refused under the applicable policy restrictions. I can offer a defensive alternative.",
+  "Safety policy: request refused under the applicable restrictions.",
+  "Safety policy: request refused because it would facilitate harm.",
+  "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
+  "I'm not able to help with that.",
+  "Safety policy: this request is refused because it would make the service time out.",
 ])("recognizes explicit review refusals: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(true);
+});
+
+test.each([
+  "httpConnectionFailed",
+  "responseStreamConnectionFailed",
+  "responseStreamDisconnected",
+  "responseTooManyFailedAttempts",
+])("preserves structured transport failure semantics: %s", (variant) => {
+  for (const status of [null, 401, 502]) {
+    const info = { [variant]: { httpStatusCode: status } };
+    expect(
+      isReviewRefusal("Request flagged for possible cybersecurity risk.", info),
+    ).toBe(false);
+    expect(
+      isReviewRefusal(
+        "Safety policy: request refused because the service timed out",
+        info,
+      ),
+    ).toBe(false);
+  }
 });
 
 test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
   "recognizes structured policy refusal codes independently of message wording: %s",
   (code) => {
     expect(isReviewRefusal("Request blocked.", code)).toBe(true);
+    expect(
+      isReviewRefusal(
+        "Safety policy: request refused because the service timed out",
+        code,
+      ),
+    ).toBe(true);
     expect(isReviewRefusal("Request blocked.", "unauthorized")).toBe(false);
   },
 );
@@ -890,6 +1036,33 @@ test.each([
   "Required source revision could not be read.",
   "I cannot complete the review because the source is unavailable.",
   "Connection refused",
+  "Connection refused: safety policy service unavailable",
+  "Request refused: safety policy service unavailable",
+  "Review refused: safety policy service unavailable",
+  "Request refused: safety policy. Service unavailable.",
+  "Review refused: safety policy. Service unavailable.",
+  "Safety policy: request refused because the service timed out",
+  "Safety policy: request refused due to upstream service timeout.",
+  "Safety policy: request refused by upstream with 401",
+  "Safety policy: request refused by upstream with 502",
+  "Safety policy: request refused by upstream with 504",
+  "Safety policy: request refused by upstream with 503",
+  "Safety policy: request refused. Service unavailable.",
+  "Safety policy: this request is refused.\nService unavailable.",
+  "Safety policy: request refused due to upstream service unavailability.",
+  "Safety policy: request refused due to upstream service unavailability for content processing.",
+  "Safety policy: request refused due to upstream service unavailability while fetching content.",
+  "Connection refused while fetching content-policy.ts",
+  "Artifact upload was blocked by the content policy.",
+  "Artifact upload failed due to content policy violation",
+  "Artifact upload failed due to safety policy violation",
+  "Artifact publication was refused due to the content policy.",
+  "Artifact publication refusal due to the content policy.",
+  "Artifact upload failed because the content policy requires refusal of unsupported media",
+  "The review failed because the content policy requires refusal of unsupported media",
+  "git fetch was refused by the remote for the cybersecurity-platform repository",
+  "Cybersecurity policy: this request is invalid.",
+  "Content policy: connection refused while fetching the source.",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(false);

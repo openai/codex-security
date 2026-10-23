@@ -391,6 +391,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const owner = "package-sdk-owner";
+  f.env.PACKAGE_DEEP_PARENT_THREAD = owner;
   let scanId;
   const client = new sdk.CodexSecurity(
     { pythonPath: f.env.PYTHON },
@@ -415,7 +416,7 @@ async function runInstalledSdk(pluginRoot, executable) {
         return {
           startThread() {
             return {
-              id: owner,
+              id: null,
               async runStreamed() {
                 assert.fail(
                   "The direct engine must not start a parent model turn.",
@@ -430,15 +431,15 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
+      onScanRegistered: (scan) => {
+        scanId = scan.scanId;
+      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       outputDir: join(f.directory, "output"),
-      onScanRegistered(scan) {
-        scanId = scan.scanId;
-      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");

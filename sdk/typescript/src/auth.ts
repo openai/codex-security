@@ -61,9 +61,10 @@ export async function readCodexHomeConfig(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<JsonObject> {
+  const path = join(configuredCodexHome(environment), "config.toml");
   try {
     return parse(
-      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+      await readFile(path, {
         encoding: "utf8",
         signal,
       }),
@@ -72,7 +73,7 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      `Could not read the configured Codex provider: ${errorMessage(error)}`,
+      `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
