@@ -14,7 +14,11 @@ The final readable output is a deterministic projection of `scan-manifest.json`,
 
 When writing `findings.json` alongside this readable output, populate the optional structured details in `finding-detail-fields.md` from the same validated evidence. Do not parse the rendered report back into finding data.
 
-Use `report.md` as the primary readable entry point. Explain report-relevant artifact paths in the report itself, especially in `Scope`, `Reviewed Surfaces`, and `Open Questions And Follow Up`.
+Use `report.md` as the primary readable entry point. Explain report-relevant artifact paths in the report itself, especially in `Scope`, `Reviewed Surfaces`, `Deferred Requested Work`, and `Open Questions And Follow Up`.
+
+Keep unfinished requested work and essential in-scope proof gaps in `coverage.deferred`.
+The report presents these separately from optional `coverage.openQuestions` follow-up.
+Neither section changes the scan execution outcome.
 
 In the final response, link the generated markdown report path as the primary readable artifact.
 

@@ -189,6 +189,10 @@ directory must be private to you (`chmod 700`).
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
+Review the requested paths and exclusions alongside the execution outcome.
+`coverage.deferred` records unfinished requested work, while
+`coverage.openQuestions` records optional follow-up separately.
+
 Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
