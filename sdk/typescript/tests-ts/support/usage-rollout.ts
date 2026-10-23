@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
-import { expect } from "bun:test";
+import assert from "node:assert/strict";
 
 export const scanThreadId = "scan-thread";
 export const lowerUuid7Turn = "019f9e4d-b3ba-7000-8000-000000000001";
@@ -83,6 +84,11 @@ export function ownershipRollout(
     uuid7TokenSnapshot(1_000, 100),
     uuid7TaskStarted(higherUuid7Turn),
     uuid7TokenSnapshot(1_100, 110),
+    {
+      type: "event_msg",
+      timestamp: uuid7EventTimestamp,
+      payload: { type: "task_complete" },
+    },
   ];
 }
 
@@ -91,7 +97,7 @@ export function readPythonRolloutUsage(
   rolloutPath: string,
 ): unknown {
   const python = Bun.which("python3") ?? Bun.which("python");
-  expect(python).not.toBeNull();
+  assert.notEqual(python, null);
   const probe = [
     "import json, sys",
     "from datetime import datetime, timezone",
@@ -99,29 +105,87 @@ export function readPythonRolloutUsage(
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_usage",
     "session = workbench_scan_usage.RolloutSession(sys.argv[3], sys.argv[4], Path(sys.argv[2]))",
-    "usage, warnings = workbench_scan_usage._read_rollout_usage(",
+    "usage = workbench_scan_usage._read_rollout_usage(",
     "    session,",
     "    started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),",
     "    completed_at=None,",
     ")",
-    "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}, sort_keys=True))",
+    "print(json.dumps({'usage': usage.tokens, 'warnings': sorted(usage.warnings)}, sort_keys=True))",
   ].join("\n");
-  const result = spawnSync(
-    python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probe,
-      join(pluginRoot, "scripts"),
-      rolloutPath,
-      childUuid7Thread,
-      scanThreadId,
-    ],
-    { encoding: "utf8" },
-  );
+  const result = runNodePython(python!, [
+    "-c",
+    probe,
+    join(pluginRoot, "scripts"),
+    rolloutPath,
+    childUuid7Thread,
+    scanThreadId,
+  ]);
 
-  expect(result.error).toBeUndefined();
-  expect(result.status, result.stderr).toBe(0);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout) as unknown;
+}
+
+export const parentFields = [
+  "source",
+  "parent_thread_id",
+  "forked_from_id",
+] as const;
+type SessionParentField = (typeof parentFields)[number];
+
+export function parentMetadata(
+  parentThreadId: string,
+  field: SessionParentField,
+) {
+  return field === "source"
+    ? {
+        source: {
+          subagent: { thread_spawn: { parent_thread_id: parentThreadId } },
+        },
+      }
+    : { [field]: parentThreadId };
+}
+
+export async function writeSession(
+  home: string,
+  threadId: string,
+  usage: Record<string, number>,
+  {
+    parent,
+    cwd,
+    timestamp,
+    parentField = "source",
+  }: {
+    parent?: string;
+    cwd?: string;
+    timestamp?: string;
+    parentField?: SessionParentField;
+  } = {},
+): Promise<string> {
+  const directory = join(home, "sessions", "2026", "07", "26");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `rollout-${threadId}.jsonl`);
+  await writeFile(
+    path,
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          ...(cwd === undefined ? {} : { cwd }),
+          ...(timestamp === undefined ? {} : { timestamp }),
+          ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: usage },
+        },
+      }),
+      "",
+    ].join("\n"),
+  );
+  return path;
 }

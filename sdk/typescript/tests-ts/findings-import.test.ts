@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -7,6 +8,7 @@ import {
 } from "../src/findings-import.js";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { PYTHON } from "./support/security-policy.js";
 
 const BYTE_ORDER_MARK = "\uFEFF";
 const CSV_SOURCE =
@@ -25,7 +27,181 @@ async function sourceDocument(): Promise<FindingsDocument> {
   );
 }
 
+function exportCsv(findings: Finding[], coverage = {}): string {
+  return execFileSync(
+    PYTHON,
+    [
+      "-c",
+      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), json.loads(sys.argv[2])))",
+      join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(coverage),
+    ],
+    {
+      cwd: join(PLUGIN_ROOT, "scripts"),
+      input: JSON.stringify({ findings }),
+      encoding: "utf8",
+    },
+  );
+}
+
 describe("findings import formats", () => {
+  test("round-trips an empty exported CSV", async () => {
+    expect(
+      await parseImportedFindings(exportCsv([]), "csv", PLUGIN_ROOT),
+    ).toEqual([]);
+    await expect(
+      parseImportedFindings("", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+    await expect(
+      parseImportedFindings("title,summary\n", "csv", PLUGIN_ROOT),
+    ).rejects.toThrow();
+  });
+
+  test("retains distinct occurrences of a shared finding in CSV and JSON", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    const rows = [
+      finding!,
+      { ...finding!, occurrenceId: "occ_111111111111111111111111" },
+    ];
+    for (const format of ["csv", "json"] as const) {
+      const source =
+        format === "csv" ? exportCsv(rows) : JSON.stringify({ findings: rows });
+      const parsed = await parseImportedFindings(source, format, PLUGIN_ROOT);
+      expect(
+        parsed.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
+      ).toEqual(
+        rows.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
+      );
+      const bound = bindImportedFindings(parsed, format, "scan", "target");
+      expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
+      if (format === "csv") {
+        expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
+      }
+    }
+    await expect(
+      parseImportedFindings(
+        exportCsv([finding!, finding!]),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow("duplicate occurrence_id");
+  });
+
+  test("round-trips required text and spreadsheet escapes through the exporter", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    const values = [
+      "'--no-verify' skips hooks",
+      "''=literal",
+      "'Literal",
+      "'=1+1",
+      "''-x",
+      "''literal",
+      "ordinary λ",
+      "\uFEFF",
+      "\u0085\uFEFF\u001c",
+      "  Required text. \n",
+      "=formula",
+      "\u0085=formula",
+      "\u001c=formula",
+      "\u001d=formula",
+      "\u001e=formula",
+      "\u001f=formula",
+      "\uFEFF=formula",
+      " +formula",
+      "-option",
+      "@owner",
+      "\tTabbed",
+      "\nNewline",
+      "  ＝wide",
+      " ＋wide",
+      "－wide",
+      "＠wide",
+    ];
+    for (const value of values) {
+      const source = {
+        ...finding!,
+        title: value,
+        summary: value,
+        remediation: value,
+        locations: [
+          {
+            path: value.replace(/[\u0000-\u001F]/gu, "") + ".ts",
+            startLine: 1,
+          },
+        ],
+      };
+      const [imported] = await parseImportedFindings(
+        exportCsv([source]),
+        "csv",
+        PLUGIN_ROOT,
+      );
+      expect(imported).toMatchObject({
+        title: source.title,
+        summary: source.summary,
+        remediation: source.remediation,
+        locations: source.locations,
+      });
+    }
+  });
+
+  test.each(
+    (["title", "summary", "remediation"] as const).flatMap((field) =>
+      [" \t\r\n", "\u0085", "\u001c\u001d\u001e\u001f"].map(
+        (value) => [field, value] as const,
+      ),
+    ),
+  )("rejects canonical whitespace in CSV %s %j", async (field, value) => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    await expect(
+      parseImportedFindings(
+        exportCsv([{ ...finding!, [field]: value }]),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow(`requires ${field}`);
+  });
+
+  test("retains a literal apostrophe before a non-whitespace byte order mark", async () => {
+    const title = "'\uFEFF=formula";
+    const [imported] = await parseImportedFindings(
+      CSV_SOURCE.replace("Reported CSV import issue", title),
+      "csv",
+      PLUGIN_ROOT,
+    );
+
+    expect(imported!.title).toBe(title);
+  });
+
+  test("round-trips literal whitespace paths and FEFF candidate IDs through the exporter", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    for (const path of [" ", "\u00A0", "\u2028", "\u2029", "\uFEFF"]) {
+      const [imported] = await parseImportedFindings(
+        exportCsv(
+          [
+            {
+              ...finding!,
+              locations: [{ path, startLine: 1, endLine: 1 }],
+              extensions: { candidateId: "\uFEFF" },
+            },
+          ],
+          { mode: "deep_repository" },
+        ),
+        "csv",
+        PLUGIN_ROOT,
+      );
+      expect(imported!.locations).toEqual([{ path, startLine: 1, endLine: 1 }]);
+      expect(imported!.extensions?.["candidateId"]).toBe("\uFEFF");
+    }
+  });
+
   test("accepts full findings documents and findings-service payloads", async () => {
     const document = await sourceDocument();
     document.findings[0]!.summary =
@@ -132,9 +308,22 @@ describe("findings import formats", () => {
         parseImportedFindings(JSON.stringify(payload), "json", PLUGIN_ROOT),
       ).rejects.toThrow("Findings JSON");
     }
-    await expect(
-      parseImportedFindings("{", "json", PLUGIN_ROOT),
-    ).rejects.toThrow("could not be parsed");
+    for (const source of ["{", '{"findings": [],}']) {
+      let parseError: Error | undefined;
+      try {
+        JSON.parse(source);
+      } catch (error) {
+        parseError = error as Error;
+      }
+      expect(parseError).toBeInstanceOf(SyntaxError);
+      await expect(
+        parseImportedFindings(source, "json", PLUGIN_ROOT),
+      ).rejects.toMatchObject({
+        name: "CodexSecurityError",
+        message: `Findings JSON could not be parsed. ${parseError!.message}`,
+        cause: expect.objectContaining({ message: parseError!.message }),
+      });
+    }
     await expect(
       parseImportedFindings(
         JSON.stringify({

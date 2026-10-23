@@ -20,8 +20,10 @@ const pluginManifest = JSON.parse(
 );
 const repository = join(consumer, "behavior-repository");
 const codexHome = join(consumer, "behavior-runtime");
+const bootstrapWorkspace = join(consumer, "behavior-bootstrap");
 await mkdir(repository, { mode: 0o700 });
 await mkdir(codexHome, { mode: 0o700 });
+await mkdir(bootstrapWorkspace, { mode: 0o700 });
 await writeFile(join(repository, "README.md"), "# Synthetic repository\n");
 const environment = {
   ...Object.fromEntries(
@@ -91,6 +93,7 @@ const client = new sdk.CodexSecurity(
     environment,
     prepareRuntime: async () => ({
       codexHome,
+      bootstrapWorkspace,
       environment,
       credentialsAvailable: true,
       plugin: {
@@ -199,7 +202,8 @@ try {
   assert.equal(finished.has(2), true);
   assert.equal(turns.length, 3);
   await assert.rejects(client.run(repository), /CodexSecurity is closed/u);
-  await assert.rejects(stat(codexHome), { code: "ENOENT" });
+  await assert.rejects(stat(bootstrapWorkspace), { code: "ENOENT" });
+  assert.equal((await stat(codexHome)).isDirectory(), true);
   assert.equal(
     (await stat(join(completed.scanDir, "report.md"))).isFile(),
     true,

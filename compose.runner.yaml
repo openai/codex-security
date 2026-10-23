@@ -10,6 +10,7 @@ services:
       - seccomp=${CODEX_SECURITY_SECCOMP:-./docker/codex-security-seccomp.json}
     environment:
       CODEX_API_KEY:
+      CODEX_SECURITY_EMBEDDINGS_URL:
       CODEX_SECURITY_GIT_HOST:
       GH_TOKEN:
       GITHUB_TOKEN:

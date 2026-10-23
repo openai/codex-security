@@ -34,6 +34,18 @@ def require_available(connection: sqlite3.Connection, args: Any, require_scan: A
         raise SystemExit(SCAN_STATUS_ERROR)
 
 
+def require_request(
+    connection: sqlite3.Connection, request_id: str, occurrence: sqlite3.Row
+) -> sqlite3.Row:
+    current = connection.execute(
+        "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
+        (request_id,),
+    ).fetchone()
+    if current is None or current["occurrence_id"] != occurrence["id"]:
+        raise SystemExit("Codex Security finding remediation request not found.")
+    return current
+
+
 def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
     if remediation["pending_action_claim_token"] is None:
         return False
@@ -90,35 +102,25 @@ def require_pending_action(current: sqlite3.Row, requested: str) -> None:
         )
 
 
-def register_cancel_finding_remediation_request(subparsers: Any) -> None:
-    parser = subparsers.add_parser("cancel-finding-remediation-request")
-    parser.add_argument("--occurrence-id", required=True)
-    parser.add_argument("--request-id", required=True)
-    parser.add_argument("--action-token", required=True)
-
-
 def cancel_finding_remediation_request(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> str:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         current = connection.execute(
             "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
             (request_id,),
         ).fetchone()
         if current is None:
-            connection.commit()
             return str(occurrence["scan_id"])
         if current["occurrence_id"] != occurrence["id"]:
             raise SystemExit("This remediation request belongs to a different finding.")
         if current["pending_action"] is None:
-            connection.commit()
             return str(occurrence["scan_id"])
         if current["state"] == "failed" and current["pending_action_claim_token"] is None:
-            connection.commit()
             return str(occurrence["scan_id"])
         if current["pending_action_claim_token"] != action_token:
             raise SystemExit("This remediation host request is owned by a different action token.")
@@ -145,17 +147,17 @@ def cancel_finding_remediation_request(
             connection.execute(
                 """
                 UPDATE finding_remediation_attempts
-                SET pending_action = NULL, pending_action_claimed_at = NULL,
+                SET state = CASE
+                        WHEN pending_action = 'verify' AND state = 'verifying' THEN 'applied'
+                        ELSE state
+                    END,
+                    pending_action = NULL, pending_action_claimed_at = NULL,
                     pending_action_claim_token = NULL, pending_action_delivered_at = NULL,
                     version = version + 1, updated_at = ?
                 WHERE request_id = ? AND pending_action_claim_token = ?
                 """,
                 (timestamp, request_id, action_token),
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return str(occurrence["scan_id"])
 
 
@@ -193,9 +195,5 @@ def _cancel_generation(
     )
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

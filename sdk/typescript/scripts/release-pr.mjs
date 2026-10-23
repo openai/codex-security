@@ -1,17 +1,25 @@
+import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
+import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
+export const actionPackagePath = "github-action/package.json";
+export const actionLockPath = "github-action/package-lock.json";
+export const exampleWorkflowPath = "examples/github-actions/codex-security.yml";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
+const packagePaths = [packagePath, actionPackagePath, actionLockPath];
 const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
 const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\(([^)]*)\))?(!)?: (.+)$/u;
+const exampleVersionPattern =
+  /^([ \t]*CODEX_SECURITY_VERSION:[ \t]*)(["']?)[0-9]+\.[0-9]+\.[0-9]+\2(?=[ \t]*(?:#[^\r\n]*)?\r?$)/gmu;
 
 function isReleaseTitle(title) {
   const [, type, scope] = conventionalTitle.exec(title) ?? [];
@@ -88,13 +96,13 @@ export function generateNoteSections(changes) {
             "",
             ...breaking.map(changeLine),
           ].join("\n")
-        : "Review compatibility and document any required migration steps before releasing.",
+        : "No additional migration steps are documented for this release.",
     ].join("\n"),
   };
 }
 
 function sectionBlock(id, content) {
-  return `<!-- release-section: ${id}:start -->\n${content}\n<!-- release-section: ${id}:end -->`;
+  return `<!-- release-section: ${id}:start -->\n\n${content}\n\n<!-- release-section: ${id}:end -->`;
 }
 
 function findSection(notes, id) {
@@ -114,10 +122,6 @@ function findSection(notes, id) {
   return { start, end, text: notes.slice(start, end) };
 }
 
-function hash(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 export function updateReleaseNotes(
   version,
   generated,
@@ -126,29 +130,22 @@ export function updateReleaseNotes(
 ) {
   const header = `<!-- release-version: ${version} -->`;
   const sections = {};
-  if (previousSections === undefined) {
-    const blocks = sectionIds.map((id) => {
-      const block = sectionBlock(id, generated[id]);
-      sections[id] = { generatedHash: hash(block), humanOwned: false };
-      return block;
-    });
-    return { notes: `${header}\n\n${blocks.join("\n\n")}\n`, sections };
-  }
-
-  let notes = previousNotes;
+  const initial = previousSections === undefined;
+  let notes = initial ? null : previousNotes;
   if (notes !== null) {
     notes = /^<!-- release-version: [^\r\n]* -->/u.test(notes)
       ? notes.replace(/^<!-- release-version: [^\r\n]* -->/u, header)
       : `${header}\n\n${notes}`;
   }
   for (const id of sectionIds) {
-    const previous = previousSections[id];
-    const block = notes === null ? null : findSection(notes, id);
+    const previous = initial ? null : previousSections[id];
+    const block = initial || notes === null ? null : findSection(notes, id);
     const humanOwned =
+      !initial &&
       previous?.reset !== true &&
       (previous?.humanOwned !== false ||
         block === null ||
-        hash(block.text) !== previous.generatedHash);
+        hash("sha256", block.text) !== previous.generatedHash);
     if (humanOwned) {
       sections[id] = {
         generatedHash: previous?.generatedHash ?? null,
@@ -162,7 +159,7 @@ export function updateReleaseNotes(
     } else {
       notes = notes.slice(0, block.start) + next + notes.slice(block.end);
     }
-    sections[id] = { generatedHash: hash(next), humanOwned: false };
+    sections[id] = { generatedHash: hash("sha256", next), humanOwned: false };
   }
   return { notes, sections };
 }
@@ -182,6 +179,35 @@ function updatePackageVersion(packageText, version) {
     if (isDeepStrictEqual(JSON.parse(updated), expected)) return updated;
   }
   throw new Error("Unable to update only the top-level package version.");
+}
+
+function updateActionLockVersion(lockText, version) {
+  const lock = JSON.parse(lockText);
+  lock.version = version;
+  lock.packages[""].version = version;
+  return `${JSON.stringify(lock, null, 2)}\n`;
+}
+
+function updateExampleVersion(exampleText, version) {
+  if ([...exampleText.matchAll(exampleVersionPattern)].length !== 1) {
+    throw new Error(
+      "Unable to update only the GitHub Actions example CLI version.",
+    );
+  }
+  return exampleText.replace(
+    exampleVersionPattern,
+    (_match, prefix, quote) => `${prefix}${quote}${version}${quote}`,
+  );
+}
+
+function packageWithoutVersion(text, path) {
+  if (text === null) return null;
+  const metadata = JSON.parse(text);
+  delete metadata.version;
+  if (path === actionLockPath && metadata.packages?.[""]) {
+    delete metadata.packages[""].version;
+  }
+  return metadata;
 }
 
 export function createReleasePlan(history, previous = null) {
@@ -204,6 +230,29 @@ export function createReleasePlan(history, previous = null) {
     previous?.state.sections,
   );
   const state = { baseVersion, baseCommit, sections };
+  const files = {
+    [packagePath]: updatePackageVersion(packageText, version),
+    [notesPath]: notes,
+    [statePath]: `${JSON.stringify(state, null, 2)}\n`,
+  };
+  if (history.actionPackageText != null) {
+    files[actionPackagePath] = updatePackageVersion(
+      history.actionPackageText,
+      version,
+    );
+  }
+  if (history.actionLockText != null) {
+    files[actionLockPath] = updateActionLockVersion(
+      history.actionLockText,
+      version,
+    );
+  }
+  if (history.exampleWorkflowText != null) {
+    files[exampleWorkflowPath] = updateExampleVersion(
+      history.exampleWorkflowText,
+      version,
+    );
+  }
   return {
     baseVersion,
     baseCommit,
@@ -214,21 +263,13 @@ export function createReleasePlan(history, previous = null) {
     changes,
     generated,
     humanOwned: sectionIds.filter((id) => sections[id].humanOwned),
-    files: {
-      [packagePath]: updatePackageVersion(packageText, version),
-      [notesPath]: notes,
-      [statePath]: `${JSON.stringify(state, null, 2)}\n`,
-    },
+    files,
   };
 }
 
 export function createGitRepository(directory) {
   const git = (...args) =>
-    execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
@@ -245,7 +286,7 @@ export function createGitRepository(directory) {
   };
 }
 
-export async function readReleaseHistory(repo, mainSha, github) {
+export function readVersionHistory(repo, mainSha) {
   repo.ensureCommit(mainSha);
   const packageText = repo.readFile(mainSha, packagePath);
   const baseVersion = releaseVersion(JSON.parse(packageText));
@@ -259,6 +300,14 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit = sha;
   }
 
+  return { baseVersion, baseCommit, packageText };
+}
+
+export async function readReleaseHistory(repo, mainSha, github) {
+  const { baseVersion, baseCommit, packageText } = readVersionHistory(
+    repo,
+    mainSha,
+  );
   const commits = repo
     .git("rev-list", "--first-parent", "--reverse", `${baseCommit}..${mainSha}`)
     .trim()
@@ -294,6 +343,9 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit,
     mainSha,
     packageText,
+    actionPackageText: repo.readFile(mainSha, actionPackagePath),
+    actionLockText: repo.readFile(mainSha, actionLockPath),
+    exampleWorkflowText: repo.readFile(mainSha, exampleWorkflowPath),
     changes: [...changes.values()],
   };
 }
@@ -306,21 +358,44 @@ function readReleaseBranch(repo, mainSha, headSha) {
     .split("\0")
     .filter(Boolean);
   if (
-    paths.some((path) => ![packagePath, notesPath, statePath].includes(path))
+    paths.some(
+      (path) =>
+        ![...packagePaths, exampleWorkflowPath, notesPath, statePath].includes(
+          path,
+        ),
+    )
   ) {
     return {
       holdReason:
         "The release branch has other file edits. Preserve or merge them before running the updater.",
     };
   }
-  const originalPackage = JSON.parse(repo.readFile(mergeBase, packagePath));
-  const branchPackage = JSON.parse(repo.readFile(headSha, packagePath));
-  delete originalPackage.version;
-  delete branchPackage.version;
-  if (!isDeepStrictEqual(originalPackage, branchPackage)) {
+  for (const path of packagePaths) {
+    const originalPackage = packageWithoutVersion(
+      repo.readFile(mergeBase, path),
+      path,
+    );
+    const branchPackage = packageWithoutVersion(
+      repo.readFile(headSha, path),
+      path,
+    );
+    if (!isDeepStrictEqual(originalPackage, branchPackage)) {
+      return {
+        holdReason:
+          "The release branch has package edits beyond its version. Preserve them before running the updater.",
+      };
+    }
+  }
+  const originalExample = repo
+    .readFile(mergeBase, exampleWorkflowPath)
+    ?.replace(exampleVersionPattern, "$1$2$2");
+  const branchExample = repo
+    .readFile(headSha, exampleWorkflowPath)
+    ?.replace(exampleVersionPattern, "$1$2$2");
+  if (originalExample !== branchExample) {
     return {
       holdReason:
-        "The release branch has package edits beyond its version. Preserve them before running the updater.",
+        "The release branch has GitHub Actions example edits beyond its CLI version. Preserve them before running the updater.",
     };
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
@@ -475,8 +550,8 @@ async function ensurePullRequest(
     };
   }
   const marker = `<!-- release-pr-head: ${headSha} -->`;
-  const proposalMarker = `<!-- release-pr-proposal: ${hash(JSON.stringify(plan.files))} -->`;
-  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash(JSON.stringify(plan.generated))} -->`;
+  const proposalMarker = `<!-- release-pr-proposal: ${hash("sha256", JSON.stringify(plan.files))} -->`;
+  const suggestionsMarker = `<!-- release-pr-suggestions: ${hash("sha256", JSON.stringify(plan.generated))} -->`;
   const comments = await github.list(
     `issues/${current.number}/comments?per_page=100`,
   );
@@ -638,17 +713,27 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
   async function responseFor(method, path, body) {
     for (let retry = 0; ; retry += 1) {
-      const response = await fetcher(`${apiRoot}${path}`, {
-        method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "X-GitHub-Api-Version": "2026-03-10",
-          "Content-Type": "application/json",
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      if (response.ok) return response;
+      let response;
+      try {
+        response = await fetcher(`${apiRoot}${path}`, {
+          method,
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "X-GitHub-Api-Version": "2026-03-10",
+            "Content-Type": "application/json",
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (response.ok) {
+          return { data: await response.json(), headers: response.headers };
+        }
+      } catch (error) {
+        if (method !== "GET" || retry >= 2 || error instanceof SyntaxError)
+          throw error;
+        await delay(1000 * 2 ** retry);
+        continue;
+      }
       if (
         method === "GET" &&
         retry < 2 &&
@@ -670,7 +755,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
     owner: repository.split("/")[0],
     repositoryUrl: `https://github.com/${repository}`,
     async request(method, path, body) {
-      return (await responseFor(method, path, body)).json();
+      return (await responseFor(method, path, body)).data;
     },
     async list(path) {
       const items = [];
@@ -679,17 +764,14 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
           "GET",
           `${path}${path.includes("?") ? "&" : "?"}page=${page}`,
         );
-        items.push(...(await response.json()));
+        items.push(...response.data);
         if (!response.headers.get("link")?.includes('rel="next"')) return items;
       }
     },
   };
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const directory = fileURLToPath(new URL("../../..", import.meta.url));
   const repository = process.env.GITHUB_REPOSITORY ?? "openai/codex-security";
   const token =

@@ -39,7 +39,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.15.0"
           package-manager-cache: false
@@ -112,6 +112,19 @@ jobs:
                   echo "Package version is unchanged and already published."
                   echo "changed=false" >> "$GITHUB_OUTPUT"
                   exit 0
+                fi
+                if tagged_sha="$(git rev-parse --verify "refs/tags/npm-v$version^{commit}" 2>/dev/null)" &&
+                   [[ "$tagged_sha" != "$RELEASE_SHA" ]] &&
+                   git merge-base --is-ancestor "$tagged_sha" "$RELEASE_SHA"; then
+                  tagged_version="$(
+                    git show "$tagged_sha:sdk/typescript/package.json" |
+                      node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version'
+                  )"
+                  if [[ "$tagged_version" == "$version" ]]; then
+                    echo "Package version is unchanged and already tagged at $tagged_sha."
+                    echo "changed=false" >> "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
                 fi
               else
                 node sdk/typescript/scripts/release-automation.mjs \
@@ -214,6 +227,7 @@ jobs:
             --silent
 
       - name: Dispatch the protected npm release
+        id: dispatch
         if: steps.release.outputs.changed == 'true'
         shell: bash
         env:
@@ -221,6 +235,22 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          gh workflow run node-release.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$RELEASE_TAG"
+          run_id="$(gh api --method POST \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/node-release.yml/dispatches" \
+            -f "ref=$RELEASE_TAG" --jq '.workflow_run_id')"
+          printf 'run-id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Start release progress observer
+        if: steps.dispatch.outputs.run-id != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.dispatch.outputs.run-id }}
+        run: |
+          # Explicitly observe token-dispatched runs without relying on chained
+          # workflow_run events. Progress notification remains best-effort.
+          timeout --kill-after=5s 10s gh workflow run release-progress.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main \
+            -f "run-id=$RELEASE_RUN_ID" -f watch=true

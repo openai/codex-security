@@ -1,27 +1,23 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const directories = createTemporaryDirectories(true);
 
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+afterEach(directories.cleanup);
 
 function probe(program: string, ...args: string[]): void {
   const python = Bun.which("python3") ?? Bun.which("python");
   if (python === null)
     throw new Error("Python is required for workbench tests.");
-  const result = Bun.spawnSync(
-    [python, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts"), ...args],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const result = runPython(python, [
+    "-c",
+    program,
+    join(PLUGIN_ROOT, "scripts"),
+    ...args,
+  ]);
   expect(result.exitCode, result.stderr.toString()).toBe(0);
 }
 
@@ -51,10 +47,7 @@ test("normalizes absolute Windows scopes without accepting escapes", () => {
 });
 
 test("verifies LF and CRLF patches with Git line-ending conversion enabled", async () => {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-line-endings-")),
-  );
-  directories.push(root);
+  const root = await directories.create("codex-security-line-endings-");
   probe(
     [
       "import hashlib, os, sys",

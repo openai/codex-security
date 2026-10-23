@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { JsonObject } from "./config.js";
-import type { Finding, SeverityLevel } from "./models.js";
+import type { Finding } from "./models.js";
 import type { NormalizedTarget } from "./targets.js";
 
 type DraftFinding = Omit<
@@ -10,18 +10,8 @@ type DraftFinding = Omit<
   "findingId" | "occurrenceId" | "fingerprints"
 >;
 
-interface MockFinding {
-  id: string;
-  title: string;
-  severity: SeverityLevel;
-  cwe: string;
-  summary: string;
-  code: string;
-  remediation: string;
-}
-
 // Entirely synthetic examples; the paths and snippets do not come from the target.
-const EXAMPLES: readonly MockFinding[] = [
+const EXAMPLES = [
   {
     id: "command-injection",
     title: "Export filename reaches a shell command",
@@ -129,7 +119,7 @@ const EXAMPLES: readonly MockFinding[] = [
     code: 'response.cookie("session", sessionId, { secure: true });',
     remediation: "Set HttpOnly on the session cookie.",
   },
-];
+] as const;
 
 function mockFindings(scanId: string): DraftFinding[] {
   const findings = EXAMPLES.map((example, index): DraftFinding => {
@@ -241,7 +231,6 @@ export async function writeMockScanDraft(
     },
     "findings.json": { findings: mockFindings(scanId) },
     "coverage.json": {
-      completeness: "complete",
       inventoryStrategy:
         target.kind === "paths"
           ? "scoped_path"

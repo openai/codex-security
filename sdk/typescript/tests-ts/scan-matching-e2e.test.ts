@@ -1,14 +1,6 @@
-import { createHash } from "node:crypto";
-import {
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createCliTest } from "./support/cli-run.js";
+import { hash } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
@@ -25,8 +17,11 @@ import {
   type ScanComparisonResult,
   type ScanMatchingBatch,
 } from "../src/scan-comparison.js";
-import { capture, dependencies } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { dependencies } from "./cli-fixtures.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { readJson } from "./support/json.js";
+import { fail } from "./support/errors.js";
 
 const empty = { matches: [], uncertain: [] } satisfies ScanComparisonResult;
 
@@ -48,9 +43,7 @@ function confirmed(
 }
 
 test("matches sealed scan history end to end without merging related findings", async () => {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-matching-")),
-  );
+  const root = await temporaryDirectory("codex-security-matching-", true);
   try {
     const python = await resolvePluginPython();
     const repository = join(root, "repository");
@@ -74,8 +67,6 @@ test("matches sealed scan history end to end without merging related findings", 
         args,
         input,
       );
-    const readJson = async <T>(path: string): Promise<T> =>
-      JSON.parse(await readFile(path, "utf8")) as T;
     const writeJson = async (path: string, value: unknown) =>
       writeFile(path, JSON.stringify(value));
     const artifacts: string[] = [];
@@ -98,9 +89,7 @@ test("matches sealed scan history end to end without merging related findings", 
         }),
       ]);
       const scanId = String(registered["scanId"]);
-      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
-        recursive: true,
-      });
+      await copyCompletedScanFixture(scanDir);
       const manifest = await readJson<ScanManifest>(
         join(scanDir, "scan-manifest.json"),
       );
@@ -189,11 +178,7 @@ test("matches sealed scan history end to end without merging related findings", 
     ];
     const digest = async () =>
       Promise.all(
-        artifacts.map(async (path) =>
-          createHash("sha256")
-            .update(await readFile(path))
-            .digest("hex"),
-        ),
+        artifacts.map(async (path) => hash("sha256", await readFile(path))),
       );
     const originalArtifacts = await digest();
     const save = (
@@ -253,9 +238,8 @@ test("matches sealed scan history end to end without merging related findings", 
       resumedPair["matchingInputs"] as unknown as ScanComparisonInput,
       {
         codex: {
-          startThread() {
-            throw new Error("An already-confirmed alias must not need Codex.");
-          },
+          startThread: () =>
+            fail("An already-confirmed alias must not need Codex."),
         },
       },
     );
@@ -367,13 +351,11 @@ test("matches sealed scan history end to end without merging related findings", 
       });
     };
     const cli = async (args: string[], matcher = onMatch) => {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
       expect(
-        await main(
+        await runCli(
           [...args, "--json"],
-          stdout.stream,
-          stderr.stream,
           dependencies({
             currentDirectory: repository,
             environment,
@@ -398,9 +380,8 @@ test("matches sealed scan history end to end without merging related findings", 
         matchScanFindings(input, {
           ...options,
           codex: {
-            startThread() {
-              throw new Error("Cached transitive links must not need Codex.");
-            },
+            startThread: () =>
+              fail("Cached transitive links must not need Codex."),
           },
         }),
       ),

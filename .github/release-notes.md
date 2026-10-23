@@ -1,41 +1,46 @@
-<!-- release-version: 0.1.27 -->
+<!-- release-version: 0.6.0 -->
 
 <!-- release-section: highlights:start -->
+
 ## Highlights
 
-- port source and test report checks to TypeScript ([#768](https://github.com/openai/codex-security/pull/768))
-- port custom validation to TypeScript ([#792](https://github.com/openai/codex-security/pull/792))
-- add Python-free Unix OS primitives ([#794](https://github.com/openai/codex-security/pull/794))
-- add Python-free Windows OS primitives ([#795](https://github.com/openai/codex-security/pull/795))
-- add Python-free musl native artifacts ([#796](https://github.com/openai/codex-security/pull/796))
-- bundle verified native runtime artifacts ([#797](https://github.com/openai/codex-security/pull/797))
-- preserve Windows filenames in native helpers ([#798](https://github.com/openai/codex-security/pull/798))
-- port security policy resolution to TypeScript ([#799](https://github.com/openai/codex-security/pull/799))
-- budget package installation and verification ([#834](https://github.com/openai/codex-security/pull/834))
-- open ready pull requests ([#833](https://github.com/openai/codex-security/pull/833))
-- draft SECURITY.md for owner review ([#536](https://github.com/openai/codex-security/pull/536))
-- resolve Windows Node to an absolute executable ([#788](https://github.com/openai/codex-security/pull/788))
-- shard automatic component planning for large repositories ([#845](https://github.com/openai/codex-security/pull/845))
-- import CSV and JSON findings as saved scans ([#850](https://github.com/openai/codex-security/pull/850))
-- add a feedback command ([#854](https://github.com/openai/codex-security/pull/854))
-- improve scan usage and cost reports ([#853](https://github.com/openai/codex-security/pull/853))
-- recover interrupted Deep Scans and bulk campaigns ([#835](https://github.com/openai/codex-security/pull/835))
-- reject owned plugin keys inside Codex profiles ([#861](https://github.com/openai/codex-security/pull/861))
-- include CommonJS and TypeScript module extensions in scan inventories ([#859](https://github.com/openai/codex-security/pull/859))
-- include workflow files in diff inventories ([#820](https://github.com/openai/codex-security/pull/820))
-- accept a UTF-8 byte order mark in imported findings JSON ([#856](https://github.com/openai/codex-security/pull/856))
-- authenticate deep workers with OpenAI API keys ([#870](https://github.com/openai/codex-security/pull/870))
-- drop canonical document size limits that do not exist ([#868](https://github.com/openai/codex-security/pull/868))
-- pin native Rust formatting edition ([#863](https://github.com/openai/codex-security/pull/863))
-- detect a Linear URL contradiction over plain HTTP ([#867](https://github.com/openai/codex-security/pull/867))
-- pipeline dedupe with configurable concurrency ([#852](https://github.com/openai/codex-security/pull/852))
-- disable reasoning summaries by default for Bedrock ([#869](https://github.com/openai/codex-security/pull/869))
-- reuse scan authentication for patch and validation ([#871](https://github.com/openai/codex-security/pull/871))
-- bump smol-toml from 1.6.1 to 1.7.1 in /sdk/typescript ([#873](https://github.com/openai/codex-security/pull/873))
+Codex Security 0.6.0 adds vendor report imports, optional owner suggestions, and hosted remediation commands. Severity classification now uses a built-in rubric and three independent reviews by default; review the model-access and cost changes below before upgrading.
+
+- **Import vendor findings.** Import supported Wiz, Snyk Open Source, Semgrep Code, and Endor Labs reports with `publish findings --to local`, or publish them with `--to cloud`. Read local evidence with `findings imported`. Local imports require no Cloud login or model call and remain separate from assessed scan findings. See the [Wiz](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/cli.md#import-wiz-findings), [Snyk](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/snyk.md), [Semgrep](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/semgrep.md), and [Endor](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/endor.md) format guides.
+- **Configurable severity reviews.** `classify-severity` uses a bundled rubric when no custom rubric is supplied. `--runs N` selects 1–10 independent reviews, with three by default. The most common severity wins, with the highest severity breaking ties. ([#1765](https://github.com/openai/codex-security/pull/1765))
+- **Optional owner suggestions.** `scan --owner-suggestions` writes a separate owner-suggestion report after supported committed Git scans. Suggestions preserve the completed scan and do not assign users. Owner enrichment is skipped when a scan cost limit is set. ([#1760](https://github.com/openai/codex-security/pull/1760))
+- **Hosted patching and source-only verification.** `patch --host` and `verify-fix --host` expose the hosted remediation protocol through the CLI. Ordinary patch and verification commands accept `--verification-mode static` to assess source evidence; omitting it preserves standard verification. Static mode sets the assessment scope and does not enforce a command-execution boundary. See the [hosted remediation guide](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/hosted-remediation.md). ([#1854](https://github.com/openai/codex-security/pull/1854))
+- **Policy previews without Python.** Policy diffs now run in Node while preserving diff formatting, cancellation, and source freshness checks. ([#1837](https://github.com/openai/codex-security/pull/1837))
+
+<details>
+<summary>Other improvements</summary>
+
+- Patch project-trust overrides are serialized correctly for Codex. ([#1861](https://github.com/openai/codex-security/pull/1861))
+- Update Hono and the Linear SDK dependencies. ([#1831](https://github.com/openai/codex-security/pull/1831), [#1852](https://github.com/openai/codex-security/pull/1852))
+- Release verification runs test shards in parallel and reports publication progress on the release PR. ([#1798](https://github.com/openai/codex-security/pull/1798))
+
+</details>
+
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
+
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+### Severity classification requires model access
+
+Classification without `--rubric` previously inherited the scanner's severity without model work. It now requires Codex authentication and model access, using three model calls per uncached finding by default. Set `--runs 1` (SDK: `classificationRuns: 1`) for a single review. All requested reviews must succeed; failures do not fall back to the scanner's severity or save a partial vote.
+
+Older classification checkpoints without a recorded review count, and former inherited assessments without a rubric hash, are reclassified on the next classification request. Changing the review count or rubric also invalidates matching checkpoints. Existing results remain readable, and publication does not silently classify findings. Use `--reprocess` when changing only the model or reasoning effort. See the [classification guide](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/cli.md#classify-finding-severity).
+
+### Policy preview interpreter selection is deprecated
+
+`securityPolicyDiff(draft, python, signal)` retains its call shape, but interpreter strings and paths returned by resolver callbacks no longer select or validate an executable. `previewPolicy()` no longer resolves Python, and `pythonPath` and `PYTHON` do not affect previews. Update integrations that relied on an invalid interpreter failing or a custom executable producing the diff. Explicit resolver callbacks still run for changed drafts and propagate their errors. Omit the second argument in new code, or pass `undefined` when supplying a cancellation signal. Python-dependent generation and other operations are unchanged.
+
+### Import identity and earlier upgrades
+
+Keep a stable source key and acquisition format across vendor imports. Switching formats can create separate records or replace richer evidence with less detail; omitted findings remain stored. Review each provider's format guide before changing inputs.
+
+If upgrading from before 0.5.1, also review the [0.5.1 upgrade notes](https://github.com/openai/codex-security/releases/tag/npm-v0.5.1) and their guidance for earlier versions. Use `openai/codex-security@action-v0.6.0` for the matching GitHub Action, or pin the distribution commit in its companion release after publication.
+
 <!-- release-section: upgrades:end -->

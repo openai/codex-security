@@ -1,9 +1,13 @@
-import { z } from "incur";
-import { readFileSync } from "node:fs";
-import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
+import { z } from "zod";
+import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
-import { pairReviewPrompt, screeningPrompt } from "./deduplication-prompts.js";
+import {
+  pairReviewPrompt,
+  groupingReviewPrompt,
+  screeningPrompt,
+} from "./deduplication-prompts.js";
+import { scanModelConfiguration, type JsonObject } from "../config.js";
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
 const sameSchema = z.object({
@@ -22,58 +26,22 @@ const reviewSchema = z.discriminatedUnion("decision", [
   sameSchema,
   distinctSchema,
 ]);
-const screeningSameSchema = z.object({
-  decision: z.literal("SAME"),
-  rationale,
-});
-const screeningDistinctSchema = z.object({
-  decision: z.literal("DISTINCT"),
-  rationale,
-});
 const screeningDecisionSchema = z.discriminatedUnion("decision", [
-  screeningSameSchema.strict(),
-  screeningDistinctSchema.strict(),
+  sameSchema.pick({ decision: true, rationale: true }).strict(),
+  distinctSchema.pick({ decision: true, rationale: true }).strict(),
 ]);
 // The host assigns exact slot names; finding IDs stay out of model output.
-const screeningSchema = z
-  .object({
-    decisions: z.record(z.string(), screeningDecisionSchema),
-  })
-  .strict();
-
-let validateMergedFinding: ValidateFunction<Finding> | undefined;
-
-function requireMergedFinding(result: DuplicateDecision): void {
-  if (result.decision !== "SAME") return;
-  if (validateMergedFinding === undefined) {
-    const schema = JSON.parse(
-      readFileSync(
-        new URL(
-          "../../_bundled_plugin/schemas/findings.schema.json",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
-    );
-    validateMergedFinding = new Ajv2020({ strict: false }).compile<Finding>(
-      schema.properties.findings.items,
-    );
-  }
-  if (
-    !validateMergedFinding(result.mergedFinding) ||
-    result.mergedFinding["findingId"] !== result.canonicalFindingId
-  )
-    throw new Error(
-      "Every SAME decision requires a generated mergedFinding in the Finding schema with the canonical finding's identity.",
-    );
-}
+const screeningSchema = z.strictObject({
+  decisions: z.record(z.string(), screeningDecisionSchema),
+});
 
 export type ScreeningResult = z.infer<typeof screeningSchema>;
 export type DuplicateDecision = z.infer<typeof reviewSchema>;
+export type GroupingDecision = z.infer<typeof screeningDecisionSchema>;
 
 export interface DeduplicationReviewer {
   screen(findings: readonly Finding[]): Promise<ScreeningResult>;
-  reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision>;
+  reviewPair(findings: readonly Finding[]): Promise<GroupingDecision>;
 }
 
 export function pairKey(ids: readonly string[]): string {
@@ -89,9 +57,13 @@ export function validateReview(
   findings: readonly Finding[],
 ): DuplicateDecision {
   const result = reviewSchema.parse(value);
-  requireMergedFinding(result);
+  if (result.decision !== "SAME") return result;
+  const finding = requireFinding(result.mergedFinding);
+  if (finding.findingId !== result.canonicalFindingId)
+    throw new Error(
+      "Every SAME decision requires the canonical finding's identity.",
+    );
   if (
-    result.decision === "SAME" &&
     !findings.some((finding) => finding.findingId === result.canonicalFindingId)
   ) {
     throw new Error(
@@ -120,54 +92,85 @@ export function validateScreening(
 }
 
 function screeningToolSchema(neighborCount: number): object {
-  const decisionSchema = z.toJSONSchema(screeningDecisionSchema, {
-    target: "openapi-3.0",
-  });
-  const slots = Array.from({ length: neighborCount }, (_value, index) =>
-    screeningPairSlot(index),
+  const slots = Object.fromEntries(
+    Array.from({ length: neighborCount }, (_value, index) => [
+      screeningPairSlot(index),
+      screeningDecisionSchema,
+    ]),
   );
-  return {
-    type: "object",
-    properties: {
-      decisions: {
-        type: "object",
-        properties: Object.fromEntries(
-          slots.map((slot) => [slot, decisionSchema]),
-        ),
-        required: slots,
-        additionalProperties: false,
-      },
+  return z.toJSONSchema(z.strictObject({ decisions: z.strictObject(slots) }), {
+    target: "openapi-3.0",
+    override: ({ jsonSchema }) => {
+      if (jsonSchema.type === "object") jsonSchema.required ??= [];
     },
-    required: ["decisions"],
-    additionalProperties: false,
-  };
+  });
 }
 
-export class CodexDeduplicationReviewer implements DeduplicationReviewer {
-  constructor(private readonly runner: Pick<CodexReviewRunner, "run">) {}
+class CodexReviewer {
+  constructor(
+    protected readonly runner: Pick<CodexReviewRunner, "run">,
+    private readonly configuration: JsonObject = {},
+    protected readonly sourceContext: (
+      findings: readonly Finding[],
+    ) => string = () => "",
+  ) {}
 
+  protected settings(model: string, effort: string) {
+    const selected = scanModelConfiguration({
+      model,
+      model_reasoning_effort: effort,
+      ...this.configuration,
+    });
+    return { model: selected.model, effort: selected.reasoningEffort };
+  }
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
-      model: "gpt-5.6-luna",
-      effort: "xhigh",
-      prompt: screeningPrompt(findings),
+      findingIds: findings.map((finding) => finding.findingId),
+      ...this.settings("gpt-5.6-luna", "xhigh"),
+      prompt: `${this.sourceContext(findings)}${screeningPrompt(findings)}`,
       schema: screeningToolSchema(findings.length - 1),
       validate: (value) => validateScreening(value, findings),
     });
   }
+}
 
+/** Rich review contract used by host-provided records consumers. */
+export class CodexDeduplicationReviewer
+  extends CodexReviewer
+  implements DeduplicationReviewer
+{
   async reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision> {
     return await this.runner.run({
       stage: "pair-review",
-      model: "gpt-5.6-sol",
-      effort: "high",
+      findingIds: findings.map((finding) => finding.findingId),
+      ...this.settings("gpt-5.6-sol", "high"),
       prompt: pairReviewPrompt(findings),
       schema: {
         type: "object",
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),
       },
       validate: (value) => validateReview(value, findings),
+    });
+  }
+}
+
+/** Saved-scan grouping stores original records and needs only a pair decision. */
+export class CodexGroupingReviewer
+  extends CodexReviewer
+  implements DeduplicationReviewer
+{
+  async reviewPair(findings: readonly Finding[]): Promise<GroupingDecision> {
+    return await this.runner.run({
+      stage: "pair-review",
+      findingIds: findings.map((finding) => finding.findingId),
+      ...this.settings("gpt-5.6-sol", "high"),
+      prompt: `${this.sourceContext(findings)}${groupingReviewPrompt(findings)}`,
+      schema: {
+        type: "object",
+        ...z.toJSONSchema(screeningDecisionSchema, { target: "openapi-3.0" }),
+      },
+      validate: (value) => screeningDecisionSchema.parse(value),
     });
   }
 }

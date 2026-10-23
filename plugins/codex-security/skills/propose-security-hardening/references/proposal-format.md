@@ -104,9 +104,7 @@ The first example is scan-backed. For ordinary documents, use the `sourceEvidenc
     "profile": "balanced",
     "changeHorizons": ["incremental", "medium_term", "foundational"],
     "nonNegotiables": [],
-    "assumptions": [
-      "No measured latency or memory budget was supplied."
-    ]
+    "assumptions": ["No measured latency or memory budget was supplied."]
   },
   "opportunities": [
     {
@@ -201,13 +199,15 @@ The first example is scan-backed. For ordinary documents, use the `sourceEvidenc
               "validationPlan": "Run compatibility coverage for valid relative archive entries."
             }
           ],
-          "residualRisks": [
-            "Containment policy can drift between call sites."
-          ],
+          "residualRisks": ["Containment policy can drift between call sites."],
           "implementationReadiness": {
             "affectedComponents": ["src/extract.py"],
-            "workPackages": ["Add containment enforcement and regression coverage."],
-            "acceptanceCriteria": ["The original traversal PoC cannot write outside the output root."],
+            "workPackages": [
+              "Add containment enforcement and regression coverage."
+            ],
+            "acceptanceCriteria": [
+              "The original traversal PoC cannot write outside the output root."
+            ],
             "migrationNotes": [],
             "rollback": "Revert the focused guard and test change."
           }
@@ -285,16 +285,20 @@ Write `hardening.md` with these headings in order. Use `Evidence Basis` for an o
 # Security Hardening Review: <target>
 
 ## Evidence Basis
+
 ## Constraints
+
 ## Opportunity Portfolio
+
 ## Recommendation Summary
+
 ## Next Decisions
 ```
 
 Under `Opportunity Portfolio`, use a compact table:
 
 | Opportunity | Evidence | Options | Recommendation | Proposal |
-| --- | --- | --- | --- | --- |
+| ----------- | -------- | ------- | -------------- | -------- |
 
 Link every proposal using its exact `proposalPath`. Make the recommendation conditional on the recorded constraints. Keep this document easy to skim; put the complete technical argument in the proposal file. Open with enough prose to orient a reader who did not participate in the scan, and use the recommendation summary to explain the reasoning in a warm design-review voice rather than merely repeating the table.
 
@@ -310,21 +314,37 @@ Name each proposal `proposals/<opportunity-id>.md` and use these headings in ord
 # Security Hardening Proposal: <title>
 
 ## Decision
+
 ## Executive Recommendation
+
 ## Evidence
+
 ## Current Design And Failure Mode
+
 ## Desired Invariants
+
 ## Constraints And Non-Goals
+
 ## Before Architecture
+
 ## Options
+
 ### Option 1: <baseline, when useful>
+
 ### Option 2: <first alternative>
+
 ## Comparison
+
 ## Recommendation
+
 ## Evidence Coverage And Residual Risk
+
 ## Migration And Rollout
+
 ## Validation Plan
+
 ## Implementation Work Packages
+
 ## Open Questions
 ```
 
@@ -353,9 +373,9 @@ Requirements:
 
 Use this shape under `Evidence` when several findings or documents contribute:
 
-| Evidence | Finding or document | What it establishes |
-| --- | --- | --- |
-| `E021` | Netlink multipath scratch exhaustion | Attacker-controlled nesting can exhaust unchecked parser scratch space. |
+| Evidence | Finding or document                  | What it establishes                                                     |
+| -------- | ------------------------------------ | ----------------------------------------------------------------------- |
+| `E021`   | Netlink multipath scratch exhaustion | Attacker-controlled nesting can exhaust unchecked parser scratch space. |
 
 Link the finding or document title to its writeup when a distributable relative path is available. The title may be shortened for readability, but it must be specific enough that a new reader understands the reference. After defining an ID once in the proposal, later prose may use the ID alone where repetition would be awkward. In `Evidence Coverage And Residual Risk`, label every row with both the ID and short title, for example `E021 — Netlink scratch exhaustion`. Apply the same rule to canonical scan finding IDs. A complete registry in `context.md` supports auditability but does not make a bare ID self-explanatory in another document.
 
@@ -389,14 +409,14 @@ Use Mermaid `flowchart` source in `.mmd` files. Keep diagrams compact and securi
 
 Assess these dimensions for every option:
 
-| Dimension | Questions |
-| --- | --- |
-| Security | Which attack paths disappear, narrow, or remain? What new trusted component appears? |
-| Performance | Does the critical path gain hops, copies, serialization, locks, or cache misses? |
-| Memory | Are there new processes, buffers, indexes, queues, caches, or retained objects? |
-| Reliability | How do failure isolation, retries, backpressure, recovery, and availability change? |
-| Operability | What new deployment, observability, alerting, or incident response burden appears? |
-| Migration | What compatibility, data, protocol, rollout, and rollback work is required? |
+| Dimension   | Questions                                                                            |
+| ----------- | ------------------------------------------------------------------------------------ |
+| Security    | Which attack paths disappear, narrow, or remain? What new trusted component appears? |
+| Performance | Does the critical path gain hops, copies, serialization, locks, or cache misses?     |
+| Memory      | Are there new processes, buffers, indexes, queues, caches, or retained objects?      |
+| Reliability | How do failure isolation, retries, backpressure, recovery, and availability change?  |
+| Operability | What new deployment, observability, alerting, or incident response burden appears?   |
+| Migration   | What compatibility, data, protocol, rollout, and rollback work is required?          |
 
 For unmeasured effects, name the likely mechanism and a measurement plan. A useful plan identifies the workload, metric, baseline, candidate design, and decision threshold. Do not present analogy or intuition as benchmark data.
 
@@ -408,15 +428,25 @@ After selection, write `implementation/<option-id>.md` with:
 # Implementation Plan: <option title>
 
 ## Selected Design And Constraints
+
 ## Source Revision And Drift Check
+
 ## Affected Components
+
 ## Ordered Work Packages
+
 ## Compatibility And Migration
+
 ## Tactical Protections During Migration
+
 ## Tests And Security Validation
+
 ## Performance And Resource Benchmarks
+
 ## Rollout And Rollback
+
 ## Acceptance Criteria
+
 ## Open Decisions
 ```
 

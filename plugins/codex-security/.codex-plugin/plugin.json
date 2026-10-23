@@ -18,6 +18,10 @@
   "skills": "./skills/",
   "apps": "./.app.json",
   "mcpServers": "./.mcp.json",
+  "codexSecurity": {
+    "directDeepScanEngine": 1,
+    "workerProviderSnapshot": 4
+  },
   "interface": {
     "displayName": "Codex Security",
     "shortDescription": "Security scanning for your codebase",

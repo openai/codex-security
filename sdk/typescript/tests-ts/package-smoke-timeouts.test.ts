@@ -1,15 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-type PackageSmokeTimeouts = {
-  packageSmokeTimeouts: (platform?: NodeJS.Platform) => {
-    commandTimeoutMs: number;
-    processTimeoutMs: number;
-  };
-};
-
-const { packageSmokeTimeouts } = (await import(
-  new URL("../scripts/package-smoke-timeouts.mjs", import.meta.url).href
-)) as PackageSmokeTimeouts;
+import { packageSmokeTimeouts } from "../scripts/package-smoke-timeouts.mjs";
 
 describe("npm package smoke timeouts", () => {
   test("preserves the command timeout on Linux and macOS", () => {
@@ -18,18 +9,32 @@ describe("npm package smoke timeouts", () => {
     }
   });
 
-  test("allows the Windows npm install to complete", () => {
-    expect(packageSmokeTimeouts("win32").commandTimeoutMs).toBe(180_000);
+  test("extends the Windows install budget without slowing other command failures", () => {
+    const { installTimeoutMs, commandTimeoutMs } =
+      packageSmokeTimeouts("win32");
+    expect(installTimeoutMs).toBe(600_000);
+    expect(commandTimeoutMs).toBe(180_000);
   });
 
   test.each(["linux", "darwin", "win32"] as const)(
-    "allows installation and verification to each use a command budget on %s",
+    "allows verification and the deliberate Deep Scan retry on %s",
     (platform) => {
-      const { commandTimeoutMs, processTimeoutMs } =
-        packageSmokeTimeouts(platform);
+      const {
+        commandTimeoutMs,
+        installTimeoutMs,
+        deepScanTimeoutMs,
+        processTimeoutMs,
+      } = packageSmokeTimeouts(platform);
 
-      const remainingAfterInstallation = processTimeoutMs - commandTimeoutMs;
-      expect(remainingAfterInstallation).toBeGreaterThan(commandTimeoutMs);
+      expect(deepScanTimeoutMs).toBeGreaterThanOrEqual(
+        commandTimeoutMs + 60_000 * 1.3,
+      );
+      const remainingForCleanup =
+        processTimeoutMs -
+        installTimeoutMs -
+        commandTimeoutMs -
+        deepScanTimeoutMs;
+      expect(remainingForCleanup).toBeGreaterThan(0);
     },
   );
 

@@ -1,30 +1,25 @@
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { rejecting, throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function run(args: string[], deps = dependencies()) {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["feedback", ...args],
-    stdout.stream,
-    stderr.stream,
-    deps,
-  );
+  const { stdout, stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["feedback", ...args], deps);
   return { code, stdout: stdout.text(), stderr: stderr.text() };
 }
 
-test("feedback selects the newest saved scan when an older scan is still running", async () => {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "feedback-history-")),
-  );
+test("feedback selects the newest saved scan when starts differ by a microsecond", async () => {
+  const root = await temporaryDirectory("feedback-history-", true);
   try {
     const python = await resolvePluginPython();
     const repository = join(root, "repository");
@@ -57,7 +52,11 @@ test("feedback selects the newest saved scan when an older scan is still running
       scans.push({
         scanId: registered["scanId"] as string,
         status,
-        startedAt: `2026-01-0${index + 1}T00:00:00Z`,
+        startedAt: [
+          "2026-01-01T00:00:00Z",
+          "2026-01-01T00:00:00.000001Z",
+          "2026-01-02T00:00:00Z",
+        ][index]!,
       });
     }
     const seeded = spawnSync(
@@ -103,6 +102,53 @@ with sqlite3.connect(sys.argv[1]) as connection:
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([
+  ["2026-10-08T01:00:00Z", "2026-10-08T01:00:00.100000Z", 1],
+  ["2026-10-08T01:00:00.000001Z", "2026-10-08T01:00:00.000002Z", 1],
+  ["2026-10-08T01:00:00.1234567Z", "2026-10-08T01:00:00.1234568Z", 1],
+  ["2026-10-08T03:00:00.123400+02:00", "2026-10-08T01:00:00.123401Z", 1],
+  ["1969-12-31T23:59:59.000001Z", "1969-12-31T23:59:59.000002Z", 1],
+  ["2026-10-08T01:00:00.000000Z", "2026-10-08T01:00:00Z", 0],
+  ["2026-10-08T01:00:00.1000000Z", "2026-10-08T03:00:00.1+02:00", 0],
+  ["2026-10-08T01:00:00Z", "2026-10-08T01:00:00.000000000000000000001Z", 1],
+] as const)(
+  "feedback selects by exact start time: %s / %s",
+  async (first, second, selected) => {
+    const scans = [
+      { scanId: "z-first", startedAt: first, status: "running" },
+      { scanId: "a-second", startedAt: second, status: "failed" },
+    ];
+    const expected = scans[selected]!;
+    const calls: string[][] = [];
+    const deps = dependencies({
+      onWorkbench: (args): JsonObject => {
+        calls.push([...args]);
+        return args[0] === "list-scans"
+          ? { scans }
+          : { scan: scans.find((scan) => scan.scanId === args[2])! };
+      },
+    });
+    deps.sendFeedback = async ({ scan, includeLogs }) => {
+      expect(scan?.scanId).toBe(expected.scanId);
+      expect(includeLogs).toBe(true);
+      return {
+        feedbackId: "feedback-chronology",
+        scanId: scan!.scanId,
+        includedLogs: true,
+      };
+    };
+    const result = await run(
+      ["--reason", "Synthetic scan stopped", "--include-logs", "--json"],
+      deps,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout).scanId).toBe(expected.scanId);
+    expect(calls.map((args) => args[0])).toEqual(["list-scans", "get-scan"]);
+    expect(calls[1]).toEqual(["get-scan", "--scan-id", expected.scanId]);
+  },
+);
 
 test("feedback selects a scan prefix", async () => {
   const calls: string[][] = [];
@@ -170,13 +216,9 @@ for (const args of [
 ]) {
   test(`feedback rejects invalid arguments ${JSON.stringify(args)}`, async () => {
     const deps = dependencies({
-      onWorkbench: () => {
-        throw new Error("Must not read scans");
-      },
+      onWorkbench: throwing("Must not read scans"),
     });
-    deps.sendFeedback = async () => {
-      throw new Error("Must not upload");
-    };
+    deps.sendFeedback = rejecting("Must not upload");
     const result = await run(args, deps);
     expect(result.code).toBe(2);
     expect(result.stdout).toBe("");
@@ -192,9 +234,7 @@ for (const missingScan of [false, true]) {
         return { scans: [] };
       },
     });
-    const upload = mock(async () => {
-      throw new Error("Upload failed");
-    });
+    const upload = mock(rejecting("Upload failed"));
     deps.sendFeedback = upload;
     const result = await run(
       [

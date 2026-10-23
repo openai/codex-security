@@ -18,21 +18,6 @@ def read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def read_yaml(path: Path) -> dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert isinstance(payload, dict), path
-    return payload
-
-
-def read_skill_frontmatter(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
-    assert match is not None, f"{path}: missing YAML frontmatter"
-    payload = yaml.safe_load(match.group(1))
-    assert isinstance(payload, dict), path
-    return payload
-
-
 def test_plugin_manifest_references_existing_assets_and_skills() -> None:
     manifest = read_json(PLUGIN_ROOT / ".codex-plugin" / "plugin.json")
 
@@ -114,6 +99,18 @@ def test_daybreak_access_uses_plugin_mcp() -> None:
     assert LEGACY_CODEX_SECURITY_ACCESS_APP_NAME not in mcp_servers
 
 
+def test_cloud_connection_is_optional_and_skill_is_shipped() -> None:
+    apps = read_json(PLUGIN_ROOT / ".app.json")["apps"]
+    cloud = apps["codex-security-cloud"]
+    assert cloud["id"] == "connector_openai_defense_factory"
+    assert cloud["category"] == "Code Hosting & Security Findings"
+    assert cloud.get("required", False) is False
+
+    shipped = read_json(PLUGIN_ROOT / "plugin-files.json")["shippedExact"]
+    assert "skills/cloud-findings/SKILL.md" in shipped
+    assert "skills/cloud-findings/agents/openai.yaml" in shipped
+
+
 def test_deep_scan_config_override_is_forwarded_to_mcp_server() -> None:
     mcp_server = read_json(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["codex-security"]
 
@@ -130,12 +127,17 @@ def test_every_skill_has_valid_frontmatter_and_agent_interface() -> None:
         assert skill_path.is_file(), skill_path
         assert agent_path.is_file(), agent_path
 
-        frontmatter = read_skill_frontmatter(skill_path)
+        text = skill_path.read_text(encoding="utf-8")
+        match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+        assert match is not None, f"{skill_path}: missing YAML frontmatter"
+        frontmatter = yaml.safe_load(match.group(1))
+        assert isinstance(frontmatter, dict), skill_path
         assert set(frontmatter) == {"name", "description"}
         assert frontmatter["name"] == skill_dir.name
         assert isinstance(frontmatter["description"], str) and frontmatter["description"].strip()
 
-        agent = read_yaml(agent_path)
+        agent = yaml.safe_load(agent_path.read_text(encoding="utf-8"))
+        assert isinstance(agent, dict), agent_path
         interface = agent["interface"]
         assert isinstance(interface, dict)
         for field in ("display_name", "short_description", "default_prompt"):

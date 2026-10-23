@@ -16,13 +16,21 @@ Preserve the complete exact user-provided security context, including user-suppl
 
 For a running host-backed scan, immediately persist requested additions, edits, clearances, or replacements with `update_codex_security_scan_context`, passing the complete replacement and current handoff token when required. At each genuine parent-owned forward phase transition, use `structuredContent.scan.userContext` from `update_codex_security_scan_progress` as the immutable context for that phase and its workers. Prompt-only scans retain their original context; independent workers retain the exact immutable context captured by their owner. Never repeat a completed phase or publish progress belonging to a currently running coordinator.
 
-## Standard Capability Preflight
+## Tool Results and Code Mode
 
-Only a top-level Standard scan reads `config-preflight.md` and runs its existing `security_scan` capability profile once. A desktop Standard host also follows `desktop-config-preflight.md` after its authoritative scan context exists. Resolve only the minimum target, scope, revision, or launch arguments needed beforehand; do not inspect source or launch Standard scan workers until the helper returns `ready`. Retain the existing host-specific direct/delegated execution, remediation, fallback, and degraded-worker behavior; configured worker capacity is not a required number of running workers.
+Check the result of each tool operation before using it: a completed code-mode cell can contain an MCP response with `isError: true`, or a shell command with a failing exit status. Preserve and act on that diagnostic before parsing output as JSON or emitting a success marker. Parse only the intended JSON output of a successful command; shell error text and truncated previews are not JSON documents.
 
-For a blocked, incomplete, or failed Standard preflight, report the exact reason and preserve any durable running scan while recovery remains possible. In an interactive session, present the helper-reported configuration path and exact remediation, then use the existing native input, MCP input, or plain-chat fallback before editing persistent configuration. In a headless or otherwise non-interactive session, apply only helper-provided ordinary patches to its reported `user_config_path`, rerun once, and continue only if the result becomes `ready`. Never guess the active configuration path or conceal a higher-precedence conflict with a lower-precedence change.
+Code mode is a fresh JavaScript isolate, not a Node.js shell. Use only the host's documented globals and tools; do not assume `process`, `require`, `Buffer`, `TextEncoder`, or `structuredClone` exist. Use ordinary JSON operations for JSON data and the documented `load`/`store` helpers for state across cells. Store only serializable values, using `null` for an absent value, and commit dependent state together so a failed later operation cannot leave a stale cursor or count paired with new data.
 
-A Deep scan has no parent capability preflight: do not load either preflight reference, inspect runtime tools, run the helper, request remediation, or publish preflight checks. Its coordinator validates the real scan ownership, target, scope, and sandbox and owns the existing transition from the durable `preflight` phase into discovery.
+## Runtime Tools
+
+A top-level Standard scan reads `scan-runtime.md` once after its authoritative scan context exists, then begins source review using available tools and parent fallback. A Deep scan's coordinator validates scan ownership, target, scope, and sandbox and owns the transition from `preflight` into discovery.
+
+## Deep Worker Failures
+
+Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and use the reserved `codex_security_deep_scan_worker` permission profile with the parent's supported filesystem denials. The selected Codex executable must support permission-profile configuration and allowance checks. If that command fails to start or exits early, report its path and the tool's diagnostic; do not infer that its version is unsupported. If the tool identifies a missing API, ask the user to update the Codex installation at the reported path: the desktop app for an app-bundled executable, or the selected CLI otherwise. If Codex policy rejects the profile, report the tool's administrator guidance. Do not remove deny rules or select a broader sandbox to work around the error.
+
+Deep Scan workers use the selected Codex home's credentials and provider configuration. An existing `CODEX_API_KEY` remains selected. When the worker has no Codex account and its provider requires OpenAI authentication, it can use `OPENAI_API_KEY` through the SDK's API-key option. This does not replace a stored account, custom-provider authentication, or a forced ChatGPT login. The key must be present in the process that launched the plugin; setting it later in a separate shell does not update a running plugin.
 
 ## Cancellation and Recovery
 

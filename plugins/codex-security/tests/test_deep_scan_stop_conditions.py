@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from argparse import Namespace
 
 import pytest
@@ -12,6 +14,7 @@ from test_deep_scan_successful_publication import (
 from test_deep_scan_successful_publication import (
     publication_scan as publication_scan,
 )
+from workbench_test_support import saved_draft, write_checkpoint
 
 
 @pytest.fixture
@@ -150,3 +153,142 @@ def test_finish_preserves_other_worker_failure_checks(
         "SELECT status, terminal_reason FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
     ).fetchone()
     assert tuple(run) == ("running", None)
+
+
+@pytest.mark.parametrize("existing_head", [False, True])
+def test_rejected_deadline_publication_does_not_leave_parent_observations(
+    workbench_api, workbench_db, publication_scan, existing_head
+):
+    scan = publication_scan()
+    canonical_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    for name in canonical_names:
+        os.utime(scan.scan_dir / name, ns=(1_000_000_000, 1_000_000_000))
+    pending = {"id": "authorization-review", "reason": "Review the remaining authorization path."}
+    if existing_head:
+        checkpoint = write_checkpoint(
+            scan.scan_dir / "checkpoints",
+            saved_draft(scan.scan_id, findings=scan.findings, deferred=[pending]),
+        )
+        head = scan.scan_dir / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        for path in (checkpoint, head):
+            os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+    saved = workbench_api["saved_results"]
+
+    def observations():
+        return {
+            relative: (
+                (scan.scan_dir / relative).read_bytes(),
+                (scan.scan_dir / relative).stat().st_mtime_ns,
+            )
+            for relative, _ in saved._saved_result_paths(scan.scan_dir, [])
+            if (scan.scan_dir / relative).is_file()
+        }
+
+    before = observations()
+    artifacts = {
+        name: ((scan.scan_dir / name).read_bytes(), (scan.scan_dir / name).stat().st_mtime_ns)
+        for name in canonical_names
+    }
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "created_at = '2000-01-01T00:00:00+00:00', manifest_path = NULL, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+        workbench_db.execute(
+            "CREATE TRIGGER reject_deadline_commit BEFORE UPDATE OF status ON deep_scan_runs "
+            "WHEN NEW.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'deadline commit failed'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="deadline commit failed"):
+        finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+
+    assert observations() == before
+    assert {
+        name: ((scan.scan_dir / name).read_bytes(), (scan.scan_dir / name).stat().st_mtime_ns)
+        for name in artifacts
+    } == artifacts
+    assert (
+        workbench_db.execute(
+            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+        == "running"
+    )
+    with workbench_db:
+        workbench_db.execute("DROP TRIGGER reject_deadline_commit")
+    assert (
+        finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
+    )
+    if existing_head:
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        assert any(item["reason"] == pending["reason"] for item in coverage["deferred"])
+
+
+def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    workers = {}
+    originals = {}
+    for name in ("first", "second"):
+        result = add_worker(workbench_db, scan, status="canceled")
+        worker_id = result.parent.name
+        output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+        output.parent.mkdir(parents=True)
+        result.parent.rename(output)
+        result = output / result.name
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? "
+                "WHERE id = ?",
+                (str(output), str(result), worker_id),
+            )
+        receipt = result.parent / "artifacts" / "review.md"
+        receipt.parent.mkdir()
+        receipt.write_text(f"Synthetic {name} source review.\n")
+        checkpoint = write_checkpoint(
+            result.parent / "checkpoints",
+            saved_draft(
+                scan.scan_id,
+                complete=False,
+                surfaces=[
+                    {
+                        "id": "api",
+                        "label": name,
+                        "disposition": "no_issue_found",
+                        "receiptRefs": ["artifacts/review.md"],
+                    }
+                ],
+                deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+            ),
+        )
+        head = result.parent / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        workers[worker_id] = receipt
+        originals.update({path: path.read_bytes() for path in (receipt, checkpoint, head)})
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "workers = 2, max_discovery_runs = 3, discovery_runs_dispatched = 2, "
+            "created_at = '2000-01-01T00:00:00+00:00', manifest_path = NULL, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+
+    finished = finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+
+    assert finished["status"] == "succeeded"
+    assert finished["completionSequence"] == 0
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert {row["id"] for row in coverage["surfaces"]} == {
+        f"{worker_id}/api" for worker_id in workers
+    }
+    for worker_id, receipt in workers.items():
+        surface = next(row for row in coverage["surfaces"] if row["workerId"] == worker_id)
+        task = next(row for row in coverage["deferred"] if row.get("workerId") == worker_id)
+        assert surface["disposition"] == "no_issue_found"
+        assert surface["receiptRefs"] == [receipt.relative_to(scan.scan_dir).as_posix()]
+        assert task["id"] == f"{worker_id}/review"
+        assert task["surfaceIds"] == [surface["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())

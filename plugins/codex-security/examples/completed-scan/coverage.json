@@ -3,7 +3,6 @@
   "schemaVersion": "1.0",
   "scanId": "scan_example_001",
   "mode": "repository",
-  "completeness": "complete",
   "inventoryStrategy": "repository",
   "includePaths": [
     "."

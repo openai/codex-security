@@ -9,24 +9,19 @@ import os
 import shutil
 import sqlite3
 import sys
-import tempfile
 import uuid
-from dataclasses import dataclass
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_config
-from filesystem_identity import serialize_filesystem_identity
-from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
-from workbench_target import (
-    directory_content_digest,
-    directory_snapshot_regular_file_count,
-    git_revision,
-    worktree_content_digest,
-)
+from workbench.storage import create_private_directory
+from workbench_source_scopes import capture_source_scopes
+from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
@@ -136,40 +131,18 @@ def non_negative_int(value: str) -> int:
     return parsed
 
 
-@dataclass(frozen=True)
-class DeepScanDependencies:
-    now: Callable[[], str]
-    state_dir: Callable[[], Path]
-    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row]
-    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row]
-    require_target: Callable[[str], Path]
-    require_remediation_target: Callable[[str], Path]
-    require_scannable_target: Callable[[Path], None]
-    require_scope: Callable[[str, str, Path], str]
-    ensure_security_target: Callable[[sqlite3.Connection, str], str]
-    require_canonical_scan_directory: Callable[[Path], Path]
-    safe_segment: Callable[[str], str]
-    compact_timestamp: Callable[[], str]
-    scan_completion_lock: Callable[[str], Any]
-    preserve_stopped_results: Callable[[sqlite3.Connection, str], None]
+_dependencies: Any = None
 
 
-_dependencies: DeepScanDependencies | None = None
-
-
-def configure(dependencies: DeepScanDependencies) -> None:
+def configure(dependencies: Any) -> None:
     global _dependencies
     _dependencies = dependencies
 
 
-def dependencies() -> DeepScanDependencies:
+def dependencies() -> Any:
     if _dependencies is None:
         raise RuntimeError("Deep Scan workbench dependencies are not configured.")
     return _dependencies
-
-
-def now() -> str:
-    return dependencies().now()
 
 
 def _bounded_error_text(message: str, maximum: int) -> str:
@@ -206,54 +179,6 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def state_dir() -> Path:
-    return dependencies().state_dir()
-
-
-def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
-    return dependencies().require_scan(connection, scan_id)
-
-
-def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqlite3.Row:
-    return dependencies().require_workspace(connection, workspace_id)
-
-
-def require_target(value: str) -> Path:
-    return dependencies().require_target(value)
-
-
-def require_remediation_target(value: str) -> Path:
-    return dependencies().require_remediation_target(value)
-
-
-def require_scannable_target(target: Path) -> None:
-    dependencies().require_scannable_target(target)
-
-
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    return dependencies().require_scope(scope, mode, target)
-
-
-def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> str:
-    return dependencies().ensure_security_target(connection, target_path)
-
-
-def require_canonical_scan_directory(scan_dir: Path) -> Path:
-    return dependencies().require_canonical_scan_directory(scan_dir)
-
-
-def safe_segment(value: str) -> str:
-    return dependencies().safe_segment(value)
-
-
-def compact_timestamp() -> str:
-    return dependencies().compact_timestamp()
-
-
-def scan_completion_lock(scan_id: str) -> Any:
-    return dependencies().scan_completion_lock(scan_id)
-
-
 def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     scan_id = require_uuid(scan_id, "scan-id")
     row = connection.execute(
@@ -265,7 +190,7 @@ def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlit
 
 
 def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
-    elapsed = _parse_timestamp(now()) - _parse_timestamp(str(run["created_at"]))
+    elapsed = _parse_timestamp(dependencies().now()) - _parse_timestamp(str(run["created_at"]))
     return elapsed.total_seconds() / 3600 >= run["max_time_hours"]
 
 
@@ -275,7 +200,7 @@ def require_deep_scan_ready_for_parent_completion(
     if scan["mode"] != "deep":
         return
     run = connection.execute(
-        "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
+        "SELECT status, manifest_path, terminal_reason FROM deep_scan_runs WHERE scan_id = ?",
         (scan["id"],),
     ).fetchone()
     if run is None or run["status"] != "succeeded" or run["manifest_path"] is None:
@@ -283,13 +208,91 @@ def require_deep_scan_ready_for_parent_completion(
             "Deep Scan discovery orchestration must finish and persist its manifest before "
             "the parent scan can be completed."
         )
+    if run["terminal_reason"] == "capped":
+        require_deep_scan_workers_finished(connection, scan["id"], "capped")
+
+
+def require_deep_scan_workers_finished(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    terminal_reason: str,
+    *,
+    has_omitted_workers: bool = False,
+) -> None:
+    """Check execution state for coordinator completion and resumed parent publication."""
+    failed_worker = connection.execute(
+        """
+        SELECT 1 FROM deep_scan_workers AS failed
+        WHERE failed.scan_id = ? AND failed.status = 'failed'
+            AND (? != 'saturated' OR failed.kind != 'discovery')
+            AND (
+                failed.kind != 'dedup'
+                OR NOT EXISTS (
+                    SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
+                    WHERE failed_inputs.dedup_worker_id = failed.id
+                )
+                OR EXISTS (
+                    SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
+                    WHERE failed_inputs.dedup_worker_id = failed.id
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM deep_scan_dedup_inputs AS replacement_inputs
+                            JOIN deep_scan_workers AS replacement
+                                ON replacement.scan_id = replacement_inputs.scan_id
+                                AND replacement.id = replacement_inputs.dedup_worker_id
+                            WHERE replacement_inputs.scan_id = failed.scan_id
+                                AND replacement_inputs.discovery_worker_id =
+                                    failed_inputs.discovery_worker_id
+                                AND replacement.kind = 'dedup'
+                                AND replacement.status = 'succeeded'
+                        )
+                )
+            )
+        LIMIT 1
+        """,
+        (scan_id, terminal_reason),
+    ).fetchone()
+    if failed_worker is not None:
+        raise SystemExit("Deep Scan cannot finish after a worker has failed.")
+    active_worker = connection.execute(
+        """
+        SELECT 1 FROM deep_scan_workers
+        WHERE scan_id = ? AND status IN ('queued', 'running')
+        LIMIT 1
+        """,
+        (scan_id,),
+    ).fetchone()
+    if active_worker is not None:
+        raise SystemExit("Deep Scan cannot finish while workers are active.")
+    merging_worker = connection.execute(
+        """
+        SELECT 1 FROM deep_scan_workers
+        WHERE scan_id = ? AND merge_state = 'merging'
+        LIMIT 1
+        """,
+        (scan_id,),
+    ).fetchone()
+    if merging_worker is not None:
+        raise SystemExit("Deep Scan cannot finish while discovery output is merging.")
+    if terminal_reason == "capped" and has_omitted_workers:
+        raise SystemExit("Deep Scan capped completion cannot declare omitted buffered workers.")
+    if (
+        terminal_reason == "capped"
+        and connection.execute(
+            "SELECT 1 FROM deep_scan_workers WHERE scan_id = ? "
+            "AND kind = 'discovery' AND merge_state = 'buffered' LIMIT 1",
+            (scan_id,),
+        ).fetchone()
+        is not None
+    ):
+        raise SystemExit("Deep Scan cannot finish capped while discovery output remains buffered.")
 
 
 def require_owned_scan(
     connection: sqlite3.Connection, scan_id: str, thread_id: str
 ) -> tuple[sqlite3.Row, sqlite3.Row]:
-    scan = require_scan(connection, scan_id)
-    workspace = require_workspace(connection, scan["workspace_id"])
+    scan = dependencies().require_scan(connection, scan_id)
+    workspace = dependencies().require_workspace(connection, scan["workspace_id"])
     owner = optional_text(thread_id, maximum=512)
     if owner is None:
         raise SystemExit("thread-id is required.")
@@ -311,7 +314,7 @@ def deep_scan_path(
         raise SystemExit(f"{label} must be an absolute path inside the scan directory.")
     try:
         resolved = supplied.resolve(strict=True)
-        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        scan_dir = dependencies().require_canonical_scan_directory(Path(scan["scan_dir"]))
         resolved.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"{label} must be an existing path inside the scan directory.") from exc
@@ -395,23 +398,18 @@ def publication_matches_snapshot(publication: Path, snapshot: Path) -> bool:
 
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
     discovery_dir = Path(scan["scan_dir"]) / "artifacts" / "02_discovery"
-    artifacts = {
-        "inScopeFilesPath": discovery_dir / "in_scope_files.txt",
-        "candidateLedgerPath": discovery_dir / "candidate_ledger.jsonl",
-    }
-    labels = {
-        "inScopeFilesPath": "Canonical in-scope inventory path",
-        "candidateLedgerPath": "Canonical candidate ledger path",
-    }
     return {
-        name: deep_scan_path(scan, str(path), labels[name], kind="file")
-        for name, path in artifacts.items()
+        name: deep_scan_path(scan, str(discovery_dir / filename), label, kind="file")
+        for name, filename, label in (
+            ("inScopeFilesPath", "in_scope_files.txt", "Canonical in-scope inventory path"),
+            ("candidateLedgerPath", "candidate_ledger.jsonl", "Canonical candidate ledger path"),
+        )
     }
 
 
 def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
     run = require_deep_scan_run(connection, scan_id)
-    scan = require_scan(connection, run["scan_id"])
+    scan = dependencies().require_scan(connection, run["scan_id"])
     worker_rows = connection.execute(
         """
         SELECT *
@@ -453,7 +451,13 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
-        "userContext": scan["user_context"],
+        "includePaths": dependencies().requested_scan_paths(scan),
+        "filePaths": dependencies().requested_scan_file_paths(scan),
+        "userContext": (
+            json.loads(run["discovery_user_context_json"])
+            if run["discovery_user_context_json"] is not None
+            else scan["user_context"]
+        ),
         "scanDir": scan["scan_dir"],
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
@@ -519,7 +523,7 @@ def independent_review_progress(
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] == "reducing",
+        "consolidating": run["phase"] in {"reducing", "terminal"},
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -582,9 +586,9 @@ def ensure_deep_scan_run(
         INSERT INTO deep_scan_runs (
             scan_id, schema_version, workflow_version, status, phase,
             workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
-            max_discovery_runs, max_time_hours,
+            max_discovery_runs, max_time_hours, discovery_user_context_json,
             created_at, updated_at
-        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan["id"],
@@ -595,6 +599,7 @@ def ensure_deep_scan_run(
             config["stopAfterConsecutiveErrors"],
             config["maxDiscoveryRuns"],
             config["maxTimeHours"],
+            json.dumps(scan["user_context"]),
             timestamp,
             timestamp,
         ),
@@ -628,6 +633,7 @@ def terminal_deep_scan_for_target_snapshot(
     thread_id: str,
     target_path: str,
     scope: str,
+    user_context: str | None,
     revision: str,
     snapshot_digest: str,
     target_device: int | str,
@@ -637,7 +643,8 @@ def terminal_deep_scan_for_target_snapshot(
 
     A continuation may safely consume a finished coordinator manifest while the
     parent scan is still open. It must not adopt live orchestration owned by a
-    different thread, or reuse results after the repository snapshot changed.
+    different thread, or reuse results for a different repository snapshot or
+    original discovery context.
     """
     return connection.execute(
         """
@@ -647,6 +654,7 @@ def terminal_deep_scan_for_target_snapshot(
         JOIN workspaces ON workspaces.id = scans.workspace_id
         WHERE scans.target_path = ?
             AND scans.scope = ?
+            AND deep_scan_runs.discovery_user_context_json = ?
             AND scans.mode = 'deep'
             AND scans.status = 'running'
             AND scans.canceled_at IS NULL
@@ -670,6 +678,7 @@ def terminal_deep_scan_for_target_snapshot(
         (
             target_path,
             scope,
+            json.dumps(user_context),
             revision,
             snapshot_digest,
             target_device,
@@ -686,8 +695,8 @@ def begin_deep_scan_for_scan(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
-    candidate = require_scan(connection, scan_id)
-    workspace = require_workspace(connection, candidate["workspace_id"])
+    candidate = dependencies().require_scan(connection, scan_id)
+    workspace = dependencies().require_workspace(connection, candidate["workspace_id"])
     if (
         candidate["mode"] == "deep"
         and candidate["status"] == "running"
@@ -701,7 +710,7 @@ def begin_deep_scan_for_scan(
             args.claim_token,
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
-        timestamp = now()
+        timestamp = dependencies().now()
         with connection:
             claimed_workspace = connection.execute(
                 "UPDATE workspaces SET thread_id = ?, updated_at = ? "
@@ -746,45 +755,36 @@ def begin_deep_scan_for_scan(
     if workflow_version is None:
         raise SystemExit("workflow-version is required.")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
         require_current_continuation(
             scan,
             args.claim_token,
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
-        ensure_deep_scan_run(connection, scan, config, workflow_version, now())
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
+        ensure_deep_scan_run(connection, scan, config, workflow_version, dependencies().now())
     return deep_scan_result(connection, scan_id, start_disposition="created")
 
 
 def begin_deep_scan_for_target(
     connection: sqlite3.Connection, args: argparse.Namespace, thread_id: str
 ) -> dict[str, Any]:
-    target = require_target(args.target_path)
-    require_scannable_target(target)
-    scope = require_scope(args.scope, "deep", target)
+    target = dependencies().require_target(args.target_path)
+    dependencies().require_scannable_target(target)
+    scope = dependencies().require_scope(args.scope, "deep", target)
     target_path = str(target)
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
+    user_context = user_context_argument(args)
     target_metadata = target.stat()
-    revision = git_revision(target)
-    target_snapshot_digest = (
-        directory_content_digest(target)
-        if revision == "unversioned"
-        else worktree_content_digest(target)
-    )
-    target_device = serialize_filesystem_identity(target_metadata.st_dev)
-    target_inode = serialize_filesystem_identity(target_metadata.st_ino)
+    target_identity = dependencies().scan_target_identity(target, None, metadata=target_metadata)
+    revision, target_snapshot_digest, target_device, target_inode = target_identity
     scope_file_count = directory_snapshot_regular_file_count(
         target if scope == "." else target / scope
     )
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
             existing_run = connection.execute(
@@ -795,14 +795,16 @@ def begin_deep_scan_for_target(
                 workflow_version = optional_text(args.workflow_version, maximum=256)
                 if workflow_version is None:
                     raise SystemExit("workflow-version is required.")
-                ensure_deep_scan_run(connection, existing, config, workflow_version, now())
+                ensure_deep_scan_run(
+                    connection, existing, config, workflow_version, dependencies().now()
+                )
             connection.commit()
             return deep_scan_result(
                 connection,
                 existing["id"],
                 start_disposition="joined" if existing_run is not None else "created",
             )
-        current_target = require_remediation_target(target_path)
+        current_target = dependencies().require_remediation_target(target_path)
         current_metadata = current_target.stat()
         if (current_metadata.st_dev, current_metadata.st_ino) != (
             target_metadata.st_dev,
@@ -816,6 +818,7 @@ def begin_deep_scan_for_target(
             thread_id,
             target_path,
             scope,
+            user_context,
             revision,
             target_snapshot_digest,
             target_device,
@@ -828,30 +831,26 @@ def begin_deep_scan_for_target(
                 terminal["id"],
                 start_disposition="joined",
             )
+        source_scopes = capture_source_scopes(
+            target,
+            (revision, target_snapshot_digest, target_device, target_inode),
+            [scope],
+        )
         config = effective_deep_scan_config(args)
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
-        root = (
-            Path(args.scan_root).expanduser().resolve() if args.scan_root else state_dir() / "scans"
-        )
-        target_root = (root / safe_segment(target.name)).resolve()
+        root = dependencies().resolve_scan_root(args.scan_root)
+        target_root = (root / dependencies().safe_segment(target.name)).resolve()
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
-        target_root.mkdir(parents=True, exist_ok=True)
-        user_context = user_context_argument(args)
+        create_private_directory(target_root)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
-        timestamp = now()
-        target_id = ensure_security_target(connection, target_path)
-        scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
-            )
-        ).resolve()
+        timestamp = dependencies().now()
+        target_id = dependencies().ensure_security_target(connection, target_path)
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -871,55 +870,28 @@ def begin_deep_scan_for_target(
                 timestamp,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-                target_device, target_inode, scope, mode, user_context,
-                deep_scan_owner_thread_id, scan_dir, model, reasoning_effort, status, phase,
-                handoff_status, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
-                'running', 'preflight', 'delivered', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                target_id,
-                target_path,
-                revision,
-                target_snapshot_digest,
-                target_device,
-                target_inode,
-                scope,
-                user_context,
-                thread_id,
-                str(scan_dir),
-                model,
-                reasoning_effort,
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
+        workspace = connection.execute(
+            "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
+        ).fetchone()
+        dependencies().insert_running_scan(
+            connection,
+            scan_id=scan_id,
+            workspace=workspace,
+            target=target,
+            scope=scope,
+            diff_target=None,
+            target_identity=target_identity,
+            source_scopes=source_scopes,
+            target_root=target_root,
+            target_summary=None,
+            scope_file_count=scope_file_count,
+            timestamp=timestamp,
+            handoff_status="delivered",
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
-        connection.execute(
-            """
-            INSERT INTO scan_progress (
-                scan_id, scope_file_count, review_items_total, review_items_completed,
-                reportable_findings_count, updated_at
-            ) VALUES (?, ?, 0, 0, 0, ?)
-            """,
-            (scan_id, scope_file_count, timestamp),
-        )
-        connection.execute(
-            "UPDATE workspaces SET active_scan_id = ?, updated_at = ? WHERE id = ?",
-            (scan_id, timestamp, workspace_id),
-        )
-        scan = require_scan(connection, scan_id)
+        scan = dependencies().require_scan(connection, scan_id)
         ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id, start_disposition="created")
 
 
@@ -973,6 +945,7 @@ def coordinator_lease_is_live(
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
             heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
+        # Missing or invalid heartbeat files leave the persisted lease timestamp in effect.
         pass
     current_time = _parse_timestamp(timestamp)
     return heartbeat_time > current_time - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)
@@ -994,7 +967,7 @@ def claim_deep_scan_coordinator(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return claim_deep_scan_coordinator_locked(connection, args, scan_id)
 
 
@@ -1002,7 +975,7 @@ def claim_deep_scan_coordinator_locked(
     connection: sqlite3.Connection, args: argparse.Namespace, scan_id: str
 ) -> dict[str, Any]:
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan, _ = require_owned_scan(connection, scan_id, args.thread_id)
         require_current_continuation(
             scan,
@@ -1010,7 +983,7 @@ def claim_deep_scan_coordinator_locked(
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
         run, _ = require_running_deep_scan(connection, scan_id)
-        timestamp = now()
+        timestamp = dependencies().now()
         if args.coordinator_generation is not None:
             require_current_coordinator(run, args)
             disposition = "claimed"
@@ -1034,10 +1007,6 @@ def claim_deep_scan_coordinator_locked(
             """,
             (int(args.coordinator_generation != run["coordinator_generation"]), timestamp, scan_id),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return {
         **deep_scan_result(connection, scan_id),
         "coordinatorDisposition": disposition,
@@ -1122,7 +1091,7 @@ def recover_expired_coordinator(
 
 
 def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id: str) -> None:
-    scan = require_scan(connection, scan_id)
+    scan = dependencies().require_scan(connection, scan_id)
     ledger = Path(scan["scan_dir"]) / "artifacts" / "02_discovery" / "candidate_ledger.jsonl"
     backups = sorted(
         ledger.parent.glob(f".{ledger.name}.*.backup"),
@@ -1173,7 +1142,7 @@ def require_running_deep_scan(
     connection: sqlite3.Connection, scan_id: str
 ) -> tuple[sqlite3.Row, sqlite3.Row]:
     run = require_deep_scan_run(connection, scan_id)
-    scan = require_scan(connection, run["scan_id"])
+    scan = dependencies().require_scan(connection, run["scan_id"])
     if run["status"] != "running" or run["cancel_requested"]:
         raise SystemExit("Only a running Deep Scan can update orchestration state.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
@@ -1199,10 +1168,10 @@ def upsert_deep_scan_worker(
     scan_id = require_uuid(args.scan_id, "scan-id")
     worker_id = require_uuid(args.worker_id, "worker-id")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
-        scan = require_scan(connection, scan_id)
+        scan = dependencies().require_scan(connection, scan_id)
         existing = connection.execute(
             "SELECT * FROM deep_scan_workers WHERE id = ?", (worker_id,)
         ).fetchone()
@@ -1245,7 +1214,7 @@ def upsert_deep_scan_worker(
             if args.result_manifest_path
             else None
         )
-        timestamp = now()
+        timestamp = dependencies().now()
         if existing is None:
             if args.kind == "dedup":
                 raise SystemExit("Create dedup workers with claim-deep-scan-dedup.")
@@ -1420,10 +1389,6 @@ def upsert_deep_scan_worker(
                 worker_id,
             ),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id)
 
 
@@ -1436,7 +1401,7 @@ def claim_deep_scan_dedup(
     if len(set(input_ids)) != len(input_ids):
         raise SystemExit("Dedup input worker IDs must be unique.")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         run, scan = require_running_deep_scan(connection, scan_id)
         require_current_coordinator(run, args)
         prompt_path = deep_scan_path(scan, args.prompt_path, "Dedup prompt path", kind="file")
@@ -1526,7 +1491,7 @@ def claim_deep_scan_dedup(
                 if minimum_inputs == 2
                 else "A Deep Scan dedup requires at least one buffered discovery result."
             )
-        timestamp = now()
+        timestamp = dependencies().now()
         connection.execute(
             """
             INSERT INTO deep_scan_workers (
@@ -1565,10 +1530,6 @@ def claim_deep_scan_dedup(
             """,
             (timestamp, scan_id),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return deep_scan_result(connection, scan_id)
 
 
@@ -1576,7 +1537,7 @@ def commit_deep_scan_dedup(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return commit_deep_scan_dedup_locked(connection, args, scan_id)
 
 
@@ -1590,7 +1551,7 @@ def commit_deep_scan_dedup_locked(
     try:
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
-        scan = require_scan(connection, scan_id)
+        scan = dependencies().require_scan(connection, scan_id)
         worker = require_deep_scan_worker(connection, worker_id)
         if worker["scan_id"] != scan_id or worker["kind"] != "dedup":
             raise SystemExit("Dedup worker does not belong to this Deep Scan.")
@@ -1652,7 +1613,7 @@ def commit_deep_scan_dedup_locked(
                 str(publication_copy),
                 canonical_candidate_ledger_path,
             )
-        timestamp = now()
+        timestamp = dependencies().now()
         connection.execute(
             """
             UPDATE deep_scan_workers
@@ -1702,7 +1663,7 @@ def commit_deep_scan_dedup_locked(
 
 def finish_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return finish_deep_scan_locked(connection, args, scan_id)
 
 
@@ -1719,7 +1680,7 @@ def finish_deep_scan_locked(
     try:
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
-        scan = require_scan(connection, scan_id)
+        scan = dependencies().require_scan(connection, scan_id)
         manifest_path = (
             deep_scan_output_path(scan, args.manifest_path, "Deep Scan coordinator manifest path")
             if args.staged_manifest_path
@@ -1729,63 +1690,6 @@ def finish_deep_scan_locked(
         )
         standard_scan_manifest = manifest_path == str(Path(scan["scan_dir"]) / "scan-manifest.json")
 
-        failure_capped = False
-        if (
-            standard_scan_manifest
-            and args.terminal_reason == "capped"
-            and (run["status"] == "running" or omitted_worker_ids)
-        ):
-            for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
-                deep_scan_path(
-                    scan,
-                    str(Path(scan["scan_dir"]) / artifact_name),
-                    f"Canonical parent {artifact_name}",
-                    kind="file",
-                )
-            coverage = _read_scan_local_json(
-                Path(scan["scan_dir"]), "coverage.json", "Canonical parent coverage.json"
-            )
-            deferred = coverage.get("deferred")
-            failure_capped = (
-                coverage.get("completeness") == "partial"
-                and isinstance(deferred, list)
-                and any(
-                    isinstance(item, dict)
-                    and isinstance(item.get("reason"), str)
-                    and item["reason"].startswith("Deep Scan stopped before completion: ")
-                    for item in deferred
-                )
-                and connection.execute(
-                    """
-                    SELECT 1 FROM deep_scan_workers
-                    WHERE scan_id = ? AND kind = 'dedup' AND status = 'succeeded'
-                    LIMIT 1
-                    """,
-                    (scan_id,),
-                ).fetchone()
-                is not None
-            )
-            if failure_capped and run["status"] == "running":
-                require_running_deep_scan(connection, scan_id)
-                connection.execute(
-                    """
-                    UPDATE deep_scan_workers
-                    SET merge_state = 'buffered', updated_at = ?
-                    WHERE scan_id = ? AND kind = 'discovery' AND status = 'succeeded'
-                        AND merge_state = 'merging'
-                        AND id IN (
-                            SELECT inputs.discovery_worker_id
-                            FROM deep_scan_dedup_inputs AS inputs
-                            JOIN deep_scan_workers AS reducers
-                                ON reducers.id = inputs.dedup_worker_id
-                                AND reducers.scan_id = inputs.scan_id
-                            WHERE inputs.scan_id = ?
-                                AND reducers.kind = 'dedup'
-                                AND reducers.status IN ('failed', 'canceled')
-                        )
-                    """,
-                    (now(), scan_id, scan_id),
-                )
         buffered_worker_ids = [
             row["id"]
             for row in connection.execute(
@@ -1798,9 +1702,10 @@ def finish_deep_scan_locked(
                 (scan_id,),
             )
         ]
+        # Historical succeeded runs retain their exact omitted-worker replay contract.
         omissions_match = (
             set(omitted_worker_ids) == set(buffered_worker_ids)
-            if args.terminal_reason == "saturated" or failure_capped
+            if args.terminal_reason == "saturated" or run["status"] == "succeeded"
             else not omitted_worker_ids and not buffered_worker_ids
         )
         if run["status"] == "succeeded":
@@ -1816,7 +1721,7 @@ def finish_deep_scan_locked(
             if run["manifest_path"] is None:
                 connection.execute(
                     "UPDATE deep_scan_runs SET manifest_path = ?, updated_at = ? WHERE scan_id = ?",
-                    (manifest_path, now(), scan_id),
+                    (manifest_path, dependencies().now(), scan_id),
                 )
             connection.commit()
             return deep_scan_result(connection, scan_id)
@@ -1832,7 +1737,6 @@ def finish_deep_scan_locked(
             args.terminal_reason == "capped"
             and run["discovery_runs_dispatched"] < run["max_discovery_runs"]
             and not deep_scan_deadline_reached(run)
-            and not failure_capped
         ):
             raise SystemExit(
                 "Deep Scan cannot finish capped before reaching its configured maximum."
@@ -1873,71 +1777,16 @@ def finish_deep_scan_locked(
         )
         if successful_reducer is None and not zero_discovery_deadline:
             raise SystemExit("Deep Scan cannot finish without a successful dedup worker.")
-        failed_worker = connection.execute(
-            """
-            SELECT 1 FROM deep_scan_workers AS failed
-            WHERE failed.scan_id = ? AND failed.status = 'failed'
-                AND (? != 'saturated' OR failed.kind != 'discovery')
-                AND (
-                    failed.kind != 'dedup'
-                    OR NOT EXISTS (
-                        SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
-                        WHERE failed_inputs.dedup_worker_id = failed.id
-                    )
-                    OR EXISTS (
-                        SELECT 1 FROM deep_scan_dedup_inputs AS failed_inputs
-                        WHERE failed_inputs.dedup_worker_id = failed.id
-                            AND NOT EXISTS (
-                                SELECT 1
-                                FROM deep_scan_dedup_inputs AS replacement_inputs
-                                JOIN deep_scan_workers AS replacement
-                                    ON replacement.scan_id = replacement_inputs.scan_id
-                                    AND replacement.id = replacement_inputs.dedup_worker_id
-                                WHERE replacement_inputs.scan_id = failed.scan_id
-                                    AND replacement_inputs.discovery_worker_id =
-                                        failed_inputs.discovery_worker_id
-                                    AND replacement.kind = 'dedup'
-                                    AND replacement.status = 'succeeded'
-                            )
-                    )
-                )
-            LIMIT 1
-            """,
-            (scan_id, args.terminal_reason),
-        ).fetchone()
-        if failed_worker is not None and not failure_capped:
-            raise SystemExit("Deep Scan cannot finish after a worker has failed.")
         if args.terminal_reason == "saturated":
-            # Mark any remaining workers canceled, including those whose own
-            # cancellation writes failed, so they cannot block completion.
-            cancel_active_workers(connection, scan_id, now())
-        active_worker = connection.execute(
-            """
-            SELECT 1 FROM deep_scan_workers
-            WHERE scan_id = ? AND status IN ('queued', 'running')
-            LIMIT 1
-            """,
-            (scan_id,),
-        ).fetchone()
-        if active_worker is not None:
-            raise SystemExit("Deep Scan cannot finish while workers are active.")
-        merging_worker = connection.execute(
-            """
-            SELECT 1 FROM deep_scan_workers
-            WHERE scan_id = ? AND merge_state = 'merging'
-            LIMIT 1
-            """,
-            (scan_id,),
-        ).fetchone()
-        if merging_worker is not None:
-            raise SystemExit("Deep Scan cannot finish while discovery output is merging.")
-        if args.terminal_reason == "capped" and omitted_worker_ids and not failure_capped:
-            raise SystemExit("Deep Scan capped completion cannot declare omitted buffered workers.")
-        if args.terminal_reason == "capped" and buffered_worker_ids and not failure_capped:
-            raise SystemExit(
-                "Deep Scan cannot finish capped while discovery output remains buffered."
-            )
-        if (args.terminal_reason == "saturated" or failure_capped) and not omissions_match:
+            # Saturation cancels surplus workers, including failed cancellation writes.
+            cancel_active_workers(connection, scan_id, dependencies().now())
+        require_deep_scan_workers_finished(
+            connection,
+            scan_id,
+            args.terminal_reason,
+            has_omitted_workers=bool(omitted_worker_ids),
+        )
+        if args.terminal_reason == "saturated" and not omissions_match:
             raise SystemExit(
                 f"Deep Scan {args.terminal_reason} completion must exactly identify all buffered discovery "
                 "workers with --omitted-worker-id."
@@ -1950,18 +1799,23 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        timestamp = now()
-        connection.execute(
-            """
-            UPDATE deep_scan_runs
-            SET status = 'succeeded', phase = 'terminal', terminal_reason = ?,
-                manifest_path = ?, completed_at = ?, updated_at = ?
-            WHERE scan_id = ?
-            """,
-            (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
-        )
-        cancel_active_workers(connection, scan_id, timestamp)
-        connection.commit()
+        with (
+            saved_results.preserve_deep_deadline_draft(dependencies(), connection, scan)
+            if zero_discovery_deadline and standard_scan_manifest
+            else nullcontext()
+        ):
+            timestamp = dependencies().now()
+            connection.execute(
+                """
+                UPDATE deep_scan_runs
+                SET status = 'succeeded', phase = 'terminal', terminal_reason = ?,
+                    manifest_path = ?, completed_at = ?, updated_at = ?
+                WHERE scan_id = ?
+                """,
+                (args.terminal_reason, manifest_path, timestamp, timestamp, scan_id),
+            )
+            cancel_active_workers(connection, scan_id, timestamp)
+            connection.commit()
     except BaseException:
         connection.rollback()
         if promotion is not None:
@@ -1974,7 +1828,7 @@ def finish_deep_scan_locked(
 
 def fail_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         return fail_deep_scan_locked(connection, args, scan_id)
 
 
@@ -1989,7 +1843,7 @@ def fail_deep_scan_locked(
     try:
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
-        scan = require_scan(connection, scan_id)
+        scan = dependencies().require_scan(connection, scan_id)
         manifest_path = None
         if args.manifest_path:
             manifest_path = (
@@ -2002,6 +1856,8 @@ def fail_deep_scan_locked(
                     kind="file",
                 )
             )
+        elif run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
+            manifest_path = run["manifest_path"]
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (
                 run["status"] == args.deep_status
@@ -2036,7 +1892,7 @@ def fail_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        timestamp = now()
+        timestamp = dependencies().now()
         connection.execute(
             """
             UPDATE deep_scan_runs
@@ -2080,12 +1936,12 @@ def record_deep_scan_publication_failure(
     message = optional_text(args.message, maximum=2400)
     if message is None:
         raise SystemExit("message is required.")
-    with scan_completion_lock(scan_id):
+    with dependencies().scan_completion_lock(scan_id):
         connection.execute("BEGIN IMMEDIATE")
-        try:
+        with connection:
             run = require_deep_scan_run(connection, scan_id)
             require_current_coordinator(run, args)
-            scan = require_scan(connection, scan_id)
+            scan = dependencies().require_scan(connection, scan_id)
             if (
                 run["status"] not in {"failed", "canceled", "interrupted"}
                 or scan["status"] != "failed"
@@ -2097,7 +1953,7 @@ def record_deep_scan_publication_failure(
                 connection.commit()
                 return deep_scan_result(connection, scan_id)
             if run["publication_error_message"] != message:
-                timestamp = now()
+                timestamp = dependencies().now()
                 connection.execute(
                     """
                     UPDATE deep_scan_runs
@@ -2106,10 +1962,6 @@ def record_deep_scan_publication_failure(
                     """,
                     (message, timestamp, scan_id),
                 )
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
     return deep_scan_result(connection, scan_id)
 
 
@@ -2118,7 +1970,7 @@ def clear_deep_scan_publication_failure(connection: sqlite3.Connection, scan_id:
         connection.execute(
             "UPDATE deep_scan_runs SET publication_error_message = NULL, updated_at = ? "
             "WHERE scan_id = ? AND publication_error_message IS NOT NULL",
-            (now(), scan_id),
+            (dependencies().now(), scan_id),
         )
 
 

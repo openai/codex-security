@@ -35,7 +35,7 @@ Read [references/risk-rubric.md](references/risk-rubric.md) before assigning rat
 Return exactly one recommendation:
 
 - `merge`: source evidence supports the patch and no decision-critical defect or unknown remains;
-- `revise`: the patch, its tests, or a material documentation contract must change;
+- `revise`: the patch, its tests, or a material documentation contract must change because of an established defect; record it as a contradicted `materialBoundaries` result or a failed `validation` entry. Source inspection can establish a documentation-contract failure; a runtime test failure is not required;
 - `no_op`: evidence shows the patch has no required live effect or belongs elsewhere;
 - `block`: affirmative evidence establishes a material safety failure; or
 - `hold_for_evidence`: unavailable evidence can still change the decision.
@@ -62,15 +62,26 @@ Return both a concise Markdown report and a JSON object conforming to [`../../sc
 7. top risk drivers, protective factors, and status-quo risk; and
 8. unknowns plus the bounded evidence plan when held.
 
-This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up. Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
+This skill lives at `<plugin-root>/skills/assess-patch-risk/SKILL.md`, so `<plugin-root>` is two directories up.
 
 Before returning the result, validate the JSON from any working directory with:
 
 ```text
-<python_command> <plugin-root>/skills/assess-patch-risk/scripts/validate_patch_risk_assessment.py <assessment.json>
+<plugin-root>/scripts/launch_codex_security_mcp --helper validate-patch-risk-assessment <assessment.json>
 ```
 
-Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file.
+On Windows, use this PowerShell invocation. Replace the placeholders inside the single quotes with literal paths, doubling any single quote in a path:
+
+```powershell
+$env:patchRiskPluginRoot = Convert-Path -LiteralPath '<plugin-root>' -ErrorAction Stop
+$env:patchRiskAssessment = '<assessment.json>'
+if ($env:patchRiskAssessment -ne '-') {
+    $env:patchRiskAssessment = Convert-Path -LiteralPath $env:patchRiskAssessment -ErrorAction Stop
+}
+cmd.exe /d /v:off /s /c '""%patchRiskPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper validate-patch-risk-assessment "%patchRiskAssessment%""'
+```
+
+These two environment variables are temporary values in the calling shell, not application settings. Resolve paths against PowerShell's current location before CMD starts, including when that location is a UNC share. Missing paths stop the invocation with PowerShell's path error. CMD expands the references once, preserving literal `%` and `!` in the paths. Pass `-` as `<assessment.json>` to read the assessment from standard input without creating a file. The validator uses the bundled Node runtime helper and does not require Python.
 
 Correct structural or invariant errors by revisiting the evidence; never change a recommendation merely to make validation pass. Return the validated JSON in the response. Write it to disk only when the caller requests an artifact, and keep every assessment-created file outside the subject checkout and its Git directories.
 

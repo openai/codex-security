@@ -1,3 +1,6 @@
+import { findingEntry } from "./value.js";
+import { isGitHubCloudHost } from "./git-remote.js";
+import { isRecord } from "./record.js";
 import {
   loadContractWithScanDirectory,
   type LoadedContract,
@@ -37,7 +40,7 @@ export interface PrepareScanPublicationOptions {
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
-  /** Publish only these finding IDs (for example dedupe's uniqueFindingIds). */
+  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
   findingIds?: readonly string[];
   /** Use this assessment; otherwise use the scan's saved classification when present. */
   classification?: SeverityClassification | ScanSeverityClassification;
@@ -53,15 +56,9 @@ export interface PreparedPublicationIssue {
 
 export interface PreparedScanPublication {
   scanId: string;
-  uploadId: string;
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
-  /** Complete sealed membership, retained when only some findings become issues. */
-  sourceFindings?: Pick<
-    PreparedPublicationIssue,
-    "findingId" | "occurrenceId"
-  >[];
 }
 
 export function linearPublicationArguments(
@@ -124,12 +121,7 @@ export async function prepareScanPublication(
       options.environment,
     );
   }
-  const assessments = new Map(
-    classification?.assessments.map((assessment) => [
-      assessment.findingId,
-      assessment,
-    ]),
-  );
+  const assessments = new Map(classification?.assessments.map(findingEntry));
   const selected = selectClassificationFindings(
     contract.findings.findings,
     options.findingIds ??
@@ -146,15 +138,7 @@ export async function prepareScanPublication(
 
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: canonicalScanDirectory,
-    ...(classification === undefined && options.findingIds === undefined
-      ? {}
-      : {
-          sourceFindings: contract.findings.findings.map(
-            ({ findingId, occurrenceId }) => ({ findingId, occurrenceId }),
-          ),
-        }),
     destination: {
       type: options.destination,
       teamId: options.teamId,
@@ -162,27 +146,24 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    issues: selected
-      .filter(
-        ({ findingId }) => assessments.get(findingId)?.decision !== "excluded",
-      )
-      .map((finding) => {
-        const assessment = assessments.get(finding.findingId);
-        const level = assessment?.level ?? finding.severity.level;
-        const priority = LINEAR_PRIORITIES[level];
-        return {
-          findingId: finding.findingId,
-          occurrenceId: finding.occurrenceId,
-          title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
-          description: renderFindingDescription(
-            contract,
-            finding,
-            uploadedAt,
-            assessment,
-          ),
-          ...(priority === undefined ? {} : { priority }),
-        };
-      }),
+    issues: selected.flatMap((finding) => {
+      const assessment = assessments.get(finding.findingId);
+      if (assessment?.decision === "excluded") return [];
+      const level = assessment?.level ?? finding.severity.level;
+      const priority = LINEAR_PRIORITIES[level];
+      return {
+        findingId: finding.findingId,
+        occurrenceId: finding.occurrenceId,
+        title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
+        description: renderFindingDescription(
+          contract,
+          finding,
+          uploadedAt,
+          assessment,
+        ),
+        ...(priority === undefined ? {} : { priority }),
+      };
+    }),
   };
 }
 
@@ -216,11 +197,15 @@ function renderFindingDescription(
     lines.push("", "## Reproduction summary", "", finding.attackPath.summary);
   }
 
-  const rootCause = finding.rootCause;
+  const rootCause = publicationRootCause(finding);
   if (typeof rootCause === "string") {
     lines.push("", "## Root cause", "", rootCause);
-  } else if (rootCause !== undefined) {
-    lines.push("", "## Root cause", "", rootCause.summary);
+  } else if (
+    rootCause !== undefined &&
+    (rootCause.summary !== undefined || rootCause.code !== undefined)
+  ) {
+    lines.push("", "## Root cause");
+    if (rootCause.summary !== undefined) lines.push("", rootCause.summary);
     if (rootCause.code !== undefined) {
       lines.push("", fencedCode(rootCause.code, rootCause.language));
     }
@@ -243,10 +228,11 @@ function renderFindingDescription(
     lines.push(...limits.map((limit) => `- ${limit}`));
   }
 
-  if (finding.codeEvidence !== undefined && finding.codeEvidence.length > 0) {
+  const codeEvidence = publicationCodeEvidence(finding);
+  if (codeEvidence.length > 0) {
     lines.push("", "## Source-code evidence");
-    for (const evidence of finding.codeEvidence) {
-      lines.push("", ...renderCodeEvidence(scan.target, evidence));
+    for (const [index, evidence] of codeEvidence.entries()) {
+      lines.push("", ...renderCodeEvidence(scan.target, evidence, index));
     }
   }
 
@@ -277,7 +263,6 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Coverage:** ${coverage.completeness}`,
     `**Coverage mode:** ${coverage.mode}`,
     `**Scan mode:** ${scanMode(coverage.mode)}`,
     `**Started:** ${scan.startedAt}`,
@@ -329,33 +314,153 @@ function renderLocation(
       : `-${location.endLine}`
   }`;
   const sourceUrl = immutableSourceUrl(target, location);
-  return `- **${role}:** ${sourceUrl === undefined ? `\`${label}\`` : `[\`${label}\`](${sourceUrl})`}`;
+  const formattedLabel = inlineCode(label);
+  return `- **${role}:** ${sourceUrl === undefined ? formattedLabel : `[${formattedLabel}](${sourceUrl})`}`;
 }
 
 function renderCodeEvidence(
   target: ScanTargetRecord,
-  evidence: FindingCodeEvidence,
+  evidence: PublicationCodeEvidence,
+  index: number,
 ): string[] {
-  const location: FindingLocation = {
-    path: evidence.path,
-    startLine: evidence.startLine,
-    ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-    ...(evidence.role === undefined ? {} : { role: evidence.role }),
-  };
-  return [
-    `### ${evidence.label}`,
-    "",
-    renderLocation(target, location),
-    "",
-    fencedCode(evidence.code, evidence.language),
-    "",
-    evidence.explanation,
-  ];
+  const lines = [`### ${evidence.label ?? `Code evidence ${index + 1}`}`, ""];
+  if (typeof evidence["location"] === "string") {
+    lines.push(
+      `- **${evidence.role === undefined ? "Location" : humanizeRole(evidence.role)}:** ${inlineCode(evidence["location"])}`,
+      "",
+    );
+  } else if (evidence.path !== undefined) {
+    lines.push(
+      evidence.startLine === undefined
+        ? `- **${evidence.role === undefined ? "Location" : humanizeRole(evidence.role)}:** ${inlineCode(evidence.path)}`
+        : renderLocation(target, {
+            ...evidence,
+            path: evidence.path,
+            startLine: evidence.startLine,
+          }),
+      "",
+    );
+  }
+  lines.push(fencedCode(evidence.code, evidence.language));
+  if (evidence.explanation !== undefined) lines.push("", evidence.explanation);
+  return lines;
+}
+
+function publicationRootCause(finding: Finding) {
+  const canonical = finding.rootCause;
+  const legacy = finding.root_cause;
+  if (canonical === undefined) return legacy ?? undefined;
+  if (legacy === undefined || legacy === null) return canonical;
+  const details: Array<{ summary?: string; code?: string; language?: string }> =
+    [canonical, legacy].map((detail) =>
+      typeof detail === "string" ? { summary: detail } : detail,
+    );
+  const summary = details.find((detail) => detail.summary?.trim())?.summary;
+  const code = details.find((detail) => detail.code?.trim())?.code;
+  const language = details.find(
+    (detail) => detail.code === code && detail.language?.trim(),
+  )?.language;
+  return summary === undefined && code === undefined
+    ? undefined
+    : { summary, code, language };
+}
+
+type PublicationCodeEvidence = Partial<FindingCodeEvidence> &
+  Pick<FindingCodeEvidence, "code">;
+
+function publicationCodeEvidence(finding: Finding): PublicationCodeEvidence[] {
+  const evidence: PublicationCodeEvidence[] = (finding.codeEvidence ?? []).map(
+    (item) =>
+      typeof item["location"] === "string" || isRecord(item["location"])
+        ? publicationEvidenceEntry(item, item.code)
+        : item,
+  );
+  const ids = new Set(
+    evidence.filter((item) => item.code.trim()).map((item) => item.id),
+  );
+  for (const item of finding.code_evidence ?? []) {
+    if (ids.has(item.id)) continue;
+    if (item.code.trim()) ids.add(item.id);
+    evidence.push(publicationEvidenceEntry(item, item.code));
+  }
+  const snippets = new Set(
+    evidence.map((item) => JSON.stringify([item.id ?? "", item.code])),
+  );
+  const attackPath = finding.attackPath;
+  for (const section of [
+    finding.rootCause,
+    finding.root_cause,
+    finding.validation,
+    attackPath,
+    attackPath?.dataFlow,
+    attackPath?.["dataflow"],
+    attackPath?.data_flow,
+    attackPath?.reachability,
+  ]) {
+    if (!isRecord(section)) continue;
+    for (const key of ["codeEvidence", "code_evidence"]) {
+      const embedded = section[key];
+      if (!Array.isArray(embedded)) continue;
+      for (const item of embedded) {
+        if (!isRecord(item)) continue;
+        const code = item["code"];
+        if (typeof code !== "string" || !code.trim()) continue;
+        const identity = JSON.stringify([item["id"] ?? "", code]);
+        if (snippets.has(identity)) continue;
+        snippets.add(identity);
+        evidence.push(publicationEvidenceEntry(item, code));
+      }
+    }
+  }
+  return evidence;
+}
+
+function publicationEvidenceEntry(
+  item: Record<string, unknown>,
+  code: string,
+): PublicationCodeEvidence {
+  const entry: PublicationCodeEvidence = { code };
+  for (const key of [
+    "id",
+    "label",
+    "language",
+    "role",
+    "explanation",
+  ] as const) {
+    const value = item[key];
+    if (typeof value === "string" && value.length > 0) entry[key] = value;
+  }
+  if (typeof item["location"] === "string") {
+    const label = item["location"].trim().replace(/\s+/g, " ");
+    if (label) entry["location"] = label;
+    return entry;
+  }
+  const location = isRecord(item["location"]) ? item["location"] : item;
+  const path = location["path"];
+  if (typeof path === "string" && path.length > 0) entry.path = path;
+  const start = location["startLine"];
+  if (typeof start === "number" && Number.isInteger(start) && start > 0) {
+    entry.startLine = start;
+    const end = location["endLine"];
+    if (typeof end === "number" && Number.isInteger(end) && end >= start)
+      entry.endLine = end;
+  }
+  return entry;
 }
 
 function humanizeRole(role: string): string {
   const words = role.replaceAll("_", " ");
   return `${words.slice(0, 1).toUpperCase()}${words.slice(1)}`;
+}
+
+function inlineCode(label: string): string {
+  let fenceLength = 1;
+  for (const match of label.matchAll(/`+/g)) {
+    fenceLength = Math.max(fenceLength, match[0].length + 1);
+  }
+  const fence = "`".repeat(fenceLength);
+  const padding = label.startsWith("`") || label.endsWith("`") ? " " : "";
+  return `${fence}${padding}${label}${padding}${fence}`;
 }
 
 function fencedCode(code: string, language?: string): string {
@@ -391,10 +496,7 @@ function immutableSourceUrl(
   } catch {
     return undefined;
   }
-  if (
-    remote.protocol !== "https:" ||
-    (remote.hostname !== "github.com" && !remote.hostname.endsWith(".ghe.com"))
-  ) {
+  if (remote.protocol !== "https:" || !isGitHubCloudHost(remote.hostname)) {
     return undefined;
   }
 
