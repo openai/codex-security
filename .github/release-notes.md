@@ -32,6 +32,7 @@
 - bump taiki-e/install-action from 2.87.28 to 2.87.29 ([#1877](https://github.com/openai/codex-security/pull/1877))
 - keep saved-results source within import limit ([#1891](https://github.com/openai/codex-security/pull/1891))
 - allow readable interactive verification results ([#1836](https://github.com/openai/codex-security/pull/1836))
+- upgrade Codex and preserve oversized MCP recovery ([#1879](https://github.com/openai/codex-security/pull/1879))
 
 <!-- release-section: highlights:end -->
 
