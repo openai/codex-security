@@ -21,6 +21,7 @@ function createRepository(): { root: string; repository: string } {
   const repository = join(root, "repository");
   mkdirSync(repository);
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   return { root, repository };
 }
 

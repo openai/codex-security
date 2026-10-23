@@ -67,6 +67,7 @@ async function interruptedScan(
     const git = (...args: string[]) =>
       gitText(["-C", repository, ...args]).trim();
     git("init", "-q");
+    git("config", "--local", "core.autocrlf", "false");
     git("add", ".");
     git(
       "-c",

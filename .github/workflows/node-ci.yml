@@ -462,6 +462,14 @@ jobs:
       - name: Test secret discovery eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+      - name: Build host plugin for Standard eval integration
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: |
+          node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
+          ln -s ../../plugins/codex-security sdk/typescript/_bundled_plugin
+      - name: Test Standard time-budget eval contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts

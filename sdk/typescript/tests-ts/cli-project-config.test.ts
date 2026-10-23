@@ -485,6 +485,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   );
   for (const args of [
     ["init", "-q", input.repository],
+    ["-C", input.repository, "config", "--local", "core.autocrlf", "false"],
     ["-C", input.repository, "add", "."],
     [
       "-C",

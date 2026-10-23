@@ -42,6 +42,7 @@ afterEach(cleanup);
 
 function createPolicyWorktree(repository: string, root: string, name: string) {
   policyGit(repository, "init", "--quiet");
+  policyGit(repository, "config", "--local", "core.autocrlf", "false");
   policyGit(repository, "commit", "--allow-empty", "--quiet", "-m", "initial");
   const linked = join(root, name);
   policyGit(

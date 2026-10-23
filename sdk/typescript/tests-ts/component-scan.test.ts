@@ -1559,6 +1559,14 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
   await mkdir(join(paths.repository, nonCased));
   await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "--local",
+    "core.autocrlf",
+    "false",
+  ]);
   execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
   expect(await scopedInventory(paths, nonCased)).toEqual({
     paths: [nonCased + "/app.ts"],
