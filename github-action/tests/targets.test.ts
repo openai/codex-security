@@ -172,7 +172,7 @@ test('wrong checkout, local changes, missing diff base and option revisions are 
 test('forks and privileged events fail eligibility',async t=>{
   const f=await fixture(t); const event=f.event(f.base);
   event.payload.pull_request.head.repo.full_name='fork/repo'; assert.throws(()=>validateEvent(event),/Fork PR/);
-  for(const eventName of ['pull_request_target','workflow_run']) assert.throws(()=>validateEvent({...event,eventName}),/Unsupported event/);
+  for(const eventName of ['pull_request_target','workflow_run','merge_group']) assert.throws(()=>validateEvent({...event,eventName}),/Unsupported event/);
 });
 test('persisted Git credentials and origin userinfo are refused without revealing secrets',async t=>{
   const f=await fixture(t);

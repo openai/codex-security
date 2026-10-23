@@ -216,12 +216,6 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -233,6 +227,9 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
+
+The Action sets up and verifies the sandbox on GitHub-hosted Ubuntu 24.04 VMs.
+Self-hosted runners and job containers must provide a working Codex sandbox.
 
 Findings are report-only by default. Set a severity threshold to fail on reported
 findings at or above it. Scanner and required reporting errors fail the job;

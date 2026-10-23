@@ -116,6 +116,11 @@ test('dry-run allows keyless configuration validation', () => {
   const dryArgs=scanArguments(parse({'dry-run':'true'}),{repository:'/checkout'},'/results');
   assert.equal(dryArgs[dryArgs.indexOf('--auth')+1],'auto'); assert.ok(dryArgs.includes('--dry-run'));
 });
+test('dry-run cannot be combined with findings enforcement', () => {
+  for (const threshold of ['low', 'medium', 'high', 'critical'])
+    assert.throws(() => parse({'dry-run':'true', 'fail-on-severity':threshold}), /dry-run requires fail-on-severity: none/);
+  assert.equal(parse({'dry-run':'true', 'fail-on-severity':'none'}).dryRun, true);
+});
 test('CLI arguments preserve literal values and enforce CI policy', () => {
   const input = parse({paths:'src/my folder',model:'model; echo never-execute', effort:'medium', 'max-cost':'5', 'fail-on-severity':'high'});
   const args = scanArguments(input, {repository:'/checkout'}, '/private/results');

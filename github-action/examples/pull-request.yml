@@ -1,0 +1,60 @@
+name: Codex Security PR
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-security-pr-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.base == null && '-metadata' || '' }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
+    name: Scan changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      scan-status: ${{ steps.security.outputs.scan-status }}
+      skip-reason: ${{ steps.security.outputs.skip-reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan PR changes
+        id: security
+        uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
+        with:
+          scope: diff
+          model: gpt-5.6-sol
+          effort: high
+          max-cost: "5"
+          fail-on-severity: high
+          upload-artifacts: "true"
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
+
+  required-review:
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security
+    needs: security
+    if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a completed review or an empty diff
+        env:
+          SCAN_JOB_RESULT: ${{ needs.security.result }}
+          SCAN_STATUS: ${{ needs.security.outputs.scan-status }}
+          SKIP_REASON: ${{ needs.security.outputs.skip-reason }}
+        run: |
+          test "$SCAN_JOB_RESULT" = success
+          if [ "$SCAN_STATUS" = completed ]; then
+            exit 0
+          fi
+          test "$SCAN_STATUS" = skipped
+          test "$SKIP_REASON" = empty-diff

@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { parseInputs, scanArguments } from '../src/inputs.js';
 import { analyzeResults } from '../src/results.js';
 import { captureRunnerPath, checkPython, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
@@ -95,6 +96,34 @@ try {
     const preflight = JSON.parse(run(args, 0));
     assert.equal(preflight.dryRun, true);
     assert.equal(preflight.mode, mode);
+  }
+
+  // Validate workflow model and cost settings against both the published pin and release candidates.
+  const diffBase = git('rev-parse', 'HEAD').trim();
+  await writeFile(join(repository, 'added.ts'), 'export const added = true;\n');
+  git('add', 'added.ts'); git('commit', '-m', 'Synthetic pull request');
+  const diffHead = git('rev-parse', 'HEAD').trim();
+  for (const example of ['repository', 'pull-request']) {
+    const workflow = parseYaml(await readFile(resolve(import.meta.dirname, `../examples/${example}.yml`), 'utf8'));
+    const values: Record<string, string> = workflow.jobs.security.steps.find((step: {id?: string}) => step.id === 'security').with;
+    const production = parseInputs(name => values[name] ?? '', repository);
+    assert.equal(production.dryRun, false);
+    for (const mode of production.scope === 'repository' ? ['standard', 'deep'] : ['standard']) for (const program of [undefined, 'daybreak_blue']) {
+      // Test the example's program selection first, then the optional Blue variant.
+      // The production policy was already parsed; dry-run cannot enforce it.
+      const dryValues: Record<string, string> = {...values, mode,
+        ...(program === undefined ? {} : {'cyber-access-program':program}),
+        'fail-on-severity':'none', 'dry-run':'true'};
+      const inputs = parseInputs(name => dryValues[name] ?? '', repository);
+      const target = production.scope === 'diff' ? {repository, diffBase, diffHead} : {repository};
+      const args = scanArguments(inputs, target, join(root, `budget-${example}-${mode}-${program ?? 'example'}`));
+      const result = JSON.parse(run(args, 0));
+      assert.equal(result.dryRun, true);
+      assert.equal(result.mode, mode);
+      assert.equal(result.model, production.model);
+      assert.equal(result.reasoningEffort, production.effort);
+      assert.equal(result.maxCostUsd, production.maxCost);
+    }
   }
 
   // Pass provider/model through the locked CLI without copying its provider setup or validation.
