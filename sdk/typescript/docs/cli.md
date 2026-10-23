@@ -2924,6 +2924,9 @@ const result = await security.scanDependencies({
   repositoryPath: "/path/to/repository",
   outputDir: "/path/outside/repository/dependencies",
   maxCostUsd: 5, // optional; applies to static model assessment
+  onProgress: (progress) => console.error(progress),
+  onActivity: (activity) => console.error(activity.description),
+  onCost: (cost) => console.error(`Estimated cost: $${cost.estimatedUsd}`),
 });
 console.log(result.status, result.matches.length, result.outputDir);
 ```
@@ -2931,6 +2934,21 @@ console.log(result.status, result.matches.length, result.outputDir);
 Options also accept the existing `auth` mode and `signal`. Source matching runs
 before model authentication. Zero matches with complete coverage require no
 model call. Model errors preserve the scanner evidence and return `partial`.
+Optional `onProgress` callbacks receive `DependencyScanProgress` snapshots for
+preparation, discovery, matching, assessment preparation, assessment, and saving.
+Matching counts finished OSV invocations separately from failed inputs;
+selection alone does not count as processed work. Assessment counts advance
+after the result is saved. A `needs_review` verdict is a completed assessment.
+`onActivity` reports observed Codex activity; `onUsage` and `onCost` report model
+usage and estimated cost across assessment turns. `onOutputDirReady` reports
+the output directory after its initial checkpoint is saved.
+Activity IDs are scoped to their advisory match, so separate assessment turns
+can be displayed without overwriting earlier activity.
+These observers are optional, are not awaited, and cannot gate work. Exceptions
+and rejected promises are passed to `onObserverError` without stopping the scan.
+Events are observations, not a durable log or a promise of future progress.
+Use the returned result or interruption error for the terminal outcome; saved
+`partial` checkpoints do not mean a running scan has stopped.
 Each matched advisory gets a separate assessment turn. The SDK saves completed
 assessments before continuing, and an invalid response affects only its match.
 Each assessment retains its originating `threadId` once its Codex thread starts,

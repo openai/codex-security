@@ -15,7 +15,8 @@ import {
   dependencyTriageContract,
   dependencyTriagePrompt,
 } from "./sca-triage.js";
-import type { ScaAssessment, ScaResult } from "./sca-types.js";
+import type { ScaAssessment, ScaMatch, ScaResult } from "./sca-types.js";
+import type { DependencyScanProgress } from "./sca-progress.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   ScanExecutionError,
@@ -395,9 +396,19 @@ export interface ScanOptions extends ScanSettings {
 
 export interface DependencyScanOptions extends Pick<
   ScanOptions,
-  "auth" | "outputDir" | "signal" | "maxCostUsd"
+  | "auth"
+  | "outputDir"
+  | "signal"
+  | "maxCostUsd"
+  | "onActivity"
+  | "onCost"
+  | "onUsage"
+  | "onOutputDirReady"
+  | "onObserverError"
 > {
   repositoryPath: string;
+  /** Best-effort observations; callbacks are not awaited and cannot gate work. */
+  onProgress?: (progress: DependencyScanProgress) => void;
 }
 export type DependencyScanResult = ScaResult;
 
@@ -881,6 +892,17 @@ export class CodexSecurity {
   async #scanDependencies(
     options: DependencyScanOptions,
   ): Promise<DependencyScanResult> {
+    const { onProgress, ...scanOptions } = options;
+    const reportProgress = (progress: DependencyScanProgress): void => {
+      void Promise.resolve()
+        .then(() => onProgress?.(progress))
+        .catch((error: unknown) =>
+          options.onObserverError?.("onProgress", error),
+        )
+        .catch(() => {});
+    };
+    const onActivity = notifyObserver(options, "onActivity");
+    const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
     const signal = AbortSignal.any([
       this.#abortController.signal,
@@ -891,9 +913,10 @@ export class CodexSecurity {
     let result: ScaResult | undefined;
     try {
       throwIfAborted(signal);
+      reportProgress({ phase: "preparing" });
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
-        options,
+        scanOptions,
         signal,
       );
       const temporaryRoot = await realpath(tmpdir());
@@ -923,6 +946,7 @@ export class CodexSecurity {
       );
       result.diagnostics.push("Dependency inventory has not started.");
       await saveDependencyScan(result);
+      notifyObserver(options, "onOutputDirReady")(outputDir);
       let sourceWorkflow: FindingWorkflow | undefined;
       const snapshotSource = async (): Promise<JsonObject> => {
         if (this.#dependencies.sourceSnapshot !== undefined)
@@ -977,6 +1001,7 @@ export class CodexSecurity {
           outputDir,
           environment: this.#dependencies.environment,
           signal,
+          onProgress: reportProgress,
         });
         result = dependencyScanResult(scan, repository, outputDir);
       } catch (error) {
@@ -989,11 +1014,13 @@ export class CodexSecurity {
         }
         throw error;
       }
+      if (result.matches.length === 0) reportProgress({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
+        reportProgress({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
         const auth =
           this.#dependencies.chooseDependencyAuthentication === undefined
@@ -1065,6 +1092,7 @@ export class CodexSecurity {
         const reportCost = (
           cost: Readonly<ScanCost>,
           complete = true,
+          notify = true,
         ): void => {
           result!.model.costUsd = complete ? cost.estimatedUsd : null;
           if (
@@ -1078,6 +1106,7 @@ export class CodexSecurity {
                 outputDir,
               ),
             );
+          if (complete && notify) onCost(cost, options.maxCostUsd);
         };
         const reportTrackingError = (error: unknown): void => {
           if (options.maxCostUsd !== undefined) budgetController.abort(error);
@@ -1085,8 +1114,7 @@ export class CodexSecurity {
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
-          if (cost !== null) reportCost(cost);
-          else {
+          if (cost === null) {
             result!.model.costUsd = null;
             if (options.maxCostUsd !== undefined)
               budgetController.abort(
@@ -1094,7 +1122,7 @@ export class CodexSecurity {
                   "Could not verify the dependency assessment cost limit.",
                 ),
               );
-          }
+          } else reportCost(cost, true, false);
         };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
@@ -1103,11 +1131,38 @@ export class CodexSecurity {
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
           onCost: reportCost,
+          onUsage: notifyObserver(options, "onUsage"),
           onError: reportTrackingError,
         });
+        const reportAssessment = (match: ScaMatch | null): void => {
+          const component = result!.components.find(
+            (item) => item.id === match?.componentId,
+          );
+          reportProgress({
+            phase: "assessing",
+            assessmentsTotal: result!.matches.length,
+            assessmentsCompleted: result!.assessments.filter(
+              (item) => item.status === "completed",
+            ).length,
+            assessmentsFailed: result!.assessments.filter(
+              (item) => item.status === "failed",
+            ).length,
+            current:
+              match === null
+                ? null
+                : {
+                    matchId: match.id,
+                    componentId: match.componentId,
+                    packageName: component?.name ?? null,
+                    packageVersion: component?.version ?? null,
+                    advisoryIds: [...match.advisoryIds],
+                  },
+          });
+        };
         try {
           for (const [index, match] of result.matches.entries()) {
             throwIfAborted(signal, outputDir);
+            reportAssessment(match);
             const thread = codex.startThread(threadOptions);
             let assessment: ScaAssessment;
             try {
@@ -1128,6 +1183,14 @@ export class CodexSecurity {
                     tracker.recordUsage(null, event["thread_id"]);
                     tracker.start(event["thread_id"]);
                   }
+                  for (const activity of scanActivitiesFromEvent(
+                    event,
+                    inputs.repository,
+                  ))
+                    onActivity({
+                      ...activity,
+                      id: `${match.id}:${activity.id}`,
+                    });
                   throwIfAborted(signal, outputDir);
                 },
               });
@@ -1174,6 +1237,7 @@ export class CodexSecurity {
             if (threadId !== undefined) assessment.threadId = threadId;
             result.assessments[index] = assessment;
             await saveDependencyScan(result);
+            reportAssessment(null);
             const snapshot = await tracker.refresh().catch((error: unknown) => {
               reportTrackingError(error);
               if (options.maxCostUsd !== undefined) throw error;
@@ -1211,10 +1275,12 @@ export class CodexSecurity {
           assessment.status = "failed";
           assessment.error = message;
         }
+        reportProgress({ phase: "saving" });
         await saveDependencyScan(result);
         throwIfAborted(signal, outputDir);
         return result;
       }
+      reportProgress({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       return result;
@@ -1231,6 +1297,7 @@ export class CodexSecurity {
             "Dependency scan interrupted; completed scanner facts are retained.",
           );
         } else result.diagnostics.push(errorMessage(error));
+        reportProgress({ phase: "saving" });
         await saveDependencyScan(result);
       }
       throwIfAborted(signal, outputDir);
