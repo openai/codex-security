@@ -75,6 +75,7 @@ import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
+  DEFAULT_DEPENDENCIES as DEFAULT_CLIENT_DEPENDENCIES,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
@@ -85,6 +86,8 @@ import {
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
+  type DependencyScanOptions,
+  type DependencyScanResult,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
@@ -335,7 +338,10 @@ import {
   type ScopeProvenanceKey,
   type ProjectConfigProvenance,
 } from "./project-config.js";
-import type { ProjectScope } from "./project-config-schema.js";
+import type {
+  ProjectConfigInput,
+  ProjectScope,
+} from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -441,6 +447,36 @@ const SHOW_COST_OPTION = z
   .boolean()
   .default(false)
   .describe("Show estimated USD cost; always shown when a cost limit is set.");
+const SHARED_SCAN_OPTION_SCHEMAS = {
+  config: PROJECT_CONFIG_OPTION,
+  auth: ScanSettingsSchema.shape.auth.describe(
+    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+  ),
+  verbose: z
+    .boolean()
+    .default(false)
+    .describe("Print additional scan diagnostics to stderr."),
+  ...modelOptions(
+    `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+  ).shape,
+  provider: PROVIDER_OPTION,
+  outputDir: optionValue("--output-dir")
+    .optional()
+    .describe(
+      "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+    ),
+  ...RUNTIME_OPTION_SCHEMAS,
+  maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+    "Stop above AMOUNT in estimated USD.",
+  ),
+  showCost: SHOW_COST_OPTION,
+};
+const SCAN_REPOSITORY_ARGUMENTS = z.object({
+  repository: z
+    .string()
+    .optional()
+    .describe("Repository root to scan (default: current directory)."),
+});
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
@@ -1186,6 +1222,13 @@ interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  createDependencySecurity?: (
+    config: CodexSecurityConfig,
+    chooseAuthentication?: (
+      auth: ScanAuthMode | undefined,
+      signal: AbortSignal,
+    ) => Promise<ScanAuthMode | undefined>,
+  ) => Pick<CodexSecurity, "scanDependencies" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
@@ -4210,20 +4253,17 @@ export async function main(
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import --csv findings.csv\n" +
         "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.\n" +
+        "Scan dependency advisories and assess their static applicability:\n" +
+        "  codex-security scan dependencies .\n" +
+        "Use ./import or ./dependencies to scan a repository with that name.\n" +
         "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       mcp: false,
       alias: { config: "c" },
-      args: z.object({
-        repository: z
-          .string()
-          .optional()
-          .describe("Repository root to scan (default: current directory)."),
-      }),
+      args: SCAN_REPOSITORY_ARGUMENTS,
       options: z
         .object({
-          config: PROJECT_CONFIG_OPTION,
+          config: SHARED_SCAN_OPTION_SCHEMAS.config,
           host: z
             .boolean()
             .default(false)
@@ -4236,13 +4276,8 @@ export async function main(
               "Reuse completed work in the named local findings workflow.",
             ),
           cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
-          auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
-          ),
-          verbose: z
-            .boolean()
-            .default(false)
-            .describe("Print additional scan diagnostics to stderr."),
+          auth: SHARED_SCAN_OPTION_SCHEMAS.auth,
+          verbose: SHARED_SCAN_OPTION_SCHEMAS.verbose,
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
@@ -4292,20 +4327,17 @@ export async function main(
           ),
           maxTime: ScanSettingsSchema.shape.maxTimeMinutes,
           ...DEEP_SCAN_OPTION_SCHEMAS,
-          ...modelOptions(
-            `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-          ).shape,
-          provider: PROVIDER_OPTION,
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-            ),
+          model: SHARED_SCAN_OPTION_SCHEMAS.model,
+          effort: SHARED_SCAN_OPTION_SCHEMAS.effort,
+          provider: SHARED_SCAN_OPTION_SCHEMAS.provider,
+          outputDir: SHARED_SCAN_OPTION_SCHEMAS.outputDir,
           archiveExisting: z
             .boolean()
             .default(false)
             .describe("Archive existing results; requires --output-dir."),
-          ...RUNTIME_OPTION_SCHEMAS,
+          pluginPath: SHARED_SCAN_OPTION_SCHEMAS.pluginPath,
+          python: SHARED_SCAN_OPTION_SCHEMAS.python,
+          codex: SHARED_SCAN_OPTION_SCHEMAS.codex,
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
           ),
@@ -4320,11 +4352,11 @@ export async function main(
           createPr: CREATE_PR_OPTION.describe(
             "Create a draft pull request or merge request after verified patches; requires --patch.",
           ),
-          maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          maxCost: SHARED_SCAN_OPTION_SCHEMAS.maxCost.describe(
             "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
           ),
           ownerSuggestions: ScanSettingsSchema.shape.ownerSuggestions,
-          showCost: SHOW_COST_OPTION,
+          showCost: SHARED_SCAN_OPTION_SCHEMAS.showCost,
           headless: z
             .boolean()
             .default(false)
@@ -6566,9 +6598,62 @@ export async function main(
 
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
+  function normalizeScanGlobalArguments(
+    argv: readonly string[],
+  ): readonly string[] {
+    const commandIndex = cliCommandIndex(argv);
+    if (argv[commandIndex] !== "scan") return argv;
+    let next = commandIndex + 1;
+    while (next < argv.length) {
+      const argument = argv[next]!;
+      const option = argument.split("=", 1)[0]!;
+      if (OUTPUT_OPTION.test(argument) && valueOptions.has(option)) {
+        if (argument.includes("=")) next += 1;
+        else if (
+          argv[next + 1] !== undefined &&
+          !argv[next + 1]!.startsWith("--") &&
+          argv[next + 1] !== "-h"
+        )
+          next += 2;
+        else break;
+      } else if (
+        [
+          "--json",
+          "--full-output",
+          "--token-count",
+          "--help",
+          "-h",
+          "--schema",
+          "--llms",
+          "--llms-full",
+          "--mcp",
+          "--update",
+        ].includes(argument)
+      ) {
+        next += 1;
+      } else break;
+    }
+    if (next === commandIndex + 1) return argv;
+    // Incur extracts globals before dispatch. Give the wrapper the same route
+    // while keeping command-local values and everything after -- in place.
+    return [
+      ...argv.slice(0, commandIndex),
+      ...argv.slice(commandIndex + 1, next),
+      "scan",
+      ...argv.slice(next),
+    ];
+  }
+
   function isScanImportCommand(argv: readonly string[]): boolean {
     const commandIndex = cliCommandIndex(argv);
     return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+  }
+
+  function isDependencyScanCommand(argv: readonly string[]): boolean {
+    const commandIndex = cliCommandIndex(argv);
+    return (
+      argv[commandIndex] === "scan" && argv[commandIndex + 1] === "dependencies"
+    );
   }
 
   function normalizeScanImportArguments(
@@ -6707,6 +6792,7 @@ export async function main(
     const scanImport = isScanImportCommand(argv);
     const nestedCommand =
       scanImport ||
+      isDependencyScanCommand(argv) ||
       command === "scans" ||
       command === "findings" ||
       command === "publish" ||
@@ -6789,7 +6875,9 @@ export async function main(
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
   }
-  argv = normalizeScanImportArguments(defaultListCommand(argv));
+  argv = normalizeScanImportArguments(
+    defaultListCommand(normalizeScanGlobalArguments(argv)),
+  );
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const argumentError = validateCliArguments(argv, positionals);
@@ -6900,6 +6988,91 @@ export async function main(
             return;
           }
           return outcome.data;
+        },
+      }),
+    );
+  }
+
+  if (isDependencyScanCommand(argv)) {
+    cli.command(
+      Cli.create("scan", {
+        description: "Scan source code or dependencies, or import findings.",
+      }).command("dependencies", {
+        description:
+          "Scan dependency advisories and assess their static applicability.",
+        hint:
+          "Requires osv-scanner on PATH; it is not installed automatically.\n" +
+          "Scans the whole repository. Source scopes, modes, prompts, severity policy, and workflow options are not supported.\n" +
+          "Results are separate SCA artifacts: sca-result.json and report.md.\n" +
+          "Incomplete JSON/JSONL --full-output returns ok: false and keeps SCA results under data.\n" +
+          "Use codex-security scan ./dependencies to scan a repository named dependencies.",
+        destructive: true,
+        mcp: false,
+        alias: { config: "c" },
+        args: SCAN_REPOSITORY_ARGUMENTS,
+        options: z.object(SHARED_SCAN_OPTION_SCHEMAS),
+        output: scanOutputSchema("SCAN_FAILED"),
+        async run({ args, options, format, error: incurError }) {
+          let outcome: ScanOutcome;
+          try {
+            const directory = dependencies.currentDirectory();
+            const project = await selectedProjectConfig(
+              options.config,
+              dependencies,
+            );
+            requireDependencyScanConfig(project?.input);
+            const resolved = resolveScanSettings(
+              project,
+              {
+                auth: options.auth,
+                outputDir: options.outputDir,
+                maxCostUsd: options.maxCost,
+                codexOverrides: parseCodexOverrides(
+                  options.codex,
+                  options.model,
+                  options.effort,
+                  options.provider,
+                  project?.input.codex,
+                ),
+              },
+              directory,
+            );
+            outcome = await withTerminalErrorsHandled(errorOutput, () =>
+              runDependencyScan(
+                {
+                  repositoryPath: resolveCliPath(
+                    directory,
+                    args.repository ?? ".",
+                  ),
+                  auth: resolved.options.auth,
+                  outputDir: resolved.options.outputDir,
+                  maxCostUsd: resolved.options.maxCostUsd,
+                },
+                {
+                  ...resolved.config,
+                  pluginPath: options.pluginPath,
+                  pythonPath: options.python,
+                },
+                options,
+                errorOutput,
+                dependencies,
+                format !== "json" && format !== "jsonl",
+              ),
+            );
+          } catch (error) {
+            const message = errorMessage(error);
+            errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
+            outcome = { exitCode: 2, error: message };
+          }
+          if (
+            outcome.data !== undefined &&
+            format === "toon" &&
+            !argv.some((argument) => OUTPUT_OPTION.test(argument))
+          ) {
+            exitCode = outcome.exitCode;
+            return;
+          }
+          return finishScan(outcome, format, incurError);
         },
       }),
     );
@@ -7021,6 +7194,165 @@ export async function main(
     errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
     return 2;
   }
+}
+
+function requireDependencyScanConfig(
+  input: ProjectConfigInput | undefined,
+): void {
+  const unsupported = [
+    ...Object.keys(input?.scan ?? {}).map((key) => `scan.${key}`),
+    ...(input?.policy?.fail_on_severity === undefined
+      ? []
+      : ["policy.fail_on_severity"]),
+  ];
+  if (unsupported.length > 0) {
+    throw new ConfigurationError(
+      `scan dependencies does not support project configuration: ${unsupported.join(", ")}. ` +
+        "Select a configuration containing only auth, codex, output, and limits settings.",
+    );
+  }
+}
+
+function scanVerbose(
+  explicit: boolean | undefined,
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  const configuredLogLevel =
+    environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
+    environment["LOG_LEVEL"]?.trim();
+  return explicit === true || configuredLogLevel?.toLowerCase() === "debug";
+}
+
+async function runDependencyScan(
+  options: DependencyScanOptions,
+  config: CodexSecurityConfig,
+  presentation: { verbose: boolean; showCost: boolean },
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+  interactive: boolean,
+): Promise<ScanOutcome> {
+  const verbose = scanVerbose(presentation.verbose, dependencies.environment);
+  const controller = new AbortController();
+  const removeSignals = listenForAbort(dependencies, controller);
+  let security: Pick<CodexSecurity, "scanDependencies" | "close"> | undefined;
+  let result: DependencyScanResult | undefined;
+  let failure: unknown;
+  const writeDiagnostic = (message: string): void => {
+    try {
+      errorOutput.write(`${diagnosticLines(message)}\n`);
+    } catch {}
+  };
+  try {
+    if (verbose) {
+      writeDiagnostic(
+        `codex-security: Dependency scan repository: ${options.repositoryPath}`,
+      );
+    }
+    security = (
+      dependencies.createDependencySecurity ??
+      ((configuration, chooseDependencyAuthentication) =>
+        new CodexSecurity(
+          configuration,
+          { ...DEFAULT_CLIENT_DEPENDENCIES, chooseDependencyAuthentication },
+          { surface: "cli" },
+        ))
+    )(
+      config,
+      interactive
+        ? (auth, signal) =>
+            chooseInteractiveAuthentication(
+              {
+                auth,
+                provider: scanModelProvider({
+                  ...DEFAULT_CODEX_CONFIG,
+                  ...config.codexOverrides,
+                }),
+                command: "scan",
+                signal,
+              },
+              errorOutput,
+              dependencies,
+            )
+        : undefined,
+    );
+    result = await security.scanDependencies({
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    failure = error;
+    // The SDK checkpoints scanner facts before an interrupted assessment.
+    if (error instanceof ScanInterruptedError && error.scanDir.length > 0) {
+      try {
+        result = JSON.parse(
+          await readFile(join(error.scanDir, "sca-result.json"), "utf8"),
+        ) as DependencyScanResult;
+      } catch (readError) {
+        writeDiagnostic(
+          `codex-security: Could not read saved dependency results: ${errorMessage(readError)}`,
+        );
+      }
+    }
+  } finally {
+    try {
+      await security?.close();
+    } catch (error) {
+      failure ??= error;
+    } finally {
+      removeSignals();
+    }
+  }
+
+  const interrupted = interruptedExitCode(controller.signal);
+  const message =
+    interrupted !== undefined
+      ? `Dependency scan ${controller.signal.reason === "SIGINT" ? "canceled" : "terminated"}.`
+      : failure !== undefined
+        ? errorMessage(failure)
+        : result?.status !== "completed" ||
+            result.coverage.status !== "complete"
+          ? `Dependency scan ${result?.status ?? "failed"}; coverage is ${result?.coverage.status ?? "unavailable"}.`
+          : undefined;
+  const exitCode = interrupted ?? (message === undefined ? 0 : 2);
+  if (message !== undefined) writeDiagnostic(`codex-security: ${message}`);
+  if (result === undefined) {
+    return {
+      exitCode,
+      error: message ?? "Dependency scan returned no result.",
+    };
+  }
+
+  const assessed = result.assessments.filter(
+    (assessment) => assessment.status === "completed",
+  ).length;
+  writeDiagnostic(
+    `Dependency scan ${result.status}: ${result.components.length} components, ` +
+      `${result.matches.length} advisory matches, ${assessed}/${result.assessments.length} assessments completed.\n` +
+      `Coverage: ${result.coverage.status}\n` +
+      `Artifacts: ${result.outputDir}`,
+  );
+  for (const diagnostic of [
+    ...result.coverage.limitations,
+    ...result.diagnostics,
+  ]) {
+    writeDiagnostic(`codex-security: ${diagnostic}`);
+  }
+  if (verbose) {
+    writeDiagnostic(
+      `Scanner: ${result.scanner.name} ${result.scanner.version ?? "unknown version"}\n` +
+        `Model: ${result.model.model ?? "not used"}`,
+    );
+  }
+  if (presentation.showCost || options.maxCostUsd !== undefined) {
+    writeDiagnostic(
+      `Estimated cost: ${result.model.costUsd === null ? "unavailable" : formatUsd(result.model.costUsd)}`,
+    );
+  }
+  return {
+    exitCode,
+    data: { ...result },
+    ...(message === undefined ? {} : { error: message }),
+  };
 }
 
 async function runScanImport(
@@ -9147,12 +9479,7 @@ async function executeScan(
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
-  const configuredLogLevel =
-    dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
-    dependencies.environment["LOG_LEVEL"]?.trim();
-  const verbose =
-    arguments_.verbose === true ||
-    configuredLogLevel?.toLowerCase() === "debug";
+  const verbose = scanVerbose(arguments_.verbose, dependencies.environment);
   const writeAboveProgress = (write: () => void): void => {
     if (progress === null) {
       write();

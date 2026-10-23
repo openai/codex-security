@@ -204,6 +204,7 @@ export class FakeSignals {
 export function dependencies(
   options: {
     onConfig?: (config: CodexSecurityConfig) => void;
+    onScanDependencies?: CodexSecurity["scanDependencies"];
     onTurn?: (repository: string, options: ScanOptions) => void;
     onRun?: () => void;
     onInterrupt?: () => void;
@@ -269,6 +270,17 @@ export function dependencies(
     createSecurity: (config) => {
       options.onConfig?.(config);
       return security;
+    },
+    createDependencySecurity: (config) => {
+      options.onConfig?.(config);
+      return {
+        scanDependencies:
+          options.onScanDependencies ??
+          (async () => {
+            throw new Error("Missing dependency scan fixture.");
+          }),
+        close: async () => await options.onClose?.(),
+      };
     },
     environment: options.environment ?? {},
     checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),

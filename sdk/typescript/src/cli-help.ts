@@ -49,6 +49,16 @@ const SCAN_GROUPS: readonly Group[] = [
   ["Patch after scanning", ["patch", "patch-severity", "create-pr"]],
 ];
 
+const DEPENDENCY_SCAN_GROUPS: readonly Group[] = [
+  ["Configuration", ["config"]],
+  ["Model and authentication", ["auth", "model", "effort", "provider"]],
+  ["Runtime", ["codex", "plugin-path", "python"]],
+  [
+    "Results, progress, and limits",
+    ["output-dir", "max-cost", "show-cost", "verbose"],
+  ],
+];
+
 const PUBLISH_GROUPS: readonly Group[] = [
   ["Input", ["scan", "scan-dir", "csv", "finding-id", "workflow-id"]],
   ["Destination", ["to", "findings-url"]],
@@ -208,7 +218,7 @@ function optionRow(row: Row, command: string): Row {
 }
 
 function globalRows(rows: Row[], command: string): Row[] {
-  const scan = command === "scan" || command === "scan import";
+  const scan = ["scan", "scan import", "scan dependencies"].includes(command);
   const plainOutput = ["validate", "login", "logout", "export"].includes(
     command,
   );
@@ -319,9 +329,11 @@ export function formatCliHelp(text: string, columns = 80): string {
       sections.push(
         ...(command === "scan"
           ? groupedRows(rows, SCAN_GROUPS, "Advanced", width)
-          : command === "publish scan"
-            ? groupedRows(rows, PUBLISH_GROUPS, "Options", width)
-            : [renderRows("Options", rows, width)]),
+          : command === "scan dependencies"
+            ? groupedRows(rows, DEPENDENCY_SCAN_GROUPS, "Options", width)
+            : command === "publish scan"
+              ? groupedRows(rows, PUBLISH_GROUPS, "Options", width)
+              : [renderRows("Options", rows, width)]),
       );
     } else if (title === "Global Options:") {
       sections.push(
@@ -351,6 +363,11 @@ export function formatCliHelp(text: string, columns = 80): string {
           .join("\n"),
       );
     }
+  }
+  if (command === "" || command === "scan") {
+    sections.push(
+      "Dependency assessment:\n  codex-security scan dependencies --help",
+    );
   }
   if (command === "") {
     sections.push(

@@ -302,6 +302,37 @@ describe("scan import", () => {
     });
   });
 
+  test.each([
+    { label: "shortcut", flags: ["--json"] },
+    { label: "format value", flags: ["--format", "json"] },
+    { label: "equals format", flags: ["--format=json"] },
+  ])(
+    "keeps an interleaved output $label separate from the JSON import file",
+    async ({ flags }) => {
+      const { deps, calls } = importDependencies();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(
+        await runCli(
+          ["scan", ...flags, "import", "--json", "dependencies", "--dry-run"],
+          deps,
+        ),
+        stderr.text(),
+      ).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        sourcePath: resolve("workspace", "dependencies"),
+        format: "json",
+        dryRun: true,
+      });
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        dryRun: true,
+        format: "json",
+        findingCount: 2,
+      });
+    },
+  );
+
   test("keeps a completed import successful if its summary cannot be written", async () => {
     const { deps, calls } = importDependencies();
     const stdout = capture();

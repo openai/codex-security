@@ -1,0 +1,9 @@
+{
+  "name": "sca-synthetic-sca-001",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@sca-fixtures/depth-parser": "1.4.0"
+  }
+}

@@ -8,6 +8,7 @@ They accept the same arguments and options. The examples below use
 ```bash
 codex-security --help
 codex-security scan --help
+codex-security scan dependencies --help
 codex-security --version
 codex-security info --json
 ```
@@ -2802,3 +2803,202 @@ capabilities, no-new-privileges, and seccomp policy. Hosts that permit nested us
 namespaces do not need it. The legacy Landlock fallback is unsupported.
 See the [Docker guide](https://github.com/openai/codex-security/blob/main/docker/README.md)
 for deployment and source-build instructions.
+
+## Dependency assessment (SCA MVP)
+
+`cs scan dependencies [repository]` and the SDK's `scanDependencies()` run an
+installed OSV-Scanner over supported dependency files, then use `triage-finding`
+to assess matched advisories. Install OSV-Scanner v2.6.0 (the tested contract) or
+a compatible executable on PATH separately. Codex Security does not install it.
+Files are discovered in nested projects too.
+
+```bash
+cs scan dependencies
+cs scan dependencies /path/to/repository --max-cost 5
+cs scan dependencies . --auth api-key --json \
+  --output-dir /path/outside/repository/dependency-results
+```
+
+The repository defaults to the current directory. Output defaults to a persistent
+per-run directory under the Codex Security state's `dependencies` directory.
+`--output-dir` must select a new or empty directory outside the repository and
+its enclosing Git worktree; existing output directories must be private to you
+on macOS and Linux. The command reports the artifact directory in its result.
+These are standalone dependency artifacts; they are not registered in source
+scan history.
+
+Compatibility: `cs scan dependencies` now selects this command. To run a source
+scan on a directory named `dependencies`, use `cs scan ./dependencies`.
+
+### Dependency command options
+
+| Options                                                                                   | Behavior                                                                                                                             |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `-c`, `--config FILE`                                                                     | Load supported project settings; configured paths remain relative to the configuration file.                                         |
+| `--auth auto\|chatgpt\|api-key`, `--model MODEL`, `--effort LEVEL`, `--provider PROVIDER` | Reuse scan authentication and model settings. Authentication defaults to `auto`; model and effort retain the existing scan defaults. |
+| `--codex KEY=VALUE`, `--plugin-path PATH`, `--python PATH`                                | Reuse the existing Codex and plugin runtime configuration. `--codex` can be repeated.                                                |
+| `--output-dir PATH`, `--max-cost USD`                                                     | Choose the artifact directory and optional assessment cost limit. No cost limit is added by default.                                 |
+| `--verbose`, `--show-cost`                                                                | Include diagnostics or estimated model cost in progress output.                                                                      |
+| `--json`, `--format FORMAT`, `--full-output`                                              | Select structured command output. `--json` is shorthand for `--format json`.                                                         |
+
+The command supports project `auth`, `codex`, `output.directory`, and
+`limits.max_cost_usd_per_scan` settings. Explicit source-scan settings in the
+project's `scan` section and `policy.fail_on_severity` are rejected, including
+`scan.mode: standard` and empty source-scan lists. Use a configuration containing
+only settings applicable to dependency assessment.
+
+Source paths and diffs, scan modes and Deep Scan settings, custom prompts,
+knowledge bases, Cyber access program and safety-identifier selectors, severity
+gates, patching, archive replacement, workflow selection, dry runs, and mock
+scans are unsupported. `--headless` is also unsupported: dependency assessment
+always uses a plain summary without an interactive dashboard. Unsupported
+settings fail instead of silently changing the requested scope or behavior.
+
+By default, the summary and diagnostics go to stderr and stdout remains empty.
+`--json` emits the native dependency result, including all matches and coverage;
+other supported formats are `toon`, `yaml`, and `jsonl`. Framework token controls
+remain available, but `--filter-output` and Markdown output are unsupported.
+With JSON or JSONL, `--full-output` wraps the result; incomplete execution returns
+`ok: false` with the retained result in `data` and a `SCAN_FAILED` error.
+
+| Exit code    | Meaning                                                                |
+| ------------ | ---------------------------------------------------------------------- |
+| `0`          | Completed execution, including runs with advisory matches.             |
+| `2`          | Partial or failed execution, invalid input, or an exceeded cost limit. |
+| `130`, `143` | Interrupted by SIGINT or SIGTERM, respectively.                        |
+
+Advisories do not set a failing exit code. A cost stop or interruption preserves
+available artifacts and reports their directory. OSV's own process exit codes
+remain in the saved scanner evidence.
+
+### Supported dependency inputs
+
+The file matrix describes supported inventory inputs. It does not establish
+per-language accuracy of the model's static applicability assessments or
+function-level reachability coverage.
+
+| Language                | Dependency files                                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| JavaScript / TypeScript | `package-lock.json` / `npm-shrinkwrap.json` v2/v3, `pnpm-lock.yaml` v9                                                      |
+| Python                  | `uv.lock`, `poetry.lock`, `Pipfile.lock`, fully pinned `*requirements*.txt`                                                 |
+| Go                      | `go.mod` with an effective Go or toolchain version of 1.17 or newer; older or missing `go` directives give partial coverage |
+| Rust                    | `Cargo.lock`                                                                                                                |
+| Java / Kotlin           | `gradle.lockfile`, `buildscript-gradle.lockfile`, parent-free `pom.xml` / `*.pom` with explicit dependency versions         |
+| Ruby                    | `Gemfile.lock`, `gems.locked`                                                                                               |
+| PHP                     | `composer.lock`                                                                                                             |
+| .NET                    | `packages.lock.json`                                                                                                        |
+
+Package versions retain their ecosystem's syntax; npm semver rules are not
+applied to Python, Maven, NuGet, or other ecosystems. The adapter reads dependency
+files without installing dependencies, building projects, or resolving manifests.
+Pinned requirements and eligible Maven POMs provide partial declaration inventory,
+not proof of installed versions or a complete transitive graph. Requirements
+includes/ranges and parent-bearing POMs remain unsupported, as do older Go files
+that require auxiliary `go.sum` inventory. A modern toolchain can supply usable
+declared pins when the `go` directive is older than 1.17 or missing, but coverage
+remains partial because indirect requirements may be absent. These inputs are
+reported explicitly; other supported inputs still produce results. Local,
+workspace, Git, direct URL, and alternate Cargo registry origins retain
+uncertainty when registry identity cannot be established. Non-PyPI indexes in
+Pipenv, uv, and Poetry lockfiles leave the affected package origins unresolved
+and coverage incomplete. Bundler GEM sections with custom or mixed registry
+remotes also leave package origins unresolved. npm v2/v3 and pnpm v9 lockfiles
+with explicit tarball URLs outside the public npm registry leave those origins
+unresolved.
+
+Advisory matching uses observed package names and versions; it does not establish
+registry origin. Gradle and NuGet locks do not record the selected repository or
+feed, and npm locks can omit resolved URLs. Composer archive URLs identify package
+downloads, not the registry that supplied them; remote archives retain name/version
+matching, while source-only VCS packages remain unresolved. Complete matching
+coverage means the supported inputs were inventoried and matched, not that every
+package's public registry origin was verified.
+
+### TypeScript SDK
+
+```ts
+import { createSecurity } from "@openai/codex-security";
+
+await using security = createSecurity();
+const result = await security.scanDependencies({
+  repositoryPath: "/path/to/repository",
+  outputDir: "/path/outside/repository/dependencies",
+  maxCostUsd: 5, // optional; applies to static model assessment
+});
+console.log(result.status, result.matches.length, result.outputDir);
+```
+
+Options also accept the existing `auth` mode and `signal`. Source matching runs
+before model authentication. Zero matches with complete coverage require no
+model call. Model errors preserve the scanner evidence and return `partial`.
+Each matched advisory gets a separate assessment turn. The SDK saves completed
+assessments before continuing, and an invalid response affects only its match.
+Each assessment retains its originating `threadId` once its Codex thread starts,
+including when that assessment fails. Older saved assessments may omit this
+field.
+Retained triage ranks apply within each single-match result; they do not form a
+priority queue across the scan. The recorded skill digest includes the triage
+skill, output schema, and required local assessment references.
+The cost limit applies to the estimated total across assessment turns. It is an
+interruption threshold, not a pre-request billing ceiling; in-flight work can
+exceed it. If source files
+change, assessment stops; earlier results describe the original source and the
+run is partial.
+Invalid arguments, cancellation, and exceeded budgets use the existing SDK
+errors; interruption errors include the directory containing partial output.
+
+The output directory contains `osv-output.json`, `osv-stderr.log`,
+`sca-result.json`, and `report.md`. The adapter scans each selected lockfile
+sequentially. For multiple inputs it also preserves each invocation's verbatim
+JSON and stderr; `scanner.invocations` records their arguments, exit codes,
+and file paths. `osv-output.json` aggregates source records, while `scanner.argv`
+retains the first call. Per-file execution costs additional process and request
+overhead but preserves literal paths and source-specific exclusion evidence.
+Raw advisory matches and optional static assessments remain separate. A
+`not_actionable` assessment never removes a match, establishes VEX `not_affected`,
+or automatically changes merge policy.
+`needs_review` is a completed uncertain assessment; `failed` means an assessment
+was unavailable. The run's coverage status describes advisory matching, while
+its overall status also accounts for assessment execution.
+The report summarizes assessment execution and model cost before listing
+components, with diagnostics near the top. A zero-match result with incomplete
+coverage does not establish a clean repository; model assessment does not run
+when there are no retained matches. A null model cost means cost was not
+reported, not a measured zero-dollar run. The CLI and example runner's exit codes
+describe overall execution separately from OSV's retained process exit codes.
+
+OSV sends package identities to its advisory service, not repository source.
+The assessment uses the existing Codex provider/model/authentication settings
+and a read-only, offline tool permission profile. Codex authentication files
+and protected credential homes stay inaccessible to model tools. It executes no
+application code or vulnerability reproductions. OSV configuration exclusions
+remain effective and are reported; a missing source inventory requires a scanner
+receipt showing empty input or package filtering. Exact suppressed counts and
+dependency introduction chains are unavailable. Unsupported lockfiles and
+unresolved source identities leave coverage incomplete. Git submodules and
+separate untracked Git checkouts nested in the selected repository are reported
+as uninspected and leave coverage incomplete. Select an initialized submodule or
+nested checkout directly to assess its supported lockfiles. Ordinary nested
+projects remain part of the selected repository's inventory. Tracked lockfiles
+omitted by sparse checkout are reported as unavailable and leave coverage
+incomplete; ordinary working-tree deletions remain outside inventory.
+
+`compareScaResults(base, head)` correlates advisory aliases and retains all
+head-only matches in `newlyObserved`. It populates `introduced` only when the
+scans are comparable. Live OSV runs have no atomic database snapshot, so they
+cannot establish introduction or resolution; disappeared matches remain
+`noLongerObserved` with `resolved: false`. Recorded OSV configuration also
+prevents introduction and resolution claims, even with identical hashes and a
+frozen database:
+a group-based exclusion can start applying when a dependency changes groups.
+Results store configuration digests rather than effective exclusions, so this
+conservative rule also applies to configurations without exclusion rules.
+`createScaUpdateHandoff(result, matchIds, checks)` builds an explicit update
+request from advisory fixed-version candidates for the existing `patch` workflow.
+Ordinary dependency resolution
+and build/test checks are still required before calling an update verified.
+
+See [local, CI, comparison, and handoff examples](../../../examples/sca/README.md)
+and the [evaluation harness](../../../evals/triage-finding/sca/README.md).
+Dependency assessment uses a separate command and SDK result contract; existing
+source-scan modes keep their current behavior.

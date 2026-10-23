@@ -98,7 +98,6 @@ jobs:
       - name: Install ripgrep
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
           sudo apt-get install --yes ripgrep
       - name: Test runner mode
         working-directory: sdk/typescript

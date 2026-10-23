@@ -1,0 +1,57 @@
+{
+  "input_id": "sca-004-match",
+  "source_type": "advisory",
+  "component": {
+    "source": "package-lock.json",
+    "ecosystem": "npm",
+    "name": "@sca-fixtures/template-view",
+    "version": "1.4.0"
+  },
+  "advisory_ids": [
+    "SCA-FIXTURE-002",
+    "SCA-ALIAS-002"
+  ],
+  "advisories": [
+    {
+      "id": "SCA-FIXTURE-002",
+      "aliases": [
+        "SCA-ALIAS-002"
+      ],
+      "modified": "2026-01-01T00:00:00Z",
+      "published": "2026-01-01T00:00:00Z",
+      "summary": "Fictional template-view advisory",
+      "details": "render inserts values without HTML encoding when escapeValues is false. With escapeValues true it encodes every substituted value and the advisory does not apply. This fixture has no alternative template or rendering entrypoint.",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "npm",
+            "name": "@sca-fixtures/template-view"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0"
+                },
+                {
+                  "fixed": "1.4.1"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "type": "ADVISORY",
+          "url": "https://example.invalid/advisories/SCA-FIXTURE-002"
+        }
+      ]
+    }
+  ],
+  "preconditions": [
+    "escapeValues is false"
+  ],
+  "scanner_evidence": "osv.json"
+}
