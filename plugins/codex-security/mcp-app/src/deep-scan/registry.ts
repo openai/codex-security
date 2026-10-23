@@ -136,7 +136,7 @@ export class DeepScanRemoteCoordinator {
         if (!isTransientPersistenceError(error)) throw error;
       }
       if (run !== undefined) {
-        if (run.status !== "running") return run;
+        if (run.status !== "running" && !run.evidenceRepairRequired) return run;
 
         const heartbeat = run.updatedAt
           ? Date.parse(run.updatedAt)
@@ -163,7 +163,11 @@ export class DeepScanRemoteCoordinator {
             if (!isTransientPersistenceError(error)) {
               try {
                 const latest = await options.store.get(run.scanId, threadId);
-                if (latest.status !== "running") return latest;
+                if (
+                  latest.status !== "running" &&
+                  !latest.evidenceRepairRequired
+                )
+                  return latest;
                 throw error;
               } catch (readError) {
                 if (!isTransientPersistenceError(readError)) throw readError;

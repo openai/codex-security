@@ -103,6 +103,10 @@ async function fixture(format: "csv" | "json" = "csv") {
       ),
     ) as FindingsDocument;
     const finding = example.findings[0]!;
+    // Existing source reports may predate completion evidence requirements.
+    delete finding.codeEvidence;
+    delete finding.rootCause;
+    delete finding.attackPath;
     source = JSON.stringify({
       ...example,
       findings: sourceOccurrenceIds.map((occurrenceId) => ({
@@ -293,6 +297,9 @@ test.each(["csv", "json"] as const)(
     ).toBe(2);
     for (const finding of result.findings.findings) {
       expect(finding.summary).toBe(description);
+      expect(finding.codeEvidence).toBeUndefined();
+      expect(finding.rootCause).toBeUndefined();
+      expect(finding.attackPath).toBeUndefined();
       expect(finding.locations[0]).toMatchObject({
         startLine: 41,
         endLine: 44,

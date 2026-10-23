@@ -58,6 +58,8 @@ async function savedEvidence() {
       explanation: "Synthetic source-to-sink evidence.",
     }));
     finding.validation = {
+      method: "synthetic fixture",
+      evidenceRefs: ["evidence-0"],
       summary: "Synthetic validation evidence.",
       counterEvidence: ["A mitigation remains unverified. ".repeat(300)],
     };

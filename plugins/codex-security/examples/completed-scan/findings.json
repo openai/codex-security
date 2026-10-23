@@ -40,8 +40,19 @@
         }
       ],
       "remediation": "Normalize destinations and reject entries that escape the extraction root.",
-      "validation": null,
-      "attackPath": null,
+      "validation": {
+        "method": "source review",
+        "summary": "An archive entry can select a path outside the extraction root.",
+        "evidence": [
+          "The untrusted entry name reaches the filesystem write without normalization or a containment check."
+        ],
+        "limitations": [
+          "The extraction route was not exercised dynamically."
+        ]
+      },
+      "attackPath": {
+        "dataflow": "archive entry name -> joined destination path -> filesystem write outside the extraction root"
+      },
       "remediationTests": [
         "Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root."
       ],
@@ -51,7 +62,21 @@
       "provenance": {
         "source": "local_plugin"
       },
-      "extensions": {}
+      "extensions": {},
+      "codeEvidence": [
+        {
+          "id": "archive-write",
+          "label": "Unchecked archive write",
+          "path": "src/extract.py",
+          "startLine": 41,
+          "endLine": 44,
+          "code": "destination = output_dir / entry.name\nwith archive.open(entry) as source:\n    destination.parent.mkdir(parents=True, exist_ok=True)\n    destination.write_bytes(source.read())",
+          "explanation": "The destination incorporates an untrusted archive entry name and is written without a containment check."
+        }
+      ],
+      "rootCause": {
+        "summary": "The extractor joins the entry name to the output directory without checking whether the destination stays inside it."
+      }
     }
   ]
 }

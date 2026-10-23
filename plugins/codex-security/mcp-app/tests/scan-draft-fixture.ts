@@ -33,3 +33,26 @@ export function finding(id: string, repositoryPath: string) {
     provenance: { source: "local_plugin" },
   };
 }
+
+export function completedFinding(id: string, repositoryPath: string) {
+  return {
+    ...finding(id, repositoryPath),
+    codeEvidence: [
+      {
+        id: "request-output",
+        label: "Request output",
+        path: repositoryPath,
+        startLine: 1,
+        code: "return request.value",
+        explanation: "The response includes the request-controlled value.",
+      },
+    ],
+    rootCause: "Request-controlled output is returned without HTML encoding.",
+    attackPath: { dataflow: "Request input flows into the returned response." },
+    validation: {
+      method: "Static source inspection",
+      summary: "The output path does not encode the request value.",
+      evidence: "The return statement uses the unencoded request value.",
+    },
+  };
+}

@@ -41,6 +41,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
   writeFile,
@@ -76,6 +77,7 @@ try {
     [path.join(bundledPluginRoot, "mcp", "server.mjs"), "shipped"],
   ]) {
     await testParentToolList(bundle);
+    await testCustomDiscoveryHandoff(bundle, runtimeLabel);
     await testClaimedParentArtifactOperations(bundle, runtimeLabel);
     await testSemanticScanDraftCompletion(bundle, runtimeLabel);
     for (const artifactWriter of [false, true]) {
@@ -425,6 +427,182 @@ async function testCompactDiffScanCompletion(
   }
 }
 
+async function testCustomDiscoveryHandoff(
+  bundle: string,
+  runtimeLabel: string,
+) {
+  for (const mode of ["standard", "diff"] as const) {
+    const label = `custom-discovery-${mode}-${runtimeLabel}`;
+    const { repoRoot, environment } = await createScanFixture(label);
+    const sourceLine = "return request.value";
+    await writeFile(path.join(repoRoot, "src", "fixture.py"), sourceLine);
+    const selection: Record<string, unknown> = {
+      targetPath: repoRoot,
+      scope: ".",
+      mode,
+    };
+    if (mode === "diff") {
+      const git = (...args: string[]) =>
+        gitText(
+          [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            ...args,
+          ],
+          { cwd: repoRoot },
+        ).trim();
+      git("init", "-q");
+      git("add", ".");
+      git("commit", "-qm", "base");
+      const baseRevision = git("rev-parse", "HEAD");
+      await writeFile(
+        path.join(repoRoot, "src", "fixture.py"),
+        `${sourceLine}\n`,
+      );
+      git("add", ".");
+      git("commit", "-qm", "selected changes");
+      selection.diffTarget = {
+        kind: "range",
+        baseRevision,
+        headRevision: git("rev-parse", "HEAD"),
+      };
+    }
+    const client = await startClient(bundle, environment);
+    const ownerThread = `${label}-owner`;
+    const call = toolCaller(client, ownerThread);
+    try {
+      const { scanId, scanDir, handoffClaimToken } = await startScan(
+        call,
+        ownerThread,
+        selection,
+        {
+          workspace: `${label}: open workspace`,
+          setup: `${label}: submit setup`,
+          scan: `${label}: start scan`,
+          claim: `${label}: claim scan`,
+          owner: `${label}: attach owner`,
+        },
+      );
+      const progress = async () =>
+        requireSuccessfulTool<ScanResult>(
+          await call("get_codex_security_scan_context", {
+            scanId,
+            handoffClaimToken,
+          }),
+        ).scan.progress;
+      await progress();
+      const provisional = {
+        ...finding("custom-discovery", "src/fixture.py"),
+        extensions: { customValidationSurfaceIds: ["surface-custom"] },
+      };
+      const draft = {
+        scanId,
+        handoffClaimToken,
+        scope: { validationMode: "custom_pending" },
+        findings: [provisional],
+        coverage: {
+          surfaces: [
+            {
+              id: "surface-custom",
+              label: "Request output",
+              disposition: "reported",
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      };
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...draft,
+          complete: false,
+        }),
+        `${label}: retain incomplete source discovery`,
+      );
+      for (const completion of [{ complete: true }, {}]) {
+        const before = await snapshotScanDraft(scanDir);
+        const checkpoint = await readFile(
+          path.join(scanDir, "checkpoint-head.json"),
+          "utf8",
+        );
+        const checkpoints = await readdir(path.join(scanDir, "checkpoints"));
+        requireToolError(
+          await call("record_codex_security_scan_draft", {
+            ...draft,
+            ...completion,
+          }),
+          /codeEvidence/,
+          `${label}: reject incomplete source proof before custom validation`,
+        );
+        assert.deepEqual(await snapshotScanDraft(scanDir), before);
+        assert.equal(
+          await readFile(path.join(scanDir, "checkpoint-head.json"), "utf8"),
+          checkpoint,
+        );
+        assert.deepEqual(
+          await readdir(path.join(scanDir, "checkpoints")),
+          checkpoints,
+          `${label}: a rejected final draft must not publish a recovery checkpoint`,
+        );
+        requireSuccessfulTool(
+          await call("record_codex_security_scan_draft", {
+            ...draft,
+            complete: false,
+          }),
+          `${label}: continue incomplete discovery after a rejected final draft`,
+        );
+        assert.equal(
+          (await readJson(scanDir, "scan-manifest.json")).scan.complete,
+          false,
+        );
+        assert.equal((await progress()).status, "running");
+      }
+      const repaired = {
+        ...provisional,
+        codeEvidence: [
+          {
+            id: "request-output",
+            label: "Request-controlled output",
+            path: "src/fixture.py",
+            startLine: 1,
+            code: sourceLine,
+            explanation: "The request value is returned without HTML encoding.",
+          },
+        ],
+        rootCause:
+          "Request-controlled output is returned without HTML encoding.",
+        attackPath: {
+          dataflow:
+            "The request value flows directly into the returned output.",
+        },
+      };
+      for (const completion of [{ complete: true }, {}]) {
+        requireSuccessfulTool(
+          await call("record_codex_security_scan_draft", {
+            ...draft,
+            ...completion,
+            findings: [repaired],
+          }),
+          `${label}: accept repaired source proof without claiming validation`,
+        );
+        const manifest = await readJson(scanDir, "scan-manifest.json");
+        assert.equal(manifest.scan.complete, undefined);
+        assert.equal(manifest.scan.sealedAt, undefined);
+        assert.equal(manifest.scan.scope.validationMode, "custom_pending");
+        assert.equal(
+          (await readJson(scanDir, "findings.json")).findings[0].validation,
+          undefined,
+        );
+        assert.equal((await progress()).status, "running");
+      }
+    } finally {
+      await client.close();
+    }
+  }
+}
+
 async function testSemanticScanDraftCompletion(
   bundle: string,
   runtimeLabel: string,
@@ -544,6 +722,16 @@ async function testSemanticScanDraftCompletion(
       codeEvidence: [codeEvidence],
       rootCause: {
         summary: "The query is not parameterized before SQL execution.",
+        evidenceRefs: [codeEvidence.id],
+      },
+      attackPath: {
+        dataflow:
+          "The execute(query) argument flows directly into connection.execute(query).",
+      },
+      validation: {
+        method: "Static source inspection",
+        summary:
+          "The fixture passes the query argument to SQL execution without parameter binding.",
         evidenceRefs: [codeEvidence.id],
       },
       remediation: "Use a parameterized SQL statement.",
@@ -861,9 +1049,47 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
+    // Reject missing evidence before the SDK-owned agent turn ends.
+    const { validation: _validation, ...incompleteFinding } = finding;
+    const beforeRejectedDraft = await snapshotScanDraft(scanDirectory);
+    requireToolError(
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        complete: true,
+        findings: [incompleteFinding],
+        coverage,
+      }),
+      /validation/,
+      `${runtimeLabel}: require validation proof before accepting a final draft`,
+    );
+    assert.deepEqual(
+      await snapshotScanDraft(scanDirectory),
+      beforeRejectedDraft,
+    );
+    assert.equal((await progress()).status, "running");
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [finding],
+        coverage,
+      }),
+    );
+
+    const correctedDraft = await readJson(scanDirectory, "findings.json");
+    assert.equal(
+      correctedDraft.findings[0].provenance.source,
+      finding.provenance.source,
+    );
+    assert.equal(
+      correctedDraft.findings[0].provenance.candidateId,
+      candidate.candidate_id,
+    );
+    assert.deepEqual(correctedDraft.findings[0].validation, finding.validation);
     const completed = requireSuccessfulTool<ScanResult>(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
-      `${runtimeLabel}: finalize the accepted draft exactly once`,
+      `${runtimeLabel}: finalize the corrected draft exactly once`,
     );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
@@ -884,7 +1110,7 @@ async function testSemanticScanDraftCompletion(
     assert.deepEqual(results.findings.findings[0].taxonomy, finding.taxonomy);
     assert.deepEqual(
       results.findings.findings[0].provenance,
-      finding.provenance,
+      correctedDraft.findings[0].provenance,
     );
     assert.equal(results.findings.findings[0].remediation, finding.remediation);
     assert.deepEqual(

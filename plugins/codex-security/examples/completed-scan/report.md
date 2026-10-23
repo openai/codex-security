@@ -15,13 +15,13 @@ The scan was configured for the include paths and exclusions listed below.
 
 ### Scan Summary
 
-| Field               | Value        |
-| ------------------- | ------------ |
-| Scan outcome        | completed    |
-| Reportable findings | 1            |
-| Severity mix        | high: 1      |
-| Confidence mix      | high: 1      |
-| Validation mode     | not recorded |
+| Field | Value |
+| --- | --- |
+| Scan outcome | completed |
+| Reportable findings | 1 |
+| Severity mix | high: 1 |
+| Confidence mix | high: 1 |
+| Validation mode | not recorded |
 
 Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.
 
@@ -31,42 +31,54 @@ No explicit canonical threat-model summary was recorded.
 
 ## Findings
 
-| Finding                                                                 | Severity | Confidence | Detailed write-up |
-| ----------------------------------------------------------------------- | -------- | ---------- | ----------------- |
-| [Unsafe archive extraction can escape the output directory](#finding-1) | high     | high       | inline below      |
+| Finding | Severity | Confidence | Detailed write-up |
+| --- | --- | --- | --- |
+| [Unsafe archive extraction can escape the output directory](#finding-1) | high | high | inline below |
 
 ### Confidence Scale
 
-| Label  | Meaning                                                                                  |
-| ------ | ---------------------------------------------------------------------------------------- |
-| high   | Direct evidence supports the finding with no material unresolved blocker.                |
+| Label | Meaning |
+| --- | --- |
+| high | Direct evidence supports the finding with no material unresolved blocker. |
 | medium | Evidence supports a plausible issue, but material runtime or reachability proof remains. |
-| low    | Evidence is incomplete and the item is retained only for explicit follow-up.             |
+| low | Evidence is incomplete and the item is retained only for explicit follow-up. |
 
 <a id="finding-1"></a>
 
 ### [1] Unsafe archive extraction can escape the output directory
 
-| Field                | Value                                                                         |
-| -------------------- | ----------------------------------------------------------------------------- |
-| Severity             | high                                                                          |
-| Confidence           | high                                                                          |
+| Field | Value |
+| --- | --- |
+| Severity | high |
+| Confidence | high |
 | Confidence rationale | Direct source trace reaches the filesystem write without a containment check. |
-| Category             | path-traversal                                                                |
-| CWE                  | CWE-22                                                                        |
-| Affected lines       | src/extract.py:41-44                                                          |
+| Category | path-traversal |
+| CWE | CWE-22 |
+| Affected lines | src/extract.py:41-44 |
 
 #### Summary
 
 An attacker-controlled path reaches a filesystem write without containment validation.
 
+#### Root Cause
+
+The extractor joins the entry name to the output directory without checking whether the destination stays inside it.
+
 #### Validation
 
-Direct source trace reaches the filesystem write without a containment check. Validation details were not recorded separately.
+An archive entry can select a path outside the extraction root.
+
+Validation method: source review
+
+Evidence:
+- The untrusted entry name reaches the filesystem write without normalization or a containment check.
+
+Limitations:
+- The extraction route was not exercised dynamically.
 
 #### Dataflow
 
-The canonical finding records the affected path at src/extract.py:41-44, but no expanded source-to-sink narrative was recorded.
+archive entry name -\> joined destination path -\> filesystem write outside the extraction root
 
 #### Reachability
 
@@ -83,15 +95,13 @@ Additional runtime or deployment evidence could raise or lower this severity.
 Normalize destinations and reject entries that escape the extraction root.
 
 Tests:
-
 - Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root.
 
 Preventive controls:
-
 - Route all archive extraction through one helper that normalizes and validates destination paths.
 
 ## Reviewed Surfaces
 
-| Surface            | Risk Area    | Outcome  | Notes                                        |
-| ------------------ | ------------ | -------- | -------------------------------------------- |
+| Surface | Risk Area | Outcome | Notes |
+| --- | --- | --- | --- |
 | Archive extraction | not recorded | Reported | No additional canonical notes were recorded. |

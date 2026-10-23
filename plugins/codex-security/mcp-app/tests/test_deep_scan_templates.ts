@@ -14,7 +14,10 @@ for (const name of ["discovery", "dedup"]) {
     "utf8",
   );
   for (const key of template.match(/\{\{[A-Z0-9_]+\}\}/g) ?? []) {
-    assert.equal(key, `{{${name.toUpperCase()}_CONTEXT_JSON}}`);
+    assert.ok(
+      key === `{{${name.toUpperCase()}_CONTEXT_JSON}}` ||
+        (name === "dedup" && key === "{{REDUCER_ROLE}}"),
+    );
   }
 }
 
@@ -72,6 +75,25 @@ assert.deepEqual(previousReduction, {
   reducerLabel: "dedup-0002",
   claimedWorkerIds: [],
 });
+
+const evidenceRepair = {
+  targetPath: "/fixture/repository",
+  includePaths: ["src/api", "background jobs/worker.py"],
+};
+const repair = renderDedupPrompt("dedup-0003", [], evidenceRepair);
+assert.deepEqual(firstJsonBlock(repair), {
+  reducerLabel: "dedup-0003",
+  claimedWorkerIds: [],
+  evidenceRepair,
+});
+assert.match(dedup, /Do not inspect repository code/);
+assert.match(repair, /Read repository source only as needed/);
+assert.match(repair, /never invent proof/);
+assert.match(repair, /Do not broaden the audit, run probes, launch subagents/);
+assert.doesNotMatch(
+  repair,
+  /Do not inspect repository code|\{\{REDUCER_ROLE\}\}/,
+);
 
 // Execute the documented pager across a failed page and fresh code-mode cells.
 // Its stored terminal state must never replay a successfully committed tail.

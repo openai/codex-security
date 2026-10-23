@@ -2101,6 +2101,58 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
+def _validate_finding_source_evidence(finding: dict[str, Any], context: str) -> None:
+    if not _require_list(finding, "codeEvidence", context):
+        raise ContractError(f"{context}.codeEvidence: include the source snippets used as proof")
+    root_cause = finding.get("rootCause")
+    if isinstance(root_cause, dict):
+        _require_str(root_cause, "summary", f"{context}.rootCause")
+    else:
+        _require_str(finding, "rootCause", context)
+    attack_path = _require_dict(finding, "attackPath", context)
+    dataflow = attack_path.get("dataflow")
+    if isinstance(dataflow, dict):
+        if not dataflow.get("summary"):
+            _require_str(dataflow, "source", f"{context}.attackPath.dataflow")
+            _require_str(dataflow, "sink", f"{context}.attackPath.dataflow")
+    else:
+        _require_str(attack_path, "dataflow", f"{context}.attackPath")
+
+
+def _validate_draft_finding_evidence(
+    scan: dict[str, Any], findings: dict[str, Any], binding: dict[str, Any]
+) -> None:
+    # Completed semantic drafts omit complete; only false marks a checkpoint.
+    if scan.get("complete") is False or binding.get("imported"):
+        return
+    # Return repair feedback while the discovery agent still owns its turn.
+    if scan.get("scope", {}).get("validationMode") == "custom_pending":
+        for index, finding in enumerate(findings["findings"]):
+            _validate_finding_source_evidence(finding, f"findings.findings[{index}]")
+    else:
+        _validate_completed_finding_evidence(findings)
+
+
+def _validate_completed_finding_evidence(findings: dict[str, Any]) -> None:
+    """Require reviewable evidence only when sealing a new successful scan.
+
+    Drafts, stopped scans and historical sealed reports retain their existing
+    contracts. This checks completeness, not the truth of the supplied proof.
+    """
+
+    for index, finding in enumerate(findings["findings"]):
+        context = f"findings.findings[{index}]"
+        _validate_finding_source_evidence(finding, context)
+        validation = _require_dict(finding, "validation", context)
+        _require_str(validation, "method", f"{context}.validation")
+        if not validation.get("result"):
+            _require_str(validation, "summary", f"{context}.validation")
+        if not any(validation.get(key) for key in ("evidence", "evidenceRefs")):
+            raise ContractError(
+                f"{context}.validation: include observed evidence or evidenceRefs to the source proof"
+            )
+
+
 def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
     for refs_field in ("evidenceRefs", "evidence_refs"):
         refs = section.get(refs_field)
@@ -3032,6 +3084,7 @@ def _prepare_scan_finalization(
     completion_binding: dict[str, Any] | None = None,
     recover_unsealed: bool = False,
     allow_missing_writeups: bool = False,
+    require_complete_evidence: bool = True,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
@@ -3105,6 +3158,10 @@ def _prepare_scan_finalization(
             _populate_unsealed_finding_identities(manifest, findings)
             _validate_findings(manifest, findings)
             _validate_current_findings(findings, schema_dir)
+            # Imports preserve source reports; only newly authored analysis must
+            # satisfy the completion evidence contract. The workbench owns this flag.
+            if require_complete_evidence and not (completion_binding or {}).get("imported"):
+                _validate_completed_finding_evidence(findings)
         except ContractError as exc:
             raise RecoverableContractError(
                 "Scan result contains invalid findings; repair the finding records "

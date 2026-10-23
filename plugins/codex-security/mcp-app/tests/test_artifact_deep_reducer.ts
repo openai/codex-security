@@ -302,6 +302,52 @@ try {
     { code: "ENOENT" },
   );
 
+  const repairOutputRoot = path.join(dedupRoot, "repair", "output");
+  await mkdir(repairOutputRoot, { recursive: true });
+  const emptyContext = {
+    ...context,
+    root: repairOutputRoot,
+    deepReducer: { scanRoot, claimedWorkers: [] },
+  };
+  await assert.rejects(
+    getCodexSecurityDeepReducerInputs(emptyContext),
+    /no assigned Standard scan workers/,
+  );
+  const repairContext = {
+    ...emptyContext,
+    deepReducer: {
+      ...emptyContext.deepReducer,
+      previousReducerResultPath: path.join(outputRoot, "result.json"),
+    },
+  };
+  const previousBytes = await readFile(
+    path.join(outputRoot, "result.json"),
+    "utf8",
+  );
+  assert.deepEqual(await getCodexSecurityDeepReducerInputs(repairContext), {
+    discoveries: [],
+    previous: mergedWithSources,
+  });
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(repairContext, reduction([])),
+    /discarded|unaccounted/,
+  );
+  assert.deepEqual(
+    await recordCodexSecurityDeepReduction(repairContext, merged),
+    {
+      findingCount: 2,
+      consumedWorkerIds: [],
+    },
+  );
+  assert.deepEqual(
+    await readJson(repairOutputRoot, "result.json"),
+    mergedWithSources,
+  );
+  assert.equal(
+    await readFile(path.join(outputRoot, "result.json"), "utf8"),
+    previousBytes,
+  );
+
   const third = await createWorker({
     workersRoot,
     label: "discovery-0003",

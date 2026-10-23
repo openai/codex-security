@@ -30,7 +30,7 @@
     "artifacts": [
       {
         "path": "findings.json",
-        "sha256": "a6dc4521d6478828224fbafc33585401a47bfeb0e56e07b5d2886e8a29937f2f",
+        "sha256": "604f4a20ffdb228eade7473f308b7202f6b7fd702c39ad591bdd2550230c294b",
         "mediaType": "application/json"
       },
       {

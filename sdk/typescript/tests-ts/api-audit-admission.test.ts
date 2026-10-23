@@ -117,6 +117,26 @@ for (const scenario of cases) {
           confidence: { level: "high", rationale: "Source review." },
           taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
           locations: [{ path: "extract.py", startLine: 4, endLine: 7 }],
+          codeEvidence: [
+            {
+              id: "archive-write",
+              label: "Archive output",
+              path: "extract.py",
+              startLine: 7,
+              code: "destination.write_bytes(entry.read())",
+              explanation: "The entry controls the destination of the write.",
+            },
+          ],
+          rootCause:
+            "The resolved archive output is not checked for containment.",
+          attackPath: {
+            dataflow: "An untrusted archive entry controls the output path.",
+          },
+          validation: {
+            method: "Static source inspection",
+            summary: "The write has no destination containment check.",
+            evidenceRefs: ["archive-write"],
+          },
           remediation: "Validate the resolved output path before writing.",
           provenance: { source: "local_plugin", candidateId: "archive-entry" },
         },

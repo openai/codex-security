@@ -36,6 +36,28 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
         scan["target"]["snapshotDigest"] = "codex-security-snapshot/v1:sha256:" + "0" * 64
         self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text(encoding="utf-8"))
         self.finding = self.findings["findings"][0]
+        self.finding.update(
+            codeEvidence=[
+                {
+                    "id": "archive-write",
+                    "label": "Unchecked archive write",
+                    "path": "src/extract.py",
+                    "startLine": 41,
+                    "code": "destination.write_bytes(entry.read())",
+                    "explanation": "The archive destination is written without containment.",
+                }
+            ],
+            rootCause={
+                "summary": "The extractor does not contain the entry path before writing it.",
+            },
+            validation={
+                "method": "source review",
+                "summary": "An archive entry can select a path outside the extraction root.",
+                "evidence": ["The entry path reaches the write without a containment check."],
+                "limitations": ["The extraction route was not exercised dynamically."],
+            },
+            attackPath={"dataflow": "archive entry -> destination path -> filesystem write"},
+        )
         for field in (
             "findingId",
             "occurrenceId",
@@ -1590,7 +1612,11 @@ The extraction root is not enforced.
     def test_finalize_accepts_current_text_or_object_report_semantics(self) -> None:
         finding = self.findings["findings"][0]
         finding["rootCause"] = "The extraction destination is not contained."
-        finding["validation"] = {"evidence": "A traversal input escapes the destination."}
+        finding["validation"] = {
+            "method": "source review",
+            "result": "The extraction destination is not constrained.",
+            "evidence": "A traversal input escapes the destination.",
+        }
         finding["attackPath"] = {"dataflow": "archive entry -> filesystem write"}
         self.write_scan()
 
@@ -1604,6 +1630,7 @@ The extraction root is not enforced.
     @pytest.mark.cross_platform
     def test_finalize_renders_embedded_evidence_with_null_end_line(self) -> None:
         self.findings["findings"][0]["validation"] = {
+            **self.findings["findings"][0]["validation"],
             "codeEvidence": [
                 {
                     "label": "Source control",
@@ -1612,7 +1639,7 @@ The extraction root is not enforced.
                     "endLine": None,
                     "code": "handle(request)",
                 }
-            ]
+            ],
         }
         self.write_scan()
 
@@ -2174,6 +2201,7 @@ The extraction root is not enforced.
 
     @pytest.mark.cross_platform
     def test_stopped_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
+        self.finding.pop("codeEvidence")
         canonical_evidence = {
             "id": "canonical-source",
             "label": "Canonical source",

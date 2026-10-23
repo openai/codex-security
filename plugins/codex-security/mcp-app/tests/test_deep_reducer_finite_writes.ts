@@ -11,7 +11,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { importSource } from "./import-module.ts";
-import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  completedFinding as finding,
+  scanId,
+  workerDraft,
+} from "./scan-draft-fixture.ts";
 
 const reducer = await importSource("src/artifact-deep-reducer.ts");
 const validation = await importSource("src/deep-scan/artifact-validation.ts");

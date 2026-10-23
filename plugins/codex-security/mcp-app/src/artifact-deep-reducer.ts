@@ -126,7 +126,7 @@ function bindDeepReducer(context: ArtifactContext) {
         "start an assigned Deep reduction before using reducer operations.",
     );
   }
-  if (state.claimedWorkers.length === 0) {
+  if (state.claimedWorkers.length === 0 && !state.previousReducerResultPath) {
     throw new Error(
       "The active Deep reducer has no assigned Standard scan workers.",
     );

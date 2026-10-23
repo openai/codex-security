@@ -59,7 +59,7 @@ export async function runCliDeepScan(): Promise<void> {
     if (controller.signal.aborted)
       throw new Error("Deep Scan canceled before coordinator startup.");
     let terminal = run;
-    if (run.status === "running") {
+    if (run.status === "running" || run.evidenceRepairRequired) {
       const started = await startDeepScanEngine({
         run,
         store,

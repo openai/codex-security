@@ -1452,7 +1452,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Complete Codex Security Scan",
       description:
-        "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+        "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails with explicit repair guidance, correct the same scan and retry completion. Otherwise, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -2070,9 +2070,10 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
 }
 
 function deepScanTerminalResult(run: DeepScanRunState) {
+  if (run.evidenceRepairRequired) return undefined;
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
-    const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error and return no final, no-findings, structured, or benchmark response.`;
+    const instructions = `Deep Scan discovery completed. Independent Standard scans have already performed validation and attack-path analysis and have been consolidated into the canonical scan-manifest.json, findings.json, and coverage.json under ${run.scanDir}. The returned manifestPath is the canonical scan-manifest.json, not a legacy discovery manifest. Any instructions requiring parent candidate listing, centralized validation, attack-path analysis, or another draft apply only to the old discovery-only workflow and must be skipped. The authoritative scan ID is ${run.scanId}. Immediately call complete_codex_security_scan once using that scan ID to seal and publish the scan. Return output only after completion succeeds and generated report.md exists. If completion fails, surface that exact error. Follow explicit repair guidance on the same scan before retrying; otherwise stop. Return no final, no-findings, structured, or benchmark response until completion succeeds.`;
     return scanActionResult(
       {
         scanId: run.scanId,
@@ -2242,9 +2243,24 @@ function failureDiagnostic(error: unknown): string {
 }
 
 function completionFailureMessage(error: unknown): string {
+  const diagnostic = failureDiagnostic(error);
+  if (
+    diagnostic.startsWith(
+      "Scan result contains invalid findings; repair the finding records before completion.",
+    ) ||
+    diagnostic ===
+      "The latest saved scan draft is incomplete; continue the scan before completing it."
+  ) {
+    return [
+      "Codex Security scan completion needs a corrected draft.",
+      diagnostic,
+      "Continue the same scan, repair the named evidence gaps using actual source or validation evidence, and retry completion after saving the corrected draft. Preserve valid findings and deferred work; do not invent evidence or start another scan.",
+      "Do not return a final, no-findings, structured, or benchmark response until completion succeeds.",
+    ].join("\n");
+  }
   return [
     "Codex Security scan completion failed.",
-    failureDiagnostic(error),
+    diagnostic,
     "Stop the current response and surface this exact MCP error.",
     "Do not retry completion or return a final, no-findings, structured, or benchmark response.",
   ].join("\n");

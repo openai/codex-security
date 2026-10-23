@@ -519,9 +519,14 @@ describe("custom validation", () => {
     expect(findings.findings[0]).toMatchObject({
       identity: f.findings.findings[0]!.identity,
       locations: f.findings.findings[0]!.locations,
+      codeEvidence: f.findings.findings[0]!.codeEvidence,
+      rootCause: f.findings.findings[0]!.rootCause,
       severity: output.validations[0]!.severity,
       confidence: { level: "medium" },
-      attackPath: { impact: output.validations[0]!.impact },
+      attackPath: {
+        dataflow: f.findings.findings[0]!.attackPath!.dataflow,
+        impact: output.validations[0]!.impact,
+      },
       validation: {
         disposition: "reportable",
         counterEvidence: [counterEvidence],

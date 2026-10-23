@@ -1318,6 +1318,49 @@ async function testMissingDiscoveryResultResumesExistingThread(
   );
 }
 
+async function testIncompleteEvidenceRetriesBeforePublication(
+  kind: "discovery" | "dedup",
+) {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 1,
+    maxDiscoveryRuns: 1,
+  });
+  const executor = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  const run = executor.run.bind(executor);
+  let rejected = false;
+  executor.run = async (request) => {
+    const result = await run(request);
+    if (request.kind === kind && !rejected) {
+      rejected = true;
+      const output = path.join(request.artifactContext!.root, "result.json");
+      const draft = await readJson(output);
+      delete draft.findings[0].validation;
+      await writeJson(output, draft);
+    }
+    return result;
+  };
+  const completedDrafts: ScanDraftInput[] = [];
+  const terminal = await runCoordinator(fixture, store, executor, {
+    retryDelaysMs: [1],
+    clock: immediateClock,
+    onComplete: async (draft) => void completedDrafts.push(draft),
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(
+    kind === "discovery" ? executor.discoveryCalls : executor.dedupCalls,
+    2,
+  );
+  assert.ok(
+    store.workerUpdates.some(
+      (update) =>
+        update.kind === kind && update.error?.includes("validation.method"),
+    ),
+  );
+  assert.equal(completedDrafts.length, 1);
+  assert.ok(completedDrafts[0].findings[0].validation);
+  assert.equal(store.finishCalls.length, 1);
+}
+
 async function testInvalidArtifactsRetry() {
   const { fixture, store } = await coordinatorFixture(
     twoRunConfig({ workers: 2, subagents: 1 }),
@@ -4287,6 +4330,8 @@ try {
   await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
+  await testIncompleteEvidenceRetriesBeforePublication("discovery");
+  await testIncompleteEvidenceRetriesBeforePublication("dedup");
   await testInvalidArtifactsRetry();
   await testInvalidReducerResultRetriesFromSnapshot();
   await testInvalidReducerResultRetriesFromSnapshot(true);

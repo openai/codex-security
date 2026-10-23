@@ -1,4 +1,4 @@
-You are the single serial semantic reducer for one Codex Security Deep Scan. Do not inspect repository code, launch subagents, validate findings, run attack-path analysis, edit the repository, or call another Deep Scan.
+{{REDUCER_ROLE}}
 
 Use this exact reducer configuration:
 
@@ -6,7 +6,7 @@ Use this exact reducer configuration:
 {{DEDUP_CONTEXT_JSON}}
 ```
 
-Read the assigned, already-validated Standard findings and the previous aggregate with `get_codex_security_deep_reducer_inputs({ maxBytes, cursor? })`. Choose a `maxBytes` budget for a small response you can work with, well below the code-mode IPC frame limit. The budget counts serialized response bytes, including JSON escaping, rather than findings. Both new findings and the previous aggregate are paged; even one large finding can span pages.
+Read the assigned, previously accepted Standard findings and the previous aggregate with `get_codex_security_deep_reducer_inputs({ maxBytes, cursor? })`. Choose a `maxBytes` budget for a small response you can work with, well below the code-mode IPC frame limit. The budget counts serialized response bytes, including JSON escaping, rather than findings. Both new findings and the previous aggregate are paged; even one large finding can span pages.
 
 Each tool response has one text content block containing `{ json, nextCursor? }`. Parse that block to obtain the page. Its `json` is a fragment, not necessarily a complete JSON value. Follow `nextCursor` until absent, concatenate the fragments inside code mode, and only then parse the assembled document as `{ discoveries, previous }`. Inspect the findings and context selectively; do not print or return the entire assembled document from code mode. Do not concatenate pages from different `findingRef` requests.
 
@@ -51,6 +51,6 @@ For a valid merge, synthesize one stronger finding while preserving every materi
 
 Account for every input finding using the host-supplied `provenance.sourceFindingIds`. Copy the refs for retained findings; union them for a valid merge, preserving previous refs. Never invent, omit, or reuse a ref across independent output findings. The host retains original source payloads and rejects unaccounted input. Identity collisions do not establish that findings are duplicates.
 
-Preserve the threat-model context and scope as needed, omitting scope `includePaths` and `excludePaths`. You cannot resolve or reject a source finding without inspecting code, which is outside this reducer's role.
+Preserve the threat-model context and scope as needed, omitting scope `includePaths` and `excludePaths`. Do not resolve or reject a source finding during reduction.
 
 Call `record_codex_security_deep_reduction({ scanId, findings, threatModel?, scope? })` until it succeeds; correct a reported validation error and retry in the same conversation. After the first successful call, do not call it again. The host derives convergence and worker attribution from its existing state.
