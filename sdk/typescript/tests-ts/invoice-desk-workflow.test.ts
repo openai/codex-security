@@ -48,7 +48,7 @@ const temporaryDirectories = createTemporaryDirectoriesSync();
 
 afterEach(temporaryDirectories.cleanup);
 
-test("Invoice Desk cancels scans only after selecting an eligible target", () => {
+test("Invoice Desk cancels only duplicate scans of an eligible target revision", () => {
   expect(workflow.concurrency).toBeUndefined();
   const job = workflow.jobs.scan;
   expect(job.needs).toBe("target");
@@ -70,10 +70,12 @@ test("Invoice Desk cancels scans only after selecting an eligible target", () =>
           template.replace("{0}", String(value)),
       ),
     );
-  expect(group(7, sourceSha)).toBe(group(7, "b".repeat(40)));
+  expect(group(7, sourceSha)).toBe(`invoice-desk-scan-pr-7-${sourceSha}`);
+  expect(group(7, sourceSha)).not.toBe(group(7, "b".repeat(40)));
   expect(group(7, sourceSha)).not.toBe(group(8, sourceSha));
   expect(group(7, sourceSha)).not.toBe(group(0, sourceSha));
-  expect(group(0, sourceSha)).toBe(group(0, "b".repeat(40)));
+  expect(group(0, sourceSha)).toBe(`invoice-desk-scan-main-${sourceSha}`);
+  expect(group(0, sourceSha)).not.toBe(group(0, "b".repeat(40)));
 });
 
 function fixture() {

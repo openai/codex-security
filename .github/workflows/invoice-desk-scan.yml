@@ -87,8 +87,9 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.target.outputs.targets) }}
     # Rejected requests must not cancel an eligible scan or its approval request.
+    # A delayed target job must not cancel a scan of a different revision.
     concurrency:
-      group: invoice-desk-scan-${{ matrix.target.pr && format('pr-{0}', matrix.target.pr) || 'main' }}
+      group: invoice-desk-scan-${{ matrix.target.pr && format('pr-{0}', matrix.target.pr) || 'main' }}-${{ matrix.target.sha }}
       cancel-in-progress: true
     environment: codex-security-smoke-test
     runs-on: ubuntu-24.04
