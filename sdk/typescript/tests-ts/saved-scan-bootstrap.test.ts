@@ -20,18 +20,20 @@ import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { FindingEmbeddingBinding } from "../src/deduplication/local.js";
 import type { Finding } from "../src/models.js";
+import type { JsonObject } from "../src/config.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
-  "saved-scan-bootstrap-",
+  "saved-scan-bootstrap-résumé-",
 );
 afterEach(cleanup);
 
-async function fixture(git = false) {
+async function fixture(git = false, separateSetupCommands = false) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(join(repository, "src"), { recursive: true });
@@ -70,23 +72,26 @@ async function fixture(git = false) {
   };
   const python = await resolvePluginPython({ environment });
   const options = { environment, python, pluginRoot: PLUGIN_ROOT };
-  async function scan(name: string) {
-    const scanDir = join(root, name);
-    await mkdir(scanDir, { mode: 0o700 });
-    const registered = await runWorkbench(options, [
-      "register-cli-scan",
-      "--repository",
+  const registrationArguments = (scanDir: string) => [
+    "register-cli-scan",
+    "--repository",
+    repository,
+    "--scan-dir",
+    scanDir,
+    "--recipe-json",
+    JSON.stringify({
+      config: {},
+      mode: "standard",
       repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
-        config: {},
-        mode: "standard",
-        repository,
-        target: { kind: "repository", paths: [] },
-      }),
-    ]);
+      target: { kind: "repository", paths: [] },
+    }),
+  ];
+  async function scan(name: string, registered?: JsonObject) {
+    const scanDir = join(root, name);
+    if (registered === undefined) {
+      await mkdir(scanDir, { mode: 0o700 });
+      registered = await runWorkbench(options, registrationArguments(scanDir));
+    }
     const scanId = registered["scanId"] as string;
     await copyCompletedScanFixture(scanDir);
     const manifest = JSON.parse(
@@ -136,11 +141,36 @@ async function fixture(git = false) {
     );
     coverage.scanId = scanId;
     await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
-    await runWorkbench(options, ["complete-scan", "--scan-id", scanId]);
+    if (separateSetupCommands)
+      await runWorkbench(options, ["complete-scan", "--scan-id", scanId]);
     return { scanId, scanDir };
   }
-  const first = await scan("first");
-  const second = await scan("second");
+  let first: Awaited<ReturnType<typeof scan>>;
+  let second: Awaited<ReturnType<typeof scan>>;
+  if (separateSetupCommands) {
+    first = await scan("first");
+    second = await scan("second");
+  } else {
+    const directories = [join(root, "first"), join(root, "second")];
+    for (const directory of directories)
+      await mkdir(directory, { mode: 0o700 });
+    const registrations = await runWorkbenchFixtureCommands(
+      python,
+      environment,
+      directories.map(registrationArguments),
+    );
+    first = await scan("first", registrations[0]!);
+    second = await scan("second", registrations[1]!);
+    await runWorkbenchFixtureCommands(
+      python,
+      environment,
+      [first, second].map(({ scanId }) => [
+        "complete-scan",
+        "--scan-id",
+        scanId,
+      ]),
+    );
+  }
   const embed = mock(async (findings: readonly Finding[]) =>
     findings.map(() => ({ model: "synthetic", vector: [1, 0, 0] })),
   );
@@ -182,7 +212,8 @@ async function fixture(git = false) {
 }
 
 test("historical reviews carry the saved occurrence revision instead of the current checkout", async () => {
-  const f = await fixture(true);
+  // Keep an end-to-end registration/completion fixture on separate processes.
+  const f = await fixture(true, true);
   const manifest = JSON.parse(
     await readFile(join(f.first.scanDir, "scan-manifest.json"), "utf8"),
   );
