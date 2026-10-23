@@ -21,6 +21,7 @@ from workbench_test_support import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
 import workbench_saved_results as saved
+from workbench import saved_sources
 
 
 def call_workbench(monkeypatch, state, codex_home, *args):
@@ -110,7 +111,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         result.write_bytes(result.read_bytes())
         os.utime(result, ns=(300, 300))
     directory = (output / "checkpoints").relative_to(scan_dir).as_posix()
-    children = saved._children
+    children = saved_sources._children
     published = []
 
     def publish_after_listing(root, relative):
@@ -122,7 +123,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
             published.append(checkpoint)
         return names
 
-    monkeypatch.setattr(saved, "_children", publish_after_listing)
+    monkeypatch.setattr(saved_sources, "_children", publish_after_listing)
     call_workbench(
         monkeypatch,
         state,

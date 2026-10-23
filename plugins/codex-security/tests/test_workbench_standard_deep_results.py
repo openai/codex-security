@@ -462,12 +462,14 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
         wrapper,
         state_dir,
         codex_home,
+        "from workbench import retained_coverage\n"
         "original_write = workbench_saved_results.write_scan_local_bytes\n"
         "def fail_parent_checkpoint(scan_dir, relative_path, payload, **kwargs):\n"
         "    if relative_path.startswith('checkpoints/'):\n"
         "        raise OSError('injected parent checkpoint failure')\n"
         "    return original_write(scan_dir, relative_path, payload, **kwargs)\n"
-        "workbench_saved_results.write_scan_local_bytes = fail_parent_checkpoint\n",
+        "workbench_saved_results.write_scan_local_bytes = fail_parent_checkpoint\n"
+        "retained_coverage.write_scan_local_bytes = fail_parent_checkpoint\n",
         "recover-scan-results",
         "--scan-id",
         scan_id,
@@ -778,9 +780,9 @@ def test_canonical_finding_validation_survives_frozen_publication_retry(tmp_path
     finding["severity"]["level"] = "informational"
     stronger = copy.deepcopy(finding)
     stronger["severity"]["level"] = "critical"
-    missing_identity = copy.deepcopy(finding)
-    missing_identity.pop("identity")
-    findings["findings"].extend([stronger, missing_identity])
+    malformed_identity = copy.deepcopy(finding)
+    malformed_identity["identity"] = {"anchor": []}
+    findings["findings"].extend([stronger, malformed_identity])
     findings_path.write_text(json.dumps(findings))
     original = findings_path.read_bytes()
 
@@ -3308,6 +3310,9 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
 
     assert not replay[2].get("resolvedDeferred")
+    assert replay[1:] == first[1:]
+    assert replay[0]["scan"].get("complete") == first[0]["scan"].get("complete")
+    assert replay[0]["scan"]["preservedSources"] == first[0]["scan"]["preservedSources"]
 
 
 @pytest.mark.parametrize("stopped", [False, True])

@@ -23,13 +23,16 @@ import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import { requireRegularFile } from "./deep-scan/artifacts.js";
+import coverageDocument from "../../schemas/coverage.schema.json" with { type: "json" };
+import findingsDocument from "../../schemas/findings.schema.json" with { type: "json" };
+import scanManifestDocument from "../../schemas/scan-manifest.schema.json" with { type: "json" };
 import { requireFiniteNumbers } from "./helpers/json.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
   draftDefinitions.scanDraftInput,
 );
-// File-authored scan IDs are host-owned; their finding fields use the same contract.
+// File-authored scan IDs are host-owned.
 const fileScanDraftInputSchema = scanDraftInputSchema.extend({
   scanId: z.string().min(1),
 });
@@ -37,6 +40,61 @@ export const completedScanInputSchema = draftDefinitions.completedScanInput;
 export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
 type DraftCoverage = ScanDraftInput["coverage"];
 export type CompletedScanInput = z.infer<typeof completedScanInputSchema>;
+
+function canonicalFieldSchema(schema: object): z.ZodType {
+  return z.fromJSONSchema(schema as Parameters<typeof z.fromJSONSchema>[0]);
+}
+
+// Canonical files can retain fields that the compact tool input does not accept.
+const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
+  scope: canonicalFieldSchema({
+    ...scanManifestDocument.properties.scan.properties.scope,
+    $defs: scanManifestDocument.$defs,
+    required:
+      z.toJSONSchema(draftDefinitions.scope, { io: "input" }).required ?? [],
+  }).optional(),
+  threatModel: canonicalFieldSchema({
+    ...scanManifestDocument.properties.scan.properties.threatModel,
+    $defs: scanManifestDocument.$defs,
+  }).optional(),
+  findings: canonicalFieldSchema({
+    ...findingsDocument.properties.findings,
+    $defs: findingsDocument.$defs,
+    items: {
+      ...findingsDocument.properties.findings.items,
+      required: z.toJSONSchema(draftDefinitions.finding, { io: "input" })
+        .required,
+    },
+  }),
+  coverage: draftDefinitions.coverage.extend({
+    surfaces: canonicalFieldSchema({
+      ...coverageDocument.properties.surfaces,
+      items: {
+        ...coverageDocument.properties.surfaces.items,
+        required: z.toJSONSchema(draftDefinitions.surface, { io: "input" })
+          .required,
+      },
+    }),
+    deferred: canonicalFieldSchema({
+      ...coverageDocument.properties.deferred,
+      items: {
+        ...coverageDocument.properties.deferred.items,
+        required: z.toJSONSchema(
+          draftDefinitions.coverage.shape.deferred.element,
+          { io: "input" },
+        ).required,
+      },
+    }),
+    openQuestions: z
+      .array(
+        z.union([
+          z.string(),
+          canonicalFieldSchema(coverageDocument.properties.openQuestions.items),
+        ]),
+      )
+      .optional(),
+  }),
+}) as z.ZodType<ScanDraftInput>;
 
 export interface ScanDraftResult {
   scanId: string;
@@ -72,6 +130,8 @@ interface SavedScanDraft {
 }
 
 const pendingWorkerDrafts = new Map<string, Promise<void>>();
+const findingIdentitySchema = draftDefinitions.identity;
+const findingProvenanceSchema = draftDefinitions.finding.shape.provenance;
 
 /** Stage a parent draft, then publish it under the workbench completion lock. */
 export async function recordCodexSecurityScanDraftViaWorkbench(
@@ -372,9 +432,27 @@ export async function saveScanDraftCheckpoint(
   input: Omit<ScanDraftInput, "coverage">,
   updateHead = true,
 ): Promise<void> {
-  const { handoffClaimToken: _claim, ...snapshot } = input;
+  const { handoffClaimToken: _claim, ...raw } = input;
+  const head =
+    context.layout === "scan" &&
+    context.mode === "deep" &&
+    input.complete !== false
+      ? await readCheckpointHead(context, "current")
+      : undefined;
+  const snapshot =
+    context.layout === "scan" &&
+    context.mode === "deep" &&
+    input.complete !== false
+      ? {
+          ...raw,
+          publication: {
+            previousCheckpoint: head?.checkpoint ?? null,
+            previousInputCheckpoint: head?.inputCheckpoint ?? null,
+          },
+        }
+      : raw;
   const contents = JSON.stringify(snapshot, null, 2) + "\n";
-  const name = scanDraftCheckpointName(input);
+  const name = scanDraftCheckpointName(snapshot);
   const destination = await artifactDestination(
     context,
     ["checkpoints", name],
@@ -822,17 +900,65 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
+    const terminalSurfaceIds = new Set(
+      (result.coverage.surfaces as JsonObject[])
+        .filter((row) => row.disposition !== "needs_follow_up")
+        .flatMap((row) =>
+          [row.id, row.candidateId].filter(
+            (id): id is string => typeof id === "string",
+          ),
+        ),
+    );
+    const terminalWorkIds = new Set([
+      ...terminalSurfaceIds,
+      ...closedIds,
+      ...terminalOutcomeIds,
+      ...(result.coverage.deferred as JsonObject[]).flatMap((row) =>
+        [row.id, row.candidateId].filter(
+          (id): id is string => typeof id === "string",
+        ),
+      ),
+    ]);
     let acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
+      const deferred = progress.coverage.deferred.filter(
+        (row) =>
+          keepsGenericWork(row) ||
+          !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
+      );
+      const pending = new Set(deferred);
+      const linked = (row: JsonObject, surface: JsonObject) =>
+        row.id === surface.id ||
+        ((row.surfaceIds as string[] | undefined) ?? []).includes(
+          surface.id as string,
+        );
+      progress.coverage.surfaces = progress.coverage.surfaces.filter(
+        (surface) =>
+          surface.disposition !== "needs_follow_up" ||
+          !progress.coverage.deferred.some(
+            (row) => !pending.has(row) && linked(row, surface),
+          ) ||
+          deferred.some((row) => linked(row, surface)),
+      );
       const reopenedIds = new Set(
-        progress.coverage.deferred.flatMap((row) =>
+        deferred.flatMap((row) =>
           [row.id, row.candidateId].filter(
-            (id): id is string => typeof id === "string" && closedIds.has(id),
+            (id): id is string =>
+              typeof id === "string" &&
+              (closedIds.has(id) || terminalSurfaceIds.has(id)),
           ),
         ),
       );
-      if (reopenedIds.size > 0) acceptProgress = true;
+      const newWork = [
+        ...progress.coverage.deferred,
+        ...progress.coverage.surfaces.filter(
+          (row) => row.disposition === "needs_follow_up",
+        ),
+      ].some(
+        (row) => !terminalWorkIds.has((row.candidateId ?? row.id) as string),
+      );
+      if (reopenedIds.size > 0 || newWork) acceptProgress = true;
       if (!acceptProgress) continue;
       result.complete = false;
       const resolved = reconcileDeferredSurfaces(
@@ -847,16 +973,20 @@ async function preserveScanDraft(
       result.coverage = preserveScanCoverage(
         {
           ...result.coverage,
-          deferred: progress.coverage.deferred.filter(
-            (row) =>
-              keepsGenericWork(row) ||
-              !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
-          ),
+          deferred,
           surfaces: progress.coverage.surfaces.filter(
             (surface) =>
-              keepsGenericWork(surface) ||
-              (!terminalOutcomeIds.has(surface.id as string) &&
-                !terminalOutcomeIds.has(surface.candidateId as string)),
+              (keepsGenericWork(surface) ||
+                (!terminalOutcomeIds.has(surface.id as string) &&
+                  !terminalOutcomeIds.has(surface.candidateId as string))) &&
+              (surface.disposition !== "needs_follow_up" ||
+                !terminalSurfaceIds.has(
+                  (surface.candidateId ?? surface.id) as string,
+                ) ||
+                reopenedIds.has(
+                  (surface.candidateId ?? surface.id) as string,
+                ) ||
+                deferred.some((row) => linked(row, surface))),
           ),
         },
         result.coverage,
@@ -910,6 +1040,20 @@ async function preserveScanDraft(
       (surface) => surface.disposition === "needs_follow_up",
     );
   });
+
+  const preserveDetails = (current: JsonObject, previous: JsonObject) => {
+    const reservedIdentity =
+      current.identity === undefined &&
+      previous.identity !== undefined &&
+      result.findings.some(
+        (finding) =>
+          finding !== current &&
+          finding.identity !== undefined &&
+          sameSavedFinding(finding, previous),
+      );
+    preserveFindingDetails(current, previous);
+    if (reservedIdentity) delete current.identity;
+  };
 
   for (const source of sources) {
     for (const previous of source.coverage.surfaces as JsonObject[]) {
@@ -981,6 +1125,19 @@ async function preserveScanDraft(
         }
       }
     }
+    const assignedFindings = new Set<JsonObject>();
+    const unmatchedFindings = new Set(
+      source.findings.filter((previous) => {
+        const matches = result.findings.filter(
+          (current) =>
+            current.identity !== undefined &&
+            previous.identity !== undefined &&
+            sameSavedFinding(current, previous),
+        );
+        for (const current of matches) assignedFindings.add(current);
+        return matches.length === 0;
+      }),
+    );
     for (const finding of source.findings) {
       const candidateId = findingCandidateId(finding);
       const disposition =
@@ -994,18 +1151,83 @@ async function preserveScanDraft(
         disposition.finding ??= structuredClone(finding);
         continue;
       }
-      const matches = result.findings.filter((current) =>
+      const available = result.findings.filter(
+        (current) =>
+          !assignedFindings.has(current) ||
+          (current.identity !== undefined &&
+            finding.identity !== undefined &&
+            sameSavedFinding(current, finding)),
+      );
+      const matches = available.filter((current) =>
         sameSavedFinding(current, finding),
+      );
+      const containing = matches.filter((current) =>
+        containsSavedFinding(current, finding),
+      );
+      const revisions = matches.filter((current) =>
+        sameSavedRevision(current, finding),
       );
       if (
         matches.length === 1 &&
-        source.findings.filter((current) => sameSavedFinding(current, finding))
-          .length === 1
+        source.findings.filter(
+          (current) =>
+            (finding.identity === undefined ||
+              matches[0]!.identity === undefined ||
+              current.identity !== undefined) &&
+            (current === finding ||
+              unmatchedFindings.has(current) ||
+              (current.identity !== undefined &&
+                finding.identity !== undefined &&
+                sameSavedFinding(current, finding))) &&
+            sameSavedFinding(
+              current,
+              containing.length === 1 ? finding : matches[0]!,
+            ),
+        ).length === 1
       ) {
-        preserveFindingDetails(matches[0]!, finding);
-      } else {
-        if (!matches.some((current) => containsSavedFinding(current, finding)))
-          result.findings.push(structuredClone(finding));
+        preserveDetails(matches[0]!, finding);
+        assignedFindings.add(matches[0]!);
+      } else if (
+        containing.length === 1 &&
+        source.findings.filter((previous) =>
+          containsSavedFinding(containing[0]!, previous),
+        ).length === 1
+      ) {
+        // An unchanged sibling still owns its previously published identity.
+        preserveDetails(containing[0]!, finding);
+        assignedFindings.add(containing[0]!);
+      } else if (
+        revisions.length === 1 &&
+        source.findings.filter((current) =>
+          sameSavedRevision(current, revisions[0]!),
+        ).length === 1
+      ) {
+        preserveDetails(revisions[0]!, finding);
+        assignedFindings.add(revisions[0]!);
+      } else if (
+        !available.some((current) => {
+          const history = (current.provenance as JsonObject).previousFindings;
+          return (
+            Array.isArray(history) &&
+            history.some((previous) => {
+              if (
+                !isObject(previous) ||
+                !containsSavedFinding(previous, finding) ||
+                source.findings.filter((sibling) =>
+                  containsSavedFinding(previous, sibling),
+                ).length !== 1
+              )
+                return false;
+              preserveFindingDetails(previous, finding);
+              return true;
+            })
+          );
+        }) &&
+        containing.length === 0
+      ) {
+        const retained = structuredClone(finding);
+        result.findings.push(retained);
+        assignedFindings.add(retained);
       }
     }
     const resolvedIds = new Set(
@@ -1293,6 +1515,11 @@ async function preserveScanDraft(
       receiptPaths.set(key, normalized);
     }
   }
+  result = (
+    context.layout === "scan"
+      ? canonicalScanDraftInputSchema
+      : scanDraftInputSchema
+  ).parse(result);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return {
     input: result,
@@ -1675,7 +1902,10 @@ function reconcileDeferredSurfaces(
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
-): Promise<{ checkpoint: string; modifiedMs: number } | undefined> {
+): Promise<
+  | { checkpoint: string; inputCheckpoint?: string; modifiedMs: number }
+  | undefined
+> {
   const metadata = await lstatIfExists(
     join(context.root, "checkpoint-head.json"),
   );
@@ -1697,7 +1927,13 @@ async function readCheckpointHead(
   )
     throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
   // Reselecting an immutable checkpoint updates only the head file.
-  return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
+  return {
+    checkpoint: head.checkpoint,
+    ...(typeof head.inputCheckpoint === "string"
+      ? { inputCheckpoint: head.inputCheckpoint }
+      : {}),
+    modifiedMs: saved.modifiedMs,
+  };
 }
 
 async function readSavedCheckpoints(
@@ -1794,9 +2030,7 @@ async function readSavedCheckpoints(
   return checkpoints;
 }
 
-function scanDraftCheckpointName(input: {
-  handoffClaimToken?: unknown;
-}): string {
+function scanDraftCheckpointName(input: JsonObject): string {
   const { handoffClaimToken: _claim, ...snapshot } = input;
   return (
     createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") +
@@ -2138,11 +2372,46 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   if (left.ruleId !== right.ruleId) return false;
   if (left.identity && right.identity)
     return scanFindingIdentity(left) === scanFindingIdentity(right);
+  const leftExplicitCandidate = findingIdentityCandidate(left);
+  const rightExplicitCandidate = findingIdentityCandidate(right);
+  if (
+    leftExplicitCandidate &&
+    rightExplicitCandidate &&
+    leftExplicitCandidate !== rightExplicitCandidate
+  )
+    return false;
+  // Report identifiers distinguish siblings that share the same candidate.
+  const reportIds = ["reportId", "ledgerRowId"].map((field) =>
+    [left, right].map((finding) => {
+      const value = (finding.extensions as JsonObject | undefined)?.[field];
+      return typeof value === "string" && value.trim() ? value : undefined;
+    }),
+  );
+  if (
+    reportIds.some(([left]) => left) &&
+    reportIds.some(([, right]) => right) &&
+    (!reportIds.some(([left, right]) => left && right) ||
+      reportIds.some(([left, right]) => left && right && left !== right))
+  )
+    return false;
   const leftCandidate = findingCandidateId(left);
   if (leftCandidate && leftCandidate === findingCandidateId(right)) return true;
   return (
     scanFindingIdentity({ ...left, identity: undefined }) ===
     scanFindingIdentity({ ...right, identity: undefined })
+  );
+}
+
+function sameSavedRevision(left: JsonObject, right: JsonObject): boolean {
+  const leftOwner = (left.provenance as JsonObject | undefined)?.workerId;
+  const rightOwner = (right.provenance as JsonObject | undefined)?.workerId;
+  return (
+    (typeof leftOwner !== "string" ||
+      typeof rightOwner !== "string" ||
+      leftOwner === rightOwner) &&
+    left.title === right.title &&
+    isDeepStrictEqual(left.locations, right.locations) &&
+    sameSavedFinding(left, right)
   );
 }
 
@@ -2157,7 +2426,10 @@ export function preserveFindingDetails(
   current: JsonObject,
   previous: JsonObject,
 ): void {
-  if (current.identity === undefined && previous.identity !== undefined) {
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  ) {
     current.identity = structuredClone(previous.identity);
   }
   const provenance = requireObject(
@@ -2177,11 +2449,25 @@ export function preserveFindingDetails(
       Array.isArray(provenance[field]) ? provenance[field] : [],
       Array.isArray(oldProvenance[field]) ? oldProvenance[field] : [],
     );
-    if (values.length) provenance[field] = values;
+    const fieldSchema =
+      field === "sourceFindingIds" || field === "sourceFindings"
+        ? findingProvenanceSchema.shape[field]
+        : undefined;
+    if (
+      values.length &&
+      (!fieldSchema || fieldSchema.safeParse(values).success)
+    )
+      provenance[field] = values;
   }
   if (!containsSavedFinding(current, previous)) {
     const original = withoutPreviousFindings(previous);
-    if (isObject(original.provenance))
+    if (
+      isObject(original.provenance) &&
+      containsSavedValue(
+        provenance.sourceFindings,
+        original.provenance.sourceFindings,
+      )
+    )
       delete original.provenance.sourceFindings;
     provenance.previousFindings = exactUnion(
       Array.isArray(provenance.previousFindings)
@@ -2196,6 +2482,10 @@ function containsSavedFinding(
   current: JsonObject,
   previous: JsonObject,
 ): boolean {
+  const currentOwner = (current.provenance as JsonObject | undefined)?.workerId;
+  const previousOwner = (previous.provenance as JsonObject | undefined)
+    ?.workerId;
+  if (!isDeepStrictEqual(currentOwner, previousOwner)) return false;
   const original = withoutPreviousFindings(previous);
   if (current.identity === undefined) delete original.identity;
   return containsSavedValue(current, original);
@@ -2377,6 +2667,16 @@ export function scanFindingIdentity(finding: JsonObject): string {
   ]);
 }
 
+function findingIdentityCandidate(finding: JsonObject): string | undefined {
+  return [
+    (finding.extensions as JsonObject | undefined)?.candidateId,
+    (finding.provenance as JsonObject | undefined)?.candidateId,
+  ].find(
+    (value): value is string =>
+      typeof value === "string" && Boolean(value.trim()),
+  );
+}
+
 function findingCandidateId(finding: JsonObject): string | undefined {
   const provenance = finding.provenance;
   if (
@@ -2504,7 +2804,7 @@ export function parseCanonicalScanDraft(input: {
 function parseCanonicalCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
-  const parsed = parsePersistedCheckpoint(input);
+  const parsed = parsePersistedCheckpoint(input, canonicalScanDraftInputSchema);
   for (const [index, finding] of parsed.findings.entries()) {
     for (const field of ["locations", "codeEvidence"] as const) {
       for (const [locationIndex, location] of (
@@ -2560,10 +2860,12 @@ export function parsePersistedScanDraft(
 
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
+  schema: z.ZodType<ScanDraftInput> = fileScanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   delete compatible.previousParentCheckpoints;
   delete compatible.canonicalParent;
+  delete compatible.publication;
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;
@@ -2590,7 +2892,7 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedScanDraft(compatible, fileScanDraftInputSchema);
+  return parsePersistedScanDraft(compatible, schema);
 }
 
 function requireBoundScan(
@@ -2753,12 +3055,8 @@ function buildScope(
 function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
-    const candidateId = (finding.extensions as JsonObject | undefined)
-      ?.candidateId;
     const identitySource =
-      typeof candidateId === "string" && candidateId.trim()
-        ? candidateId
-        : (finding.title as string);
+      findingIdentityCandidate(finding) ?? (finding.title as string);
     const anchor =
       finding.identity === undefined
         ? semanticIdentifier(identitySource, `finding-${index + 1}`)
@@ -2794,15 +3092,22 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       identity,
     };
   });
-  if (mode !== "deep") return identified;
+  // Keep generated identities distinct without replacing an authored identity.
+  const authored = new Set(
+    findings
+      .filter((finding) => finding.identity !== undefined)
+      .map(scanFindingIdentity),
+  );
 
   // Keep both findings when workers reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
   const used = new Set<string>();
-  return identified.map((finding) => {
+  return identified.map((finding, index) => {
+    const explicit = findings[index]!.identity !== undefined;
+    if (mode !== "deep" && explicit) return finding;
     const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
+    if (!used.has(key) && (explicit || !authored.has(key))) {
       used.add(key);
       return finding;
     }
@@ -2820,12 +3125,14 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       reserved.has(scanFindingIdentity(distinct)) ||
       used.has(scanFindingIdentity(distinct))
     );
-    const provenance = finding.provenance as JsonObject;
-    distinct.provenance = {
-      ...provenance,
-      preservedIdentity:
-        provenance.preservedIdentity ?? structuredClone(identity),
-    };
+    if (explicit) {
+      const provenance = finding.provenance as JsonObject;
+      distinct.provenance = {
+        ...provenance,
+        preservedIdentity:
+          provenance.preservedIdentity ?? structuredClone(identity),
+      };
+    }
     used.add(scanFindingIdentity(distinct));
     return distinct;
   });

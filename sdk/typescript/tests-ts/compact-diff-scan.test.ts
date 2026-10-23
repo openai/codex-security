@@ -602,7 +602,7 @@ describe("compact diff scan", () => {
         ).findings.map((draftFinding) => draftFinding["identity"]),
       ).toEqual([
         { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -729,7 +729,7 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[

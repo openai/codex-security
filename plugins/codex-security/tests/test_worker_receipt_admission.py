@@ -159,10 +159,11 @@ JAVASCRIPT_CANDIDATE_HASHES = [
 @pytest.mark.parametrize("index", range(len(CANDIDATE_IDS)))
 def test_saved_candidate_projection_matches_javascript_utf8(tmp_path: Path, index: int):
     import workbench_saved_results as saved
+    from workbench_validation import javascript_utf8
 
     candidate = CANDIDATE_IDS[index]
     digest = JAVASCRIPT_CANDIDATE_HASHES[index]
-    assert hashlib.sha256(saved.javascript_utf8(candidate)).hexdigest() == digest
+    assert hashlib.sha256(javascript_utf8(candidate)).hexdigest() == digest
     draft = saved_draft(
         "identity-scan",
         complete=True,

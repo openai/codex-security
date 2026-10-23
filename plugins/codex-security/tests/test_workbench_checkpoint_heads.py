@@ -1245,3 +1245,97 @@ def test_generic_worker_closeout_preserves_receipt_owners(
             "Synthetic current evidence.\n",
         }
     assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("abandoned_time", [100, 200, 300])
+def test_accepted_head_survives_superseded_terminal_timestamps(
+    tmp_path: Path, complete: bool, abandoned_time: int
+) -> None:
+    scan_id = "accepted-publication"
+    write_completed_contract(
+        tmp_path, scan_id, tmp_path, target_kind="git_revision", target_revision="head"
+    )
+    manifest = json.loads((tmp_path / "scan-manifest.json").read_text())
+    binding = saved_binding("deep_repository")
+    binding["target"] = manifest["scan"]["target"]
+    findings = json.loads((tmp_path / "findings.json").read_text())["findings"]
+    findings.append(copy.deepcopy(findings[0]))
+    findings[1]["identity"]["anchor"] = "second-accepted-finding"
+    findings[1]["title"] = "Second accepted finding"
+    accepted = saved_draft(
+        scan_id,
+        complete=complete,
+        findings=findings,
+    )
+    checkpoints = tmp_path / "checkpoints"
+    raw = write_checkpoint(
+        checkpoints,
+        {
+            **accepted,
+            "publication": {"previousCheckpoint": None, "previousInputCheckpoint": None},
+        },
+    )
+    projected = {
+        **accepted,
+        "scope": binding["scope"],
+        "coverage": {
+            **accepted["coverage"],
+            "mode": "deep_repository",
+            "inventoryStrategy": "repository",
+            "includePaths": ["."],
+            "excludePaths": [],
+        },
+    }
+    head = write_checkpoint(checkpoints, projected)
+    abandoned = write_checkpoint(
+        checkpoints,
+        {
+            **saved_draft(scan_id, complete=True),
+            "publication": {"previousCheckpoint": None, "previousInputCheckpoint": None},
+        },
+    )
+    write_saved_parent(tmp_path, projected, 200)
+    manifest["scan"]["complete"] = complete
+    (tmp_path / "scan-manifest.json").write_text(json.dumps(manifest))
+    selection = tmp_path / "checkpoint-head.json"
+    selection.write_text(json.dumps({"checkpoint": head.name, "inputCheckpoint": raw.name}))
+    for file in (
+        raw,
+        head,
+        selection,
+        tmp_path / "scan-manifest.json",
+        tmp_path / "findings.json",
+        tmp_path / "coverage.json",
+    ):
+        os.utime(file, ns=(200, 200))
+    os.utime(abandoned, ns=(abandoned_time, abandoned_time))
+    original = {path: path.read_bytes() for path in (raw, head, abandoned)}
+    warnings: list[str] = []
+    result = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [],
+        warnings,
+        stopped=True,
+        reason="interrupted",
+        scan_mode="deep",
+    )
+    assert result is not None
+    assert [row["title"] for row in result[1]["findings"]] == [row["title"] for row in findings]
+    assert warnings == []
+    replay = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [],
+        warnings,
+        stopped=True,
+        reason="interrupted",
+        scan_mode="deep",
+        frozen_source_digests=result[0]["scan"]["preservedSources"],
+    )
+    assert replay[1] == result[1]
+    assert warnings == []
+    assert all(path.read_bytes() == content for path, content in original.items())
