@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -107,6 +108,8 @@ test(${JSON.stringify(file)}, () => {
             "--experimental-strip-types",
             join(root, "scripts", "run-ci-tests.mts"),
             `${shard}/${count}`,
+            "--parallel=2",
+            "--parallel-delay=0",
           ],
           env: {
             ...process.env,
@@ -301,5 +304,114 @@ test("isolated timeout", async () => {
     expect(stderr).toContain("this test timed out after 100ms");
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("parallel workers preserve failures, skips, inherited timeouts, and covered lines", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-parallel-report-");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root);
+    await writeFile(
+      join(root, "shared.ts"),
+      `export function first() {
+  return "first";
+}
+export function second() {
+  return "second";
+}
+`,
+    );
+    for (const [name, body] of [
+      ["pass", 'expect(first()).toBe("first");'],
+      ["fail", 'expect(second()).toBe("deliberate failure");'],
+      ["skip", ""],
+    ]) {
+      await writeFile(
+        join(root, "tests-ts", `${name}.test.ts`),
+        `import { expect, test } from "bun:test";
+import { readdir, writeFile } from "node:fs/promises";
+import { first, second } from "../shared.ts";
+test${name === "skip" ? ".skip" : ""}("synthetic ${name}", async () => {
+  if (process.env["CODEX_SECURITY_PARALLEL_PROBE"] === "parallel") {
+    const worker = process.env["BUN_TEST_WORKER_ID"];
+    expect(worker).toBeDefined();
+    const workers = ${JSON.stringify(join(root, "workers"))};
+    await writeFile(workers + "/" + worker, "");
+    while ((await readdir(workers)).length < 2) {
+      await new Promise(setImmediate);
+    }
+  }
+  expect(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"]).toBe("5000");
+  ${body}
+});
+`,
+      );
+    }
+    const workers = join(root, "workers");
+    await mkdir(workers);
+    const covered = new Map<string, string[]>();
+    for (const mode of ["baseline", "parallel"]) {
+      const child = Bun.spawn({
+        cmd: [
+          node!,
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
+          "1/1",
+          ...(mode === "parallel"
+            ? ["--parallel=2", "--parallel-delay=0"]
+            : []),
+          "--timeout=5000",
+          "--coverage",
+          "--coverage-reporter=lcov",
+          `--coverage-dir=reports/${mode}`,
+          `--reporter-outfile=reports/${mode}.xml`,
+        ],
+        env: {
+          ...process.env,
+          CODEX_SECURITY_PARALLEL_PROBE: mode,
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const { status, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(1);
+      const xml = await readFile(join(root, "reports", `${mode}.xml`), "utf8");
+      expect(xml.match(/<testcase /gu)).toHaveLength(3);
+      expect(xml.match(/<failure /gu)).toHaveLength(1);
+      expect(xml.match(/<skipped/gu)).toHaveLength(1);
+      for (const name of ["pass", "fail", "skip"]) {
+        expect(xml).toContain(`name="synthetic ${name}"`);
+      }
+      const lcov = await readFile(
+        join(root, "reports", mode, "lcov.info"),
+        "utf8",
+      );
+      const source = lcov
+        .split("end_of_record")
+        .find((record) =>
+          /^SF:.*shared\.ts$/mu.test(record.replaceAll("\r", "")),
+        );
+      expect(source).toBeDefined();
+      covered.set(
+        mode,
+        [...source!.matchAll(/^DA:(\d+),([1-9]\d*)$/gmu)].map(
+          (match) => match[1]!,
+        ),
+      );
+    }
+    expect((await readdir(workers)).sort()).toEqual(["1", "2"]);
+    expect(covered.get("baseline")).toContain("2");
+    expect(covered.get("baseline")).toContain("5");
+    expect(covered.get("parallel")).toEqual(covered.get("baseline"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

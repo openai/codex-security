@@ -304,7 +304,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7 --seed=${{ github.run_number }}",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7 --parallel=2 --seed=${{ github.run_number }}",
       }),
     );
   });
@@ -528,14 +528,13 @@ describe("TypeScript package skeleton", () => {
       ],
       mode: [
         { name: "baseline", args: "" },
-        { name: "isolated", args: "--isolate" },
         { name: "parallel", args: "--parallel=2" },
       ],
     });
     for (const [job, version] of [
       [runner, "1.4.3"],
-      [ci.jobs["test"]!, "1.3.14"],
-      [ci.jobs["windows-test"]!, "1.3.14"],
+      [ci.jobs["test"]!, "1.4.3"],
+      [ci.jobs["windows-test"]!, "1.4.3"],
       [quality.jobs["mutation"]!, "1.3.14"],
     ] as const) {
       expect(

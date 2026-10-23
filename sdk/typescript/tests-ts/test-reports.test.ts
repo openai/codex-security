@@ -93,15 +93,9 @@ describe("JUnit inventory comparison", () => {
   test("runs every workflow comparison before reporting a mismatch", async () => {
     const fixture = await workflowFixtures();
     const script = fixture.script;
-    const expected = [
-      "ubuntu-latest",
-      "macos-latest",
-      "windows-latest",
-    ].flatMap((os) =>
-      ["isolated", "parallel"].map(
-        (mode) =>
-          `reports/runner-${os}-baseline-*.xml|reports/runner-${os}-${mode}-*.xml`,
-      ),
+    const expected = ["ubuntu-latest", "macos-latest", "windows-latest"].map(
+      (os) =>
+        `reports/runner-${os}-baseline-*.xml|reports/runner-${os}-parallel-*.xml`,
     );
     const mock = `node() {
   printf '%s\\n' "$3|$4"
@@ -144,7 +138,7 @@ describe("JUnit inventory comparison", () => {
   ]) {
     test(`rejects identically incomplete workflow groups: ${scenario.name}`, async () => {
       const fixture = await workflowFixtures();
-      for (const mode of ["baseline", "isolated", "parallel"]) {
+      for (const mode of ["baseline", "parallel"]) {
         if (scenario.missing !== undefined) {
           await rm(
             join(
@@ -192,7 +186,7 @@ describe("JUnit inventory comparison", () => {
         (await readFile(join(fixture.root, "summary.md"), "utf8"))
           .trim()
           .split(/\r?\n/u),
-      ).toHaveLength(6);
+      ).toHaveLength(3);
     });
   }
 
