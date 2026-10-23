@@ -989,9 +989,10 @@ test.each(["failure", "abort"] as const)(
   async (mode) => {
     const context = await fixture();
     const controller = new AbortController();
+    const failureMessage = `--synthetic-import-completion-failure ${"detail ".repeat(20_000)}final cause`;
     const run: typeof runWorkbench = async (options, args, input) => {
       if (args[0] === "prepare-scan-completion" && mode === "failure") {
-        throw new Error("--synthetic-import-completion-failure");
+        throw new Error(failureMessage);
       }
       const result = await runWorkbench(options, args, input);
       if (args[0] === "register-cli-scan" && mode === "abort")
@@ -1007,12 +1008,17 @@ test.each(["failure", "abort"] as const)(
     );
     if (mode === "abort")
       await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
-    else
-      await expect(operation).rejects.toThrow(
-        "--synthetic-import-completion-failure",
-      );
+    else await expect(operation).rejects.toThrow(failureMessage);
     const scans = await storedScans(context);
     expect(scans).toHaveLength(1);
     expect(scans[0]!.status).toBe("failed");
+    if (mode === "failure") {
+      const saved = await runWorkbench(context.workbenchOptions, [
+        "get-scan",
+        "--scan-id",
+        scans[0]!.id,
+      ]);
+      expect(saved["scan"]).toMatchObject({ failureMessage });
+    }
   },
 );

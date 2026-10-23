@@ -2,6 +2,7 @@ import { CodexSecurityError } from "./errors.js";
 import {
   repositoryUrlKey,
   validateExternalEvidence,
+  type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
 import { readWizCsv, wizCsvFinding } from "./wiz-csv.js";
@@ -26,22 +27,31 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function sourceFindingId(value: unknown): string {
+function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
   const id = text(value);
-  if (!id || id.includes("\0") || Buffer.byteLength(id) > 512)
+  if (
+    !id ||
+    id.includes("\0") ||
+    (target === "cloud" && Buffer.byteLength(id) > 512)
+  )
     throw new Error(
-      "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
+      target === "cloud"
+        ? "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters."
+        : "Source finding id must be nonempty and contain no NUL characters.",
     );
   return id;
 }
 
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
-function wizFinding(record: Record<string, unknown>): VendorFinding {
+function wizFinding(
+  record: Record<string, unknown>,
+  target: ExternalImportTarget,
+): VendorFinding {
   if (record["detectionMethod"] === "EXTERNAL_NETWORK_SCAN")
     throw new Error(
       "Wiz external network findings are not supported by the package vulnerability mapping.",
     );
-  const id = sourceFindingId(record["id"]);
+  const id = sourceFindingId(record["id"], target);
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
   const version = text(record["version"]);
@@ -106,7 +116,7 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
   };
   return {
     source_finding_id: id,
-    evidence: validateExternalEvidence(evidence),
+    evidence: validateExternalEvidence(evidence, target),
   };
 }
 
@@ -223,8 +233,9 @@ function repositoryFinding(
   record: Record<string, unknown>,
   repositories: FindingInput["repositories"],
   legacy = false,
+  target: ExternalImportTarget = "cloud",
 ): VendorFinding {
-  const id = sourceFindingId(record["id"]);
+  const id = sourceFindingId(record["id"], target);
   const resource = object(record["resource"]);
   if (kind === "secret" && resource?.["type"] !== "REPOSITORY_BRANCH")
     throw new Error(
@@ -299,25 +310,28 @@ function repositoryFinding(
   return {
     // Existing package occurrence IDs remain unchanged. New families cannot
     // collide with one another when the same tenant source key is used.
-    source_finding_id: sourceFindingId(`${kind}:${id}`),
-    evidence: validateExternalEvidence({
-      title: text(record["name"]) ?? text(rule?.["name"]),
-      severity: text(record["severity"])?.toLowerCase(),
-      description: text(record["description"]) ?? text(rule?.["description"]),
-      url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
-      locations: path ? [{ path, line: line ?? null }] : [],
-      branch: sourceBranch(branch, repository, legacy),
-      code_revision: null,
-      source_scan_id: null,
-      source_updated_at:
-        kind === "secret"
-          ? updatedAt(record["lastUpdatedAt"], "lastUpdatedAt")
-          : kind === "iac"
-            ? updatedAt(record["updatedAt"], "updatedAt")
-            : null,
-      source_data: record,
-      details,
-    }),
+    source_finding_id: sourceFindingId(`${kind}:${id}`, target),
+    evidence: validateExternalEvidence(
+      {
+        title: text(record["name"]) ?? text(rule?.["name"]),
+        severity: text(record["severity"])?.toLowerCase(),
+        description: text(record["description"]) ?? text(rule?.["description"]),
+        url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
+        locations: path ? [{ path, line: line ?? null }] : [],
+        branch: sourceBranch(branch, repository, legacy),
+        code_revision: null,
+        source_scan_id: null,
+        source_updated_at:
+          kind === "secret"
+            ? updatedAt(record["lastUpdatedAt"], "lastUpdatedAt")
+            : kind === "iac"
+              ? updatedAt(record["updatedAt"], "updatedAt")
+              : null,
+        source_data: record,
+        details,
+      },
+      target,
+    ),
   };
 }
 
@@ -443,12 +457,16 @@ function records(payload: unknown): FindingInput {
 
 export async function readVendorFindings(
   path: string,
+  target: ExternalImportTarget = "cloud",
 ): Promise<VendorFindings> {
-  return normalizeFindings(await readFindingInput(path));
+  return normalizeFindings(await readFindingInput(path), target);
 }
 
 /** @internal Preserve older inventory projections only for saved publication replay. */
-export async function readVendorFindingsForPublication(path: string): Promise<{
+export async function readVendorFindingsForPublication(
+  path: string,
+  target: ExternalImportTarget = "cloud",
+): Promise<{
   current: VendorFindings;
   legacy: VendorFindings;
   currentIdentity: unknown[];
@@ -457,9 +475,10 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
 }> {
   const input = await readFindingInput(path);
   const normalized = new WeakSet<VendorFinding>();
-  const current = normalizeFindings(input, normalized);
+  const current = normalizeFindings(input, target, normalized);
   const legacy = normalizeFindings(
     { ...input, repositories: input.legacyRepositories ?? input.repositories },
+    target,
     normalized,
     true,
   );
@@ -530,6 +549,7 @@ async function readFindingInput(path: string): Promise<FindingInput> {
 
 function normalizeFindings(
   input: FindingInput,
+  target: ExternalImportTarget,
   normalized?: WeakSet<VendorFinding>,
   legacy = false,
 ): VendorFindings {
@@ -545,7 +565,11 @@ function normalizeFindings(
       if (!record) throw new Error("Finding must be an object.");
       let finding: VendorFinding;
       if (item.kind === "sca_csv") {
-        finding = wizCsvFinding(record, sourceFindingId(record["ID"]));
+        finding = wizCsvFinding(
+          record,
+          sourceFindingId(record["ID"], target),
+          target,
+        );
       } else if ("source_finding_id" in record) {
         if (
           Object.keys(record).some(
@@ -557,8 +581,11 @@ function normalizeFindings(
           );
         }
         finding = {
-          source_finding_id: sourceFindingId(record["source_finding_id"]),
-          evidence: validateExternalEvidence(record["evidence"]),
+          source_finding_id: sourceFindingId(
+            record["source_finding_id"],
+            target,
+          ),
+          evidence: validateExternalEvidence(record["evidence"], target),
         };
       } else if (item.kind === "cloud_configuration") {
         throw new Error(
@@ -570,6 +597,7 @@ function normalizeFindings(
           record,
           input.repositories,
           legacy,
+          target,
         );
       } else {
         if (
@@ -581,7 +609,7 @@ function normalizeFindings(
           throw new Error(
             "Raw SAST, secret, and IaC records require their named sastFindings, secretInstances, or iacFindings collection. Bare arrays do not identify the finding family; use normalized JSONL for an explicit mapping.",
           );
-        finding = wizFinding(record);
+        finding = wizFinding(record, target);
       }
       if (identities.has(finding.source_finding_id)) {
         throw new CodexSecurityError(
