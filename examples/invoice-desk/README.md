@@ -170,8 +170,9 @@ so cache availability is a performance signal, not a pass/fail condition.
 
 After merging this setup, run a main baseline and inspect the completed reports.
 Run the same revision again to verify a cache hit and compare elapsed time and
-token use. Then use an ordinary PR to verify the automatic dispatcher and the
-reported source SHA.
+token use. Then select **Actions → Invoice Desk OpenAI scan → Run workflow** on
+`main`, enter an open PR's number in `pr_number` and its exact current head SHA in
+`source_sha`, and verify that the reports identify that source SHA.
 
 Review actual findings against the ten root causes in the QA manifest. Record
 matched cases, misses, uncertain cases, duplicates, and additional findings;
