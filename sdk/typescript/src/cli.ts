@@ -59,6 +59,7 @@ import {
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
+import { formatCoverageScope } from "./coverage-presentation.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -10721,6 +10722,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

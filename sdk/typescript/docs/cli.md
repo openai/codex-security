@@ -426,6 +426,11 @@ codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+`--path` selects files or directories. The scan summary and saved scan details
+show requested paths and exclusions. `coverage.deferred` records unfinished
+requested work separately from optional `coverage.openQuestions` follow-up.
+Human-readable output quotes ambiguous paths, while JSON retains their original strings.
+
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
 
