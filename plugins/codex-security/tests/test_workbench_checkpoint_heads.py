@@ -425,14 +425,15 @@ def test_recovery_keeps_generic_work_that_collides_with_candidate_aliases(
     repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, workers)
     assert first[2] == replay[2] == repeated[2]
     for result in (first, replay, repeated):
-        assert [row for row in result[2]["deferred"] if row["id"] != "scan-stopped"] == [generic]
-        assert (
-            sum(
-                row["label"] == "Generic review" and row["disposition"] == "needs_follow_up"
-                for row in result[2]["surfaces"]
-            )
-            == 1
-        )
+        pending_surfaces = [
+            row
+            for row in result[2]["surfaces"]
+            if row["label"] == "Generic review" and row["disposition"] == "needs_follow_up"
+        ]
+        assert len(pending_surfaces) == 1
+        assert [row for row in result[2]["deferred"] if row["id"] != "scan-stopped"] == [
+            {**generic, "surfaceIds": [pending_surfaces[0]["id"]]}
+        ]
         assert any(
             row.get("candidateId") == "candidate-a" and row["disposition"] == outcome
             for row in result[2]["surfaces"]
