@@ -44,7 +44,10 @@ test("rejects an unrepresentable deadline before scan setup", async () => {
   expect(now).not.toHaveBeenCalled();
 });
 
-async function fixture(start = Date.UTC(2026, 0, 1)) {
+async function fixture(
+  start = Date.UTC(2026, 0, 1),
+  beforeDiscovery?: () => never,
+) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const codexHome = join(root, "home");
@@ -68,6 +71,7 @@ async function fixture(start = Date.UTC(2026, 0, 1)) {
         recipes.push(JSON.parse(input!).recipe);
       }
       if (args[0] === "get-scan-feedback") clock += 60_000;
+      if (args[0] === "list-scans") beforeDiscovery?.();
       return mockWorkbench(args, input);
     },
     createCodex: codexFactory(async (prompt: string, options: TurnOptions) => {
@@ -177,7 +181,7 @@ test("explicit cancellation remains authoritative with an advisory allowance", a
       signal: controller.signal,
     }),
   ).rejects.toBeInstanceOf(ScanInterruptedError);
-  expect(state.commands).toContain("fail-scan");
+  expect(state.commands).toContain("cancel-scan");
   expect(state.commands).not.toContain("complete-scan");
 });
 
@@ -198,12 +202,11 @@ test("preflight exposes the effective Deep limit in minutes and leaves Standard 
   });
 });
 
-test("Deep stores its converted hard limit without adding the Standard advisory policy", async () => {
-  const state = await fixture();
-  await using client = state.client;
-  state.setFinish(async () => {
+test("Deep stores its converted hard limit before discovery", async () => {
+  const state = await fixture(undefined, () => {
     throw new Error("Captured Deep launch");
   });
+  await using client = state.client;
   await expect(
     client.run(state.repository, {
       mode: "deep",
@@ -211,7 +214,7 @@ test("Deep stores its converted hard limit without adding the Standard advisory 
     }),
   ).rejects.toThrow("Captured Deep launch");
   expect(state.clockReads).toBe(0);
-  expect(state.prompts[0]).not.toContain("2026-01-01T00:01:00.000Z");
+  expect(state.prompts).toEqual([]);
   expect(state.recipes[0]).toMatchObject({
     maxTimeMinutes: 90,
     deepScan: { maxTimeHours: 1.5 },

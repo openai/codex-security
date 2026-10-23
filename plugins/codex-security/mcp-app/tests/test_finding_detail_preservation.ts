@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { finding } from "./scan-draft-fixture.ts";
 
-const { parseCurrentFindings, preserveFindingDetails } = await importSource(
+const { parseCurrentFindings } = await importSource(
   "src/artifact-scan-draft.ts",
+);
+const { preserveFindingDetails } = await importSource(
+  fileURLToPath(
+    new URL(
+      "../../../../sdk/typescript/src/scan-semantics.ts",
+      import.meta.url,
+    ),
+  ),
 );
 
 function parsedFinding(auditJson: string) {

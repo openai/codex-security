@@ -63,11 +63,15 @@ export interface SeverityClassification {
 
 /** @internal Per-finding persistence used by saved-scan classification. */
 export interface SeverityClassificationCheckpoint {
-  load(result: SeverityClassification): Promise<SeverityAssessment[]>;
+  load(
+    result: SeverityClassification,
+    findings: readonly SeverityClassificationFinding[],
+  ): Promise<SeverityAssessment[]>;
   save(
     finding: SeverityClassificationFinding,
     assessment: SeverityAssessment,
     result: SeverityClassification,
+    reused?: boolean,
   ): Promise<void>;
 }
 
@@ -91,6 +95,14 @@ export const severityClassificationSchema = z.strictObject({
     }),
   ),
 }) satisfies z.ZodType<SeverityClassification>;
+
+/** @internal Reusable evidence excludes only its scan-local occurrence binding. */
+export function severityFindingDigest(
+  finding: SeverityClassificationFinding,
+): string {
+  const { occurrenceId: _occurrenceId, ...evidence } = finding;
+  return workflowDigest(evidence);
+}
 
 /** Classify each supplied report independently, without scanning or writing findings. */
 export async function classifySeverity(
@@ -135,16 +147,26 @@ export async function classifySeverityInternal(
     knowledgeBaseSha256: knowledge === null ? null : workflowDigest(knowledge),
     assessments: [],
   };
-  const cached = new Map((await checkpoint?.load(result))?.map(findingEntry));
+  const cached = new Map(
+    (await checkpoint?.load(result, findings))?.map((assessment) => [
+      assessment.findingId,
+      assessment,
+    ]),
+  );
   for (const finding of findings) {
     options.signal?.throwIfAborted();
-    const inputSha256 = workflowDigest(finding);
+    const inputSha256 = severityFindingDigest(finding);
     const previous = cached.get(finding.findingId);
     if (previous?.inputSha256 === inputSha256) {
-      validateSeverityClassification({ ...result, assessments: [previous] }, [
+      const rebound = {
+        ...previous,
+        occurrenceId: finding.occurrenceId ?? null,
+      };
+      validateSeverityClassification({ ...result, assessments: [rebound] }, [
         finding,
       ]);
-      result.assessments.push(previous);
+      await checkpoint?.save(finding, rebound, result, true);
+      result.assessments.push(rebound);
       continue;
     }
     const prompt = [
@@ -209,7 +231,8 @@ export function validateSeverityClassification(
     if (
       !finding ||
       assessment.occurrenceId !== (finding.occurrenceId ?? null) ||
-      assessment.inputSha256 !== workflowDigest(finding) ||
+      (assessment.inputSha256 !== severityFindingDigest(finding) &&
+        assessment.inputSha256 !== workflowDigest(finding)) ||
       (assessment.source === "rubric") !== (result.rubricSha256 !== null) ||
       (assessment.decision === "assessed"
         ? assessment.level === null

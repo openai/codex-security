@@ -925,7 +925,14 @@ command shims such as `codex.cmd` fall back to the bundled executable.
 Python lookup: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
-works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
+works on Windows).
+
+`CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage. The native MCP
+host preserves the Python workbench's path selection: relative values resolve
+from the plugin directory, whitespace is part of the path, and an empty value
+uses the default. Home prefixes, including `~user` on POSIX, expand before
+physical path resolution. The host, scan workers, and execution locks share
+that selected location.
 
 ### Troubleshooting
 
@@ -2104,6 +2111,14 @@ identifier, and post-scan prompt; older records cannot reconstruct missing value
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
 original producer version. Unsupported artifacts are rejected without rewriting them.
+
+Unsealed scans from the retired Deep Scan runtime cannot resume; start a fresh
+scan or use the prior release to finish them. Saved drafts must match the current
+schema. The current runtime reads parent drafts and ordinary scan checkpoints;
+legacy worker or reducer fragments and historical checkpoints without a pending
+checkpoint index are not imported automatically. Older unreleased database
+snapshots that identified child scans by artifact paths are no longer migrated.
+Existing reports remain readable, and rejection preserves saved state and files.
 
 For bulk scans, use [bulk recovery](#recovering-failed-or-interrupted-bulk-scans)
 to update campaign receipts. Individual resume does not update `results.jsonl`.

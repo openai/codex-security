@@ -26,6 +26,10 @@ import {
   tarRecord,
 } from "./package-tar-fixtures.js";
 
+// Bun on Windows can start synchronous timeouts from a stale loop clock.
+// https://github.com/oven-sh/bun/pull/33935
+const execFileAsync = promisify(execFile);
+
 const { assertTarListingSizes, regularTarListingLines } = (await import(
   new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
 )) as {
@@ -35,9 +39,6 @@ const { assertTarListingSizes, regularTarListingLines } = (await import(
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
 )) as { packageDistFiles: readonly string[] };
-// Avoid Bun 1.3.14's stale Windows spawnSync timeout.
-// https://github.com/oven-sh/bun/issues/33932
-const execFileAsync = promisify(execFile);
 
 const pluginContract = {
   externalOwnedExact: [".codex-plugin/plugin.json"],

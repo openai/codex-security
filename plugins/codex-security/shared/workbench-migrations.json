@@ -441,5 +441,28 @@
     "statements": [
       "CREATE TABLE external_source_reports (\n    id TEXT PRIMARY KEY,\n    repository TEXT NOT NULL,\n    provider TEXT NOT NULL,\n    source_key TEXT NOT NULL,\n    source_finding_id TEXT NOT NULL,\n    evidence_json TEXT NOT NULL,\n    version INTEGER NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (repository, provider, source_key, source_finding_id)\n);"
     ]
+  },
+  {
+    "version": 54,
+    "name": "persist composition child membership",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN parent_scan_role TEXT\n    CHECK (parent_scan_role IS NULL OR parent_scan_role = 'deep_pass');",
+      "CREATE INDEX scans_by_composition_parent ON scans(parent_scan_id)\n    WHERE parent_scan_role = 'deep_pass';"
+    ]
+  },
+  {
+    "version": 55,
+    "name": "reuse scan severity assessments",
+    "statements": [
+      "CREATE INDEX scan_severity_reuse ON scan_severity_assessments\n    (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);"
+    ]
+  },
+  {
+    "version": 56,
+    "name": "persist scan target executable protection",
+    "statements": [
+      "ALTER TABLE workspaces ADD COLUMN target_protection_roots_json TEXT;",
+      "ALTER TABLE scans ADD COLUMN target_protection_roots_json TEXT;"
+    ]
   }
 ]

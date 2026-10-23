@@ -132,10 +132,11 @@ test("saved patch and verification tasks receive complete sealed evidence and li
     "--scan-id",
     fixture.scanId,
   ]);
-  const previewFinding = (preview["scan"] as { findings: Finding[] })
-    .findings[0]!;
+  const previewFinding = (
+    preview["scan"] as { findings: Finding[] }
+  ).findings.find((finding) => finding.occurrenceId === full.occurrenceId)!;
   expect(previewFinding.codeEvidence).toHaveLength(4);
-  expect(previewFinding.writeup?.reportPath).not.toBe(full.writeup!.reportPath);
+  expect(previewFinding.writeup?.reportPath).toBe(full.writeup!.reportPath);
 
   for (const command of ["patch", "verify-fix"]) {
     const { runCli, stderr } = createCliTest(main);

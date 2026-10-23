@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { decodeUtf8 } from "./helpers/utf8.js";
 import { decodePosixBytes } from "./helpers/posix-path.js";
-import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
+import { runPythonWithInput } from "./python_command.js";
 import {
   stableJson,
   candidateRelativePath,
@@ -48,6 +48,11 @@ export type DiscoveryCandidatesInput = Pick<
   z.infer<typeof workbenchDiscoveryCandidatesInputSchema>,
   "candidates"
 >;
+import {
+  missingPythonHelperMessage,
+  resolvePythonCommand,
+} from "./python_command.js";
+export const rawDiscoveryCandidateSchema = definitions.rawDiscoveryCandidate;
 
 /**
  * Normalize in memory and replace the bound canonical candidate ledger.

@@ -7,11 +7,11 @@ import pytest
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
     deep_scan_fixture,
-    standard_finding,
 )
 from workbench_test_support import (
     cancel_scan,
     fail_deep_scan,
+    finding_fixture,
     get_scan,
     preserve_scan_results,
     saved_draft,
@@ -22,9 +22,9 @@ from workbench_test_support import (
 def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     tmp_path: Path, termination: str
 ) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
     environment = {"CODEX_HOME": str(codex_home)}
-    finding = standard_finding(tmp_path, scan_id, target)
+    finding = finding_fixture(relative_path="app.py")
     workers = {}
     originals = {}
     for name in ("first", "second"):

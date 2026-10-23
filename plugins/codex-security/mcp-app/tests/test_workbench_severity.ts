@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -75,7 +76,7 @@ function begin(
   };
 }
 
-test("severity checkpoints retain external findings and each scan's cached assessments", (t) => {
+test("severity checkpoints retain external findings and isolate each scan's assessments", (t) => {
   const database = open(t);
   const payload = save("finding\0suffix", "scan-a");
   payload.assessment.classificationRuns = 10;
@@ -108,7 +109,7 @@ test("severity checkpoints retain external findings and each scan's cached asses
       begin("scan-b", [payload.finding.findingId]),
       "started",
     ),
-    { assessments: [first] },
+    { assessments: [] },
   );
   payload.scanId = "scan-b";
   payload.finding.identity.anchor = "must-not-replace-existing-finding";
@@ -122,9 +123,11 @@ test("severity checkpoints retain external findings and each scan's cached asses
     ),
     { assessments: [first] },
   );
-  assert.deepEqual(assessments(database, [payload.finding.findingId]), [
-    { ...payload.assessment, assessedAt: "second" },
-  ]);
+  assert.deepEqual(assessments(database, [payload.finding.findingId]), []);
+  assert.deepEqual(
+    assessments(database, [payload.finding.findingId], "scan-b"),
+    [{ ...payload.assessment, assessedAt: "second" }],
+  );
   assert.equal(
     database
       .prepare("SELECT details_json FROM findings WHERE id = ?")
@@ -147,7 +150,7 @@ test("failed assessment writes roll back external finding insertion and preserve
     database.prepare("SELECT 1 FROM findings WHERE id = 'new'").get(),
     undefined,
   );
-  assert.equal(assessments(database, ["saved"])[0].assessedAt, "first");
+  assert.equal(assessments(database, ["saved"], "scan")[0].assessedAt, "first");
   invalid.finding.findingId = "saved\ud800";
   assert.throws(
     () => severityCheckpoint(database, invalid, "third"),
@@ -234,4 +237,270 @@ test("old database reads use legacy assessments without migrating or changing th
   const missing = join(directory, "missing.sqlite3");
   assert.throws(() => readSeverityClassification(missing, "scan"));
   await assert.rejects(stat(missing), { code: "ENOENT" });
+});
+
+test("recover legacy assessments only for their owning scan and keep read-only recovery unchanged", async (t) => {
+  const directory = await temporary.create("severity-owner-");
+  const path = join(directory, "workbench.sqlite3");
+  const database = open(t, path);
+  const occurrence = `occ_${createHash("sha256").update("scan-a\0fingerprint").digest("hex").slice(0, 24)}`;
+  database.exec(`INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+    VALUES ('finding', 'fingerprint', 'rule', 'anchor', 'created', 'updated');`);
+  database
+    .prepare(
+      `INSERT INTO finding_severity_assessments
+    (finding_id, occurrence_id, input_sha256, assessed_at, source, decision, level, rationale)
+    VALUES ('finding', ?, 'digest', 'assessed', 'existing-severity', 'assessed', 'high', 'Saved')`,
+    )
+    .run(occurrence);
+  const legacy = assessments(database, ["finding"]);
+  assert.deepEqual(
+    severityCheckpoint(database, begin("scan-a", ["finding"]), "started"),
+    { assessments: legacy },
+  );
+  assert.deepEqual(
+    severityCheckpoint(database, begin("scan-b", ["finding"]), "started"),
+    { assessments: [] },
+  );
+  const before = database
+    .prepare("SELECT * FROM scan_severity_assessments")
+    .all();
+  const recovered = readSeverityClassification(path, "scan-a") as {
+    assessments: unknown[];
+  };
+  assert.deepEqual(recovered.assessments, legacy);
+  assert.deepEqual(
+    database.prepare("SELECT * FROM scan_severity_assessments").all(),
+    before,
+  );
+  const current = save("finding", "scan-a");
+  current.assessment.level = "low";
+  severityCheckpoint(database, current, "updated");
+  assert.equal(
+    severityCheckpoint(database, begin("scan-a", ["finding"]), "started")
+      .assessments![0].level,
+    "low",
+  );
+  assert.deepEqual(assessments(database, ["finding"]), legacy);
+});
+
+test("matching evidence reuses per-scan assessments without changing an acknowledged receipt", (t) => {
+  const database = open(t);
+  const first = save("finding", "scan-a");
+  const second = save("finding", "scan-b");
+  second.assessment.level = "medium";
+  severityCheckpoint(database, begin("scan-a", ["finding"]), "unused");
+  severityCheckpoint(database, begin("scan-b", ["finding"]), "unused");
+  severityCheckpoint(database, first, "2026-01-01T00:00:00Z");
+  severityCheckpoint(database, second, "2026-01-02T00:00:00Z");
+  const cached = (
+    scanId: string,
+    inputSha256 = "evidence-digest",
+    rubricSha256: string | null = null,
+  ) =>
+    severityCheckpoint(
+      database,
+      {
+        ...begin(scanId, ["finding"]),
+        action: "begin",
+        scanId,
+        findingIds: ["finding"],
+        assessedAt: "2026-01-03T00:00:00Z",
+        rubricSha256,
+        knowledgeBaseSha256: null,
+        inputs: { finding: inputSha256 },
+      },
+      "unused",
+    ).assessments!;
+  assert.equal(cached("scan-c")[0].level, "medium");
+  assert.equal(cached("scan-a")[0].level, "high");
+  assert.deepEqual(cached("scan-c", "changed-evidence"), []);
+  assert.deepEqual(cached("scan-c", "evidence-digest", "changed-rubric"), []);
+  severityCheckpoint(
+    database,
+    { ...first, reused: true },
+    "2026-01-04T00:00:00Z",
+  );
+  assert.equal(
+    assessments(database, ["finding"], "scan-a")[0].assessedAt,
+    "2026-01-01T00:00:00Z",
+  );
+  severityCheckpoint(
+    database,
+    {
+      ...first,
+      reused: true,
+      assessment: { ...first.assessment, inputSha256: "changed-evidence" },
+    },
+    "2026-01-05T00:00:00Z",
+  );
+  assert.equal(
+    assessments(database, ["finding"], "scan-a")[0].assessedAt,
+    "2026-01-05T00:00:00Z",
+  );
+  assert.deepEqual(assessments(database, ["finding"]), []);
+});
+
+test("reuse selects the requested review count before ranking and updates a stale local count", (t) => {
+  const database = open(t);
+  const first = save("finding", "scan-a");
+  first.assessment.classificationRuns = 1;
+  const matching = save("finding", "scan-b");
+  matching.assessment.classificationRuns = 3;
+  const legacy = save("finding", "scan-c");
+  for (const [payload, timestamp] of [
+    [first, "2026-01-01T00:00:00Z"],
+    [matching, "2026-01-02T00:00:00Z"],
+    [legacy, "2026-01-03T00:00:00Z"],
+  ] as const) {
+    severityCheckpoint(database, begin(payload.scanId, ["finding"]), "started");
+    severityCheckpoint(database, payload, timestamp);
+  }
+
+  const cached = (classificationRuns?: number) =>
+    severityCheckpoint(
+      database,
+      {
+        action: "begin",
+        scanId: "scan-a",
+        findingIds: ["finding"],
+        inputs: { finding: "evidence-digest" },
+        assessedAt: "started",
+        rubricSha256: null,
+        knowledgeBaseSha256: null,
+        classificationRuns,
+      },
+      "unused",
+    ).assessments!;
+  assert.deepEqual(cached(3), [
+    { ...matching.assessment, assessedAt: "2026-01-02T00:00:00Z" },
+  ]);
+  assert.deepEqual(cached(), [
+    { ...legacy.assessment, assessedAt: "2026-01-03T00:00:00Z" },
+  ]);
+  assert.deepEqual(cached(5), []);
+
+  const reused = { ...matching, scanId: "scan-a", reused: true };
+  severityCheckpoint(database, reused, "2026-01-04T00:00:00Z");
+  const updated = assessments(database, ["finding"], "scan-a");
+  assert.equal(updated[0].classificationRuns, 3);
+  assert.equal(updated[0].assessedAt, "2026-01-04T00:00:00Z");
+  severityCheckpoint(database, reused, "2026-01-05T00:00:00Z");
+  assert.deepEqual(assessments(database, ["finding"], "scan-a"), updated);
+});
+
+test("real severity producer reuses unchanged evidence across occurrences", async (t) => {
+  const options = {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/src/severity-store.ts",
+          import.meta.url,
+        ).href,
+      ),
+    },
+    banner: {
+      js: `import { createRequire as severityCreateRequire } from "node:module"; const require = severityCreateRequire(${JSON.stringify(import.meta.url)});`,
+    },
+  };
+  const { SeverityStore } = await importSource(
+    "../../../sdk/typescript/src/severity-store.ts",
+    options,
+  );
+  const { classifySeverityInternal, validateSeverityClassification } =
+    await importSource(
+      "../../../sdk/typescript/src/classify-severity.ts",
+      options,
+    );
+  const database = open(t);
+  const store = new SeverityStore({}, "/unused-scan");
+  Object.assign(store, {
+    run: async (_command: string, payload: Severity.SeverityCheckpoint) =>
+      severityCheckpoint(database, payload, "2026-01-01T00:00:00Z"),
+  });
+  const finding = {
+    findingId: "finding",
+    occurrenceId: "occurrence-a",
+    title: "Synthetic finding",
+    summary: "Same evidence",
+    severity: { level: "high", rationale: "Original assessment" },
+    fingerprints: { primary: "fingerprint" },
+    ruleId: "synthetic-rule",
+    identity: { anchor: "synthetic-anchor" },
+  };
+  const reviewPrompts: string[] = [];
+  const codex = {
+    startThread() {
+      return {
+        async run(prompt: string) {
+          reviewPrompts.push(prompt);
+          return {
+            finalResponse: JSON.stringify({
+              findingId: finding.findingId,
+              decision: "assessed",
+              level: "high",
+              rubricLabel: "HIGH",
+              rationale: "Synthetic evidence supports the assessment.",
+              confidence: "high",
+              reviewTrigger: "Changed evidence requires another review.",
+            }),
+          };
+        },
+      };
+    },
+  };
+  const classificationOptions = { codex, environment: {} };
+  const first = await classifySeverityInternal(
+    [finding],
+    classificationOptions,
+    "sdk",
+    store.checkpoint("scan-a", [finding.findingId], false),
+  );
+  assert.equal(reviewPrompts.length, 3);
+  const next = { ...finding, occurrenceId: "occurrence-b" };
+  const checkpoint = store.checkpoint("scan-b", [finding.findingId], false);
+  const cached = await checkpoint.load(first, [next]);
+  assert.equal(cached.length, 1);
+  assert.equal(cached[0].occurrenceId, "occurrence-a");
+  const second = await classifySeverityInternal(
+    [next],
+    classificationOptions,
+    "sdk",
+    checkpoint,
+  );
+  assert.equal(reviewPrompts.length, 3);
+  assert.equal(
+    second.assessments[0].inputSha256,
+    first.assessments[0].inputSha256,
+  );
+  assert.equal(second.assessments[0].occurrenceId, "occurrence-b");
+  assert.equal(
+    assessments(database, ["finding"], "scan-a")[0].occurrenceId,
+    "occurrence-a",
+  );
+  assert.equal(
+    assessments(database, ["finding"], "scan-b")[0].occurrenceId,
+    "occurrence-b",
+  );
+  validateSeverityClassification(second, [next]);
+  assert.deepEqual(
+    await checkpoint.load(first, [{ ...next, summary: "Changed evidence" }]),
+    [],
+  );
+  assert.deepEqual(
+    await checkpoint.load({ ...first, rubricSha256: "b".repeat(64) }, [next]),
+    [],
+  );
+  assert.deepEqual(
+    await checkpoint.load({ ...first, knowledgeBaseSha256: "c".repeat(64) }, [
+      next,
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    await store
+      .checkpoint("scan-c", [finding.findingId], true)
+      .load(first, [next]),
+    [],
+  );
 });

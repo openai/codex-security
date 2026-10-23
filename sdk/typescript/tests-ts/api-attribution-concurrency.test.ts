@@ -1,23 +1,239 @@
-import { mkdir, readFile, realpath, symlink } from "node:fs/promises";
-import { delimiter, join } from "node:path";
-import type {
-  CodexOptions,
-  ThreadOptions,
-  TurnOptions,
-} from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
-import { parse as parseToml } from "smol-toml";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
+import type { TurnOptions } from "@openai/codex-sdk";
 import { InternalSecurity } from "./support/internal-security.js";
-import { VERSION } from "../src/version.js";
-import { requestMetadata } from "./support/request-metadata.js";
+import { mkdir, readFile, realpath, symlink } from "node:fs/promises";
+
+import { delimiter, join } from "node:path";
+
+import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
+
+import { afterEach, describe, expect, test } from "bun:test";
+
+import { parse as parseToml } from "smol-toml";
+
+import { CodexSecurity } from "../src/index.js";
+import { deepMerge, type JsonObject } from "../src/config.js";
+
+import type { WorkbenchCommandOptions as RequiredWorkbenchCommandOptions } from "../src/runtime.js";
+
+import { PLUGIN_ROOT } from "./plugin-root.js";
+
+import { createApiTestFixtures } from "./support/api-events.js";
 
 const fixtures = createApiTestFixtures();
 
-afterEach(fixtures.cleanup);
+const InternalCodexSecurity = CodexSecurity as unknown as new (
+  config: Record<string, unknown>,
+  dependencies: Record<string, unknown>,
+  runtimeOptions?: { surface: "cli" | "sdk" },
+) => CodexSecurity;
+
+afterEach(async () => {
+  await fixtures.cleanup();
+});
 
 describe("delegated scan attribution", () => {
+  test.each(["standard", "deep"] as const)(
+    "keeps overlapping CLI and SDK %s scans concurrent and correctly attributed",
+    async (mode) => {
+      const root = await fixtures.temporaryDirectory();
+      const repository = join(root, "repository");
+      const ambientHome = join(root, "ambient-home");
+      const stateDirectory = join(root, "state");
+      const credentialHome = join(stateDirectory, "codex-home");
+      await mkdir(repository);
+      await mkdir(ambientHome);
+      let active = 0;
+      let maximumActive = 0;
+      let releaseConcurrentScans!: () => void;
+      const concurrentScans = new Promise<void>((resolve) => {
+        releaseConcurrentScans = resolve;
+      });
+
+      const controllers = [new AbortController(), new AbortController()];
+      const clients = await Promise.all(
+        (["cli", "sdk"] as const).map(async (surface, index) => {
+          const scanDirectory = join(root, `${surface}-scan`);
+          const gitDirectory = join(root, `${surface}-tools`);
+          await mkdir(gitDirectory);
+          const hostGit = Bun.which("git");
+          expect(hostGit).not.toBeNull();
+          const git = join(
+            gitDirectory,
+            process.platform === "win32" ? "git.exe" : "git",
+          );
+          await symlink(await realpath(hostGit!), git);
+          const expectedGitDirectory = await realpath(gitDirectory);
+          await mkdir(scanDirectory, { mode: 0o700 });
+          let registrations = 0;
+          return new InternalCodexSecurity(
+            { pluginPath: PLUGIN_ROOT },
+            {
+              environment: {
+                PATH: gitDirectory,
+                GIT_SSH_COMMAND: `synthetic-${surface}-ssh`,
+                CODEX_HOME: ambientHome,
+                CODEX_SECURITY_STATE_DIR: stateDirectory,
+                CODEX_SECURITY_SURFACE: "spoofed",
+                OPENAI_API_KEY: `synthetic-${surface}-key`,
+              },
+              resolvePluginPython: async () => "/managed/python",
+              probeCodexSandbox: async () => {},
+              prepareOutputDir: async (requested: string | undefined) => {
+                const directory = requested ?? scanDirectory;
+                await mkdir(directory, { recursive: true, mode: 0o700 });
+                return directory;
+              },
+              prepareScanArtifactRestorer: async () => ({
+                prepareDirectory: async () => {},
+                restore: async () => {},
+                remove: async () => {},
+              }),
+              repositoryRevision: async () => "deadbeef",
+              runWorkbench: async (
+                options: WorkbenchCommandOptions,
+                args: readonly string[],
+              ) => {
+                expect(options.environment["CODEX_HOME"]).toBe(credentialHome);
+                if (args[0] === "list-scans") return { scans: [] };
+                if (args[0] === "get-scan")
+                  return { scan: { progress: { status: "running" } } };
+                if (args[0] === "register-cli-scan") {
+                  return {
+                    scanId: `scan_${surface}_${++registrations}`,
+                    targetId: `target_${surface}`,
+                    targetRevision: "deadbeef",
+                    scanDir: args[args.indexOf("--scan-dir") + 1],
+                    contract: { target: { allowedKinds: ["git_revision"] } },
+                  };
+                }
+                if (args[0] === "get-scan-feedback") {
+                  return {
+                    scanId: args[args.indexOf("--scan-id") + 1],
+                    targetId: `target_${surface}`,
+                    falsePositives: [],
+                  };
+                }
+                return {};
+              },
+              createCodex: (options: CodexOptions) => ({
+                startThread: (threadOptions: ThreadOptions) => ({
+                  id: null,
+                  async runStreamed() {
+                    return {
+                      events: (async function* () {
+                        active += 1;
+                        maximumActive = Math.max(maximumActive, active);
+                        if (active === 2) releaseConcurrentScans();
+                        try {
+                          const initialEnvironment = { ...options.env };
+                          const launchConfig = parseToml(
+                            await readFile(
+                              join(credentialHome, "config.toml"),
+                              "utf8",
+                            ),
+                          ) as JsonObject;
+                          const executionConfig = effectiveConfig(
+                            options,
+                            launchConfig,
+                          );
+                          expect(options.env?.["CODEX_HOME"]).toBe(
+                            credentialHome,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).toContain(expectedGitDirectory);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).not.toContain(
+                            join(
+                              root,
+                              `${surface === "cli" ? "sdk" : "cli"}-tools`,
+                            ),
+                          );
+                          expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+                            `synthetic-${surface}-ssh`,
+                          );
+                          expect(options.env).not.toHaveProperty(
+                            "OPENAI_API_KEY",
+                          );
+                          expect(executionConfig).toMatchObject({
+                            responses_api_metadata: {
+                              codex_security_surface: surface,
+                            },
+                          });
+                          expect(threadOptions.threadSource).toBe(
+                            "security_scan",
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SCAN_DIR"]).toBe(
+                            mode === "deep"
+                              ? join(
+                                  scanDirectory,
+                                  "artifacts/deep-scan/passes/pass-1",
+                                )
+                              : scanDirectory,
+                          );
+                          yield {
+                            type: "thread.started",
+                            thread_id: `synthetic-${surface}`,
+                          };
+                          await concurrentScans;
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          expect(options.env).toEqual(initialEnvironment);
+                          expect(
+                            effectiveConfig(options, launchConfig),
+                          ).toEqual(executionConfig);
+                          const observed = new Error(
+                            "delegated attribution observed",
+                          );
+                          controllers[index]!.abort(observed);
+                          throw observed;
+                        } finally {
+                          active -= 1;
+                        }
+                      })(),
+                    };
+                  },
+                }),
+              }),
+            },
+            { surface },
+          );
+        }),
+      );
+
+      try {
+        const results = await Promise.allSettled(
+          clients.map((client, index) =>
+            client
+              .run(repository, {
+                mode,
+                ...(mode === "deep" ? { workers: 1, maxDiscoveryRuns: 1 } : {}),
+                signal: controllers[index]!.signal,
+              })
+              .finally(releaseConcurrentScans),
+          ),
+        );
+        for (const result of results) expect(result.status).toBe("rejected");
+        for (const [index, controller] of controllers.entries()) {
+          expect(
+            controller.signal.reason?.message,
+            Bun.inspect(results[index]),
+          ).toBe("delegated attribution observed");
+        }
+        expect(maximumActive).toBe(2);
+      } finally {
+        releaseConcurrentScans();
+        await Promise.all(clients.map(async (client) => await client.close()));
+      }
+    },
+  );
+
   test.each([
     ["standard", true, false, "root"],
     ["deep", true, false, "profile-override"],
@@ -46,9 +262,10 @@ describe("delegated scan attribution", () => {
         ? (["daybreak_blue", "standard"] as const)
         : ([undefined, undefined] as const);
       const concurrentScans = Promise.withResolvers<void>();
+      const controllers = [new AbortController(), new AbortController()];
 
       const clients = await Promise.all(
-        (["cli", "sdk"] as const).map(async (surface) => {
+        (["cli", "sdk"] as const).map(async (surface, index) => {
           const model = selectModel
             ? surface === "cli"
               ? "gpt-daybreak-blue-latest"
@@ -92,6 +309,7 @@ describe("delegated scan attribution", () => {
           await symlink(await realpath(hostGit!), git);
           const expectedGitDirectory = await realpath(gitDirectory);
           await mkdir(scanDirectory, { mode: 0o700 });
+          let registrations = 0;
           return new InternalSecurity(
             {
               pluginPath: PLUGIN_ROOT,
@@ -151,30 +369,41 @@ describe("delegated scan attribution", () => {
               },
               resolvePluginPython: async () => "/managed/python",
               probeCodexSandbox: async () => {},
-              prepareOutputDir: async () => scanDirectory,
+              prepareOutputDir: async (requested: string | undefined) => {
+                const directory = requested ?? scanDirectory;
+                await mkdir(directory, { recursive: true, mode: 0o700 });
+                return directory;
+              },
+              prepareScanArtifactRestorer: async () => ({
+                prepareDirectory: async () => {},
+                restore: async () => {},
+                remove: async () => {},
+              }),
               repositoryRevision: async () => "deadbeef",
               runWorkbench: async (
                 _options: unknown,
                 args: readonly string[],
                 input?: string,
               ) => {
+                if (args[0] === "list-scans") return { scans: [] };
+                if (args[0] === "get-scan")
+                  return { scan: { progress: { status: "running" } } };
                 if (args[0] === "register-cli-scan") {
-                  if (model !== undefined) {
+                  if (model !== undefined)
                     expect(JSON.parse(input!).recipe).toMatchObject({
                       config: { model },
                     });
-                  }
                   return {
-                    scanId: `scan_${surface}`,
+                    scanId: `scan_${surface}_${++registrations}`,
                     targetId: `target_${surface}`,
                     targetRevision: "deadbeef",
-                    scanDir: scanDirectory,
+                    scanDir: args[args.indexOf("--scan-dir") + 1],
                     contract: { target: { allowedKinds: ["git_revision"] } },
                   };
                 }
                 if (args[0] === "get-scan-feedback") {
                   return {
-                    scanId: `scan_${surface}`,
+                    scanId: args[args.indexOf("--scan-id") + 1],
                     targetId: `target_${surface}`,
                     falsePositives: [],
                   };
@@ -188,173 +417,138 @@ describe("delegated scan attribution", () => {
                     _input: unknown,
                     turnOptions?: TurnOptions,
                   ) {
-                    active += 1;
-                    maximumActive = Math.max(maximumActive, active);
-                    if (active === 2) concurrentScans.resolve();
-                    try {
-                      const initialEnvironment = { ...options.env };
-                      expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
-                      expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
-                        surface,
-                      );
-                      expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
-                      expect(options.env?.["PATH"]?.split(delimiter)).toContain(
-                        expectedGitDirectory,
-                      );
-                      expect(
-                        options.env?.["PATH"]?.split(delimiter),
-                      ).not.toContain(
-                        join(
-                          root,
-                          `${surface === "cli" ? "sdk" : "cli"}-tools`,
-                        ),
-                      );
-                      expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
-                        `synthetic-${surface}-ssh`,
-                      );
-                      expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
-                      expect(options.apiKey).toBe(`synthetic-${surface}-key`);
-                      expect(turnOptions?.cyberAccessProgram).toBe(program);
-                      expect(options.config?.["openai_base_url"]).toBe(
-                        endpoint,
-                      );
-                      expect(options.config?.["daybreak"]).toBe(daybreak);
-                      expect(options.config).toMatchObject({
-                        features,
-                        ...(model === undefined ? {} : { model }),
-                        analytics: { enabled: surface === "sdk" },
-                        otel: { environment: `synthetic-${surface}` },
-                      });
-                      expect(options.config).not.toHaveProperty(
-                        "responses_api_metadata",
-                      );
-                      expect(
-                        requestMetadata(options.configOverrides),
-                      ).toMatchObject({
-                        custom_attribution: surface,
-                        "team.tag": `synthetic-${surface}`,
-                        codex_security_integration: "github_action",
-                        codex_security_surface: surface,
-                        codex_security_command: "scan",
-                        codex_security_package_version: VERSION,
-                        codex_security_provider: "openai",
-                        codex_security_scan_mode: mode,
-                      });
-                      const deepConfigPath =
-                        options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
-                      const deepConfig =
-                        mode === "deep"
-                          ? await readFile(deepConfigPath!, "utf8")
-                          : undefined;
-                      if (deepConfig !== undefined) {
-                        expect(
-                          parseToml(deepConfig)["worker_runtime"],
-                        ).toMatchObject({
-                          analytics: { enabled: surface === "sdk" },
-                          otel: { environment: `synthetic-${surface}` },
-                          responses_api_metadata: requestMetadata(
-                            options.configOverrides,
-                          ),
-                        });
-                      }
-                      expect(threadOptions.threadSource).toBe("security_scan");
-                      if (model !== undefined) {
-                        expect(
-                          threadOptions.model ?? options.config?.["model"],
-                        ).toBe(model);
-                      }
-                      const configPath =
-                        options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-                      expect(configPath).toBeString();
-                      configPaths.add(configPath!);
-                      const initialConfig = await readFile(configPath!, "utf8");
-                      const runtimeConfig = parseToml(initialConfig);
-                      if (mode === "deep") {
-                        const deepConfigPath =
-                          options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
-                        expect(deepConfigPath).toBeString();
-                        const deepConfig = parseToml(
-                          await readFile(deepConfigPath!, "utf8"),
-                        );
-                        const workerRuntime = deepConfig[
-                          "worker_runtime"
-                        ] as Record<string, unknown>;
-                        expect(workerRuntime["daybreak"]).toBe(daybreak);
-                        if (endpoint === undefined)
-                          expect(workerRuntime).not.toHaveProperty(
-                            "openai_base_url",
+                    return {
+                      events: (async function* () {
+                        active += 1;
+                        maximumActive = Math.max(maximumActive, active);
+                        if (active === 2) concurrentScans.resolve();
+                        try {
+                          const initialEnvironment = { ...options.env };
+                          const launchConfig = parseToml(
+                            await readFile(
+                              join(credentialHome, "config.toml"),
+                              "utf8",
+                            ),
+                          ) as JsonObject;
+                          const executionConfig = effectiveConfig(
+                            options,
+                            launchConfig,
                           );
-                        else
-                          expect(workerRuntime["openai_base_url"]).toBe(
+                          expect(options.env?.["CODEX_HOME"]).toBe(
+                            credentialHome,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
+                            surface,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).toContain(expectedGitDirectory);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).not.toContain(
+                            join(
+                              root,
+                              `${surface === "cli" ? "sdk" : "cli"}-tools`,
+                            ),
+                          );
+                          expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+                            `synthetic-${surface}-ssh`,
+                          );
+                          expect(options.env).not.toHaveProperty(
+                            "OPENAI_API_KEY",
+                          );
+                          expect(options.apiKey).toBe(
+                            `synthetic-${surface}-key`,
+                          );
+                          expect(turnOptions?.cyberAccessProgram).toBe(program);
+                          expect(executionConfig["openai_base_url"]).toBe(
                             endpoint,
                           );
-                      }
-                      expect(runtimeConfig).toMatchObject({
-                        features,
-                        ...(model === undefined ? {} : { model }),
-                      });
-                      expect(runtimeConfig["daybreak"]).toBe(daybreak);
-                      expect(initialConfig).not.toContain("openai_base_url");
-                      expect(initialConfig).not.toContain("synthetic-password");
-                      if (program === undefined) {
-                        expect(runtimeConfig).not.toHaveProperty(
-                          "codex_security",
-                        );
-                        for (const config of [options.config, runtimeConfig]) {
-                          expect(config?.["features"]).not.toHaveProperty(
-                            "api_key_cyber_access_programs",
+                          expect(executionConfig).toMatchObject({
+                            features,
+                            ...(model === undefined ? {} : { model }),
+                            analytics: { enabled: surface === "sdk" },
+                            responses_api_metadata: {
+                              custom_attribution: surface,
+                              codex_security_surface: surface,
+                              codex_security_command: "scan",
+                              codex_security_package_version: VERSION,
+                            },
+                          });
+                          expect(options.env?.["CODEX_SECURITY_SCAN_DIR"]).toBe(
+                            mode === "deep"
+                              ? join(
+                                  scanDirectory,
+                                  "artifacts/deep-scan/passes/pass-1",
+                                )
+                              : scanDirectory,
                           );
+                          expect(threadOptions.threadSource).toBe(
+                            "security_scan",
+                          );
+                          if (model !== undefined)
+                            expect(
+                              threadOptions.model ?? executionConfig["model"],
+                            ).toBe(model);
+                          const configPath =
+                            options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+                          expect(configPath).toBeString();
+                          configPaths.add(configPath!);
+                          const initialConfig = await readFile(
+                            configPath!,
+                            "utf8",
+                          );
+                          const runtimeConfig = parseToml(initialConfig);
+                          expect(runtimeConfig).toMatchObject({
+                            features,
+                            ...(model === undefined ? {} : { model }),
+                          });
+                          expect(initialConfig).not.toContain(
+                            "openai_base_url",
+                          );
+                          expect(initialConfig).not.toContain(
+                            "synthetic-password",
+                          );
+                          if (program === undefined) {
+                            expect(runtimeConfig).not.toHaveProperty(
+                              "codex_security",
+                            );
+                            for (const config of [
+                              executionConfig,
+                              runtimeConfig,
+                            ]) {
+                              expect(config?.["features"]).not.toHaveProperty(
+                                "api_key_cyber_access_programs",
+                              );
+                            }
+                          } else {
+                            expect(runtimeConfig).toMatchObject({
+                              codex_security: { cyber_access_program: program },
+                            });
+                          }
+                          yield {
+                            type: "thread.started",
+                            thread_id: `synthetic-${surface}`,
+                          };
+                          await concurrentScans.promise;
+                          expect(await readFile(configPath!, "utf8")).toBe(
+                            initialConfig,
+                          );
+                          expect(options.env).toEqual(initialEnvironment);
+                          expect(
+                            effectiveConfig(options, launchConfig),
+                          ).toEqual(executionConfig);
+                          const observed = new Error(
+                            "delegated attribution observed",
+                          );
+                          controllers[index]!.abort(observed);
+                          throw observed;
+                        } finally {
+                          active -= 1;
                         }
-                      } else {
-                        expect(runtimeConfig).toMatchObject({
-                          codex_security: { cyber_access_program: program },
-                        });
-                      }
-                      await concurrentScans.promise;
-                      const sharedConfig = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
-                      );
-                      expect(sharedConfig).not.toHaveProperty(
-                        "responses_api_metadata",
-                      );
-                      expect(sharedConfig).not.toHaveProperty("otel");
-                      expect(sharedConfig).not.toHaveProperty("model");
-                      expect(sharedConfig).not.toHaveProperty("codex_security");
-                      expect(sharedConfig).not.toHaveProperty("analytics");
-                      expect(JSON.stringify(sharedConfig)).not.toContain(
-                        "openai_base_url",
-                      );
-                      expect(JSON.stringify(sharedConfig)).not.toContain(
-                        "synthetic-password",
-                      );
-                      expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
-                        "api_key_cyber_access_programs",
-                      );
-                      expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
-                        "api_key_model_discovery",
-                      );
-                      expect(JSON.stringify(sharedConfig)).not.toContain(
-                        "synthetic-cli-key",
-                      );
-                      expect(JSON.stringify(sharedConfig)).not.toContain(
-                        "synthetic-sdk-key",
-                      );
-                      expect(await readFile(configPath!, "utf8")).toBe(
-                        initialConfig,
-                      );
-                      expect(options.env).toEqual(initialEnvironment);
-                      if (deepConfig !== undefined) {
-                        expect(await readFile(deepConfigPath!, "utf8")).toBe(
-                          deepConfig,
-                        );
-                      }
-                      throw new Error("delegated attribution observed");
-                    } finally {
-                      active -= 1;
-                    }
+                      })(),
+                    };
                   },
                 }),
               }),
@@ -380,17 +574,21 @@ describe("delegated scan attribution", () => {
         const results = await Promise.allSettled(
           clients.map((client, index) =>
             client
-              .run(repository, { mode, cyberAccessProgram: programs[index] })
+              .run(repository, {
+                mode,
+                cyberAccessProgram: programs[index],
+                signal: controllers[index]!.signal,
+                ...(mode === "deep" ? { workers: 1, maxDiscoveryRuns: 1 } : {}),
+              })
               .finally(concurrentScans.resolve),
           ),
         );
-        for (const result of results) {
-          expect(result).toMatchObject({
-            status: "rejected",
-            reason: expect.objectContaining({
-              message: "delegated attribution observed",
-            }),
-          });
+        for (const result of results) expect(result.status).toBe("rejected");
+        for (const [index, controller] of controllers.entries()) {
+          expect(
+            controller.signal.reason?.message,
+            Bun.inspect(results[index]),
+          ).toBe("delegated attribution observed");
         }
         expect(maximumActive).toBe(2);
         expect(configPaths.size).toBe(2);
@@ -401,3 +599,25 @@ describe("delegated scan attribution", () => {
     },
   );
 });
+
+import { VERSION } from "../src/version.js";
+
+function effectiveConfig(
+  options: CodexOptions,
+  base: JsonObject = {},
+): JsonObject {
+  expect(JSON.stringify(base)).not.toContain("synthetic-cli-key");
+  expect(JSON.stringify(base)).not.toContain("synthetic-sdk-key");
+  return (options.configOverrides ?? []).reduce(
+    (config, override) => deepMerge(config, parseToml(override) as JsonObject),
+    deepMerge(
+      structuredClone(base),
+      structuredClone(options.config ?? {}) as JsonObject,
+    ),
+  );
+}
+
+type WorkbenchCommandOptions = Omit<
+  RequiredWorkbenchCommandOptions,
+  "python"
+> & { python?: string };

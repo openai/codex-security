@@ -1,4 +1,3 @@
-import { hash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
@@ -18,7 +17,7 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each(["pending", "finalized", "unavailable", "standard"] as const)(
-  "finalizes saved completion-turn usage when accounting is %s",
+  "ordinary scans finalize saved completion-turn usage when accounting is %s",
   async (scenario) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -35,7 +34,6 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
     let turnFinished = false;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      canRunDirectDeepScan: () => false,
       runWorkbench: async (_options, args, input) => {
         commands.push(args);
         if (args[0] === "complete-scan") {
@@ -65,19 +63,6 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
       },
       createCodex: codexFactory(async () => {
         await copyCompletedScan(root);
-        if (scenario !== "standard") {
-          const coveragePath = join(scanDir, "coverage.json");
-          const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
-          coverage.mode = "deep_repository";
-          const coverageBytes = `${JSON.stringify(coverage)}\n`;
-          await writeFile(coveragePath, coverageBytes);
-          const manifestPath = join(scanDir, "scan-manifest.json");
-          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-          manifest.scan.artifacts.find(
-            (artifact: { path: string }) => artifact.path === "coverage.json",
-          ).sha256 = hash("sha256", coverageBytes);
-          await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
-        }
         async function* events() {
           yield* completedEvents();
           turnFinished = true;
@@ -87,7 +72,7 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
     });
     try {
       const result = await client.run(repository, {
-        mode: scenario === "standard" ? "standard" : "deep",
+        mode: "standard",
         onWarning: (warning) => {
           warnings.push(warning);
           if (warning.includes(accountingFailure))
@@ -190,7 +175,6 @@ test.each([
     }
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      canRunDirectDeepScan: () => false,
       createCodex: () => ({
         startThread: () => ({
           id: null,
@@ -244,9 +228,13 @@ test.each([
     try {
       const failure = await client
         .run(repository, {
-          mode: "deep",
+          mode: "standard",
           ...(scenario === "resumed"
-            ? { resumeScanId: "scan_example_001", outputDir: scanDir }
+            ? {
+                resumeScanId: "scan_example_001",
+                outputDir: scanDir,
+                deepScanPass: true,
+              }
             : {}),
           signal: controller.signal,
           onWarning: (warning) => {

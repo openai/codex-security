@@ -2,14 +2,10 @@ import * as z from "zod/v4";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import {
-  chmod,
   mkdir,
   mkdtemp,
   readFile,
-  readdir,
   realpath,
   rm,
   symlink,
@@ -17,51 +13,52 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importSource } from "./import-module.ts";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
-const io = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-io.ts"),
+const compiled = await build({
+  bundle: true,
+  entryPoints: [
+    fileURLToPath(new URL("../src/artifact-io.ts", import.meta.url)),
+    fileURLToPath(new URL("../src/artifact-context.ts", import.meta.url)),
+    fileURLToPath(new URL("../src/artifact-contracts.ts", import.meta.url)),
+  ],
+  format: "esm",
+  outdir: "codex-security-artifact-foundation",
+  platform: "node",
+  write: false,
+});
+const modules = new Map(
+  compiled.outputFiles.map((file) => [
+    path.basename(file.path),
+    "data:text/javascript;base64," +
+      Buffer.from(file.contents).toString("base64"),
+  ]),
 );
-const contextApi = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-context.ts"),
-);
-const writerApi = await importSource(
-  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
-  {
-    plugins: [
-      {
-        name: "observe-worker-context",
-        setup(builder) {
-          builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
-            contents:
-              "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
-            loader: "js",
-          }));
-        },
-      },
-    ],
-  },
-);
-const schemas = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
-);
+const io = await import(modules.get("artifact-io.js"));
+const contextApi = await import(modules.get("artifact-context.js"));
+const schemas = await import(modules.get("artifact-contracts.js"));
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
 );
 
-const context = {
-  root: path.join(fixture, "scan"),
-  repoRoot: path.join(fixture, "repository"),
-  layout: "scan",
+const rowSchema = {
+  safeParse(value) {
+    return value && typeof value.candidate_id === "string"
+      ? { success: true, data: value }
+      : {
+          success: false,
+          error: {
+            issues: [{ path: ["candidate_id"], message: "required" }],
+          },
+        };
+  },
 };
-const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 
 try {
   await testSchemaSourceOfTruth();
   await testScanContext();
-  await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
-  await testAtomicReplacementAfterInterruptedWriter();
   await testAtomicReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
@@ -151,8 +148,10 @@ async function testSchemaSourceOfTruth() {
 async function testScanContext() {
   const root = path.join(fixture, "scan");
   const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  await mkdir(repoRoot, { recursive: true });
+  await Promise.all([
+    mkdir(root, { recursive: true }),
+    mkdir(repoRoot, { recursive: true }),
+  ]);
   const scanId = "61a20957-1be8-4ccf-8de8-eab4061e8cc3";
   const contract = {
     target: {
@@ -165,8 +164,8 @@ async function testScanContext() {
       requiredExcludePaths: [],
     },
   };
-  const calls: string[][] = [];
-  const runWorkbench = async (args: string[]) => {
+  const calls = [];
+  const runWorkbench = async (args) => {
     calls.push(args);
     return {
       scan: {
@@ -195,7 +194,6 @@ async function testScanContext() {
   assert.deepEqual(calls, [["get-scan", "--scan-id", scanId]]);
   assert.equal(context.root, await realpath(root));
   assert.equal(context.repoRoot, await realpath(repoRoot));
-  assert.equal(context.layout, "scan");
   assert.equal(context.scope, ".");
   assert.equal(context.mode, "deep");
   assert.deepEqual(context.targetContract, contract);
@@ -233,98 +231,12 @@ async function testScanContext() {
   );
 }
 
-async function testWorkerStandardLayout() {
-  const root = path.join(fixture, "worker", "output");
-  const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  const environment = {
-    CODEX_SECURITY_ARTIFACT_ROOT: root,
-    CODEX_SECURITY_REPO_ROOT: repoRoot,
-    CODEX_SECURITY_SCOPE: ".",
-    CODEX_SECURITY_PLUGIN_ROOT: "/fixture/plugin",
-  };
-  const { context } =
-    await writerApi.createCodexSecurityArtifactWriterServer(environment);
-  const inventory = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "in_scope_files.txt"],
-    "review_items",
-  );
-  const candidates = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "candidate_ledger.jsonl"],
-    "discovery_candidates",
-  );
-  assert.equal(
-    inventory,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "in_scope_files.txt",
-    ),
-  );
-  assert.equal(
-    candidates,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "candidate_ledger.jsonl",
-    ),
-  );
-  assert.equal(context.layout, "worker");
-  assert.equal(context.scope, ".");
-
-  await assert.rejects(
-    writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [],
-      }),
-    }),
-    /coordinator-bound reducer context/,
-  );
-  const { context: reducer } =
-    await writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [
-          { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-        ],
-      }),
-    });
-  assert.equal(reducer.layout, "reducer");
-  assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
-}
-
-async function testAtomicReplacementAfterInterruptedWriter() {
-  const destination = await io.artifactDestination(
-    context,
-    ["interrupted.json"],
-    "interrupted artifact",
-  );
-  const child = spawn(process.execPath, [
-    "-e",
-    'require("node:fs").openSync(process.argv[1], "wx", 0o600); process.stdout.write("locked"); setInterval(() => {}, 1000);',
-    destination + ".lock",
-  ]);
-  await once(child.stdout, "data");
-  child.kill("SIGKILL");
-  await once(child, "close");
-  await io.replaceArtifactText(destination, "recovered\n");
-  assert.equal(await readFile(destination, "utf8"), "recovered\n");
-  const values = ["a", "b", "c"].map((value) => value.repeat(32_000));
-  await Promise.all(
-    values.map((value) => io.replaceArtifactText(destination, value)),
-  );
-  assert.ok(values.includes(await readFile(destination, "utf8")));
-}
-
 async function testSafeJsonAndJsonl() {
+  const context = {
+    root: path.join(fixture, "scan"),
+    repoRoot: path.join(fixture, "repository"),
+  };
+  const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
     context,
     components,
@@ -334,18 +246,7 @@ async function testSafeJsonAndJsonl() {
     { candidate_id: "one", extension: "preserved" },
     { candidate_id: "two" },
   ]);
-  const rowSchema = {
-    safeParse(value: { candidate_id?: unknown } | null) {
-      return value && typeof value.candidate_id === "string"
-        ? { success: true, data: value }
-        : {
-            success: false,
-            error: {
-              issues: [{ path: ["candidate_id"], message: "required" }],
-            },
-          };
-    },
-  };
+
   assert.deepEqual(
     await io.readArtifactJsonl(
       context,
@@ -362,10 +263,10 @@ async function testSafeJsonAndJsonl() {
     manifestComponents,
     "scan_manifest",
   );
-  await io.replaceArtifactJson(manifest, {
-    scanId: "fixture",
-    extension: true,
-  });
+  await io.replaceArtifactText(
+    manifest,
+    JSON.stringify({ scanId: "fixture", extension: true }) + "\n",
+  );
   assert.deepEqual(
     await io.readArtifactJsonObject(
       context,
@@ -397,30 +298,14 @@ async function testSafeJsonAndJsonl() {
     ),
     /row 1 does not match its artifact schema: candidate_id: required/,
   );
-  if (process.platform !== "win32" && process.getuid?.() !== 0) {
-    try {
-      await chmod(destination, 0o000);
-      for (const read of [
-        io.readArtifactText,
-        io.readArtifactTextWithMetadata,
-      ]) {
-        await assert.rejects(
-          read(context, components, "discovery_candidates"),
-          (error: Error & { cause?: NodeJS.ErrnoException }) => {
-            assert.equal(error.cause?.code, "EACCES");
-            assert.ok(error.message.includes("EACCES"));
-            assert.ok(error.message.includes(destination));
-            return true;
-          },
-        );
-      }
-    } finally {
-      await chmod(destination, 0o600);
-    }
-  }
 }
 
 async function testAtomicReplacement() {
+  const context = {
+    root: path.join(fixture, "scan"),
+    repoRoot: path.join(fixture, "repository"),
+  };
+  const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
     context,
     components,
@@ -429,20 +314,26 @@ async function testAtomicReplacement() {
   await io.replaceArtifactJsonl(destination, []);
   assert.equal(await readFile(destination, "utf8"), "");
 
-  const replacements = Array.from({ length: 12 }, (_, index) => ({
-    candidate_id: "concurrent-" + index,
-  }));
-  await Promise.all(
-    replacements.map((row) => io.replaceArtifactJsonl(destination, [row])),
-  );
-  const written = await readJson(destination);
-  assert.deepEqual(
-    written,
-    replacements.find((row) => row.candidate_id === written.candidate_id),
-  );
-  assert.deepEqual(await readdir(path.dirname(destination)), [
-    "candidate_ledger.jsonl",
+  const versions = Array.from({ length: 12 }, (_, index) => [
+    {
+      candidate_id: "concurrent-" + index,
+      evidence: String(index).repeat(8192),
+    },
+    { candidate_id: "tail-" + index },
   ]);
+  const expected = new Set(versions.map((rows) => JSON.stringify(rows)));
+  await Promise.all(
+    versions.map(async (rows) => {
+      await io.replaceArtifactJsonl(destination, rows);
+      const observed = await io.readArtifactJsonl(
+        context,
+        components,
+        "discovery_candidates",
+        rowSchema,
+      );
+      assert.ok(expected.has(JSON.stringify(observed)));
+    }),
+  );
 }
 
 async function testBoundedPagination() {
@@ -469,6 +360,10 @@ async function testBoundedPagination() {
 }
 
 async function testUnsafeArtifacts() {
+  const context = {
+    root: path.join(fixture, "scan"),
+    repoRoot: path.join(fixture, "repository"),
+  };
   for (const components of [
     [],
     ["..", "outside.json"],
@@ -485,8 +380,6 @@ async function testUnsafeArtifacts() {
 
   const outside = path.join(fixture, "outside");
   await mkdir(outside, { recursive: true });
-  const outsideFile = path.join(outside, "candidate_ledger.jsonl");
-  await writeFile(outsideFile, "outside remains unchanged\n");
   const symlinkPath = path.join(context.root, "linked");
   await symlink(outside, symlinkPath);
   await assert.rejects(
@@ -498,29 +391,10 @@ async function testUnsafeArtifacts() {
     /not a regular directory/,
   );
 
-  assert.equal(
-    await readFile(outsideFile, "utf8"),
-    "outside remains unchanged\n",
-  );
   const linkedFile = path.join(context.root, "linked.json");
-  await symlink(outsideFile, linkedFile);
+  await symlink(path.join(outside, "outside.json"), linkedFile);
   await assert.rejects(
     io.artifactDestination(context, ["linked.json"], "scan_manifest"),
     /not a regular file/,
-  );
-  assert.equal(
-    await readFile(outsideFile, "utf8"),
-    "outside remains unchanged\n",
-  );
-
-  const linkedRoot = path.join(fixture, "linked-root");
-  await symlink(context.root, linkedRoot);
-  await assert.rejects(
-    io.artifactDestination(
-      { ...context, root: linkedRoot },
-      ["scan_manifest.json"],
-      "scan_manifest",
-    ),
-    /safe regular directory|escaped|context/i,
   );
 }

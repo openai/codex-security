@@ -229,22 +229,43 @@ test("binds assessments to evidence and tracks policy and context changes", asyn
 });
 
 test("cancellation and invalid inputs cannot produce a successful classification", async () => {
+  const { codex } = fakeCodex(assessed);
   const controller = new AbortController();
   const reason = new Error("Canceled classification");
   controller.abort(reason);
   await expect(
-    classifySeverity([finding], { signal: controller.signal }),
+    classifySeverity([finding], { codex, signal: controller.signal }),
   ).rejects.toBe(reason);
-  await expect(classifySeverity([finding, finding])).rejects.toThrow(
+  await expect(classifySeverity([finding, finding], { codex })).rejects.toThrow(
     "unique finding IDs",
   );
   const rubricPath = await document(" ");
-  await expect(classifySeverity([finding], { rubricPath })).rejects.toThrow(
-    "must not be empty",
-  );
-  expect((await classifySeverity([])).assessments).toEqual([]);
+  await expect(
+    classifySeverity([finding], { rubricPath, codex }),
+  ).rejects.toThrow("must not be empty");
+  expect((await classifySeverity([], { codex })).assessments).toEqual([]);
 });
 
+test("legacy severity assessments require unchanged evidence and original occurrence", async () => {
+  const { codex } = fakeCodex(assessed);
+  const current = await classifySeverity([finding], { codex });
+  const legacy = {
+    ...current,
+    assessments: current.assessments.map((assessment) => ({
+      ...assessment,
+      inputSha256: workflowDigest(finding),
+    })),
+  };
+  expect(validateSeverityClassification(legacy, [finding])).toEqual(legacy);
+  for (const changed of [
+    { ...finding, occurrenceId: "another-occurrence" },
+    { ...finding, summary: "Changed evidence" },
+  ]) {
+    expect(() => validateSeverityClassification(legacy, [changed])).toThrow(
+      "does not match",
+    );
+  }
+});
 test("votes independently for each imported report and retains the winning answer", async () => {
   const rubricPath = await document("Classify using the supplied evidence.");
   const second = { ...finding, findingId: "second-finding" };

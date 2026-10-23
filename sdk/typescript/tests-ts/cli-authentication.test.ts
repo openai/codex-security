@@ -860,9 +860,13 @@ describe("CLI authentication", () => {
     ).toBe(17);
   });
 
-  test(
-    "keeps delegated credentials in the configured Codex home",
-    async () => {
+  for (const kind of [
+    "relative",
+    "tilde",
+    "mounted",
+    ...(process.platform === "win32" ? [] : (["empty", "whitespace"] as const)),
+  ] as const) {
+    test(`keeps delegated credentials in the configured Codex home (${kind})`, async () => {
       const root = await temporaryDirectory("codex-security-login-home-");
       const repository = join(root, "repository");
       const relativeHome = join(repository, ".codex-security-home");
@@ -875,85 +879,92 @@ describe("CLI authentication", () => {
       await mkdir(mountedHome, { mode: 0o700 });
       await mkdir(defaultHome, { mode: 0o700 });
       try {
-        for (const [configuredHome, expectedHome, userHome] of [
-          [".codex-security-home", relativeHome, root],
-          ["~/.codex-security-home", tildeHome, root],
-          [mountedHome, mountedHome, join(root, "missing-home")],
-          ...(process.platform === "win32"
-            ? []
-            : ([
-                ["", defaultHome, root],
-                ["   ", defaultHome, root],
-              ] as const)),
-        ] as const) {
-          const credentialAncestors = [
-            join(expectedHome, "state"),
-            join(expectedHome, "state", "plugins"),
-            join(expectedHome, "state", "plugins", "codex-security"),
-            join(
-              expectedHome,
-              "state",
-              "plugins",
-              "codex-security",
-              "codex-home",
-            ),
-          ];
-          const credentialHome = credentialAncestors.at(-1)!;
-          await mkdir(credentialHome, { recursive: true, mode: 0o700 });
-          if (process.platform !== "win32") {
-            for (const path of [expectedHome, ...credentialAncestors]) {
-              await chmod(path, 0o700);
-            }
+        const [configuredHome, expectedHome, userHome] = (
+          {
+            relative: [".codex-security-home", relativeHome, root],
+            tilde: ["~/.codex-security-home", tildeHome, root],
+            mounted: [mountedHome, mountedHome, join(root, "missing-home")],
+            empty: ["", defaultHome, root],
+            whitespace: ["   ", defaultHome, root],
+          } as const
+        )[kind];
+        const credentialAncestors = [
+          join(expectedHome, "state"),
+          join(expectedHome, "state", "plugins"),
+          join(expectedHome, "state", "plugins", "codex-security"),
+          join(
+            expectedHome,
+            "state",
+            "plugins",
+            "codex-security",
+            "codex-home",
+          ),
+        ];
+        const credentialHome = credentialAncestors.at(-1)!;
+        await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        if (process.platform !== "win32") {
+          for (const path of [expectedHome, ...credentialAncestors]) {
+            await chmod(path, 0o700);
           }
-          await writeFile(
-            join(credentialHome, "config.toml"),
-            'cli_auth_credentials_store = "file"\n',
-          );
-          const environment = {
-            PATH: process.env["PATH"],
-            HOME: userHome,
-            USERPROFILE: userHome,
-            CODEX_HOME: configuredHome,
-          };
-          const run = (args: string[], input?: string): number | null =>
-            spawnSync(
-              process.execPath,
-              [join(import.meta.dir, "../src/cli.ts"), ...args],
-              {
-                cwd: repository,
-                env: environment,
-                input,
-                encoding: "utf8",
-              },
-            ).status;
-          expect(run(["login", "--with-api-key"], "synthetic-key\n")).toBe(0);
-          expect(await stat(join(credentialHome, "auth.json"))).toBeDefined();
-          await expect(stat(join(repository, "auth.json"))).rejects.toThrow();
-          expect(run(["login", "status"])).toBe(0);
-          expect(run(["logout"])).toBe(0);
         }
-        expect(
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          'cli_auth_credentials_store = "file"\n',
+        );
+        const environment = {
+          PATH: process.env["PATH"],
+          HOME: userHome,
+          USERPROFILE: userHome,
+          CODEX_HOME: configuredHome,
+        };
+        const run = (args: string[], input?: string): number | null =>
           spawnSync(
             process.execPath,
-            [join(import.meta.dir, "../src/cli.ts"), "login", "--help"],
+            [join(import.meta.dir, "../src/cli.ts"), ...args],
             {
               cwd: repository,
-              env: {
-                PATH: process.env["PATH"],
-                HOME: root,
-                USERPROFILE: root,
-                Codex_Home: "   ",
-              },
+              env: environment,
+              input,
               encoding: "utf8",
             },
-          ).status,
-        ).toBe(0);
+          ).status;
+        expect(run(["login", "--with-api-key"], "synthetic-key\n")).toBe(0);
+        expect(await stat(join(credentialHome, "auth.json"))).toBeDefined();
+        await expect(stat(join(repository, "auth.json"))).rejects.toThrow();
+        expect(run(["login", "status"])).toBe(0);
+        expect(run(["logout"])).toBe(0);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
-    },
-    process.platform === "win32" ? 120_000 : 60_000,
-  );
+    }, 60_000);
+  }
+
+  test("shows delegated login help with a blank mixed-case Codex home", async () => {
+    const root = await temporaryDirectory("codex-security-login-help-");
+    const repository = join(root, "repository");
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(join(root, ".codex"), { mode: 0o700 });
+    try {
+      expect(
+        spawnSync(
+          process.execPath,
+          [join(import.meta.dir, "../src/cli.ts"), "login", "--help"],
+          {
+            cwd: repository,
+            env: {
+              PATH: process.env["PATH"],
+              HOME: root,
+              USERPROFILE: root,
+              Codex_Home: "   ",
+            },
+            encoding: "utf8",
+          },
+        ).status,
+      ).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test("reports selected scan credentials without contaminating JSON output", async () => {
     const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });

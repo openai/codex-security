@@ -9,7 +9,7 @@ import { importSource } from "./import-module.ts";
 
 const {
   candidateValidationsInputSchema,
-  recordCodexSecurityCandidateValidations,
+  recordCodexSecurityCandidateValidations: writeValidations,
 } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
 );
@@ -85,11 +85,7 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-validation-phase-", true);
 try {
-  const context = {
-    root: path.join(root, "scan"),
-    repoRoot: root,
-    layout: "scan" as const,
-  };
+  const context = await scanContext(root, "scan", scanId);
   const ledger = path.join(
     context.root,
     "artifacts",
@@ -158,9 +154,28 @@ try {
     /repeats candidate candidate-b/,
   );
   await assertNoMutation(
-    { ...context, layout: "worker" },
+    context,
     ledger,
     {
+      validations: [
+        {
+          candidateId: "candidate-a",
+          validation: {
+            ...firstValidation,
+            confidence: "certain",
+          },
+        },
+        updates[0],
+      ],
+    },
+    /confidence/,
+  );
+
+  await assertNoMutation(
+    { ...context, scanId: undefined },
+    ledger,
+    {
+      scanId: context.scanId,
       validations: updates,
     },
     /scan-bound artifact context/,
@@ -216,6 +231,18 @@ try {
   await rm(root, { recursive: true, force: true });
 }
 
+async function scanContext(root: string, directory: string, scanId: string) {
+  const scanRoot = path.join(root, directory);
+  const repository = path.join(root, "repository");
+  await Promise.all([
+    mkdir(path.join(scanRoot, "artifacts", "02_discovery"), {
+      recursive: true,
+    }),
+    mkdir(repository, { recursive: true }),
+  ]);
+  return { root: scanRoot, repoRoot: repository, scanId };
+}
+
 function candidate(candidateId: string, sourcePath: string) {
   return {
     candidate_id: candidateId,
@@ -255,4 +282,11 @@ async function assertNoMutation(
     expectedError,
   );
   assert.equal(await readFile(ledger, "utf8"), before);
+}
+
+async function recordCodexSecurityCandidateValidations(context, input) {
+  return writeValidations(
+    context,
+    candidateValidationsInputSchema.parse({ scanId: context.scanId, ...input }),
+  );
 }

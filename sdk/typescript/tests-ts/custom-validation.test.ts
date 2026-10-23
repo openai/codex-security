@@ -1,3 +1,4 @@
+import type { BigIntStats, Stats } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -56,6 +57,7 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
   scan.id = scanId;
   scan.target.kind = diff ? "git_diff" : "directory_snapshot";
   scan.scope.validationMode = "custom_pending";
+  if (!diff) scan["complete"] = false;
   await save(join(scanDir, "scan-manifest.json"), { ...manifest, scan });
   const findings = await json<FindingsDocument>(join(scanDir, "findings.json"));
   const original = findings.findings[0]!;
@@ -103,6 +105,7 @@ async function publishDraft(
   const staged = {
     manifest: {
       scan: {
+        complete: manifest.scan["complete"],
         target: manifest.scan.target,
         scope: manifest.scan.scope,
         ...(complete === undefined ? {} : { complete }),
@@ -411,6 +414,11 @@ describe("custom validation", () => {
       "artifacts/custom-validation/proof.txt",
     );
     expect(coverage.deferred).toHaveLength(1);
+    expect(
+      (await json<ScanManifest>(join(f.scanDir, "scan-manifest.json"))).scan[
+        "complete"
+      ],
+    ).toBe(false);
     expect(await json(join(f.scanDir, resultName))).toMatchObject({
       scanId: f.scanId,
       ...output,
@@ -456,6 +464,25 @@ describe("custom validation", () => {
       }),
     ).rejects.toThrow("unsealed custom-validation draft");
   });
+
+  test.each([
+    "findings/check/details.md",
+    "findings/child-scan/check/details.md",
+  ])(
+    "retains nested report paths through custom validation: %s",
+    async (reportPath) => {
+      const f = await fixture();
+      f.findings.findings[0]!.writeup = { reportPath };
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      await runCustomValidation({ ...f, run });
+      expect(run).toHaveBeenCalledTimes(1);
+      const saved = await json<FindingsDocument>(
+        join(f.scanDir, "findings.json"),
+      );
+      expect(saved.findings[0]!.writeup?.reportPath).toBe(reportPath);
+    },
+  );
 
   test.each([
     ["empty title", { title: "" }],
@@ -504,6 +531,8 @@ describe("custom validation", () => {
   ])("rejects %s results without losing the draft", async (kind) => {
     const f = await fixture();
     const original = await readFile(join(f.scanDir, "findings.json"), "utf8");
+    const manifestPath = join(f.scanDir, "scan-manifest.json");
+    const manifest = await json<ScanManifest>(manifestPath);
     const output = result("reportable");
     if (kind === "missing") output.validations = [];
     if (kind === "duplicate") output.validations.push(output.validations[0]!);
@@ -526,6 +555,8 @@ describe("custom validation", () => {
     expect(await json(join(f.scanDir, "findings.json"))).toEqual(
       JSON.parse(original),
     );
+    expect(await json<ScanManifest>(manifestPath)).toEqual(manifest);
+    expect(manifest.scan["complete"]).toBe(false);
   });
 
   test("rejects output directories linked outside the scan", async () => {
@@ -555,10 +586,24 @@ describe("custom validation", () => {
     "incomplete",
     "dismissed",
     "unfinished-source",
+    "identity-small",
+    "identity-rounded",
+    "identity-unchanged",
   ];
   test.each(completionScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
+      const identityCase = scenario.startsWith("identity-");
+      if (
+        identityCase &&
+        runTestInSubprocess(
+          import.meta.path,
+          `SDK owns real workbench completion: ${scenario}`,
+        )
+      )
+        return;
+      let identityProbe:
+        Awaited<ReturnType<typeof replaceWithIdentity>> | undefined;
       const diff = scenario === "diff";
       const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
@@ -736,6 +781,17 @@ describe("custom validation", () => {
                             })(),
                         };
                       }
+                      if (identityCase) {
+                        const original =
+                          scenario === "identity-small" ? 100n : 2n ** 60n;
+                        identityProbe = await replaceWithIdentity(
+                          join(scanDir, "findings.json"),
+                          original,
+                          scenario === "identity-unchanged"
+                            ? original
+                            : original + 1n,
+                        );
+                      }
                       return { events: completedEvents() };
                     }
                     if (scenario === "progress") {
@@ -753,6 +809,9 @@ describe("custom validation", () => {
                     expect(pendingManifest.scan.id).toBe(scanId);
                     expect(pendingManifest.scan.scope.validationMode).toBe(
                       "custom_pending",
+                    );
+                    expect(pendingManifest.scan["complete"]).toBe(
+                      scenario !== "unfinished-source",
                     );
                     expect(pendingManifest.scan).not.toHaveProperty("sealedAt");
                     expect(pendingManifest.scan).not.toHaveProperty(
@@ -867,6 +926,19 @@ describe("custom validation", () => {
             : {}),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
+        if (identityCase && scenario !== "identity-unchanged") {
+          await expect(pending).rejects.toThrow(
+            "expected the checked regular file",
+          );
+          expect(identityProbe?.replaced()).toBe(true);
+          expect(turns).toBe(1);
+          expect(commands).not.toContain("complete-scan");
+          expect(identityProbe?.handles.length).toBeGreaterThan(0);
+          expect(identityProbe?.handles.every((file) => file.fd === -1)).toBe(
+            true,
+          );
+          return;
+        }
         if (scenario === "unfinished-source") {
           await expect(pending).rejects.toThrow(
             "The latest saved scan draft is incomplete",
@@ -947,6 +1019,7 @@ describe("custom validation", () => {
             "reportable",
           );
         expect(completed.manifest.scan.scope.validationMode).toBe("custom");
+        expect(completed.manifest.scan["complete"]).not.toBe(false);
         expect(
           completed.manifest.scan.artifacts.map((artifact) => artifact.path),
         ).toContain(resultName);
@@ -961,6 +1034,7 @@ describe("custom validation", () => {
           count === 0 ? "No findings" : "Fixture 0",
         );
       } finally {
+        identityProbe?.restore();
         await client.close();
       }
     },
@@ -1065,3 +1139,65 @@ describe("custom validation", () => {
 });
 
 const unexpectedValidation = rejecting("unexpected validation");
+
+async function replaceWithIdentity(
+  path: string,
+  originalId: bigint,
+  replacementId: bigint,
+) {
+  const files = await import("node:fs/promises");
+  const originalLstat = files.lstat;
+  const originalRealpath = files.realpath;
+  const originalOpen = files.open;
+  let replaced = false;
+  const handles: FileHandle[] = [];
+  const withIdentity = (metadata: Stats | BigIntStats, identity: bigint) => {
+    Object.defineProperty(metadata, "ino", {
+      value: typeof metadata.ino === "bigint" ? identity : Number(identity),
+    });
+    return metadata;
+  };
+  const inspecting = spyOn(files, "lstat").mockImplementation((async (
+    ...args: Parameters<typeof originalLstat>
+  ) => {
+    const metadata = await originalLstat(...args);
+    return args[0] === path
+      ? withIdentity(metadata, replaced ? replacementId : originalId)
+      : metadata;
+  }) as typeof originalLstat);
+  const resolving = spyOn(files, "realpath").mockImplementation((async (
+    ...args: Parameters<typeof originalRealpath>
+  ) => {
+    const canonical = await originalRealpath(...args);
+    if (args[0] === path && !replaced && originalId !== replacementId) {
+      await rename(path, `${path}.original`);
+      await writeFile(path, await readFile(`${path}.original`));
+      replaced = true;
+    }
+    return canonical;
+  }) as typeof originalRealpath);
+  const opening = spyOn(files, "open").mockImplementation(async (...args) => {
+    const file = await originalOpen(...args);
+    if (args[0] === path) {
+      handles.push(file);
+      const originalStat = file.stat.bind(file);
+      spyOn(file, "stat").mockImplementation((async (
+        ...options: Parameters<typeof originalStat>
+      ) =>
+        withIdentity(
+          await originalStat(...options),
+          replaced ? replacementId : originalId,
+        )) as typeof originalStat);
+    }
+    return file;
+  });
+  return {
+    replaced: () => replaced,
+    handles,
+    restore: () => {
+      inspecting.mockRestore();
+      resolving.mockRestore();
+      opening.mockRestore();
+    },
+  };
+}

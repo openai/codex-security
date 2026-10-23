@@ -14,9 +14,9 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
   codexSecurityStateDirectory,
+  requireModelSafeOutputDir,
   resolvePluginPython,
   runWorkbench,
-  workbenchEnvironment,
   type ProcessEnvironment,
 } from "./runtime.js";
 
@@ -40,7 +40,9 @@ export async function savedScanWorkbench(
   requestedId: string | { workflowId: string },
   options: {
     environment: ProcessEnvironment;
+    stateDirectory?: string;
     pluginRoot: string;
+    pythonPath?: string;
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -48,15 +50,21 @@ export async function savedScanWorkbench(
   SavedScanDependencies["runWorkbench"] & {
     environment: ProcessEnvironment;
     readonly protectedRoots: readonly string[];
+    readonly targetPaths: readonly string[];
   }
 > {
   options.signal?.throwIfAborted();
-  const environment: ProcessEnvironment = workbenchEnvironment(
-    options.environment,
-  );
+  const stateDirectory =
+    options.stateDirectory ?? codexSecurityStateDirectory(options.environment);
+  requireModelSafeOutputDir(stateDirectory);
+  const environment: ProcessEnvironment = {
+    ...options.environment,
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  };
   const targets = await readTargets(
     requestedId,
     environment,
+    stateDirectory,
     options.currentDirectory,
     options.signal,
   );
@@ -121,6 +129,7 @@ export async function savedScanWorkbench(
       );
     // Pin the interpreter selected with every candidate and the caller checkout protected.
     python ??= await resolvePluginPython({
+      configuredPath: options.pythonPath,
       environment,
       protectedRoot: protectedRoots,
       currentDirectory: options.currentDirectory,
@@ -130,6 +139,7 @@ export async function savedScanWorkbench(
     const result = await runWorkbench(
       {
         environment,
+        stateDirectory,
         pluginRoot: options.pluginRoot,
         python,
         signal,
@@ -164,12 +174,14 @@ export async function savedScanWorkbench(
   return Object.assign(workbench, {
     environment,
     protectedRoots: [options.currentDirectory, ...protectedRoots],
+    targetPaths: targets.map((row) => row.target_path),
   });
 }
 
 async function readTargets(
   requestedId: string | { workflowId: string },
   environment: ProcessEnvironment,
+  stateDirectory: string,
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
@@ -189,7 +201,7 @@ async function readTargets(
   let database: BootstrapDatabase | undefined;
   try {
     database = new Database(
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+      join(stateDirectory, "workbench.sqlite3"),
       // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
       // Open only an existing file there; query_only still prevents SQL data/schema writes.
       bun

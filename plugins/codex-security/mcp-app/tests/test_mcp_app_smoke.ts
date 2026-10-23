@@ -10,6 +10,7 @@ import { hash, randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -741,104 +742,61 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability(
   }
 }
 
-async function assertDeepScanPersistsRetryableWorkerStartupError() {
-  const fixtureRoot = await temporaryDirectory(
-    "codex-security-deep-inventory-",
+async function assertDeepScanRetainsStartupFailureAndTerminalState() {
+  const fixtureRoot = await mkdtemp(
+    path.join(tmpdir(), "codex-security-deep-inventory-"),
   );
-  const fixtureTarget = path.join(
-    fixtureRoot,
-    process.platform === "win32" ? "repository" : "repository ",
-  );
-  if (process.platform !== "win32")
-    await mkdir(path.join(fixtureRoot, "repository"));
+  const fixtureTarget = path.join(fixtureRoot, "repository");
   const fixtureState = path.join(fixtureRoot, "state");
   const fixtureScanRoot = path.join(fixtureRoot, "scans");
+  const fixtureCodexHome = path.join(fixtureRoot, "codex-home");
+  await mkdir(fixtureCodexHome);
   await mkdir(path.join(fixtureTarget, "app"), { recursive: true });
   await writeFile(path.join(fixtureTarget, "app", "routes.py"), "route = 1\n");
 
-  const fixtureEnvironment = {
-    CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
-    CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
-    CODEX_SECURITY_STATE_DIR: fixtureState,
-  };
   const deepServer = startTestServer({
     cwd: pluginRoot,
-    env: fixtureEnvironment,
+    env: {
+      CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
+      CODEX_HOME: fixtureCodexHome,
+      CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
+      CODEX_SECURITY_STATE_DIR: fixtureState,
+    },
   });
   try {
     assertNoError(
-      await deepServer.initialize("codex-security-deep-inventory-smoke"),
+      await deepServer.request(1, "initialize", {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: {
+          name: "codex-security-deep-inventory-smoke",
+          version: "0.1.0",
+        },
+      }),
     );
 
-    deepServer.sendRequest(2, "tools/call", {
+    const started = await deepServer.request(2, "tools/call", {
       name: "start_codex_security_deep_scan",
-      arguments: { targetPath: fixtureTarget, scope: fixtureTarget },
+      arguments: { targetPath: fixtureTarget },
       _meta: {
         "openai/threadId": "fixture-deep-inventory-thread",
         "codex/sandbox-state-meta": parentSandboxState,
       },
     });
-    let scan;
-    let startupErrorWorker;
-    const pollingStarted = Date.now();
-    for (
-      let requestId = 100;
-      Date.now() - pollingStarted < 30_000;
-      requestId++
-    ) {
-      const listed = await deepServer.callTool(requestId, {
-        name: "list_codex_security_scans",
-        arguments: {},
-      });
-      assertNoError(listed);
-      [scan] = listed.result.structuredContent.scans;
-      if (scan) {
-        assert.equal(listed.result.structuredContent.scans.length, 1);
-        assert.equal(scan.progress.status, "running");
-        const { deepScan } = JSON.parse(
-          execFileSync(
-            process.env.PYTHON?.trim() || "python3",
-            [
-              path.join(pluginRoot, "scripts", "workbench_db.py"),
-              "get-deep-scan",
-              "--scan-id",
-              scan.scanId,
-              "--thread-id",
-              "fixture-deep-inventory-thread",
-            ],
-            {
-              env: { ...process.env, ...fixtureEnvironment },
-              encoding: "utf8",
-            },
-          ),
-        );
-        assert.equal(deepScan.status, "running");
-        assert.equal(deepScan.targetPath, await realpath(fixtureTarget));
-        assert.equal(deepScan.scope, ".");
-        startupErrorWorker = deepScan.workers.find(
-          (worker: { status: string; error?: string }) =>
-            worker.error?.includes("missing-deep-scan-codex"),
-        );
-        if (startupErrorWorker) break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.ok(
-      startupErrorWorker,
-      "Expected a persisted retryable startup error",
+    assert.equal(started.result.isError, true);
+    assert.match(
+      started.result.content.map((item) => item.text).join(" "),
+      /missing-deep-scan-codex/,
     );
-    assert.equal(startupErrorWorker.status, "running");
 
-    const canceled = await deepServer.callTool(3, {
-      name: "cancel_codex_security_scan",
-      arguments: { scanId: scan.scanId },
-      _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
+    const listed = await deepServer.request(3, "tools/call", {
+      name: "list_codex_security_scans",
+      arguments: {},
     });
-    assertNoError(canceled);
-    await deepServer.waitForMessage(
-      (message) => message.id === 2,
-      "Deep Scan start response after cancellation",
-    );
+    assertNoError(listed);
+    assert.equal(listed.result.structuredContent.scans.length, 1);
+    const scan = listed.result.structuredContent.scans[0];
+    assert.equal(scan.progress.status, "running");
     await assert.rejects(
       readFile(
         path.join(
@@ -851,37 +809,40 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
       { code: "ENOENT" },
     );
 
-    const publicationFailure =
-      "Saved result publication failed: fixture retained result publication failure";
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
-      "-c",
-      `import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as connection:
-    updated = connection.execute("UPDATE deep_scan_runs SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = ? WHERE scan_id = ?", (sys.argv[2], sys.argv[3]))
-    assert updated.rowcount == 1`,
-      path.join(fixtureState, "workbench.sqlite3"),
-      publicationFailure,
-      scan.scanId,
-    ]);
-    const canceledWithPublicationFailure = await deepServer.callTool(4, {
+    const handoffClaimToken = execFileSync(
+      process.env.PYTHON?.trim() || "python3",
+      [
+        "-c",
+        "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); print(connection.execute('SELECT handoff_claim_token FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()[0])",
+        path.join(fixtureState, "workbench.sqlite3"),
+        scan.scanId,
+      ],
+      { encoding: "utf8" },
+    ).trim();
+    const failureMessage = "Fixture retained ordinary scan failure";
+    assertNoError(
+      await deepServer.request(4, "tools/call", {
+        name: "fail_codex_security_scan",
+        arguments: {
+          scanId: scan.scanId,
+          handoffClaimToken,
+          message: failureMessage,
+        },
+        _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
+      }),
+    );
+    const rejoined = await deepServer.request(5, "tools/call", {
       name: "start_codex_security_deep_scan",
-      arguments: { scanId: scan.scanId },
+      arguments: { scanId: scan.scanId, handoffClaimToken },
       _meta: {
         "openai/threadId": "fixture-deep-inventory-thread",
         "codex/sandbox-state-meta": parentSandboxState,
       },
     });
-    const publicationFailureText = canceledWithPublicationFailure.result.content
-      .map((item: { text: string }) => item.text)
-      .join(" ");
-    assert.equal(canceledWithPublicationFailure.result.isError, true);
+    assert.equal(rejoined.result.isError, true);
     assert.equal(
-      canceledWithPublicationFailure.result.structuredContent,
-      undefined,
-    );
-    assert.match(
-      publicationFailureText,
-      /fixture retained result publication failure/,
+      rejoined.result.content.map((item) => item.text).join(" "),
+      failureMessage,
     );
   } finally {
     await deepServer.stop();
@@ -1494,7 +1455,7 @@ try {
     await assertWorkspaceWorksWithoutUiCapability(scope);
   await assertHeadlessStandardScanWorksWithoutUiCapability();
   await assertHeadlessStandardScanWorksWithoutUiCapability("security_scan");
-  await assertDeepScanPersistsRetryableWorkerStartupError();
+  await assertDeepScanRetainsStartupFailureAndTerminalState();
   await assertUserInputFailureLogging();
   if (process.platform !== "win32") {
     await rm(launchCwd, { recursive: true, force: true });
@@ -2054,10 +2015,7 @@ try {
   assert.equal(missingPersistedDeepScan.result.isError, true);
   assert.equal(missingPersistedDeepScan.result.structuredContent, undefined);
   assert.match(missingPersistedDeepScanText, /Codex Security scan not found/);
-  assert.match(
-    missingPersistedDeepScanText,
-    /discovery did not start or rejoin/,
-  );
+  assert.match(missingPersistedDeepScanText, /Deep Scan did not complete/);
   assert.match(
     missingPersistedDeepScanText,
     /Stop the current response and surface this exact MCP error/,
@@ -2066,7 +2024,7 @@ try {
     missingPersistedDeepScanText,
     /Do not call start_codex_security_deep_scan again/,
   );
-  assert.match(missingPersistedDeepScanText, /get_codex_security_scan_context/);
+  assert.match(missingPersistedDeepScanText, /saved scan context/);
   assert.match(missingPersistedDeepScanText, /complete_codex_security_scan/);
   assert.match(missingPersistedDeepScanText, /emit benchmark JSON/);
   assert.equal(listFindings.annotations.readOnlyHint, false);

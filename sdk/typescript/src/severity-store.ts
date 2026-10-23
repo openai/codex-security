@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   severityClassificationSchema,
+  severityFindingDigest,
   type SeverityClassification,
   type SeverityClassificationCheckpoint,
 } from "./classify-severity.js";
@@ -35,11 +36,17 @@ export class SeverityStore {
     reprocess: boolean,
   ): SeverityClassificationCheckpoint {
     return {
-      load: async (result) => {
+      load: async (result, findings) => {
         const response = await this.run("severity-classification", {
           action: "begin",
           scanId,
           findingIds,
+          inputs: Object.fromEntries(
+            findings.map((finding) => [
+              finding.findingId,
+              severityFindingDigest(finding),
+            ]),
+          ),
           assessedAt: result.assessedAt,
           classificationRuns: result.classificationRuns,
           rubricSha256: result.rubricSha256,
@@ -52,9 +59,10 @@ export class SeverityStore {
               result,
             ).assessments;
       },
-      save: async (finding, assessment, result) => {
+      save: async (finding, assessment, result, reused = false) => {
         await this.run("severity-classification", {
           action: "save",
+          reused,
           scanId,
           finding,
           assessment: {

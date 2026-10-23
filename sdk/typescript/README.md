@@ -359,6 +359,19 @@ semantics. `maxCostUsd` and `signal` keep their existing behavior.
 
 ### Configure deep scans
 
+For `scan --mode deep`, `--workers` sets the number of independent Standard scans
+in each batch, and `--subagents` sets subagents per scan. Each batch finishes and
+merges before the next starts. With `--workers 1`, each scan is merged immediately.
+
+`--stop-after-no-new` stops after that many successfully merged scans without new
+issues. Within each batch, scans count in their original order, and each new
+issue is credited to the first scan that found it. A scan credited with a new
+issue resets the count; other successful scans increase it. The scan checks this
+threshold after each batch merge, so a batch can pass the threshold. Failures do not count as
+no-new results, and retries do not consume additional discovery runs.
+`--max-discovery-runs` and `--max-time-hours` cap discovery runs and duration.
+SDK equivalents:
+
 ```ts
 const result = await security.run("/path/to/repository", {
   mode: "deep",
@@ -378,13 +391,181 @@ stops, the scan combines and returns completed findings. See
 Deep discovery retains its enforced deadline, with a default and maximum of
 5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
 
+Deep Scan combines ordinary Standard scans in batches. Each child receives the same
+saved knowledge snapshot; resume rejects changed inputs. Merge inputs retain the
+original findings and evidence, and the merger must read retained source records
+before consolidating findings. See the [completed-report evaluation](scripts/merge-eval/README.md).
+If the deadline expires before any child starts, the scan publishes an empty sealed
+report with a `null` `threadId`. Failed and canceled checkpoints are terminal.
+
 ### Progress and cost
 
 Use `onProgress` for scan progress and `onCost` for cost updates.
 
-Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
-persisted worker sessions discovered by the SDK's existing session tracker,
-independently of model-emitted status markers:
+The token summary shows uncached input, cache reads, cache writes, output,
+and total tokens. Total tokens include all input plus output; cache reads and
+writes are subsets of input, not extra tokens. When cache-write usage is missing,
+the summary shows uncached input and cache writes as unavailable.
+The final summary preserves missing-data information from a matching session log.
+If the Codex runtime converts an omitted count to zero before recording it, the
+CLI cannot distinguish that zero from reported usage.
+
+Cost displays show a range using
+[standard API prices](https://developers.openai.com/api/docs/pricing), because
+runtime usage does not identify which requests received long-context pricing.
+The minimum assumes short-context pricing; the maximum assumes long-context
+pricing. These are token-cost estimates for the observed usage, excluding other
+processing tiers, fees, surcharges, and account-specific pricing.
+
+JSON results, scan history, and bulk-scan receipts preserve
+`cost.estimatedUsdRange`: `min`, `max`, and `context: "unknown"`. A `null` maximum
+means an upper estimate is unavailable, including models without verified
+long-context rates. `cost.pricing` records the price source, verification date,
+processing tier, short-context rates, and verified long-context rates when known.
+Models without known short-context prices still have no cost estimate.
+GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna have verified standard prices for cost
+estimates and `--max-cost` limits.
+
+For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
+`cacheWriteInputTokensReported: false` means at least one included usage record
+did not report cache writes. Raw usage uses `cache_write_input_tokens_reported`.
+In that case, the range minimum prices unclassified input as ordinary input,
+and the maximum allows it to be cache writes. Token counts remain unchanged.
+Older saved records remain readable and display a labeled legacy estimate;
+they are not repriced using current rates.
+
+For compatibility, `cost.estimatedUsd` retains the short-context baseline used
+by existing spending limits. `cost.pricing.context: "short"` describes that
+baseline, not observed request contexts. Use `estimatedUsdRange` for cost
+reporting. This change does not change when spending limits stop scans.
+
+`--max-cost USD` stops the scan and its workers when estimated cost exceeds
+the limit, though in-flight requests can finish above it. If deep-scan
+discovery has finished, the scan returns a sealed partial report without more
+model calls and lists unvalidated candidates as follow-up work. Bulk scans
+apply the limit per repository attempt.
+
+With `--max-cost`, automatic finding-history matching makes at most one extra
+model call. If it needs more context, the completed scan is kept and a warning
+directs you to run `scans match --all` explicitly.
+
+For a single scan in the interactive dashboard, reaching 80% of the limit
+offers a higher **total** USD limit. Enter a larger amount to approve it, or
+press Enter with an empty input or Escape to keep the current limit. The scan
+continues running while you decide, and the existing limit remains enforced
+until the increase is saved. Increases keep the same scan and accumulated cost;
+they do not restart work or extend time or discovery limits. CI, JSON/JSONL,
+`--headless`, and `--verbose` scans do not offer budget increases. If usage crosses the limit
+before an increase is approved, the scan still stops.
+
+SDK callers can supply `onBudgetApproaching({ maxCostUsd, cost, signal })` and
+return a higher total limit, or `undefined` to keep the current limit. The
+callback runs once per limit at 80% usage without blocking tracking or
+execution. Its signal aborts when the scan stops or finishes model work; late
+answers are ignored. Invalid increases or failures to save them leave the
+existing limit in place and report a warning. `onCost(cost, maxCostUsd)` reports
+the current limit, including after an approved increase.
+
+These amounts estimate API-equivalent model usage, not ChatGPT subscription
+allowance. Post-scan prompts run after scan cost tracking ends and are outside
+this limit.
+
+### Bulk scans
+
+Run `gh auth login`, then `npx @openai/codex-security bulk-scan` to select
+GitHub repositories pushed in the last 90 days. Forks and archived repositories
+are excluded; private checkouts use your GitHub CLI sign-in. The command asks
+for an output directory and saves your selection there as `repositories.csv`.
+`--output-dir` requires CSV input.
+
+For CI or an existing repository list, pass a CSV with `id`, `repository`, and
+`revision` (full commit hash). Optional `scope`, `mode`, and `prompt` columns
+customize each scan:
+
+```csv
+id,repository,revision,scope,mode,prompt
+service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard,Focus on authentication and authorization.
+```
+
+```bash
+npx @openai/codex-security bulk-scan repositories.csv \
+  --output-dir /path/outside/repositories/security-scans --workers 4
+```
+
+`--scan-prompt-file PATH` adds instructions to a scan or all bulk scans. Each
+repository's CSV `prompt` follows the shared instructions.
+`-c FILE` shares config with single scans: CSV mode/scope override file defaults,
+and deep settings apply only to deep rows. `output.directory` can supply the
+results directory. `fail_on_severity` returns exit `1` without retrying completed
+scans, including when resuming saved results. A changed project configuration
+requires a new campaign output directory.
+`--post-scan-prompt-file PATH` runs a follow-up in the same authenticated session,
+even after a failed or incomplete scan, but not after cancellation or a
+cost-limit stop.
+
+`--workers` defaults to `4`. `--max-attempts` defaults to `1` attempt per pending
+repository per invocation. Rerunning the command continues the campaign, skips
+completed results, and starts new attempts for pending repositories. If an
+attempt directory is occupied, that repository stops before replacing its
+checkout and the command recommends `--recover`.
+
+#### Recovering failed or interrupted bulk scans
+
+Use the original CSV, output directory, and campaign options with `--recover`:
+
+```bash
+npx @openai/codex-security bulk-scan repositories.csv \
+  --output-dir /path/outside/repositories/security-scans --recover
+```
+
+Recovery requires an existing campaign with a matching manifest. It skips
+completed results, including partial coverage, and repositories never started.
+For each failed or interrupted repository, it checks the latest attempt:
+
+- A sealed scan is recorded in `results.jsonl` without scanning again.
+- An eligible running Deep Scan resumes saved work in its original output
+  directory, keeping its scan ID, completed workers, artifacts, saved settings,
+  and accumulated cost.
+- A failed, canceled, or otherwise unavailable scan starts a new attempt at the
+  CSV's pinned revision. Attempt numbers account for both receipts and existing
+  directories. Old artifacts and checkouts are preserved; new attempts use
+  `recovery-checkouts/<id>/attempt-<n>`.
+
+`--workers` still defaults to `4`; `--max-attempts` defaults to one recovery or
+new attempt per repository. A resume connection failure stops that repository
+for this invocation instead of starting another scan. Other repositories
+continue. Failed and interrupted recovery checkouts remain available for a later
+`--recover`; fresh completed checkouts are removed after recording the result.
+If a reboot interrupted a receipt write, its unfinished tail is saved beside
+`results.jsonl` as `results.jsonl.interrupted-<id>` before appending valid records.
+
+Same-scan resume requires the original checkout, session logs, and Codex Security
+state directory. Recovery does not reconstruct deleted checkpoints or fix the
+underlying cause of execution failures. New attempts incur new scan costs.
+Any remaining failures or partial coverage keep exit code `2`.
+`bulk-scan --help` lists all options.
+
+### Custom validation
+
+Replace the final validation step of a standard or diff scan with a prompt
+file. Source review still runs; discovery workers do not receive this prompt.
+
+```bash
+npx @openai/codex-security scan . --validation-prompt-file validation.md
+```
+
+The SDK accepts the same file as `validationPromptFile`, or inline text as
+`validationPrompt`:
+
+```ts
+await security.run(repository, {
+  validationPromptFile: "validation.md",
+});
+```
+
+### Observe workers and progress
+
+Use `onWorkerEvent` to observe scan-associated workers:
 
 ```ts
 await security.run(repository, {

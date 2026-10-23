@@ -59,6 +59,18 @@ for (const fields of [
     JSON.stringify(fields),
   );
 
+// Composed reports retain each child scan's nested relative write-up path.
+assert.equal(
+  validateFinding({
+    ...finding,
+    writeup: {
+      reportPath:
+        "findings/2da76c72-89a0-4f45-859e-7ce8d41fc380/proof/proof.md",
+    },
+  }),
+  true,
+);
+
 // Reused nested union branches must keep their constraints and error paths.
 assert.equal(
   validateFinding({
@@ -103,7 +115,7 @@ for (const field of ["writeup", "remediationTests", "preventiveControls"]) {
   assert.equal(
     validate(
       field === "writeup"
-        ? { reportPath: "findings/example/different.md" }
+        ? { reportPath: "findings/example/../different.md" }
         : [""],
     ),
     false,

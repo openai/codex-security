@@ -3,12 +3,15 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 const { normalizeCandidatesCommand } = await importSource(
-  new URL("../src/helpers/normalize-candidates.ts", import.meta.url).pathname,
+  fileURLToPath(
+    new URL("../src/helpers/normalize-candidates.ts", import.meta.url),
+  ),
 );
 const { recordCodexSecurityDiscoveryCandidates } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-discovery.ts"),

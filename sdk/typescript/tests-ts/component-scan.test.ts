@@ -1,3 +1,5 @@
+import { Codex } from "@openai/codex-sdk";
+import * as permissionProfile from "../src/permission-profile.js";
 import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
 import { gitText, nodeCommand } from "./support/shell.js";
@@ -1775,6 +1777,10 @@ test.each([
     let arrivals = 0;
     const resolveCommand = runtime.resolveCodexCommand;
     const spies = [
+      spyOn(
+        permissionProfile,
+        "createPermissionCheckedCodex",
+      ).mockImplementation((options) => new Codex(options)),
       spyOn(runtime, "resolveCodexCommand").mockImplementation(
         (environment) => {
           if (environment?.["CODEX_CLI_PATH"] !== node)
@@ -1795,6 +1801,13 @@ test.each([
       ),
       spyOn(runtime, "prepareScanArtifactRestorer").mockResolvedValue({
         restore: async () => {},
+        prepareDirectory: async () => {},
+        remove: async () => {},
+        projectChild: async () => {
+          throw new Error(
+            "No accepted child is projected in this cancellation fixture.",
+          );
+        },
       }),
       spyOn(runtime, "runWorkbench").mockImplementation(
         async (_options, args, input) => mockWorkbench(args, input),
@@ -1806,6 +1819,9 @@ test.each([
           const paths = await fixture();
           const preload = join(paths.root, "codex.mjs");
           const receipt = join(paths.root, "child.json");
+          const controller = new AbortController();
+          const boundary = new Error("Synthetic child boundary reached");
+          let retryMessage: string | undefined;
           const environment = {
             ...Object.fromEntries(
               Object.entries(process.env).filter(([key]) =>
@@ -1842,14 +1858,16 @@ test.each([
               'const bytes = JSON.stringify(coverage); writeFileSync(coveragePath, bytes); const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
               'manifest.scan.artifacts.find(artifact => artifact.path === "coverage.json").sha256 = createHash("sha256").update(bytes).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
               'const authPath = join(process.env.CODEX_HOME, "auth.json");',
-              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
+              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, arguments: process.argv.slice(2) }));`,
               'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
               'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "scan complete" } }));',
-              'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
+              mode === "deep"
+                ? 'console.log(JSON.stringify({ type: "turn.failed", error: { message: "Synthetic child boundary reached" } }));'
+                : 'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
               "process.exit(0);",
             ].join("\n"),
           );
-          const summary = await scan(paths, {
+          const scanResult = scan(paths, {
             components: [{ name: "Source", paths: ["."] }],
             createSecurity: undefined,
             environment,
@@ -1861,12 +1879,44 @@ test.each([
                 },
               },
             },
-            scanOptions: { auth, mode },
+            scanOptions: {
+              auth,
+              mode,
+              ...(mode === "deep" ? { workers: 1 } : {}),
+            },
+            signal: controller.signal,
+            onScanEvent: (event) => {
+              if (mode === "deep" && event.type === "warning") {
+                retryMessage = event.value;
+                controller.abort(boundary);
+              }
+            },
           }).finally(ready.resolve);
+          const summary =
+            mode === "deep"
+              ? await (async () => {
+                  await expect(scanResult).rejects.toBe(boundary);
+                  return json(join(paths.outputDir, "summary.json"));
+                })()
+              : await scanResult;
           expect(
             summary,
             JSON.stringify(await json(summary.summaryPath!)),
-          ).toMatchObject({ completed: 1, failed: 0 });
+          ).toMatchObject(
+            mode === "deep"
+              ? { completed: 0, failed: 1 }
+              : { completed: 1, failed: 0 },
+          );
+          if (mode === "deep") {
+            expect(retryMessage).toContain("Synthetic child boundary reached");
+            expect(await json(summary.summaryPath!)).toMatchObject({
+              components: [
+                expect.objectContaining({
+                  error: expect.stringContaining("interrupted"),
+                }),
+              ],
+            });
+          }
           const child = await json(receipt);
           expect(await realpath(child.executable)).toBe(await realpath(node));
           expect(child).toMatchObject({
@@ -1877,15 +1927,35 @@ test.each([
             value,
             python: "/managed/python",
           });
+          const overrides = child.arguments.flatMap(
+            (argument: string, index: number) =>
+              argument === "-c" || argument === "--config"
+                ? [parseToml(child.arguments[index + 1])]
+                : [],
+          );
+          expect(overrides).toContainEqual({
+            shell_environment_policy: {
+              set: { SYNTHETIC_COMPONENT: `worker-${value}` },
+            },
+          });
           if (mode === "deep") {
-            expect(parseToml(child.workerConfig)).toMatchObject({
-              worker_runtime: {
-                shell_environment_policy: {
-                  set: { SYNTHETIC_COMPONENT: `worker-${value}` },
-                },
-              },
+            expect(overrides).toContainEqual({
+              default_permissions: "codex_security_scan",
             });
-          } else expect(child.workerConfig).toBeNull();
+            expect(overrides).toContainEqual(
+              expect.objectContaining({
+                permissions: expect.objectContaining({
+                  codex_security_scan: expect.objectContaining({
+                    filesystem: expect.objectContaining({
+                      ":root": "read",
+                      ":workspace_roots": "write",
+                      [child.home]: { ".": "deny" },
+                    }),
+                  }),
+                }),
+              }),
+            );
+          }
           expect(environment).toEqual(original);
           expect(await json(join(environment.CODEX_HOME, "auth.json"))).toEqual(
             storedAuthentication,

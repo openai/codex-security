@@ -108,9 +108,9 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items; receipt references point to the original evidence. Findings reduction does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
+During [Deep Scan](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans), the host combines child scans’ reviewed surfaces, explicit exclusions, deferred work and open questions, preserving references to the child artifacts. The parent retains pending child work and records why any pass remains unresolved or has no completed input. Reaching a discovery limit alone does not add deferred work. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
 
-Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
+Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage.
 
 For Standard and diff scans, record:
 

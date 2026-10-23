@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { deserializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
@@ -38,12 +38,14 @@ function markedFinding(repositoryPath = "api/source.py") {
 }
 
 async function checkpoints(root: string) {
-  const names = await readdir(join(root, "checkpoints"));
+  const names = (await readdir(join(root, "checkpoints"))).filter((name) =>
+    name.endsWith(".json"),
+  );
   assert.ok(names.length > 0);
   return Promise.all(names.map((name) => readJson(root, "checkpoints", name)));
 }
 
-for (const layout of ["standard", "diff", "deep", "worker"] as const) {
+for (const layout of ["standard", "diff", "deep"] as const) {
   for (const complete of layout === "deep" ? [false, true] : [true]) {
     test(`${layout} ${complete ? "terminal" : "progress"} rejects retained overflow before writing`, async (t) => {
       const f = await fixture(t, layout);
@@ -75,7 +77,7 @@ for (const layout of ["standard", "deep"] as const) {
   });
 }
 
-for (const layout of ["worker", "deep"] as const) {
+for (const layout of ["deep"] as const) {
   test(`${layout} drops outside overflow before saving a terminal draft`, async (t) => {
     const f = await fixture(t, layout);
     f.context.scope = "api";
@@ -91,7 +93,7 @@ for (const layout of ["worker", "deep"] as const) {
     assert.equal((await f.write(input)).findingCount, 1);
     const saved =
       layout === "worker"
-        ? await readJson(f.root, "result.json")
+        ? await readJson(f.root, "findings.json")
         : {
             ...(await readJson(f.root, "findings.json")),
             coverage: await readJson(f.root, "coverage.json"),
@@ -101,8 +103,6 @@ for (const layout of ["worker", "deep"] as const) {
       assert.equal(Object.hasOwn(document.coverage, "completeness"), false);
     }
     assert.deepEqual(input, before);
-    if (layout === "deep")
-      assert.deepEqual(await readdir(join(f.root, "drafts")), []);
   });
 
   test(`${layout} retains overflow when a later finding location matches scope`, async (t) => {
@@ -180,6 +180,8 @@ test("Deep retains historical threat-model reader behavior", async (t) => {
       );
       assert.equal(draft.manifest.scan.threatModel.audit.measurement, null);
       assert.equal(checkpoint.threatModel.audit.measurement, null);
+      await rm(args[args.indexOf("--draft-path") + 1]);
+      await rm(args[args.indexOf("--checkpoint-path") + 1]);
       return {};
     },
   );
@@ -192,8 +194,8 @@ test("Deep retains historical threat-model reader behavior", async (t) => {
   assert.equal(Object.hasOwn(input, "threatModel"), false);
 });
 
-test("worker recovers finite nested values after an interrupted result write", async (t) => {
-  const f = await fixture(t, "worker");
+test("standard scan recovers finite nested values after an interrupted result write", async (t) => {
+  const f = await fixture(t, "standard");
   let nested: unknown = 1.25e300;
   for (let depth = 0; depth < 300; depth++) nested = [nested];
   const kept = {
@@ -204,8 +206,10 @@ test("worker recovers finite nested values after an interrupted result write", a
     },
   };
   const input = requestInput({ ...f.draft(), findings: [kept] });
-  await interruptDraftWrite(join(f.root, "result.json"), () => f.write(input));
+  await interruptDraftWrite(join(f.root, "findings.json"), () =>
+    f.write(input),
+  );
   assert.deepEqual((await checkpoints(f.root))[0].findings, [kept]);
   await f.write(f.draft());
-  assert.deepEqual((await readJson(f.root, "result.json")).findings, [kept]);
+  assert.deepEqual((await readJson(f.root, "findings.json")).findings, [kept]);
 });

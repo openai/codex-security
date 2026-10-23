@@ -1,9 +1,9 @@
+import { createReadStream } from "node:fs";
 import type { JsonObject as JsonRecord } from "../types.js";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";

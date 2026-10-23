@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -33,6 +34,8 @@ export interface PreparedKnowledgeBase {
   path: string;
   sources: string[];
   protectedRoots: string[];
+  snapshot: KnowledgeBaseSnapshot;
+  sha256: string;
   cleanup(): Promise<void>;
 }
 
@@ -168,6 +171,15 @@ export async function prepareKnowledgeBase(
       path,
       sources: [...snapshot.sources],
       protectedRoots,
+      snapshot,
+      sha256: createHash("sha256")
+        .update(
+          JSON.stringify({
+            sources: snapshot.sources,
+            documents: snapshot.documents,
+          }),
+        )
+        .digest("hex"),
       cleanup: () => rm(path, { recursive: true, force: true }),
     };
   } catch (error) {

@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { JsonObject } from "./types.js";
 import { isRecord as isJsonObject } from "./record.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
+  workbenchCommandTimeout,
 } from "./python_command.js";
 import { WORKBENCH_PYTHON } from "./server/workbench-process.js";
 
@@ -13,6 +14,27 @@ const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 export const PLUGIN_ROOT =
   process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
+
+let selectedStateDirectory: Promise<string> | undefined;
+
+/** Share the workbench's canonical state selection with native execution. */
+export function workbenchStateDirectory(): Promise<string> {
+  if (selectedStateDirectory) return selectedStateDirectory;
+  const selection = (async () => {
+    const result = await executeWorkbench(await resolvePythonCommand(), [
+      "resolve-scan-root",
+    ]);
+    if (typeof result.scanRoot !== "string")
+      throw new Error("Missing scan artifact root.");
+    return dirname(result.scanRoot);
+  })();
+  selectedStateDirectory = selection;
+  void selection.catch(() => {
+    if (selectedStateDirectory === selection)
+      selectedStateDirectory = undefined;
+  });
+  return selection;
+}
 
 export async function scanRoot(): Promise<string> {
   const result = await runWorkbench([
@@ -36,7 +58,13 @@ export async function runWorkbench(
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
-    return await executeWorkbench(pythonCommand, args, input, options);
+    return await executeWorkbench(
+      pythonCommand,
+      args,
+      input,
+      options,
+      await workbenchStateDirectory(),
+    );
   } catch (error) {
     const launchError = pythonCommand
       ? missingPythonHelperMessage(error, pythonCommand)
@@ -56,36 +84,9 @@ async function executeWorkbench(
   args: string[],
   input?: string | Buffer,
   options: WorkbenchOptions = {},
+  stateDirectory?: string,
 ): Promise<JsonObject> {
-  const timeout = [
-    "begin-deep-scan",
-    "cancel-scan",
-    "fail-scan",
-    "claim-deep-scan-dedup",
-    "commit-deep-scan-dedup",
-    "complete-scan",
-    "export-findings",
-    "finish-deep-scan",
-    "finding-issues",
-    "get-scan",
-    "get-deep-scan",
-    "get-workspace",
-    "inspect-setup",
-    "list-findings",
-    "preserve-scan-results",
-    "recover-scan-results",
-    "request-finding-remediation",
-    "request-finding-remediation-action",
-    "save-workspace",
-    "set-finding-triage",
-    "set-finding-remediation",
-    "start-headless-standard-scan",
-    "start-prompt-only-scan",
-    "start-scan",
-    "upsert-deep-scan-worker",
-  ].includes(args[0] ?? "")
-    ? 300_000
-    : 30_000;
+  const timeout = workbenchCommandTimeout(args[0]);
   const execution = execFileAsync(
     pythonCommand,
     [
@@ -98,7 +99,10 @@ async function executeWorkbench(
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: process.env,
+      env:
+        stateDirectory === undefined
+          ? process.env
+          : { ...process.env, CODEX_SECURITY_STATE_DIR: stateDirectory },
       encoding: "utf8" as const,
       maxBuffer: Infinity,
       timeout,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
@@ -39,6 +39,17 @@ export function scanInputIdentity(
             ),
           },
   };
+}
+
+export async function modelInstructionsFileDigest(
+  path: string | undefined,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  return path === undefined
+    ? null
+    : createHash("sha256")
+        .update(await readFile(path, { signal }))
+        .digest("hex");
 }
 
 export async function saveScanKnowledge(

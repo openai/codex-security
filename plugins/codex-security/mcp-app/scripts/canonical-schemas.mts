@@ -91,7 +91,9 @@ const finding = z.looseObject({
   locations: z.array(location).min(1),
   writeup: z
     .looseObject({
-      reportPath: pattern("^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"),
+      reportPath: pattern(
+        "^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$",
+      ),
     })
     .optional(),
   codeEvidence: z.array(codeEvidence).optional(),

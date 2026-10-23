@@ -14,19 +14,15 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
-    begin_deep_scan,
     create_saved_workspace,
     fail_scan,
     initialize_git_repository,
-    mark_deep_coordinator_succeeded,
+    mark_deep_aggregate_ready,
     run_workbench,
     scan_command,
     start_delivered_scan,
-    upsert_deep_worker,
     write_completed_contract,
 )
-
-pytestmark = pytest.mark.native_macos
 
 
 @dataclass(frozen=True)
@@ -39,6 +35,46 @@ class ScanFixture:
     environment: dict[str, str]
     mode: str = "standard"
     diff_target: dict[str, Any] | None = None
+
+
+@pytest.mark.parametrize("include_cost", [False, True])
+def test_cost_envelopes_preserve_usage_without_nesting(workbench_api, include_cost: bool) -> None:
+    usage = {
+        "coverage": "unavailable",
+        "source": "codex_rollout",
+        "threadCount": 0,
+        "warnings": ["scan_thread_unavailable"],
+    }
+    measured = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(0, 0, 0),
+        "threadCount": 1,
+    }
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0,
+    }
+    merge = workbench_api["scan_usage"].merge_scan_cost
+    stored = json.dumps({"usage": usage, "cost": cost})
+    incoming = json.dumps({"usage": measured, **({"cost": cost} if include_cost else {})})
+    assert json.loads(merge(stored, incoming)) == {"usage": measured, "cost": cost}
+    assert json.loads(merge(stored, json.dumps(cost))) == {"usage": usage, "cost": cost}
+    assert json.loads(merge(None, json.dumps(cost))) == cost
+    assert merge(None, None) is None
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE scans (id TEXT, status TEXT, cost_json TEXT)")
+        connection.execute("INSERT INTO scans VALUES ('scan', 'complete', ?)", (stored,))
+        connection.commit()
+        workbench_api["scan_usage"].reconcile_completed_scan_cost(
+            connection, {"id": "scan", "cost_json": stored}, incoming
+        )
+        receipt = connection.execute("SELECT cost_json FROM scans").fetchone()[0]
+        assert json.loads(receipt) == {"usage": measured, "cost": cost}
 
 
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
@@ -96,16 +132,6 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
         str(tmp_path / "scans"),
         environment=environment,
     )["results"]
-    if mode == "deep":
-        begin_deep_scan(
-            state_dir,
-            "scan-parent",
-            "--scan-id",
-            str(started["scanId"]),
-            "--available-parallelism",
-            "4",
-            environment=environment,
-        )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         row = connection.execute(
             "SELECT started_at FROM scans WHERE id = ?", (started["scanId"],)
@@ -217,6 +243,719 @@ def _rollout(
     return rollout.resolve()
 
 
+def _state_graph(
+    environment: dict[str, str],
+    threads: dict[str, Path],
+    edges: list[tuple[str, str]],
+) -> None:
+    sqlite_home = Path(environment["CODEX_SQLITE_HOME"])
+    sqlite_home.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(sqlite_home / "state_5.sqlite") as connection:
+        connection.execute(
+            "CREATE TABLE threads "
+            "(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)"
+        )
+        connection.execute(
+            "CREATE TABLE thread_spawn_edges "
+            "(parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
+            [(thread_id, str(path)) for thread_id, path in threads.items()],
+        )
+        connection.executemany(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?, ?)",
+            edges,
+        )
+
+
+def _counts(
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_write_input_tokens: int = 0,
+) -> dict[str, int]:
+    return {
+        "inputTokens": input_tokens,
+        "cachedInputTokens": cached_input_tokens,
+        "cacheWriteInputTokens": cache_write_input_tokens,
+        "outputTokens": output_tokens,
+        "reasoningOutputTokens": 0,
+        "totalTokens": input_tokens + output_tokens,
+    }
+
+
+def _complete_scan(
+    fixture: ScanFixture, *arguments: str, cost: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    options: dict[str, Any] = {"relative_path": "app.py"}
+    if fixture.mode == "diff":
+        assert fixture.diff_target is not None
+        options.update(
+            relative_path="README.md",
+            target_kind="git_diff",
+            diff_base_revision=str(fixture.diff_target["baseRevision"]),
+            diff_head_revision=str(fixture.diff_target["headRevision"]),
+        )
+    elif fixture.mode == "deep":
+        options["coverage_mode"] = "deep_repository"
+        mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
+    write_completed_contract(
+        fixture.scan_dir,
+        fixture.scan_id,
+        fixture.target,
+        **options,
+    )
+    return run_workbench(
+        fixture.state_dir,
+        "complete-scan",
+        "--scan-id",
+        fixture.scan_id,
+        *arguments,
+        *(["--cost-json", json.dumps(cost)] if cost is not None else []),
+        environment=fixture.environment,
+    )
+
+
+@pytest.mark.parametrize(
+    ("info", "coverage"),
+    [("missing", "partial"), ("null", "complete"), ("invalid", "partial"), ("valid", "complete")],
+)
+def test_completion_preserves_usage_record_warnings(
+    tmp_path: Path, info: str, coverage: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    event = _token_event(counted, 10, 5)
+    if info == "missing":
+        del event["payload"]["info"]
+    elif info == "null":
+        event["payload"]["info"] = None
+    elif info == "invalid":
+        event["payload"]["info"] = {}
+    parent = _rollout(tmp_path, "scan-parent", [event, _token_event(counted, 20, 10)])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert usage["coverage"] == coverage
+    assert usage["totalTokens"] == 30
+    assert usage.get("warnings", []) == (["token_record_invalid"] if coverage == "partial" else [])
+
+
+@pytest.mark.parametrize("mode", ["standard", "diff"])
+def test_completion_counts_only_scan_owned_parent_and_descendants(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    fixture = _start_scan(tmp_path, mode=mode)
+    before = fixture.started_at - timedelta(seconds=1)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent_snapshot = _token_event(counted, 150, 25, cached_input_tokens=45)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _token_event(before, 100, 10, cached_input_tokens=20),
+            parent_snapshot,
+        ],
+    )
+    worker_snapshot = _token_event(counted, 180, 32, cached_input_tokens=55)
+    worker = _rollout(
+        tmp_path,
+        "scan-worker",
+        [worker_snapshot],
+        parent_thread_id="scan-parent",
+        copied_events=[parent_snapshot],
+    )
+    descendant = _rollout(
+        tmp_path,
+        "nested-worker",
+        [_token_event(counted, 8, 3, cached_input_tokens=2)],
+        parent_thread_id="scan-worker",
+    )
+    unrelated = _rollout(tmp_path, "unrelated", [_token_event(counted, 80_000, 20_000)])
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": parent,
+            "scan-worker": worker,
+            "nested-worker": descendant,
+            "unrelated": unrelated,
+        },
+        [("scan-parent", "scan-worker"), ("scan-worker", "nested-worker")],
+    )
+
+    completed = _complete_scan(fixture)
+    expected = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(88, 37, 25),
+        "threadCount": 3,
+    }
+    assert completed["scan"]["mode"] == mode
+    usage = completed["scan"]["usage"]
+    assert usage.items() >= expected.items()
+    assert usage["byRole"] == {
+        "parent": {**_counts(50, 25, 15), "threadCount": 1},
+        "workers": {**_counts(38, 12, 10), "threadCount": 2},
+    }
+    assert datetime.fromisoformat(usage["window"]["startedAt"]) == fixture.started_at
+    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == counted
+    assert datetime.fromisoformat(usage["observedAt"]) >= datetime.fromisoformat(
+        usage["window"]["endedAt"]
+    )
+    expected = usage
+    assert completed["workspace"]["results"]["usage"] == expected
+    assert "byModel" not in completed["scan"]["usage"]
+    assert (
+        run_workbench(fixture.state_dir, "list-scans", environment=fixture.environment)["scans"][0][
+            "usage"
+        ]
+        == expected
+    )
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        stored = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()
+    assert stored is not None
+    assert json.loads(stored[0]) == {"usage": expected}
+
+
+@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
+def test_scan_usage_helper_preserves_cached_token_totals(
+    cache_write_field: str,
+) -> None:
+    helper = Path(__file__).resolve().parents[1] / "scripts" / "workbench_scan_usage.py"
+    snapshot = runpy.run_path(str(helper))["_token_snapshot"]
+    usage = {
+        "input_tokens": 120,
+        "cached_input_tokens": 30,
+        cache_write_field: 12,
+        "output_tokens": 15,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 135,
+    }
+
+    assert snapshot({"info": {"total_token_usage": usage}}) == _counts(
+        120, 30, 15, cache_write_input_tokens=12
+    )
+
+
+@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
+def test_completion_includes_cached_and_cache_write_tokens(
+    tmp_path: Path,
+    cache_write_field: str,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    event = _token_event(counted, 120, 15, cached_input_tokens=30)
+    reported = event["payload"]["info"]["total_token_usage"]
+    reported.pop("cache_write_input_tokens")
+    reported[cache_write_field] = 12
+    parent = _rollout(tmp_path, "scan-parent", [event])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(120, 30, 15, cache_write_input_tokens=12),
+            "threadCount": 1,
+        }.items()
+    )
+
+
+def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    first_snapshot = _token_event(counted, 120, 10, cached_input_tokens=20)
+    second_snapshot = _token_event(counted, 170, 25, cached_input_tokens=40)
+    parent = _rollout(tmp_path, "scan-parent", [first_snapshot, second_snapshot])
+    first = _rollout(
+        tmp_path,
+        "first-worker",
+        [_token_event(counted, 150, 17, cached_input_tokens=30)],
+        parent_thread_id="scan-parent",
+        copied_events=[first_snapshot],
+    )
+    second = _rollout(
+        tmp_path,
+        "second-worker",
+        [_token_event(counted, 210, 35, cached_input_tokens=55)],
+        parent_thread_id="scan-parent",
+        copied_events=[second_snapshot],
+    )
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "first-worker": first, "second-worker": second},
+        [("scan-parent", "first-worker"), ("scan-parent", "second-worker")],
+    )
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(240, 65, 42),
+            "threadCount": 3,
+        }.items()
+    )
+
+
+def test_completion_ignores_worker_families_started_before_scan(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    before = fixture.started_at - timedelta(minutes=30)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 0)])
+    worker = _rollout(
+        tmp_path,
+        "old-worker",
+        [_token_event(before, 100, 0), _token_event(counted, 200, 0)],
+        parent_thread_id="scan-parent",
+        task_started_at=before,
+    )
+    descendant = _rollout(
+        tmp_path,
+        "old-descendant",
+        [_token_event(before, 50, 0), _token_event(counted, 90, 0)],
+        parent_thread_id="old-worker",
+        task_started_at=before,
+    )
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "old-worker": worker, "old-descendant": descendant},
+        [("scan-parent", "old-worker"), ("old-worker", "old-descendant")],
+    )
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(10, 0, 0),
+            "threadCount": 1,
+        }.items()
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "warning"),
+    [
+        ("missing_rollout", "rollout_unavailable"),
+        ("wrong_identity", "thread_identity_mismatch"),
+        ("missing_ownership", "thread_ownership_unavailable"),
+        ("missing_timestamp", "thread_ownership_unavailable"),
+    ],
+)
+def test_completion_marks_unverifiable_workers_partial(
+    tmp_path: Path,
+    failure: str,
+    warning: str,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [_token_event(counted, 12, 4, cached_input_tokens=3)],
+    )
+    worker = (
+        (tmp_path / "missing-rollout.jsonl").resolve()
+        if failure == "missing_rollout"
+        else _rollout(
+            tmp_path,
+            "scan-worker",
+            [_token_event(counted, 800, 200)],
+            parent_thread_id="scan-parent",
+            recorded_thread_id="other-worker" if failure == "wrong_identity" else None,
+            include_task_start=failure != "missing_ownership",
+            include_task_start_timestamp=failure != "missing_timestamp",
+        )
+    )
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "scan-worker": worker},
+        [("scan-parent", "scan-worker")],
+    )
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "partial"
+    assert usage["threadCount"] == 1
+    assert usage["missingThreadCount"] == 1
+    assert warning in usage["warnings"]
+    assert usage["totalTokens"] == 16
+
+
+def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (
+        usage.items()
+        >= {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["codex_state_unavailable"],
+        }.items()
+    )
+    assert "totalTokens" not in usage
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
+@pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
+def test_completion_accepts_macos_system_rollout_alias(
+    tmp_path: Path,
+    temporary_root: str,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
+        root = Path(directory)
+        canonical = _rollout(root, "scan-parent", [_token_event(counted, 10, 3)])
+        alias = root / "rollouts" / "scan-parent.jsonl"
+        assert alias != canonical
+        assert alias.resolve() == canonical
+        _state_graph(fixture.environment, {"scan-parent": alias}, [])
+        usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 13
+
+
+def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    canonical = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)])
+    symlink = canonical.with_name("linked-rollout.jsonl")
+    symlink.symlink_to(canonical)
+    _state_graph(fixture.environment, {"scan-parent": symlink}, [])
+    assert (
+        _complete_scan(fixture)["scan"]["usage"].items()
+        >= {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["rollout_unavailable", "scan_thread_unavailable"],
+        }.items()
+    )
+
+
+@pytest.mark.parametrize(
+    ("prior_session_unavailable", "child_session_saved", "merge_state"),
+    [
+        (False, True, "saved"),
+        (True, True, "saved"),
+        (False, False, "saved"),
+        (False, True, "merged"),
+        (False, True, "prepared"),
+        (False, True, "not-started"),
+        (True, True, "not-started"),
+        (False, True, "accepted-without-merge"),
+        (False, True, "accepted-with-prepared-merge"),
+        (False, True, "started"),
+        (True, True, "accepted-without-merge"),
+    ],
+)
+def test_completion_counts_ordinary_child_scans_and_descendants(
+    tmp_path: Path,
+    prior_session_unavailable: bool,
+    child_session_saved: bool,
+    merge_state: str,
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    environment = fixture.environment
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = fixture.scan_dir / "artifacts" / "deep-scan" / "passes" / "pass-1"
+    directory.mkdir(parents=True, mode=0o700)
+    child = run_workbench(
+        fixture.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(fixture.target),
+        "--scan-dir",
+        str(directory),
+        "--parent-scan-id",
+        fixture.scan_id,
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "parentScanRole": "deep_pass",
+                "recipe": {
+                    "repository": str(fixture.target),
+                    "mode": "standard",
+                    "target": {"kind": "repository", "paths": []},
+                    "config": {},
+                },
+            }
+        ),
+        environment=environment,
+    )
+    if child_session_saved:
+        run_workbench(
+            fixture.state_dir,
+            "set-scan-thread",
+            "--scan-id",
+            child["scanId"],
+            "--thread-id",
+            "sdk-worker",
+            environment=environment,
+        )
+    else:
+        run_workbench(
+            fixture.state_dir,
+            "fail-scan",
+            "--scan-id",
+            child["scanId"],
+            "--message",
+            "Synthetic failure after optional session persistence failed.",
+            "--cost-json",
+            json.dumps({"model": "synthetic-model", "estimatedUsd": 0.01, **_counts(20, 0, 5)}),
+            environment=environment,
+        )
+    checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
+    document = json.loads(checkpoint.read_text())
+    document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
+    if merge_state != "saved":
+        write_completed_contract(directory, child["scanId"], fixture.target, relative_path="app.py")
+        run_workbench(
+            fixture.state_dir,
+            "complete-scan",
+            "--scan-id",
+            child["scanId"],
+            environment=environment,
+        )
+        document["passes"][0]["completed"] = True
+        if merge_state in {"merged", "accepted-without-merge", "accepted-with-prepared-merge"}:
+            document["mergedScanIds"] = [child["scanId"]]
+        if merge_state in {"accepted-without-merge", "accepted-with-prepared-merge"}:
+            document["mergeStarted"] = False
+        elif merge_state == "started":
+            document["mergeStarted"] = True
+        if merge_state in {"prepared", "accepted-with-prepared-merge"}:
+            # Preparation is durable before launch; interrupted contents still record intent.
+            (checkpoint.parent / "merge-inputs.json").write_text("{")
+        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
+            )
+    if prior_session_unavailable:
+        document["costUnavailable"] = True
+    checkpoint.write_text(json.dumps(document))
+    _state_graph(
+        environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
+            "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
+            "sdk-child": _rollout(
+                tmp_path,
+                "sdk-child",
+                [_token_event(counted, 7, 2)],
+                parent_thread_id="sdk-worker",
+            ),
+        },
+        [("sdk-worker", "sdk-child")],
+    )
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    incomplete = (
+        prior_session_unavailable
+        or not child_session_saved
+        or merge_state in {"merged", "prepared", "accepted-with-prepared-merge", "started"}
+    )
+    assert (
+        usage.items()
+        >= {
+            "coverage": "partial" if incomplete else "complete",
+            "source": "codex_rollout",
+            **(_counts(37, 0, 10) if child_session_saved else _counts(10, 0, 3)),
+            "threadCount": 3 if child_session_saved else 1,
+            **({"warnings": ["scan_thread_unavailable"]} if incomplete else {}),
+        }.items()
+    )
+    assert usage["byRole"] == {
+        "parent": {**_counts(10, 0, 3), "threadCount": 1},
+        "workers": {
+            **(_counts(27, 0, 7) if child_session_saved else _counts(0, 0, 0)),
+            "threadCount": 2 if child_session_saved else 0,
+        },
+    }
+    assert datetime.fromisoformat(usage["window"]["startedAt"]) == fixture.started_at
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep", "diff"])
+@pytest.mark.parametrize("delayed_cache_counts", [False, True])
+def test_completion_preserves_explicit_legacy_cost(
+    tmp_path: Path, delayed_cache_counts: bool, mode: str
+) -> None:
+    fixture = _start_scan(tmp_path, mode=mode)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(
+                tmp_path,
+                "scan-parent",
+                [
+                    _token_event(fixture.started_at - timedelta(seconds=1), 100, 0),
+                    _token_event(
+                        counted, 115, 6, cached_input_tokens=100 if delayed_cache_counts else 0
+                    ),
+                    _allowance_event(counted, 6),
+                ],
+            )
+        },
+        [],
+    )
+    cost = {
+        "model": "gpt-5.6-sol",
+        "inputTokens": 15,
+        "cachedInputTokens": 4,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    completed = _complete_scan(fixture, cost=cost)["scan"]
+    assert completed["cost"] == cost
+    assert completed["usage"]["accountRateLimits"][0]["primary"]["usedPercent"] == 6
+    if delayed_cache_counts:
+        assert completed["usage"]["coverage"] == "unavailable"
+        assert completed["usage"]["warnings"] == ["token_breakdown_unavailable"]
+        assert "totalTokens" not in completed["usage"]
+    else:
+        assert completed["usage"]["totalTokens"] == 21
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_native_completion_retains_measured_usage_with_sdk_cost(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path, "scan-parent", [_token_event(counted, 15, 6, cached_input_tokens=4)]
+                )
+            },
+            [],
+        )
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 15,
+        "cachedInputTokens": 4,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    completed = _complete_scan(fixture, cost=cost)["scan"]
+    expected_usage = (
+        {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(15, 4, 6),
+            "threadCount": 1,
+        }
+        if readable_usage
+        else {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["codex_state_unavailable"],
+        }
+    )
+    assert completed["cost"] == cost
+    assert completed["usage"].items() >= expected_usage.items()
+    assert completed["progress"]["status"] == "complete"
+    repeated = run_workbench(
+        fixture.state_dir,
+        "complete-scan",
+        "--scan-id",
+        fixture.scan_id,
+        environment=fixture.environment,
+    )["scan"]
+    assert repeated["cost"] == cost
+    assert repeated["usage"] == completed["usage"]
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_fresh_completion_does_not_promote_a_running_cost_estimate(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
+        )
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path,
+                    "scan-parent",
+                    [_token_event(fixture.started_at + timedelta(microseconds=1), 30, 10)],
+                )
+            },
+            [],
+        )
+    completed = _complete_scan(fixture)["scan"]
+    assert "cost" not in completed
+    assert completed["usage"]["coverage"] == ("complete" if readable_usage else "unavailable")
+    if readable_usage:
+        assert completed["usage"]["totalTokens"] == 40
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        receipt = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()[0]
+    assert json.loads(receipt) == {"usage": completed["usage"]}
+
+
+def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 12, 4)])},
+        [],
+    )
+    assert _complete_scan(fixture)["scan"]["usage"]["totalTokens"] == 16
+    extra_command = scan_command(
+        fixture.state_dir,
+        "get-scan-usage",
+        fixture.scan_id,
+        check=False,
+        environment=fixture.environment,
+    )
+    assert extra_command["returncode"] != 0
+    assert "invalid choice" in str(extra_command["stderr"])
+
+
+def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])},
+        [],
+    )
+    failed = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]
+    assert failed["progress"]["status"] == "failed"
+    assert "usage" not in failed
+
+
 def _allowance_event(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
     return _event(
         timestamp,
@@ -270,103 +1009,6 @@ def _response_event(
             "thread_token_usage": total,
         },
     )
-
-
-def _state_graph(
-    environment: dict[str, str],
-    threads: dict[str, Path],
-    edges: list[tuple[str, str]],
-) -> None:
-    sqlite_home = Path(environment["CODEX_SQLITE_HOME"])
-    sqlite_home.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(sqlite_home / "state_5.sqlite") as connection:
-        connection.execute(
-            "CREATE TABLE threads "
-            "(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)"
-        )
-        connection.execute(
-            "CREATE TABLE thread_spawn_edges "
-            "(parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL)"
-        )
-        connection.executemany(
-            "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
-            [(thread_id, str(path)) for thread_id, path in threads.items()],
-        )
-        connection.executemany(
-            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?, ?)",
-            edges,
-        )
-
-
-def _counts(
-    input_tokens: int,
-    cached_input_tokens: int,
-    output_tokens: int,
-    *,
-    cache_write_input_tokens: int = 0,
-) -> dict[str, int]:
-    return {
-        "inputTokens": input_tokens,
-        "cachedInputTokens": cached_input_tokens,
-        "cacheWriteInputTokens": cache_write_input_tokens,
-        "outputTokens": output_tokens,
-        "reasoningOutputTokens": 0,
-        "totalTokens": input_tokens + output_tokens,
-    }
-
-
-def _complete_scan(fixture: ScanFixture, *arguments: str) -> dict[str, Any]:
-    options: dict[str, Any] = {"relative_path": "app.py"}
-    if fixture.mode == "diff":
-        assert fixture.diff_target is not None
-        options.update(
-            relative_path="README.md",
-            target_kind="git_diff",
-            diff_base_revision=str(fixture.diff_target["baseRevision"]),
-            diff_head_revision=str(fixture.diff_target["headRevision"]),
-        )
-    elif fixture.mode == "deep":
-        options["coverage_mode"] = "deep_repository"
-        mark_deep_coordinator_succeeded(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
-    write_completed_contract(
-        fixture.scan_dir,
-        fixture.scan_id,
-        fixture.target,
-        **options,
-    )
-    return scan_command(
-        fixture.state_dir,
-        "complete-scan",
-        fixture.scan_id,
-        *arguments,
-        environment=fixture.environment,
-    )
-
-
-@pytest.mark.parametrize(
-    ("info", "coverage"),
-    [("missing", "partial"), ("null", "complete"), ("invalid", "partial"), ("valid", "complete")],
-)
-def test_completion_preserves_usage_record_warnings(
-    tmp_path: Path, info: str, coverage: str
-) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    event = _token_event(counted, 10, 5)
-    if info == "missing":
-        del event["payload"]["info"]
-    elif info == "null":
-        event["payload"]["info"] = None
-    elif info == "invalid":
-        event["payload"]["info"] = {}
-    parent = _rollout(tmp_path, "scan-parent", [event, _token_event(counted, 20, 10)])
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
-
-    usage = _complete_scan(fixture)["scan"]["usage"]
-
-    assert usage["coverage"] == coverage
-    assert usage["totalTokens"] == 30
-    assert usage.get("warnings", []) == (["token_record_invalid"] if coverage == "partial" else [])
 
 
 def test_completion_counts_native_responses_and_compaction_without_legacy_duplicates(
@@ -723,105 +1365,6 @@ def test_native_usage_preserves_partial_measurement_warnings(tmp_path: Path, fai
     }
 
 
-@pytest.mark.parametrize("mode", ["standard", "diff"])
-def test_completion_counts_only_scan_owned_parent_and_descendants(
-    tmp_path: Path,
-    mode: str,
-) -> None:
-    fixture = _start_scan(tmp_path, mode=mode)
-    before = fixture.started_at - timedelta(seconds=1)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    parent_snapshot = _token_event(counted, 150, 25, cached_input_tokens=45)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [
-            _token_event(before, 100, 10, cached_input_tokens=20),
-            parent_snapshot,
-        ],
-    )
-    worker_snapshot = _token_event(counted, 180, 32, cached_input_tokens=55)
-    worker = _rollout(
-        tmp_path,
-        "scan-worker",
-        [worker_snapshot],
-        parent_thread_id="scan-parent",
-        copied_events=[parent_snapshot],
-    )
-    descendant = _rollout(
-        tmp_path,
-        "nested-worker",
-        [_token_event(counted, 8, 3, cached_input_tokens=2)],
-        parent_thread_id="scan-worker",
-    )
-    unrelated = _rollout(tmp_path, "unrelated", [_token_event(counted, 80_000, 20_000)])
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": parent,
-            "scan-worker": worker,
-            "nested-worker": descendant,
-            "unrelated": unrelated,
-        },
-        [("scan-parent", "scan-worker"), ("scan-worker", "nested-worker")],
-    )
-
-    completed = _complete_scan(fixture)
-    expected = {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(88, 37, 25),
-        "threadCount": 3,
-    }
-    assert completed["scan"]["mode"] == mode
-    usage = completed["scan"]["usage"]
-    assert usage.items() >= expected.items()
-    assert usage["byRole"] == {
-        "parent": {**_counts(50, 25, 15), "threadCount": 1},
-        "workers": {**_counts(38, 12, 10), "threadCount": 2},
-    }
-    assert datetime.fromisoformat(usage["window"]["startedAt"]) == fixture.started_at
-    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == counted
-    assert datetime.fromisoformat(usage["observedAt"]) >= datetime.fromisoformat(
-        usage["window"]["endedAt"]
-    )
-    expected = usage
-    assert completed["workspace"]["results"]["usage"] == expected
-    assert "byModel" not in completed["scan"]["usage"]
-    assert (
-        run_workbench(fixture.state_dir, "list-scans", environment=fixture.environment)["scans"][0][
-            "usage"
-        ]
-        == expected
-    )
-    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
-        stored = connection.execute(
-            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
-        ).fetchone()
-    assert stored is not None
-    assert json.loads(stored[0]) == {"usage": expected}
-
-
-@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
-def test_scan_usage_helper_preserves_cached_token_totals(
-    cache_write_field: str,
-) -> None:
-    helper = Path(__file__).resolve().parents[1] / "scripts" / "workbench_scan_usage.py"
-    snapshot = runpy.run_path(str(helper))["_token_snapshot"]
-    usage = {
-        "input_tokens": 120,
-        "cached_input_tokens": 30,
-        cache_write_field: 12,
-        "output_tokens": 15,
-        "reasoning_output_tokens": 0,
-        "total_tokens": 135,
-    }
-
-    assert snapshot({"info": {"total_token_usage": usage}}) == _counts(
-        120, 30, 15, cache_write_input_tokens=12
-    )
-
-
 @pytest.mark.parametrize(
     ("canonical", "legacy", "expected"),
     [(0, 12, 12), (0, 0, 0), (5, 12, 5), (False, 12, None), (0.0, 12, None)],
@@ -912,201 +1455,6 @@ def test_scan_cost_preserves_diagnostics_for_non_scalar_coverage(workbench_api, 
     assert str(error.value) == "Scan cost includes invalid measured token usage."
 
 
-@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
-def test_completion_includes_cached_and_cache_write_tokens(
-    tmp_path: Path,
-    cache_write_field: str,
-) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    event = _token_event(counted, 120, 15, cached_input_tokens=30)
-    reported = event["payload"]["info"]["total_token_usage"]
-    reported.pop("cache_write_input_tokens")
-    reported[cache_write_field] = 12
-    parent = _rollout(tmp_path, "scan-parent", [event])
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
-
-    usage = _complete_scan(fixture)["scan"]["usage"]
-
-    assert (
-        usage.items()
-        >= {
-            "coverage": "complete",
-            "source": "codex_rollout",
-            **_counts(120, 30, 15, cache_write_input_tokens=12),
-            "threadCount": 1,
-        }.items()
-    )
-
-
-def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    first_snapshot = _token_event(counted, 120, 10, cached_input_tokens=20)
-    second_snapshot = _token_event(counted, 170, 25, cached_input_tokens=40)
-    parent = _rollout(tmp_path, "scan-parent", [first_snapshot, second_snapshot])
-    first = _rollout(
-        tmp_path,
-        "first-worker",
-        [_token_event(counted, 150, 17, cached_input_tokens=30)],
-        parent_thread_id="scan-parent",
-        copied_events=[first_snapshot],
-    )
-    second = _rollout(
-        tmp_path,
-        "second-worker",
-        [_token_event(counted, 210, 35, cached_input_tokens=55)],
-        parent_thread_id="scan-parent",
-        copied_events=[second_snapshot],
-    )
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": parent, "first-worker": first, "second-worker": second},
-        [("scan-parent", "first-worker"), ("scan-parent", "second-worker")],
-    )
-    usage = _complete_scan(fixture)["scan"]["usage"]
-    assert (
-        usage.items()
-        >= {
-            "coverage": "complete",
-            "source": "codex_rollout",
-            **_counts(240, 65, 42),
-            "threadCount": 3,
-        }.items()
-    )
-
-
-def test_completion_ignores_worker_families_started_before_scan(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    before = fixture.started_at - timedelta(minutes=30)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 0)])
-    worker = _rollout(
-        tmp_path,
-        "old-worker",
-        [_token_event(before, 100, 0), _token_event(counted, 200, 0)],
-        parent_thread_id="scan-parent",
-        task_started_at=before,
-    )
-    descendant = _rollout(
-        tmp_path,
-        "old-descendant",
-        [_token_event(before, 50, 0), _token_event(counted, 90, 0)],
-        parent_thread_id="old-worker",
-        task_started_at=before,
-    )
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": parent, "old-worker": worker, "old-descendant": descendant},
-        [("scan-parent", "old-worker"), ("old-worker", "old-descendant")],
-    )
-    assert (
-        _complete_scan(fixture)["scan"]["usage"].items()
-        >= {
-            "coverage": "complete",
-            "source": "codex_rollout",
-            **_counts(10, 0, 0),
-            "threadCount": 1,
-        }.items()
-    )
-
-
-@pytest.mark.parametrize(
-    ("failure", "warning"),
-    [
-        ("missing_rollout", "rollout_unavailable"),
-        ("wrong_identity", "thread_identity_mismatch"),
-        ("missing_ownership", "thread_ownership_unavailable"),
-        ("missing_timestamp", "thread_ownership_unavailable"),
-    ],
-)
-def test_completion_marks_unverifiable_workers_partial(
-    tmp_path: Path,
-    failure: str,
-    warning: str,
-) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [_token_event(counted, 12, 4, cached_input_tokens=3)],
-    )
-    worker = (
-        (tmp_path / "missing-rollout.jsonl").resolve()
-        if failure == "missing_rollout"
-        else _rollout(
-            tmp_path,
-            "scan-worker",
-            [_token_event(counted, 800, 200)],
-            parent_thread_id="scan-parent",
-            recorded_thread_id="other-worker" if failure == "wrong_identity" else None,
-            include_task_start=failure != "missing_ownership",
-            include_task_start_timestamp=failure != "missing_timestamp",
-        )
-    )
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": parent, "scan-worker": worker},
-        [("scan-parent", "scan-worker")],
-    )
-    usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage["coverage"] == "partial"
-    assert usage["threadCount"] == 1
-    assert usage["missingThreadCount"] == 1
-    assert warning in usage["warnings"]
-    assert usage["totalTokens"] == 16
-
-
-@pytest.mark.parametrize("home_variable", ["CODEX_HOME", "CODEX_SQLITE_HOME"])
-@pytest.mark.parametrize("home_kind", ["absolute", "literal_tilde", "relative_home", "home"])
-def test_completion_reads_usage_from_literal_home(
-    tmp_path: Path, home_variable: str, home_kind: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fixture = _start_scan(tmp_path)
-    home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
-    if home_kind == "literal_tilde":
-        home = tmp_path / ("~ literal" if sys.platform == "win32" else "~ ")
-    fixture.environment["CODEX_SQLITE_HOME"] = str(home)
-    parent = _rollout(
-        tmp_path,
-        "scan-parent",
-        [_token_event(fixture.started_at + timedelta(microseconds=1), 12, 3)],
-    )
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
-    configured_home = str(home)
-    if home_kind == "literal_tilde":
-        monkeypatch.chdir(tmp_path)
-        configured_home = home.name
-    elif home_kind in {"relative_home", "home"}:
-        monkeypatch.setenv("HOME", str(home if home_kind == "home" else tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(home if home_kind == "home" else tmp_path))
-        configured_home = "~" if home_kind == "home" else f"~/{home.name}"
-    fixture.environment[home_variable] = configured_home
-    if home_variable == "CODEX_HOME":
-        fixture.environment["CODEX_SQLITE_HOME"] = ""
-
-    usage = _complete_scan(fixture)["scan"]["usage"]
-
-    assert usage["coverage"] == "complete"
-    assert usage["totalTokens"] == 15
-
-
-def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    usage = _complete_scan(fixture)["scan"]["usage"]
-    assert (
-        usage.items()
-        >= {
-            "coverage": "unavailable",
-            "source": "codex_rollout",
-            "threadCount": 0,
-            "warnings": ["codex_state_unavailable"],
-        }.items()
-    )
-    assert "totalTokens" not in usage
-
-
 @pytest.mark.parametrize("observation", ["missing", "null", "before", "legacy_zero", "native_zero"])
 def test_completion_distinguishes_missing_usage_from_observed_zero(
     tmp_path: Path, observation: str
@@ -1184,44 +1532,6 @@ def test_missing_usage_preserves_measured_parent_or_descendant(
         ],
     }
     assert _complete_scan(fixture)["scan"]["usage"].items() >= expected.items()
-
-
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
-@pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
-def test_completion_accepts_macos_system_rollout_alias(
-    tmp_path: Path,
-    temporary_root: str,
-) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
-        root = Path(directory)
-        canonical = _rollout(root, "scan-parent", [_token_event(counted, 10, 3)])
-        alias = root / "rollouts" / "scan-parent.jsonl"
-        assert alias != canonical
-        assert alias.resolve() == canonical
-        _state_graph(fixture.environment, {"scan-parent": alias}, [])
-        usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage["coverage"] == "complete"
-    assert usage["totalTokens"] == 13
-
-
-def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    canonical = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)])
-    symlink = canonical.with_name("linked-rollout.jsonl")
-    symlink.symlink_to(canonical)
-    _state_graph(fixture.environment, {"scan-parent": symlink}, [])
-    assert (
-        _complete_scan(fixture)["scan"]["usage"].items()
-        >= {
-            "coverage": "unavailable",
-            "source": "codex_rollout",
-            "threadCount": 0,
-            "warnings": ["rollout_unavailable", "scan_thread_unavailable"],
-        }.items()
-    )
 
 
 def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -> None:
@@ -1335,58 +1645,6 @@ def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
             "warnings": ["rollout_unavailable"],
         }.items()
     )
-
-
-@pytest.mark.parametrize("delayed_cache_counts", [False, True])
-def test_completion_preserves_explicit_legacy_cost(
-    tmp_path: Path, delayed_cache_counts: bool
-) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": _rollout(
-                tmp_path,
-                "scan-parent",
-                [
-                    _token_event(fixture.started_at - timedelta(seconds=1), 100, 0),
-                    _token_event(
-                        counted, 115, 6, cached_input_tokens=100 if delayed_cache_counts else 0
-                    ),
-                    _allowance_event(counted, 6),
-                ],
-            )
-        },
-        [],
-    )
-    cost = {
-        "model": "gpt-5.6-sol",
-        "inputTokens": 15,
-        "cachedInputTokens": 4,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 6,
-        "estimatedUsd": 0.002,
-    }
-    write_completed_contract(
-        fixture.scan_dir, fixture.scan_id, fixture.target, relative_path="app.py"
-    )
-    completed = scan_command(
-        fixture.state_dir,
-        "complete-scan",
-        fixture.scan_id,
-        "--cost-json",
-        json.dumps(cost),
-        environment=fixture.environment,
-    )["scan"]
-    assert completed["cost"] == cost
-    assert completed["usage"]["accountRateLimits"][0]["primary"]["usedPercent"] == 6
-    if delayed_cache_counts:
-        assert completed["usage"]["coverage"] == "unavailable"
-        assert completed["usage"]["warnings"] == ["token_breakdown_unavailable"]
-        assert "totalTokens" not in completed["usage"]
-    else:
-        assert completed["usage"]["totalTokens"] == 21
 
 
 @pytest.mark.parametrize(
@@ -1541,26 +1799,6 @@ def test_metadata_only_deep_owner_requires_direct_control_originator(
         "threadCount": 0,
         "warnings": ["token_record_missing", "token_usage_unavailable"],
     }
-
-
-def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 12, 4)])},
-        [],
-    )
-    assert _complete_scan(fixture)["scan"]["usage"]["totalTokens"] == 16
-    extra_command = scan_command(
-        fixture.state_dir,
-        "get-scan-usage",
-        fixture.scan_id,
-        check=False,
-        environment=fixture.environment,
-    )
-    assert extra_command["returncode"] != 0
-    assert "invalid choice" in str(extra_command["stderr"])
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -1861,21 +2099,6 @@ def test_host_final_usage_does_not_invent_an_unrecorded_completion_turn(tmp_path
     assert finalized["totalTokens"] == 12
     assert finalized["warnings"] == ["completion_turn_unavailable"]
     assert finalized["completion"]["finalized"] is True
-
-
-def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])},
-        [],
-    )
-    failed = fail_scan(
-        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
-    )["scan"]
-    assert failed["progress"]["status"] == "failed"
-    assert "usage" not in failed
 
 
 @pytest.mark.parametrize("worker_kind", ["discovery", "dedup"])
@@ -2510,3 +2733,41 @@ def test_completion_marks_closed_turn_without_receipt_partial(tmp_path: Path) ->
             "warnings": ["token_record_missing"],
         }.items()
     )
+
+
+def upsert_deep_worker(
+    state_dir, scan_id, worker_id, kind, status, prompt_path, artifact_dir, *extra, **options
+):
+    values = dict(zip(extra[::2], extra[1::2]))
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, "
+            "workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at) "
+            "SELECT id, 1, 'deep-security-scan/v1', 'running', 'discovery', 1, 1, 1, 1, "
+            "started_at, updated_at FROM scans WHERE id = ? ON CONFLICT(scan_id) DO NOTHING",
+            (scan_id,),
+        )
+        if connection.execute(
+            "SELECT 1 FROM deep_scan_workers WHERE id = ?", (worker_id,)
+        ).fetchone():
+            connection.execute(
+                "UPDATE deep_scan_workers SET status = ?, attempt = ?, sdk_thread_id = ? WHERE id = ?",
+                (status, int(values["--attempt"]), values["--sdk-thread-id"], worker_id),
+            )
+            return
+        connection.execute(
+            "INSERT INTO deep_scan_workers (id, scan_id, kind, status, prompt_path, artifact_dir, "
+            "attempt, sdk_thread_id, created_at, updated_at) "
+            "SELECT ?, id, ?, ?, ?, ?, ?, ?, started_at, updated_at FROM scans WHERE id = ?",
+            (
+                worker_id,
+                kind,
+                status,
+                prompt_path,
+                artifact_dir,
+                int(values["--attempt"]),
+                values["--sdk-thread-id"],
+                scan_id,
+            ),
+        )

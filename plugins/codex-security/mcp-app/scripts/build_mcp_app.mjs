@@ -2,12 +2,18 @@
 import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
 import { buildNativeWrappers } from "./build_native_wrappers.mjs";
+import { mcpBundleOptions } from "./bundle_options.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const sdkRequire = createRequire(
+  join(root, "../../../sdk/typescript/package.json"),
+);
 const maxChunkBytes = 140_000;
 
 export async function buildMcpApp({ output, native = "universal" }) {
@@ -88,47 +94,34 @@ export async function buildMcpApp({ output, native = "universal" }) {
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
-    const result = await build({
-      bundle: true,
-      define: { "import.meta.url": "__filename" },
-      entryPoints: [join(root, entryPoint)],
-      external: ["fsevents"],
-      format: "cjs",
-      loader: { ".md": "text" },
-      logLevel: "info",
-      logOverride: { "empty-import-meta": "silent" },
-      outfile: bundle,
-      platform: "node",
-      plugins: [
-        {
-          name: "native-typescript-source",
-          setup(builder) {
-            builder.onResolve({ filter: /\.mjs$/ }, (args) => {
-              const source = resolve(args.resolveDir, args.path);
-              if (dirname(source) === resolve(root, "../native")) {
-                return { path: source.slice(0, -4) + ".mts" };
-              }
-            });
-          },
-        },
-      ],
-      target: "node20",
-      write: false,
-    });
-    const runtime = brotliCompressSync(result.outputFiles[0].contents, {
-      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
-    });
-    const chunkPrefix = name + ".mjs.br.part-";
-    await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
-    for (
-      let offset = 0, index = 0;
-      offset < runtime.length;
-      offset += maxChunkBytes, index += 1
-    ) {
-      await writeFile(
-        join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
-        runtime.subarray(offset, offset + maxChunkBytes),
-      );
+    try {
+      await build({
+        ...mcpBundleOptions,
+        entryPoints: [join(root, entryPoint)],
+        inject:
+          name === "server"
+            ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")]
+            : [],
+        logLevel: "info",
+        outfile: bundle,
+      });
+      const runtime = brotliCompressSync(await readFile(bundle), {
+        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },
+      });
+      const chunkPrefix = name + ".mjs.br.part-";
+      await writeFile(join(mcpDir, name + ".mjs"), loader(chunkPrefix), "utf8");
+      for (
+        let offset = 0, index = 0;
+        offset < runtime.length;
+        offset += maxChunkBytes, index += 1
+      ) {
+        await writeFile(
+          join(mcpDir, chunkPrefix + String(index).padStart(3, "0")),
+          runtime.subarray(offset, offset + maxChunkBytes),
+        );
+      }
+    } finally {
+      await rm(bundle, { force: true });
     }
   }
 }
