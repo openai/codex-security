@@ -48,9 +48,9 @@ jobs:
             sdk/typescript/tsconfig.json sdk/typescript/tsconfig.ci.json \
             plugins/codex-security/native plugins/codex-security/mcp-app \
             plugins/codex-security/schemas plugins/codex-security/scripts \
-            plugins/codex-security/shared | sha256sum)"
+            plugins/codex-security/shared | git hash-object --stdin)"
           # Hosted runner images can change without a source change.
-          printf 'key=native-universal-v1-%s-%s\n' "$(date -u +%G-%V)" "${source_hash%% *}" >> "$GITHUB_OUTPUT"
+          printf 'key=native-universal-v1-%s-%s\n' "$(date -u +%G-%V)" "$source_hash" >> "$GITHUB_OUTPUT"
       - name: Restore verified native payload
         if: inputs.reuse-verified
         id: restore

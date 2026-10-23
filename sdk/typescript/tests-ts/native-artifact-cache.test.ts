@@ -40,7 +40,7 @@ const native = workflow("native-artifacts");
 const prepare = native.jobs["prepare"]!;
 const keyScript = prepare.steps!.find((step) => step.id === "key")!.run!;
 
-test("native reuse follows committed build inputs, filenames and the qualification week", () => {
+test("native reuse hashes committed inputs with Git alone across platforms", () => {
   const root = mkdtempSync(join(tmpdir(), "native-cache-"));
   const repository = join(root, "repository");
   const output = join(root, "output");
@@ -57,17 +57,25 @@ test("native reuse follows committed build inputs, filenames and the qualificati
   const key = (week = "2026-43") => {
     writeSource(root, "output", "");
     const result = spawnSync(
-      bashCommand(),
+      Bun.which(bashCommand())!,
       [
         "--noprofile",
         "--norc",
         "-c",
-        `date() { printf '%s\\n' "$TEST_WEEK"; }\n${keyScript}`,
+        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\n${keyScript}`,
       ],
       {
         cwd: repository,
         encoding: "utf8",
-        env: { ...process.env, GITHUB_OUTPUT: output, TEST_WEEK: week },
+        env: {
+          ...process.env,
+          // macOS does not ship GNU sha256sum. Only Git and Bash builtins are
+          // available here; the workflow's date command is fixed for this test.
+          PATH: root,
+          TEST_GIT: Bun.which("git")!,
+          GITHUB_OUTPUT: output,
+          TEST_WEEK: week,
+        },
       },
     );
     expect(result.status, result.stderr).toBe(0);
@@ -76,7 +84,7 @@ test("native reuse follows committed build inputs, filenames and the qualificati
   try {
     commit();
     const initial = key();
-    expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{64}$/);
+    expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
     writeSource(repository, "README.md", "updated documentation\n");
     commit();
     expect(key()).toBe(initial);
