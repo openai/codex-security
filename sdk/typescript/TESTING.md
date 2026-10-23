@@ -143,7 +143,7 @@ consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
 The full Bun suite runs once per OS under Node 22: three file shards on Linux
-and macOS, and seven on Windows. The other Node versions run the installed
+and macOS, and eight on Windows. The other Node versions run the installed
 package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
@@ -156,7 +156,7 @@ snapshot. New files are included automatically with the mean known-file duration
 deleted files in the timing snapshot are ignored. Timing hints never select or
 exclude tests, and adding or splitting tests does not require updating them.
 To reproduce one Windows shard locally after building the plugin, run
-`node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
+`node --experimental-strip-types scripts/run-ci-tests.mts 3/8 --seed=12345`.
 
 Refresh timing hints from successful CI JUnit artifacts when shard runtimes
 become uneven. From the SDK directory, pass reports for one platform to
@@ -180,8 +180,7 @@ shard runner, timing metadata, report comparator, or Windows test-root helper.
 It compares Bun's default runner, `--isolate`, and `--parallel=2` on Linux, macOS,
 and Windows.
 Each mode uses the same duration-based file assignment and production shard count:
-three on Linux/macOS and seven on Windows. This gives 39 sharded runner jobs in place
-of 19 jobs that included an unsharded Windows baseline. It measures the production
+three on Linux/macOS and eight on Windows. This gives 42 sharded runner jobs. It measures the production
 partition rather than cross-file interactions across one unsharded suite; local
 full-suite runs still cover that ordering. More jobs add setup overhead, so compare
 workflow wall time and runner minutes, alongside shard test timings, before

@@ -46,13 +46,14 @@ jobs:
           - { os: macos-latest, shard: 1, count: 3 }
           - { os: macos-latest, shard: 2, count: 3 }
           - { os: macos-latest, shard: 3, count: 3 }
-          - { os: windows-latest, shard: 1, count: 7 }
-          - { os: windows-latest, shard: 2, count: 7 }
-          - { os: windows-latest, shard: 3, count: 7 }
-          - { os: windows-latest, shard: 4, count: 7 }
-          - { os: windows-latest, shard: 5, count: 7 }
-          - { os: windows-latest, shard: 6, count: 7 }
-          - { os: windows-latest, shard: 7, count: 7 }
+          - { os: windows-latest, shard: 1, count: 8 }
+          - { os: windows-latest, shard: 2, count: 8 }
+          - { os: windows-latest, shard: 3, count: 8 }
+          - { os: windows-latest, shard: 4, count: 8 }
+          - { os: windows-latest, shard: 5, count: 8 }
+          - { os: windows-latest, shard: 6, count: 8 }
+          - { os: windows-latest, shard: 7, count: 8 }
+          - { os: windows-latest, shard: 8, count: 8 }
         mode:
           - { name: baseline, args: "" }
           - { name: isolated, args: --isolate }
@@ -143,7 +144,7 @@ jobs:
           shopt -s nullglob
           for os in ubuntu-latest macos-latest windows-latest; do
             shards=3
-            if [[ "$os" == windows-latest ]]; then shards=7; fi
+            if [[ "$os" == windows-latest ]]; then shards=8; fi
             for mode in baseline isolated parallel; do
               reports=(reports/runner-"$os"-"$mode"-*.xml)
               if (( ${#reports[@]} != shards )); then

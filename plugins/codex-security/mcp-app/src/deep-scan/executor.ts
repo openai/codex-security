@@ -385,7 +385,7 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
+    ...(subagents > 0 ? { "agents.max_threads": subagents } : {}),
     features: {
       ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {
@@ -690,6 +690,28 @@ async function workerRuntimeSettings(
     "approvals_reviewer",
   ]) {
     delete settings.config[key];
+  }
+  const parentScanDirectory = environmentVariable(
+    environment,
+    "CODEX_SECURITY_SCAN_DIR",
+    process.platform,
+  );
+  if (parentScanDirectory) {
+    for (const key of [
+      "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
+    ]) {
+      const value = settings.config[key];
+      if (
+        typeof value === "string" &&
+        value.length > 0 &&
+        !isAbsolute(value) &&
+        !value.startsWith("~")
+      ) {
+        settings.config[key] = resolve(parentScanDirectory, value);
+      }
+    }
   }
   return settings;
 }

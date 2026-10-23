@@ -22,7 +22,16 @@ import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Codex,
@@ -3781,6 +3790,35 @@ describe("CodexSecurity orchestration", () => {
         {
           model_reasoning_summary: "auto",
           service_tier: "flex",
+          model_instructions_file: join(root, "instructions-1.md"),
+          model_catalog_json: join(root, "catalog-1.json"),
+          experimental_compact_prompt_file: join(root, "compact-1.md"),
+          features: {
+            code_mode: {
+              enabled: true,
+              excluded_tool_namespaces: ["synthetic_first"],
+            },
+          },
+          model_verbosity: "high",
+          web_search: "disabled",
+          skills: {
+            config: [
+              { path: join(root, "skill-1", "SKILL.md"), enabled: false },
+            ],
+          },
+          otel: {
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://telemetry.example.test/first",
+                protocol: "binary",
+                tls: {
+                  "ca-certificate": "tls-1/ca.pem",
+                  "client-certificate": "tls-1/client.pem",
+                  "client-private-key": "tls-1/client.key",
+                },
+              },
+            },
+          },
           model_context_window: 64_000,
           model_auto_compact_token_limit: 48_000,
           windows: { sandbox: "unelevated" },
@@ -3806,6 +3844,17 @@ describe("CodexSecurity orchestration", () => {
               },
               model_reasoning_summary: "concise",
               service_tier: "fast",
+              model_instructions_file: join(root, "instructions-2.md"),
+              model_catalog_json: join(root, "catalog-2.json"),
+              experimental_compact_prompt_file: join(root, "compact-2.md"),
+              features: {
+                code_mode: {
+                  enabled: false,
+                  excluded_tool_namespaces: ["synthetic_second"],
+                },
+              },
+              model_verbosity: "low",
+              web_search: "cached",
               model_context_window: 96_000,
               model_auto_compact_token_limit: 72_000,
               windows: { sandbox: "elevated" },
@@ -3828,6 +3877,8 @@ describe("CodexSecurity orchestration", () => {
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
+              model_catalog_json: "profile-catalog.json",
+              experimental_compact_prompt_file: "profile-compact.md",
               model_verbosity: "high",
               model_auto_compact_token_limit: 112_000,
               windows: { sandbox: "unelevated" },
@@ -3838,6 +3889,15 @@ describe("CodexSecurity orchestration", () => {
         "fast",
       ],
     ];
+    const originalScenarios = structuredClone(scenarios);
+    const bundledSkillNames = (
+      await readdir(join(PLUGIN_ROOT, "skills"), {
+        withFileTypes: true,
+      })
+    )
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
     let started = 0;
     const allStarted = Promise.withResolvers<void>();
     const configPaths = new Set<string>();
@@ -3860,7 +3920,20 @@ describe("CodexSecurity orchestration", () => {
           resolveCodexProfile(overrides)["model_instructions_file"];
         const instructions = `Synthetic instructions for scan ${index}.\n`;
         if (typeof instructionsFile === "string") {
-          await writeFile(join(scanDir, instructionsFile), instructions);
+          await writeFile(resolve(scanDir, instructionsFile), instructions);
+        }
+        for (const key of [
+          "model_catalog_json",
+          "experimental_compact_prompt_file",
+        ]) {
+          const path = resolveCodexProfile(overrides)[key];
+          if (typeof path === "string")
+            await writeFile(
+              resolve(scanDir, path),
+              key === "model_catalog_json"
+                ? '{"models":[]}\n'
+                : `Synthetic compact prompt for scan ${index}.\n`,
+            );
         }
         const authentication: Record<string, string> =
           index === 0
@@ -3927,7 +4000,6 @@ describe("CodexSecurity orchestration", () => {
                   expect(workerConfig["analytics"]).toEqual(
                     selected["analytics"],
                   );
-                  expect(workerConfig["otel"]).toEqual(selected["otel"]);
                   expect(workerConfig["responses_api_metadata"]).toMatchObject({
                     ...(selected["responses_api_metadata"] as
                       JsonObject | undefined),
@@ -3943,6 +4015,59 @@ describe("CodexSecurity orchestration", () => {
                     windows,
                   );
                   expect(options.config?.["windows"]).toEqual(windows);
+                  const requestedSkills =
+                    (
+                      selected["skills"] as
+                        | { config: { path: string; enabled: boolean }[] }
+                        | undefined
+                    )?.config ?? [];
+                  const effectiveSkills = options.config?.["skills"] as {
+                    config: { path: string; enabled: boolean }[];
+                  };
+                  const requestedPaths = new Set(
+                    requestedSkills.map((entry) => entry.path),
+                  );
+                  const cachedSkills = effectiveSkills.config.filter(
+                    (entry) => !requestedPaths.has(entry.path),
+                  );
+                  expect(effectiveSkills.config).toEqual([
+                    ...requestedSkills,
+                    ...cachedSkills,
+                  ]);
+                  expect(
+                    cachedSkills
+                      .map((entry) => basename(dirname(entry.path)))
+                      .sort(),
+                  ).toEqual(bundledSkillNames);
+                  for (const entry of cachedSkills) {
+                    expect(entry.enabled).toBe(false);
+                    expect(basename(entry.path)).toBe("SKILL.md");
+                    expect(
+                      relative(options.env!["CODEX_HOME"]!, entry.path),
+                    ).toStartWith(join("plugins", "cache") + sep);
+                  }
+                  expect(workerConfig["skills"]).toEqual(effectiveSkills);
+                  expect(options.config?.["otel"] as unknown).toEqual(
+                    selected["otel"],
+                  );
+                  const expectedOtel = structuredClone(selected["otel"]);
+                  if (index === 1) {
+                    const exporter = (expectedOtel as JsonObject)[
+                      "exporter"
+                    ] as JsonObject;
+                    const exporterSettings = exporter[
+                      "otlp-http"
+                    ] as JsonObject;
+                    const tls = exporterSettings["tls"] as JsonObject;
+                    for (const field of [
+                      "ca-certificate",
+                      "client-certificate",
+                      "client-private-key",
+                    ]) {
+                      tls[field] = join(scanDir, tls[field] as string);
+                    }
+                  }
+                  expect(workerConfig["otel"]).toEqual(expectedOtel);
                   for (const key of [
                     "cli_auth_credentials_store",
                     "forced_login_method",
@@ -3967,7 +4092,7 @@ describe("CodexSecurity orchestration", () => {
                   );
                   expect(workerConfig["model_instructions_file"]).toBe(
                     typeof instructionsFile === "string"
-                      ? join(scanDir, instructionsFile)
+                      ? resolve(scanDir, instructionsFile)
                       : undefined,
                   );
                   if (typeof instructionsFile === "string") {
@@ -3978,6 +4103,21 @@ describe("CodexSecurity orchestration", () => {
                       ),
                     ).toBe(instructions);
                   }
+                  for (const key of [
+                    "model_catalog_json",
+                    "experimental_compact_prompt_file",
+                  ]) {
+                    const path = resolveCodexProfile(overrides)[key];
+                    expect(workerConfig[key]).toBe(
+                      typeof path === "string"
+                        ? resolve(scanDir, path)
+                        : undefined,
+                    );
+                    if (typeof path === "string")
+                      expect(
+                        await readFile(workerConfig[key] as string, "utf8"),
+                      ).toBe(await readFile(resolve(scanDir, path), "utf8"));
+                  }
                   const config = parseToml(
                     await readFile(configPath!, "utf8"),
                   ) as JsonObject;
@@ -3986,7 +4126,35 @@ describe("CodexSecurity orchestration", () => {
                     model_reasoning_summary: expected,
                     model_provider: "amazon-bedrock",
                   });
-                  expect(config["service_tier"]).toBe(expectedTier);
+                  expect(resolveCodexProfile(config)["service_tier"]).toBe(
+                    expectedTier,
+                  );
+                  const requested = resolveCodexProfile(overrides);
+                  for (const key of [
+                    "model_instructions_file",
+                    "model_catalog_json",
+                    "experimental_compact_prompt_file",
+                    "model_verbosity",
+                    "web_search",
+                  ]) {
+                    expect(resolveCodexProfile(config)[key]).toBe(
+                      requested[key],
+                    );
+                  }
+                  expect(
+                    (
+                      resolveCodexProfile(config)["features"] as
+                        JsonObject | undefined
+                    )?.["code_mode"],
+                  ).toEqual(
+                    (requested["features"] as JsonObject | undefined)?.[
+                      "code_mode"
+                    ],
+                  );
+                  if (index === 1 || index === 2)
+                    expect(mcpEnvironment["CODEX_SECURITY_SCAN_DIR"]).toBe(
+                      scanDir,
+                    );
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     `synthetic-bedrock-key-${index}`,
                   );
@@ -4031,6 +4199,7 @@ describe("CodexSecurity orchestration", () => {
       expect(started).toBe(scenarios.length);
       expect(configPaths.size).toBe(scenarios.length);
       expect(deepConfigPaths.size).toBe(scenarios.length);
+      expect(scenarios).toEqual(originalScenarios);
     } finally {
       allStarted.resolve();
       await Promise.all(clients.map((client) => client.close()));
@@ -6662,6 +6831,7 @@ describe("CodexSecurity orchestration", () => {
       undefined,
     ],
     ["managed provider selection retains matching", "managed", undefined],
+    ["relative model files preserve scan origin", "model-files", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
@@ -6696,7 +6866,24 @@ describe("CodexSecurity orchestration", () => {
         requires_openai_auth: false,
         http_headers: { "X-Synthetic-Key": "synthetic-managed-secret" },
       };
+      const modelFiles: Record<string, string> =
+        failure === "model-files"
+          ? {
+              model_instructions_file: "../instructions.md",
+              model_catalog_json: "../catalog.json",
+              experimental_compact_prompt_file: "../compact.md",
+            }
+          : {};
+      for (const [name, contents] of [
+        ["instructions.md", "Synthetic instructions.\n"],
+        ["catalog.json", '{"models":[]}\n'],
+        ["compact.md", "Synthetic compact prompt.\n"],
+      ]) {
+        if (failure === "model-files")
+          await writeFile(join(root, name!), contents!);
+      }
       const providerConfig = {
+        ...modelFiles,
         features: { shell_tool: false, unified_exec: false, view_image: false },
         windows: { sandbox: "unelevated" },
         model_provider: "synthetic.provider",
@@ -6852,7 +7039,11 @@ describe("CodexSecurity orchestration", () => {
             if (args[0] === "list-global-findings") {
               expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
-              if (failure === "dismissed" || failure === "managed") {
+              if (
+                failure === "dismissed" ||
+                failure === "managed" ||
+                failure === "model-files"
+              ) {
                 return {
                   findings: args.includes("--status")
                     ? matched
@@ -6890,6 +7081,12 @@ describe("CodexSecurity orchestration", () => {
             if (failure !== "managed")
               expect(options?.config?.codexOverrides).toMatchObject({
                 ...providerConfig,
+                ...Object.fromEntries(
+                  Object.entries(modelFiles).map(([key, value]) => [
+                    key,
+                    resolve(scanDir, value),
+                  ]),
+                ),
                 features: {
                   ...providerConfig.features,
                   ...(failure === "budget-context"
@@ -6915,6 +7112,17 @@ describe("CodexSecurity orchestration", () => {
                 value.includes("synthetic-comparison-header"),
               ),
             ).toBe(false);
+            for (const [key, path] of Object.entries(modelFiles)) {
+              expect(options?.config?.codexOverrides?.[key]).toBe(
+                resolve(scanDir, path),
+              );
+              expect(
+                await readFile(
+                  options?.config?.codexOverrides?.[key] as string,
+                  "utf8",
+                ),
+              ).toBe(await readFile(resolve(scanDir, path), "utf8"));
+            }
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
@@ -7047,7 +7255,9 @@ describe("CodexSecurity orchestration", () => {
         ).toEqual(
           failure === "budget"
             ? ["another-open-finding"]
-            : failure === "dismissed" || failure === "managed"
+            : failure === "dismissed" ||
+                failure === "managed" ||
+                failure === "model-files"
               ? []
               : undefined,
         );
@@ -7069,7 +7279,11 @@ describe("CodexSecurity orchestration", () => {
         expect(
           commands.some(([command]) => command === "list-global-findings"),
         ).toBe(true);
-        if (failure === "dismissed" || failure === "managed") {
+        if (
+          failure === "dismissed" ||
+          failure === "managed" ||
+          failure === "model-files"
+        ) {
           expect(JSON.parse(savedComparisonInput!)).toMatchObject({
             matches: [
               {

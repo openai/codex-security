@@ -19,11 +19,13 @@ import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
-import { structuredCodexConfig } from "../src/config.js";
+import { mergeCodexOverrides, structuredCodexConfig } from "../src/config.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
 } from "../src/runtime.js";
@@ -58,6 +60,81 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test.each([false, true])(
+  "saved managed provider profiles remain isolated across concurrent scans (replay: %p)",
+  async (replay) => {
+    const root = await temporaryDirectory();
+    const environment = {
+      CODEX_HOME: join(root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const home = codexSecurityCredentialHome(environment);
+    const providers = ["first", "second"].map((name) => ({
+      openrouter: {
+        base_url: `https://${name}.example.invalid/`,
+        http_headers: { "X-Synthetic-Token": `synthetic-${name}-value` },
+        ...(replay ? { auth: null } : {}),
+      },
+    }));
+    const profiles = await Promise.all(
+      providers.map((model_providers) =>
+        createProviderProfile(home, { model_providers }, { replay }),
+      ),
+    );
+    expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+    const restore = (index: number) =>
+      restoreProviderProfile(
+        { model_provider: "openrouter" },
+        { name: profiles[index]!.name, home: "managed" },
+        environment,
+      );
+    const restored = await Promise.all([restore(0), restore(1)]);
+    for (const [index, profile] of profiles.entries()) {
+      expect(restored[index]).toEqual({
+        model_provider: "openrouter",
+        model_providers: providers[index]!,
+      });
+      if (process.platform !== "win32")
+        expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+    }
+    await profiles[0]!.cleanup();
+    expect(await restore(1)).toEqual(restored[1]);
+    await expect(
+      restoreProviderProfile(
+        {},
+        { name: "../outside", home: "managed" },
+        environment,
+      ),
+    ).rejects.toThrow("invalid provider profile");
+  },
+);
+
+test("saved provider reads preserve JSON parse and permission failures", async () => {
+  const root = await temporaryDirectory();
+  const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+  const home = codexSecurityCredentialHome(environment);
+  const profile = await createProviderProfile(home, config);
+  const reference = { name: profile.name, home: "managed" };
+  const jsonPath = join(home, `${profile.name}.config.json`);
+  expect(await restoreProviderProfile({}, reference, environment)).toEqual({
+    model_providers: config.model_providers,
+  });
+  await writeFile(jsonPath, "{", { mode: 0o600 });
+  await expect(
+    restoreProviderProfile({}, reference, environment),
+  ).rejects.toBeInstanceOf(SyntaxError);
+  if (process.platform !== "win32" && process.geteuid?.() !== 0) {
+    await chmod(jsonPath, 0o000);
+    try {
+      await expect(
+        restoreProviderProfile({}, reference, environment),
+      ).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      await chmod(jsonPath, 0o600);
+    }
+  }
+});
 
 test.each([
   [
@@ -226,13 +303,47 @@ test.each([
 
 test("native profile turns omit optional null fields and retain array errors", async () => {
   const home = await temporaryDirectory();
+  const saved = await createProviderProfile(
+    home,
+    {
+      model_providers: {
+        "synthetic.gateway": { http_headers: null, auth: null },
+      },
+    },
+    { replay: true },
+  );
+  const replay = await restoreProviderProfile(
+    {},
+    { name: saved.name, home: "ambient" },
+    { CODEX_HOME: home },
+  );
+  const native = await createProviderProfile(
+    home,
+    mergeCodexOverrides(
+      {
+        model_providers: {
+          "synthetic.gateway": {
+            name: "Synthetic",
+            wire_api: "responses",
+            http_headers: { "X-Synthetic": "synthetic-inherited-header" },
+            auth: { command: "synthetic-inherited-auth" },
+          },
+        },
+      },
+      replay,
+    ),
+  );
   const script = join(home, "profile child.mjs");
   await writeFile(
     script,
-    `for await (const chunk of process.stdin) {}
+    `import { readFile } from "node:fs/promises";
+    import { join } from "node:path";
+    for await (const chunk of process.stdin) {}
+    const args = process.argv.slice(1);
+    const profile = await readFile(join(process.env.CODEX_HOME, args[args.indexOf("--profile") + 1] + ".config.toml"), "utf8");
     console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
     console.log(JSON.stringify({ type: "item.completed", item: {
-      type: "agent_message", id: "answer", text: JSON.stringify(process.argv.slice(1)),
+      type: "agent_message", id: "answer", text: JSON.stringify({ args, profile }),
     } }));
     console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
     process.exit(0);`,
@@ -259,14 +370,21 @@ test("native profile turns omit optional null fields and retain array errors", a
         nested: [{ enabled: true, optional: null }],
       }) as CodexOptions["config"],
     },
-    "synthetic-profile",
+    native.name,
   );
   for (const resumed of [false, true]) {
     const thread = resumed
       ? codex.resumeThread("synthetic-thread")
       : codex.startThread();
     const result = await thread.run("synthetic prompt");
-    const args: string[] = JSON.parse(result.finalResponse);
+    const observed = JSON.parse(result.finalResponse);
+    const args: string[] = observed.args;
+    expect(parse(observed.profile)).toEqual({
+      model_providers: {
+        "synthetic.gateway": { name: "Synthetic", wire_api: "responses" },
+      },
+    });
+    expect(args.join(" ")).not.toContain("synthetic-inherited");
     const overrides = args.flatMap((arg, index) =>
       arg === "--config" ? [args[index + 1]!] : [],
     );

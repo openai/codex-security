@@ -147,7 +147,7 @@ describe("TypeScript package skeleton", () => {
       include: [{ os: "macos-latest", node: "22.13.0" }],
     });
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
-      shard: [1, 2, 3, 4, 5, 6, 7],
+      shard: [1, 2, 3, 4, 5, 6, 7, 8],
     });
     expect(jobs["windows-verify"]?.strategy?.matrix["node"]).toEqual([
       "22.13.0",
@@ -304,7 +304,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7 --seed=${{ github.run_number }}",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/8 --seed=${{ github.run_number }}",
       }),
     );
   });

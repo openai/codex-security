@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -7,6 +7,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
+  mergedCodexConfig,
   CHEAPERINFERENCE_CODEX_PROVIDER,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -93,6 +94,83 @@ describe("CodexSecurity preflight configuration", () => {
       skills: { config: [] },
     });
   });
+
+  test.each([
+    ["approval-only", { approval_policy: "never" }],
+    ["windows-only", { windows: { sandbox: "unelevated" } }],
+  ])(
+    "preserves %s inline-profile identity in saved recipes",
+    async (_name, profile) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "selected.config.toml"),
+        'model_provider = "fireworks"\n',
+      );
+      const original = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "selected",
+            profiles: { selected: profile as JsonObject },
+          },
+        },
+        home,
+      );
+      const saved = scanPreflightCodexConfig(original);
+      const replayed = await mergedCodexConfig({ codexOverrides: saved }, home);
+      expect(scanModelProvider(replayed)).toBe(scanModelProvider(original));
+      expect(saved["profile"]).toBe("selected");
+      expect(saved["profiles"]).toEqual({ selected: {} });
+    },
+  );
+
+  test("preserves resolved file-profile model files and tool exclusions", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model_catalog_json = "catalog.json"\nexperimental_compact_prompt_file = "compact.md"\n[features.code_mode]\nenabled = true\nexcluded_tool_namespaces = ["synthetic_tools"]\n',
+    );
+    const config = await mergedCodexConfig(
+      { codexOverrides: { profile: "review" } },
+      home,
+    );
+    const requested = {
+      model_catalog_json: join(home, "catalog.json"),
+      experimental_compact_prompt_file: join(home, "compact.md"),
+      features: {
+        code_mode: {
+          enabled: true,
+          excluded_tool_namespaces: ["synthetic_tools"],
+        },
+      },
+    };
+    expect(config).toMatchObject(requested);
+    expect(scanPreflightCodexConfig(config)).toMatchObject(requested);
+  });
+
+  test.each([undefined, "low"])(
+    "preserves resolved file-profile worker settings and explicit verbosity: %s",
+    async (verbosity) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_instructions_file = "instructions.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(verbosity === undefined ? {} : { model_verbosity: verbosity }),
+          },
+        },
+        home,
+      );
+      expect(scanPreflightCodexConfig(config)).toMatchObject({
+        model_instructions_file: join(home, "instructions.md"),
+        model_verbosity: verbosity ?? "high",
+        web_search: "disabled",
+      });
+    },
+  );
 
   test.each([
     ["model", { model: null }, true],
@@ -502,6 +580,35 @@ describe("CodexSecurity preflight configuration", () => {
     await expect(
       writeCodexConfig(join(root, "large-capacity.toml"), largeCapacity),
     ).resolves.toBeUndefined();
+  });
+
+  test("keeps resolved tool disables in isolated worker settings", () => {
+    expect(
+      scanPreflightCodexConfig({
+        profile: "review",
+        features: { shell_tool: true, unified_exec: true },
+        profiles: {
+          review: { features: { shell_tool: false, unified_exec: false } },
+        },
+      })["features"],
+    ).toEqual({ shell_tool: false, unified_exec: false });
+  });
+
+  test("uses resolved native file settings without a legacy profile selector", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "config-preflight.toml");
+    const snapshot = scanPreflightCodexConfig({
+      profile: "review",
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    expect(snapshot).toEqual({
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    await writeCodexConfig(path, snapshot);
   });
 
   test("keeps every valid profile, project, and root marker", () => {
