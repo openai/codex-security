@@ -1,11 +1,9 @@
 import { decodeUtf8 } from "./utf8";
 import {
-  closeSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
-  readSync,
+  readFileSync,
   statSync,
   writeFileSync,
   type Stats,
@@ -21,7 +19,6 @@ import {
   resolvePosixPath,
 } from "./posix-path";
 
-const MAX_SECURITY_MD_BYTES = 1024 * 1024;
 const windows = process.platform === "win32";
 export const windowsFiles = () => windowsFileSystem(windowsBinding());
 const encodePath = (path: string) =>
@@ -310,33 +307,9 @@ function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
 }
 
 function readPolicy(path: Buffer, displayedPath: Buffer): string {
-  const buffer = Buffer.alloc(MAX_SECURITY_MD_BYTES + 1);
-  let length = 0;
-  if (windows) {
-    length = windowsFiles().readInto(path, buffer);
-  } else {
-    const file = openSync(path, "r");
-    try {
-      while (length < buffer.length) {
-        const count = readSync(
-          file,
-          buffer,
-          length,
-          buffer.length - length,
-          null,
-        );
-        if (count === 0) break;
-        length += count;
-      }
-    } finally {
-      closeSync(file);
-    }
-  }
-  if (length > MAX_SECURITY_MD_BYTES) {
-    throw new Error(`SECURITY.md exceeds 1 MiB: ${decodePath(displayedPath)}`);
-  }
+  const buffer = windows ? windowsFiles().readFile(path) : readFileSync(path);
   try {
-    return decodeUtf8(buffer.subarray(0, length));
+    return decodeUtf8(buffer);
   } catch {
     throw new Error(
       `SECURITY.md is not valid UTF-8: ${decodePath(displayedPath)}`,

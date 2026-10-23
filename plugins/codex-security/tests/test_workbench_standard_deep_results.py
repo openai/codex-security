@@ -1090,19 +1090,27 @@ def standard_finding(tmp_path: Path, scan_id: str, target: Path) -> dict[str, ob
 
 
 def deep_scan_fixture(
-    tmp_path: Path, *, budget: bool = False, workers: int = 1
+    tmp_path: Path,
+    *,
+    budget: bool = False,
+    workers: int = 1,
+    include_paths: list[str] | None = None,
 ) -> tuple[Path, Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("value = request.args['value']\n")
+    for relative in include_paths or []:
+        included = target / relative
+        if not included.exists():
+            included.write_text("value = 1\n")
     config_path = codex_home / "codex-security" / "config.toml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n")
     environment = {"CODEX_HOME": str(codex_home)}
 
-    if budget:
+    if budget or include_paths is not None:
         scan_dir = tmp_path / "scan"
         scan_dir.mkdir(mode=0o700)
         registered = run_workbench(
@@ -1118,8 +1126,11 @@ def deep_scan_fixture(
                     "config": {},
                     "mode": "deep",
                     "repository": str(target),
-                    "target": {"kind": "repository", "paths": []},
-                    "maxCostUsd": 0.005,
+                    "target": {
+                        "kind": "paths" if include_paths is not None else "repository",
+                        "paths": include_paths or [],
+                    },
+                    **({"maxCostUsd": 0.005} if budget else {}),
                 }
             ),
         )

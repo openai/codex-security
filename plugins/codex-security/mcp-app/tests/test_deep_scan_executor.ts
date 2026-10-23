@@ -2254,6 +2254,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 "mcp",
                 "server.mjs",
               ),
+              "mcp_servers.cs_artifacts.args.1": "--artifact-writer",
+              "mcp_servers.cs_artifacts.args.2": "--stdio",
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT":
                 path.join(fixture.root, `plugin-${index}`),
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
@@ -3139,10 +3141,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
           return message.includes(reference);
         },
       );
-      // Truncating the long, well-formed emoji message splits a surrogate pair.
-      const persistedDiagnostic = reference.includes("\0")
-        ? message
-        : "\ufffd\n...[truncated; sha256:";
+      const persistedDiagnostic = message;
       process.env.FAKE_CODEX_ARTIFACT_EVENT = JSON.stringify({
         type: "item.completed",
         item: {

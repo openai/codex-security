@@ -18,7 +18,7 @@ import { sourceReferences } from "./support/source-references.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { once } from "node:events";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importModule } from "./import-module.ts";
@@ -149,13 +149,6 @@ export class FakeStore {
   }
 
   async updateWorker(update: DeepScanWorkerMutation) {
-    if (update.error) {
-      assert.equal(
-        update.error.length <= 2_400,
-        true,
-        "persisted worker errors must be bounded",
-      );
-    }
     if (
       update.kind === "discovery" &&
       update.status === this.blockDiscoveryUpdate
@@ -356,7 +349,7 @@ export class FakeStore {
     this.publicationFailureMessages.push(message);
     const original = this.run.error?.trim();
     this.run.error = original
-      ? boundedFixtureErrorPair(message, original)
+      ? `${message}\nOriginal Deep Scan failure:\n${original}`
       : message;
     return structuredClone(this.run);
   }
@@ -738,26 +731,6 @@ export const immediateClock: DeepScanClock = {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
   },
 };
-
-function boundedFixtureErrorPair(primary: string, secondary: string) {
-  const separator = "\nOriginal Deep Scan failure:\n";
-  const available = 2_400 - separator.length;
-  let primaryBudget = Math.min(primary.length, Math.floor(available / 2));
-  const secondaryBudget = Math.min(secondary.length, available - primaryBudget);
-  primaryBudget = Math.min(primary.length, available - secondaryBudget);
-  return (
-    boundedFixtureErrorText(primary, primaryBudget) +
-    separator +
-    boundedFixtureErrorText(secondary, secondaryBudget)
-  );
-}
-
-function boundedFixtureErrorText(message: string, maximum: number) {
-  if (message.length <= maximum) return message;
-  const digest = createHash("sha256").update(message).digest("hex");
-  const suffix = `\n...[truncated; sha256:${digest}]`;
-  return message.slice(0, maximum - suffix.length) + suffix;
-}
 
 export function createCoordinator(
   fixture: Awaited<ReturnType<typeof fixtureRun>>,

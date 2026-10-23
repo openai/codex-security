@@ -1,3 +1,4 @@
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -180,10 +181,11 @@ function sarifIdentity(
 export function normalizeSemgrepFindings(
   input: unknown,
   options: SemgrepImportOptions,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
-    return normalizeSemgrepSarif(document, options);
+    return normalizeSemgrepSarif(document, options, target);
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
   if (array(document["errors"] ?? [], "Semgrep errors").length)
@@ -221,39 +223,44 @@ export function normalizeSemgrepFindings(
       const path = relativePath(rawPath);
       return {
         source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence({
-          title: rule,
-          description: messageText(extra["message"]),
-          severity: severity(extra["severity"]),
-          locations: path ? [{ path, line }] : [],
-          details: {
-            kind: "sast",
-            repository: { url: repositoryUrl },
-            scanner_origin: "Semgrep",
-            rule: { id: rule },
-            weakness_ids: weaknessIds(metadata["cwe"]),
-            code: {
-              end_line: path ? endLine : null,
-              snippet: ungatedText(extra["lines"]),
+        evidence: validateExternalEvidence(
+          {
+            title: rule,
+            description: messageText(extra["message"]),
+            severity: severity(extra["severity"]),
+            locations: path ? [{ path, line }] : [],
+            details: {
+              kind: "sast",
+              repository: { url: repositoryUrl },
+              scanner_origin: "Semgrep",
+              rule: { id: rule },
+              weakness_ids: weaknessIds(metadata["cwe"]),
+              code: {
+                end_line: path ? endLine : null,
+                snippet: ungatedText(extra["lines"]),
+              },
+              source_status:
+                typeof extra["is_ignored"] === "boolean"
+                  ? extra["is_ignored"]
+                    ? "ignored"
+                    : "open"
+                  : null,
             },
-            source_status:
-              typeof extra["is_ignored"] === "boolean"
-                ? extra["is_ignored"]
-                  ? "ignored"
-                  : "open"
-                : null,
+            source_data: structuredClone({ report: context, result }),
           },
-          source_data: structuredClone({ report: context, result }),
-        }),
+          target,
+        ),
       };
     },
     jsonIdentity,
+    target,
   );
 }
 
 export function normalizeSemgrepSarif(
   input: unknown,
   options: SemgrepImportOptions,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
   const document = record(input, "Semgrep SARIF");
@@ -409,58 +416,63 @@ export function normalizeSemgrepSarif(
         rawPath === null || absoluteUri ? null : relativePath(rawPath);
       return {
         source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence({
-          title: ruleId,
-          description:
-            text(message["markdown"]) ?? messageText(message["text"]),
-          severity: mappedSeverity,
-          locations: path ? [{ path, line }] : [],
-          details: {
-            kind: "sast",
-            repository: { url: repositoryUrl },
-            scanner_origin: "Semgrep",
-            rule: { id: ruleId },
-            weakness_ids: weaknessIds(
-              record(rule?.["properties"] ?? {}, "Rule properties")["tags"],
-            ),
-            code: {
-              end_line: path ? endLine : null,
-              snippet: ungatedText(
-                record(region["snippet"] ?? {}, "Snippet")["text"],
+        evidence: validateExternalEvidence(
+          {
+            title: ruleId,
+            description:
+              text(message["markdown"]) ?? messageText(message["text"]),
+            severity: mappedSeverity,
+            locations: path ? [{ path, line }] : [],
+            details: {
+              kind: "sast",
+              repository: { url: repositoryUrl },
+              scanner_origin: "Semgrep",
+              rule: { id: ruleId },
+              weakness_ids: weaknessIds(
+                record(rule?.["properties"] ?? {}, "Rule properties")["tags"],
               ),
+              code: {
+                end_line: path ? endLine : null,
+                snippet: ungatedText(
+                  record(region["snippet"] ?? {}, "Snippet")["text"],
+                ),
+              },
+              source_status:
+                Array.isArray(result["suppressions"]) &&
+                result["suppressions"].some((value) => {
+                  const status = record(value, "Suppression")["status"];
+                  return status === undefined || status === "accepted";
+                })
+                  ? "suppressed"
+                  : null,
             },
-            source_status:
-              Array.isArray(result["suppressions"]) &&
-              result["suppressions"].some((value) => {
-                const status = record(value, "Suppression")["status"];
-                return status === undefined || status === "accepted";
-              })
-                ? "suppressed"
-                : null,
-          },
-          source_data: structuredClone({
-            ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
+            source_data: structuredClone({
+              ...context,
+              runContext: sarifRunContextForResult(
+                context.runContext,
+                result,
+                rule,
+                context.driverContext,
+                context.toolContext,
+                context.documentContext,
+              ),
+              ...(rule ? { rule } : {}),
               result,
-              rule,
-              context.driverContext,
-              context.toolContext,
-              context.documentContext,
-            ),
-            ...(rule ? { rule } : {}),
-            result,
-          }),
-        }),
+            }),
+          },
+          target,
+        ),
       };
     },
     ({ result, runContext }) => sarifIdentity(result, runContext),
+    target,
   );
 }
 
 export async function readSemgrepFindings(
   path: string,
   options: SemgrepImportOptions,
+  target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
-  return normalizeSemgrepFindings(await readScannerJson(path), options);
+  return normalizeSemgrepFindings(await readScannerJson(path), options, target);
 }
