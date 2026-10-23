@@ -187,14 +187,19 @@ test("propagates a subprocess exit after successful test assertions", async () =
   const node = Bun.which("node");
   expect(node).not.toBeNull();
   const root = await temporaryDirectory("codex-security-shard-exit-");
+  const completed = join(root, "assertion-completed");
   try {
     await mkdir(join(root, "scripts"));
     await mkdir(join(root, "tests-ts"));
     await copyRunner(root);
     await writeFile(
       join(root, "tests-ts", "probe.test.ts"),
-      `import { afterAll, expect, test } from "bun:test";
-test("completed shard assertion", () => { expect(1).toBe(1); });
+      `import { writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+test("completed shard assertion", () => {
+  expect(1).toBe(1);
+  writeFileSync(${JSON.stringify(completed)}, "completed");
+});
 afterAll(() => { process.exit(7); });
 `,
     );
@@ -216,7 +221,7 @@ afterAll(() => { process.exit(7); });
       windowsHide: true,
     });
     const { status, stderr } = await readSubprocess(child);
-    expect(stderr).toContain("(pass) completed shard assertion");
+    expect(await readFile(completed, "utf8")).toBe("completed");
     expect(status, stderr).toBe(7);
   } finally {
     await rm(root, { recursive: true, force: true });
