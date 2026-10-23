@@ -65,7 +65,7 @@ test("uses each platform's history and includes new files without selecting dele
   expect(partitionTests(files, 2, {}, "darwin").flat().sort()).toEqual(files);
 });
 
-test.each([3, 7])(
+test.each([3, 6, 7, 14])(
   "runs each eligible file once across %i native shards, including new files",
   async (count) => {
     const node = Bun.which("node");
@@ -178,6 +178,51 @@ test("rejects an empty shard while allowing a nonempty shard with the same count
         expect(stderr).toContain("Test shard 2/2 is empty.");
       }
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("propagates a subprocess exit after successful test assertions", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-shard-exit-");
+  const completed = join(root, "assertion-completed");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root);
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      `import { writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+test("completed shard assertion", () => {
+  expect(1).toBe(1);
+  writeFileSync(${JSON.stringify(completed)}, "completed");
+});
+afterAll(() => { process.exit(7); });
+`,
+    );
+    const child = Bun.spawn({
+      cmd: [
+        node!,
+        "--experimental-strip-types",
+        join(root, "scripts", "run-ci-tests.mts"),
+        "1/1",
+      ],
+      env: {
+        ...process.env,
+        PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    const { status, stderr } = await readSubprocess(child);
+    expect(await readFile(completed, "utf8")).toBe("completed");
+    expect(status, stderr).toBe(7);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

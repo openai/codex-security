@@ -7,7 +7,11 @@ import { SaxesParser, type SaxesTagNS } from "saxes";
 
 type TestStatus = "passed" | "skipped" | "failed";
 type TestIdentity = [file: string, classname: string, name: string];
-type TestOutcome = [...TestIdentity, status: TestStatus];
+type TestOutcome = [
+  ...TestIdentity,
+  status: TestStatus,
+  assertions: string | null,
+];
 type TestRecord = {
   attributes: SaxesTagNS["attributes"];
   status: TestStatus;
@@ -123,7 +127,12 @@ function readReport(path: string) {
       attributes["classname"]?.value ?? "",
       attributes["name"]?.value ?? "",
     ];
-    const key = JSON.stringify([...identity, status]);
+    const reportedAssertions = attributes["assertions"]?.value;
+    const assertions =
+      reportedAssertions === undefined
+        ? null
+        : integer(reportedAssertions).toString();
+    const key = JSON.stringify([...identity, status, assertions]);
     cases.set(key, (cases.get(key) ?? 0) + 1);
   }
   if (!cases.size) throw new Error(`${path}: no test cases`);
@@ -212,8 +221,8 @@ function main(): number {
       .sort(([a], [b]) => {
         for (let index = 0; index < a.length; index++) {
           const order = Buffer.compare(
-            Buffer.from(a[index]!),
-            Buffer.from(b[index]!),
+            Buffer.from(a[index] ?? ""),
+            Buffer.from(b[index] ?? ""),
           );
           if (order) return order;
         }
@@ -221,7 +230,10 @@ function main(): number {
       });
     for (const [identity, count] of differences) {
       failed = true;
-      console.error(`${label} (${count}): ${identity.join(" > ")}`);
+      const [file, classname, name, status, assertions] = identity;
+      const description = [file, classname, name, status];
+      if (assertions !== null) description.push(`assertions=${assertions}`);
+      console.error(`${label} (${count}): ${description.join(" > ")}`);
     }
   }
   if (failed) return 1;
