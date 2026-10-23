@@ -38,6 +38,7 @@
 - retain unfinished deadline checkpoints ([#1710](https://github.com/openai/codex-security/pull/1710))
 - clarify requested scope and deferred work ([#586](https://github.com/openai/codex-security/pull/586))
 - preserve literal scope paths across renderers ([#1850](https://github.com/openai/codex-security/pull/1850))
+- preserve Unicode colon source paths ([#542](https://github.com/openai/codex-security/pull/542))
 
 <!-- release-section: highlights:end -->
 
