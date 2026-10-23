@@ -23,6 +23,7 @@ const {
   validateReducerArtifacts,
   aggregateDiscoveryCoverage,
   aggregateSourceCoverage,
+  deepReductionForPersistence,
   projectDiscoveryCoverage,
 } = await importSource(
   path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
@@ -71,6 +72,7 @@ try {
     for (const reverse of [false, true])
       await testCurrentAnonymousReceiptSelection(root, candidate, reverse);
   await testReducerValidation(root);
+  await testReducerLineageConvergence(root);
   await testEmptyDiscoveryAndReduction(root);
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -1338,6 +1340,242 @@ async function testReducerValidation(root: string) {
     await symlink(actualResult, resultPath, "file");
     await assert.rejects(validate(), /canonical non-symlink path/);
   }
+}
+
+async function testReducerLineageConvergence(root: string) {
+  const { artifacts } = await createWorker(
+    path.join(root, "lineage-convergence"),
+    "worker-lineage",
+    draft([]),
+  );
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-current", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  const previousReducerResultPath = path.join(
+    artifacts.dedupRoot,
+    "dedup-previous",
+    "output",
+    "result.json",
+  );
+  await mkdir(artifactDir, { recursive: true });
+  await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
+  const originals = {
+    a: finding("root-a", "src/a.js"),
+    b: finding("alias-b", "src/b.js"),
+    c: finding("fresh-c", "src/c.js"),
+  };
+  const referenced = (name: string, refs: string[]) => ({
+    ...finding(name, `src/${name}.js`),
+    provenance: { source: "local_plugin", sourceFindingIds: refs },
+  });
+  const retained = (name: string, keys: (keyof typeof originals)[]) => ({
+    ...referenced(
+      name,
+      keys.map((key) => `origin:${key}`),
+    ),
+    provenance: {
+      source: "local_plugin",
+      sourceFindingIds: keys.map((key) => `origin:${key}`),
+      sourceFindings: keys.map((key) => ({
+        id: `origin:${key}`,
+        finding: originals[key],
+      })),
+    },
+  });
+  const previousA = retained("root-a", ["a"]);
+  const previousB = {
+    ...retained("alias-b", ["b"]),
+    rootCause:
+      "The previous reduction established another reachable response branch.",
+  };
+  const discoveries = [{ workerId: "fresh", result: reduction([originals.c]) }];
+  for (const [label, previous, output, newFindings] of [
+    [
+      "retain-canonical-alias",
+      [previousA, previousB],
+      [referenced("root-a", ["origin:a", "origin:b", "fresh:0"])],
+      0,
+    ],
+    [
+      "new-canonical-alias",
+      [previousA, previousB],
+      [referenced("merged-root", ["origin:a", "origin:b", "fresh:0"])],
+      0,
+    ],
+    [
+      "independent-root",
+      [previousA, previousB],
+      [
+        referenced("merged-root", ["origin:a", "origin:b"]),
+        referenced("fresh-c", ["fresh:0"]),
+      ],
+      1,
+    ],
+    [
+      "keep-independent-instances",
+      [previousA, previousB],
+      [
+        referenced("root-a", ["origin:a", "fresh:0"]),
+        referenced("alias-b", ["origin:b"]),
+      ],
+      0,
+    ],
+  ] as const) {
+    await writeResult(resultPath, reduction([...output]));
+    await writeResult(previousReducerResultPath, reduction([...previous]));
+    const input = { artifacts, artifactDir, resultPath, reducerId: label };
+    const accepted = await validateReducerArtifacts(
+      {
+        ...input,
+        sources: { discoveries, previous: reduction([...previous]) },
+      },
+      scanId,
+    );
+    assert.equal(accepted.newFindings, newFindings, label);
+    const saved = await readJson(resultPath);
+    assert.deepEqual(deepReductionForPersistence(accepted.result), saved);
+    assert.equal(
+      (
+        await validateReducerArtifacts(
+          { ...input, previousReducerResultPath },
+          scanId,
+        )
+      ).newFindings,
+      newFindings,
+      `${label}: reopening the saved reduction must reconstruct the same novelty`,
+    );
+    if (label === "new-canonical-alias") {
+      assert.deepEqual(
+        saved.findings[0].provenance.previousFindings.map(
+          (item: JsonObject) => item.title,
+        ),
+        [previousA.title, previousB.title],
+        "semantic consolidation keeps both prior canonical bodies",
+      );
+      for (const field of ["summary", "rootCause"]) {
+        const degraded = structuredClone(saved);
+        degraded.findings[0][field] = "X";
+        await writeResult(resultPath, degraded);
+        await assert.rejects(
+          validateReducerArtifacts(
+            {
+              ...input,
+              sources: { discoveries, previous: reduction([...previous]) },
+            },
+            scanId,
+          ),
+          /placeholder.*origin:/,
+          "renaming merged aliases cannot bypass original or synthesized content preservation",
+        );
+        await assert.rejects(
+          validateReducerArtifacts(
+            { ...input, previousReducerResultPath },
+            scanId,
+          ),
+          /placeholder.*origin:/,
+          "stored recovery rejects the same content loss as live reduction",
+        );
+        assert.deepEqual(await readJson(resultPath), degraded);
+      }
+    }
+  }
+  for (const [label, previous, output] of [
+    [
+      "split-previous-group",
+      [retained("root-a", ["a", "b"])],
+      [
+        referenced("root-a", ["origin:a"]),
+        referenced("alias-b", ["origin:b", "fresh:0"]),
+      ],
+    ],
+    [
+      "rename-independent-root",
+      [previousA],
+      [referenced("renamed-root", ["origin:a", "fresh:0"])],
+    ],
+    [
+      "ambiguous-previous-group",
+      [previousA],
+      [
+        referenced("root-a", ["origin:a"]),
+        referenced("alias-b", ["origin:a", "fresh:0"]),
+      ],
+    ],
+  ] as const) {
+    await writeResult(resultPath, reduction([...output]));
+    await writeResult(previousReducerResultPath, reduction([...previous]));
+    const input = { artifacts, artifactDir, resultPath, reducerId: label };
+    await assert.rejects(
+      validateReducerArtifacts(
+        {
+          ...input,
+          sources: { discoveries, previous: reduction([...previous]) },
+        },
+        scanId,
+      ),
+      /previously accepted finding|more than once/,
+      label,
+    );
+    await assert.rejects(
+      validateReducerArtifacts({ ...input, previousReducerResultPath }, scanId),
+      /previously accepted finding/,
+      `${label}: stored recovery must enforce the same assignment`,
+    );
+  }
+  const legacy = reduction([originals.a, originals.b]);
+  const legacyMerge = reduction([
+    referenced("merged-root", ["previous:0", "previous:1"]),
+  ]);
+  const validateLegacy = (previous: typeof legacy) =>
+    validateReducerArtifacts(
+      {
+        artifacts,
+        artifactDir,
+        resultPath,
+        reducerId: "legacy-consolidation",
+        sources: { discoveries: [], previous },
+      },
+      scanId,
+    );
+  await writeResult(resultPath, legacyMerge);
+  await assert.rejects(
+    validateLegacy(legacy),
+    /previously accepted finding identity/,
+    "legacy findings without retained source bodies keep their identities",
+  );
+  await writeResult(resultPath, legacy);
+  const upgraded = (await validateLegacy(legacy)).result;
+  assert.deepEqual(
+    upgraded.findings.map(
+      (item: { provenance: { sourceFindingIds: string[] } }) =>
+        item.provenance.sourceFindingIds,
+    ),
+    [["previous:0"], ["previous:1"]],
+  );
+  await writeResult(resultPath, legacyMerge);
+  assert.equal(
+    (await validateLegacy(upgraded)).newFindings,
+    0,
+    "host-retained legacy source bodies support later alias consolidation",
+  );
+  await writeResult(
+    previousReducerResultPath,
+    deepReductionForPersistence(upgraded),
+  );
+  assert.equal(
+    (
+      await validateReducerArtifacts(
+        {
+          artifacts,
+          artifactDir,
+          resultPath,
+          reducerId: "legacy-consolidation-recovery",
+          previousReducerResultPath,
+        },
+        scanId,
+      )
+    ).newFindings,
+    0,
+  );
 }
 
 async function testEmptyDiscoveryAndReduction(root: string) {

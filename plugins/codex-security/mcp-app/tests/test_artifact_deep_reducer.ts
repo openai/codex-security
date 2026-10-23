@@ -54,6 +54,7 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-deep-reducer-", true);
 try {
+  await testRetainedFindingContent(root);
   const scanRoot = path.join(root, "scan");
   const workersRoot = path.join(
     scanRoot,
@@ -328,8 +329,7 @@ try {
   });
   await assert.rejects(
     recordCodexSecurityDeepReduction(nextContext, reduction([shared])),
-    (error: NodeJS.ErrnoException) =>
-      error.code === "merge_traceability_unstable_candidate_id",
+    /unaccounted source findings: worker-002:1/,
   );
   assert.deepEqual(
     await recordCodexSecurityDeepReduction(nextContext, merged),
@@ -449,6 +449,181 @@ try {
 }
 
 console.log("artifact deep reducer tests passed");
+
+async function testRetainedFindingContent(root: string) {
+  const scanRoot = path.join(root, "content");
+  const deepRoot = path.join(scanRoot, "artifacts", "deep_discovery");
+  const original = {
+    ...finding("retained", "src/handler.ts"),
+    rootCause: { summary: "The response omits encoding of request input." },
+    writeup: {
+      reportPath: "findings/retained/retained.md",
+      description: "A crafted query is rendered as executable HTML.",
+    },
+  };
+  const worker = await createWorker({
+    workersRoot: path.join(deepRoot, "workers"),
+    label: "discovery-0001",
+    id: "worker-content",
+    result: workerDraft([original]),
+  });
+  const outputRoot = path.join(deepRoot, "dedup", "first", "output");
+  await mkdir(outputRoot, { recursive: true });
+  const context = {
+    root: outputRoot,
+    repoRoot: root,
+    scanId,
+    layout: "reducer",
+    deepReducer: { scanRoot, claimedWorkers: [worker] },
+  };
+  const replacements = [
+    { title: "X" },
+    { summary: "X" },
+    { rootCause: { summary: "TBD" } },
+    { remediation: "..." },
+    { writeup: { ...original.writeup, description: "X" } },
+  ];
+  for (const replacement of replacements) {
+    await assert.rejects(
+      recordCodexSecurityDeepReduction(
+        context,
+        reduction([{ ...original, ...replacement }]),
+      ),
+      /placeholder.*worker-content:0/i,
+      "a reducer cannot replace accepted source text with placeholders",
+    );
+    await assert.rejects(readFile(path.join(outputRoot, "result.json")), {
+      code: "ENOENT",
+    });
+    await assert.rejects(readdir(path.join(outputRoot, "checkpoints")), {
+      code: "ENOENT",
+    });
+  }
+  await recordCodexSecurityDeepReduction(context, reduction([original]));
+  const accepted = await readJson(outputRoot, "result.json");
+  // This detail exists only in the previous aggregate, beyond its originals.
+  accepted.findings[0].writeup.additionalProof =
+    "A second response branch reaches the same vulnerable HTML sink.";
+  await writeJson(path.join(outputRoot, "result.json"), accepted);
+  const empty = await createWorker({
+    workersRoot: path.join(deepRoot, "workers"),
+    label: "discovery-0002",
+    id: "worker-empty",
+    result: workerDraft([]),
+  });
+  const nextRoot = path.join(deepRoot, "dedup", "second", "output");
+  await mkdir(nextRoot, { recursive: true });
+  const nextContext = {
+    ...context,
+    root: nextRoot,
+    deepReducer: {
+      scanRoot,
+      claimedWorkers: [empty],
+      previousReducerResultPath: path.join(outputRoot, "result.json"),
+    },
+  };
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(
+      nextContext,
+      reduction([
+        {
+          ...accepted.findings[0],
+          writeup: { ...accepted.findings[0].writeup, additionalProof: "X" },
+        },
+      ]),
+    ),
+    /placeholder.*worker-content:0/i,
+    "details synthesized by an earlier reducer must also be preserved",
+  );
+  await recordCodexSecurityDeepReduction(
+    nextContext,
+    reduction([], { retainedFindingRefs: ["previous:0"] }),
+  );
+  assert.deepEqual(
+    await readJson(nextRoot, "result.json"),
+    accepted,
+    "reference-only retention copies the complete body and history verbatim",
+  );
+  assert.deepEqual(
+    (
+      await getCodexSecurityDeepReducerInputs({
+        ...nextContext,
+        deepReducer: {
+          ...nextContext.deepReducer,
+          previousReducerResultPath: path.join(nextRoot, "result.json"),
+        },
+      })
+    ).previous,
+    accepted,
+    "reopening the reduction retains substantive text and exact locations",
+  );
+  for (const retainedFindingRefs of [
+    ["previous:1"],
+    ["previous:0", "previous:0"],
+  ]) {
+    await assert.rejects(
+      recordCodexSecurityDeepReduction(
+        nextContext,
+        reduction([], { retainedFindingRefs }),
+      ),
+      /not assigned|more than once/,
+    );
+    assert.deepEqual(await readJson(nextRoot, "result.json"), accepted);
+  }
+  await recordCodexSecurityDeepReduction(
+    nextContext,
+    reduction([
+      { ...accepted.findings[0], summary: "Reflected HTML injection." },
+    ]),
+  );
+  assert.equal(
+    (await readJson(nextRoot, "result.json")).findings[0].summary,
+    "Reflected HTML injection.",
+    "concise substantive synthesis remains allowed without length heuristics",
+  );
+  for (const legacyRefs of [undefined, ["historical:0"]]) {
+    const legacyFinding = {
+      ...original,
+      summary: "An earlier review recorded a separate response route.",
+      provenance: { ...original.provenance, sourceFindingIds: legacyRefs },
+    };
+    const previousReducerResultPath = path.join(
+      deepRoot,
+      "dedup",
+      "legacy.json",
+    );
+    await writeJson(previousReducerResultPath, reduction([legacyFinding]));
+    await recordCodexSecurityDeepReduction(
+      {
+        ...nextContext,
+        deepReducer: {
+          scanRoot,
+          claimedWorkers: [worker],
+          previousReducerResultPath,
+        },
+      },
+      reduction(
+        [
+          {
+            ...original,
+            provenance: {
+              ...original.provenance,
+              sourceFindingIds: ["worker-content:0"],
+            },
+          },
+        ],
+        { retainedFindingRefs: ["previous:0"] },
+      ),
+    );
+    const retained = (await readJson(nextRoot, "result.json")).findings[1];
+    assert.equal(retained.summary, legacyFinding.summary);
+    assert.deepEqual(
+      retained.provenance.sourceFindingIds,
+      ["previous:0"],
+      "legacy references are explicit even when a fresh finding has the same identity",
+    );
+  }
+}
 
 async function createWorker({
   workersRoot,
