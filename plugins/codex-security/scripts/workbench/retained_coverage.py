@@ -140,8 +140,27 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
-def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
-    rows = coverage.get("deferred", [])
+def _append_previous_finding(
+    item: dict[str, Any], finding: dict[str, Any], *, clone: bool = False
+) -> None:
+    if not isinstance(item.get("previousFindings"), list):
+        item["previousFindings"] = []
+    history = item["previousFindings"]
+    if not any(
+        isinstance(previous, dict)
+        and _finding_key(previous) == _finding_key(finding)
+        and _finding_content(previous) == _finding_content(finding)
+        for previous in history
+    ):
+        history.append(copy.deepcopy(finding) if clone else finding)
+
+
+def _has_candidate_metadata(row: dict[str, Any]) -> bool:
+    return any(key in row for key in ("candidateId", "candidate", "finding"))
+
+
+def _coverage_rows(coverage: dict[str, Any], field: str) -> list[Any]:
+    rows = coverage.get(field, [])
     return rows if isinstance(rows, list) else []
 
 
@@ -153,7 +172,7 @@ def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> li
     try:
         # Invalid closure metadata cannot discard the evidence it names.
         _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
-        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
+        _validate_resolved_deferred({**coverage, "deferred": _coverage_rows(coverage, "deferred")})
     except ContractError:
         return []
     return rows
@@ -168,15 +187,14 @@ def _merge_tied_parent_observations(
             merged["findings"].append(copy.deepcopy(finding))
     coverage = merged["coverage"]
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = previous["coverage"].get(field, [])
         output = coverage.setdefault(field, [])
-        if isinstance(rows, list) and isinstance(output, list):
-            for row in rows:
+        if isinstance(output, list):
+            for row in _coverage_rows(previous["coverage"], field):
                 if row not in output:
                     output.append(copy.deepcopy(row))
     pending_ids = {
         identity
-        for row in _deferred_rows(coverage)
+        for row in _coverage_rows(coverage, "deferred")
         if isinstance(row, dict)
         for identity in (row.get("id"), row.get("candidateId"))
         if isinstance(identity, str)
@@ -258,8 +276,7 @@ def _generic_surface_updates(
 
     saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
     for relative, draft, owner in sources:
-        rows = draft["coverage"].get("surfaces", [])
-        for row in rows if isinstance(rows, list) else []:
+        for row in _coverage_rows(draft["coverage"], "surfaces"):
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
     replaced: set[int] = set()
@@ -283,8 +300,7 @@ def _generic_surface_updates(
                 if source_order[relative] == source_order[latest_source]
             )
         for relative, draft, owner in sources:
-            rows = draft["coverage"].get("surfaces", [])
-            for row in rows if isinstance(rows, list) else []:
+            for row in _coverage_rows(draft["coverage"], "surfaces"):
                 if (
                     isinstance(row, dict)
                     and "id" not in row
@@ -321,8 +337,7 @@ def _generic_surface_updates(
         }
         if not closed_ids and not reopened_ids and receipt_root is None:
             continue
-        current = draft["coverage"].get("surfaces", [])
-        for surface in current if isinstance(current, list) else []:
+        for surface in _coverage_rows(draft["coverage"], "surfaces"):
             if not isinstance(surface, dict):
                 continue
             reopening = surface.get("disposition") == "needs_follow_up"
@@ -344,9 +359,7 @@ def _generic_surface_updates(
             by_source = dict(matches)
             if any(row != by_source[saved_path] for saved_path, row in matches):
                 continue
-            if any(
-                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
-            ):
+            if any(_has_candidate_metadata(row) for _, row in matches):
                 continue
             if any(
                 row is not surface
@@ -363,7 +376,7 @@ def _generic_surface_updates(
                     or (
                         isinstance(row.get("id"), str)
                         and (owner, row["id"]) in ambiguous_deferred
-                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                        and not _has_candidate_metadata(row)
                     )
                 )
                 and linked(row, identity)
@@ -493,8 +506,6 @@ def _deferred_candidate_id(
     identity = row.get("candidateId") or row.get("id")
     if not isinstance(identity, str):
         return None
-    if (owner, identity) in ambiguous_deferred and not any(
-        key in row for key in ("candidateId", "candidate", "finding")
-    ):
+    if (owner, identity) in ambiguous_deferred and not _has_candidate_metadata(row):
         return None
     return identity
