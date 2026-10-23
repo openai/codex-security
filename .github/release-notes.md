@@ -43,6 +43,7 @@
 - update the GitHub Action runtime to 0.6.0 ([#1906](https://github.com/openai/codex-security/pull/1906))
 - separate report readers from source providers ([#1871](https://github.com/openai/codex-security/pull/1871))
 - persist run warnings in SARIF exports ([#1893](https://github.com/openai/codex-security/pull/1893))
+- keep HTML entities literal in report text ([#1851](https://github.com/openai/codex-security/pull/1851))
 
 <!-- release-section: highlights:end -->
 

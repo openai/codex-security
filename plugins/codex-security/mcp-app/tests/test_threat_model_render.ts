@@ -109,6 +109,59 @@ equivalent(
     },
   },
 );
+equivalent(
+  "footer entities remain literal in prose and scope paths",
+  {
+    ...markdownModel,
+    origin: "provided",
+    scope: {
+      includePaths: [
+        "docs/&lt;tag&gt;.md",
+        "docs/www.example.com/&lt;tag&gt;.md",
+        "docs/`&lt;tag&gt;`.md",
+        "docs/a,&lt;tag&gt;.md",
+        "dir&lt;tag&gt;.example/file.md",
+        "dir.example/file&lt;tag&gt;.md",
+        "www.example.com/file&amp;.md",
+        "`&amp;`",
+        "`&amp;.md",
+        "file&amp;`",
+      ],
+      excludePaths: ["tmp/&amp;.md"],
+      summary:
+        "R&D decodes &#x3C;tag&#x3E; and &amp;lt;. Keep `&amp;` literal.",
+    },
+  },
+  { target: "R&D &lt;workspace&gt;" },
+);
+for (const url of [
+  "https://example.com/?first=1&second=2",
+  "http://example.com/?payload=&#x3C;tag&#x3E;&mode=1",
+  "ftp://example.com/?first=1&second=2",
+  "www.example.com/?payload=&lt;tag&gt;&mode=1",
+  "WWW.example.com/?first=1&second=2",
+  "WwW.example.com/?first=1&second=2",
+  "https://example.com/`a`?first=1&second=2",
+  "example.com/?first=1&second=2",
+  "//example.com/?first=1&second=2",
+  '"example.com/?first=1&second=2"',
+  "[example.com/?first=1&second=2]",
+  "éxample.com/?first=1&second=2",
+  "例子.com/?first=1&second=2",
+  "example.com/?payload=&lt;tag&gt;&mode=1",
+  "example.com/?first=1&word;=2",
+  "//example.com/?first=1&word;=2",
+  "user&tag@example.com",
+  "mailto:user&tag@example.com",
+  "//localhost:8080/?first=1&word;=2",
+  "{//example.com/?first=1&word;=2}",
+  "?example.com/?first=1&word;=2",
+  "mailto:user&tag@localhost",
+]) {
+  equivalent(`footer URL ampersands ${url}`, markdownModel, {
+    target: `${url} then &amp; and \`https://example.com/?a=1&b=2 &amp;\`.`,
+  });
+}
 for (const [paths, expected] of [
   [
     [
@@ -225,7 +278,18 @@ test("non-object models report a threatModel diagnostic", () => {
 
 test("Python finalizer recognizes native renderer bytes as the current projection", () => {
   const scope = {
-    includePaths: ["src", "a,b.ts", "a  b", "\u{1fae9},notes.md"],
+    includePaths: [
+      "src",
+      "a,b.ts",
+      "a  b",
+      "\u{1fae9},notes.md",
+      "docs/&lt;tag&gt;.md",
+      "docs/a,&lt;tag&gt;.md",
+      "dir&lt;tag&gt;.example/file.md",
+      "dir.example/file&lt;tag&gt;.md",
+      "www.example.com/file&amp;.md",
+      "`&amp;`",
+    ],
     excludePaths: [" "],
   };
   const threatModel = { summary: "Saved model", assets: ["Queue"], scope };
@@ -234,7 +298,7 @@ test("Python finalizer recognizes native renderer bytes as the current projectio
     status: "running",
     threatModel,
     target: {
-      displayName: "Example [workspace]",
+      displayName: "R&D &lt;workspace&gt;",
       revision: "example-revision",
     },
     scope,
