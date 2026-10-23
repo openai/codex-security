@@ -104,7 +104,7 @@
     - type: javascript
       value: file://./assertions/ticket-intake.mts
 
-- description: "Linear nested sub-issues ask again at the next depth"
+- description: "Linear child-only selection asks before expanding to grandchildren"
   metadata:
     case_id: linear-nested-subissue-confirmation
     source_type: scanner_ticket
@@ -124,6 +124,40 @@
   assert:
     - type: javascript
       value: file://./assertions/ticket-intake.mts
+
+- description: "Linear all-descendants selection proceeds across depths"
+  metadata:
+    case_id: linear-all-descendants
+    source_type: scanner_ticket
+  vars:
+    case_id: linear-all-descendants
+    target_repo: evals/triage-finding/fixtures/repo
+    source_type_under_test: scanner_ticket
+    invocation_preamble: "Use $codex-security:triage-finding to triage every finding under Linear parent SEC-293, including all descendants."
+    expected_ids: SEC-294,SEC-295,SEC-296
+    expected_source_types: scanner_ticket,scanner_ticket,scanner_ticket
+    expected_verdicts: confirmed,not_actionable,not_actionable
+    finding_input: |-
+      Connector observations: all child listings and pages are complete. SEC-293
+      is an organizing summary with no independent claim. Its children, in
+      creation order, are SEC-294 and SEC-295. SEC-294 has child SEC-296. There
+      are no other descendants. The full selected issue bodies were fetched:
+
+      SEC-294: User-controlled next query parameter reaches res.redirect in
+      src/server.js route /redirect without allowlist validation.
+
+      SEC-295: User-controlled next query parameter may reach res.redirect in
+      src/server.js route /safe-redirect.
+
+      SEC-296: SQL injection in product search: req.query.q is concatenated into
+      a SQL string in src/server.js.
+    eval_instructions: |-
+      This is an automated eval. Treat the connector observations as completed
+      reads, including the full issue bodies above. Follow the skill to decide
+      whether the requested collection is ready for static triage. Do not make
+      live connector calls or invent additional issues. If triage can proceed,
+      inspect only the fixture repository and return concise Markdown plus one
+      fenced triage-finding/v0 JSON block.
 
 - description: "Ambiguous Linear parent asks whether it is a finding"
   metadata:

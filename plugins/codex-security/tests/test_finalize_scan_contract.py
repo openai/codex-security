@@ -81,7 +81,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
     @skipIf(os.name == "nt", "POSIX source filenames")
     def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
         source_root = self.scan_dir / "source"
-        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md", " ", "\u00a0"):
+        for name in ("aux.c", "con.py", "src/a:b.c", "é:helper.ts", "what?.md", " ", "\u00a0"):
             with self.subTest(name=name):
                 source = source_root / name
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -2508,7 +2508,7 @@ The extraction root is not enforced.
         )
 
     def test_preserves_literal_repository_paths(self) -> None:
-        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py"):
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py", "é:helper.ts"):
             with self.subTest(path=path):
                 self.manifest["scan"]["scope"]["includePaths"] = [path]
                 self.coverage["includePaths"] = [path]
