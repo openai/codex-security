@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
@@ -24,6 +25,38 @@ test("only ordinary documentation can skip source qualification", () => {
   assert.equal(select([])["source-required"], "true");
   assert.equal(
     select(["README.md"], { baseChanged: true })["source-required"],
+    "true",
+  );
+});
+
+test("packaged SDK documentation keeps package validation selected", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL("../../sdk/typescript/package.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const file of manifest.files.filter((file) => file.endsWith(".md"))) {
+    const path = `sdk/typescript/${file}`;
+    const selected = select([path]);
+    assert.equal(selected["source-required"], "true", path);
+    assert.equal(selected["container-validate"], "true", path);
+  }
+  // The --no-renames diff reports the old path when a required doc is renamed.
+  const renamed = select([
+    "sdk/typescript/docs/hosted-scans.md",
+    "docs/hosted-scans.md",
+  ]);
+  assert.equal(renamed["source-required"], "true");
+  assert.equal(
+    select(["README.md", "sdk/typescript/README.md"])["source-required"],
+    "true",
+  );
+});
+
+test("release helper changes select their release-progress regression checks", () => {
+  assert.equal(
+    select(["sdk/typescript/scripts/release-pr.mjs"])["workflow-quality"],
     "true",
   );
 });

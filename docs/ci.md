@@ -3,7 +3,9 @@
 The `node-ci` workflow selects checks from the complete pull request diff. An
 ordinary documentation-only change runs static checks and the final `ci` gate.
 Plugin skills, references, schemas, examples, and unrecognized paths still run
-source qualification: plugin Markdown is part of the product.
+source qualification: plugin Markdown is part of the product. SDK README and
+documentation changes also run source qualification because those files are
+required package contents; deleting or renaming them must pass archive checks.
 
 Source changes run the complete SDK suite on Linux, macOS, and Windows, plus
 MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
