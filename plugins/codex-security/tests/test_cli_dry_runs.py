@@ -33,7 +33,6 @@ def test_all_scripts_support_help() -> None:
         "workbench_publication.py",
         "finalize_scan_contract.py",
         "validate_scan_contract.py",
-        "validate_tracking_source.py",
         "threat_model_projection.py",
     ),
 )

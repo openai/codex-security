@@ -130,6 +130,28 @@ export function windowsFileSystem(native: WindowsBinding) {
     });
   }
 
+  function directoryIdentity(path: Buffer) {
+    return withFile(
+      path,
+      flags.FILE_READ_ATTRIBUTES,
+      (handle) => {
+        const info = handle.attributes();
+        check(info.error, path);
+        if (
+          (info.attributes & flags.FILE_ATTRIBUTE_DIRECTORY) === 0 ||
+          (info.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT) !== 0
+        ) {
+          throw new Error("not a non-symlink directory");
+        }
+        const result = handle.identity();
+        check(result.error, path);
+        return { volume: result.volume, fileId: result.fileId };
+      },
+      flags.OPEN_EXISTING,
+      false,
+    );
+  }
+
   function entriesWithTypes(path: Buffer) {
     const result = native.windowsDirectoryEntries(operationPath(path));
     check(result.error, path);
@@ -245,6 +267,7 @@ export function windowsFileSystem(native: WindowsBinding) {
     realpath,
     stat,
     identity,
+    directoryIdentity,
     entriesWithTypes,
     mkdir,
     mkdirPrivate,

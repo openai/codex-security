@@ -15,7 +15,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{
         GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
-        ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE,
+        ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE, INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
@@ -729,6 +729,22 @@ impl WindowsHandle {
 
     #[napi]
     pub fn attributes(&self) -> AttributesResult {
+        let mut basic = FILE_BASIC_INFO::default();
+        let error = status(unsafe {
+            GetFileInformationByHandleEx(
+                self.raw(),
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        });
+        if error != 0 || basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            return AttributesResult {
+                error,
+                attributes: basic.FileAttributes,
+                reparse_tag: 0,
+            };
+        }
         let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
         let error = status(unsafe {
             GetFileInformationByHandleEx(
@@ -748,7 +764,7 @@ impl WindowsHandle {
     #[napi]
     pub fn identity(&self) -> IdentityResult {
         let mut info = FILE_ID_INFO::default();
-        let error = status(unsafe {
+        let mut error = status(unsafe {
             GetFileInformationByHandleEx(
                 self.raw(),
                 FileIdInfo,
@@ -756,6 +772,18 @@ impl WindowsHandle {
                 size_of::<FILE_ID_INFO>() as u32,
             )
         });
+        if matches!(error, ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED) {
+            // Some filesystems expose only the legacy 64-bit file index.
+            let mut legacy = BY_HANDLE_FILE_INFORMATION::default();
+            error = status(unsafe { GetFileInformationByHandle(self.raw(), &mut legacy) });
+            if error == 0 {
+                info.VolumeSerialNumber = u64::from(legacy.dwVolumeSerialNumber);
+                let index =
+                    (u64::from(legacy.nFileIndexHigh) << 32) | u64::from(legacy.nFileIndexLow);
+                info.FileId.Identifier = [0; 16];
+                info.FileId.Identifier[..8].copy_from_slice(&index.to_le_bytes());
+            }
+        }
         IdentityResult {
             error,
             volume: info.VolumeSerialNumber.to_string(),

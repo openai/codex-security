@@ -169,14 +169,6 @@ describe("canonical scan contract", () => {
     );
   });
 
-  test("ships a completed example that passes tracking preflight", () => {
-    const result = runPython(Bun.which("python3") ?? "python", [
-      join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
-      EXAMPLE,
-    ]);
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-  });
-
   test("compares exact Windows volume serials without rounding file identity", async () => {
     const scanDir = await copyExample();
     const path = join(scanDir, "scan-manifest.json");

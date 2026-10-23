@@ -87,7 +87,13 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const shared = ["workbench-arguments", "executable-path"].map((name) => [
+  const shared = [
+    "workbench-arguments",
+    "executable-path",
+    "contract-values",
+    "finding-normalization",
+    "windows-path",
+  ].map((name) => [
     `${name}.ts`,
     `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
       readFileSync(
@@ -98,6 +104,20 @@ generate().then((models) => {
         "utf8",
       ),
   ]);
+  const pluginModels = join(
+    packageRoot,
+    "../../plugins/codex-security/mcp-app/src/models.ts",
+  );
+  if (process.argv.includes("--check")) {
+    if (
+      readFileSync(pluginModels, "utf8").replaceAll("\r\n", "\n") !== models
+    ) {
+      console.error(
+        "Plugin models.ts is out of date. Run `pnpm generate:models`.",
+      );
+      process.exitCode = 1;
+    }
+  } else writeFileSync(pluginModels, models);
   for (const [name, content] of [["models.ts", models], ...shared]) {
     const output = join(packageRoot, "src", name);
     if (process.argv.includes("--check")) {

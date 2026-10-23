@@ -661,6 +661,24 @@ try {
     { recursive: true },
   );
   if (process.platform !== "win32") await chmod(publicationScan, 0o700);
+  const trackingIds = run(
+    process.execPath,
+    [
+      join(installedRoot, "_bundled_plugin", "mcp", "helpers.mjs"),
+      "validate-tracking-source",
+      publicationScan,
+    ],
+    {
+      cwd: consumer,
+      capture: true,
+      env: {
+        ...process.env,
+        PATH: "",
+        PYTHON: join(consumer, "unavailable-python"),
+      },
+    },
+  );
+  assert.equal(trackingIds, "csf_852f90d6e1177502ff113d4a\n");
   const publication = JSON.parse(
     run(
       process.execPath,
