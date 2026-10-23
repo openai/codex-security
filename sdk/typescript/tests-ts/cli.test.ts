@@ -4851,6 +4851,7 @@ describe("CLI", () => {
         `  REPORT    ${result.reportPath}`,
         "",
         "  FINDINGS  1 (1 high)",
+        "  SCOPE     repository: .",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",

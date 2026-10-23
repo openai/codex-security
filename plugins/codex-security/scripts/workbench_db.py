@@ -1978,6 +1978,12 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     return recipe
 
 
+def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
+    return scan_history.coverage_summary_for_history(
+        _WORKBENCH_DB_CONTEXT, scan, require_canonical_scan_directory
+    )
+
+
 def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     return saved_results.coverage_for_comparison(_WORKBENCH_DB_CONTEXT, scan)
 
@@ -2745,6 +2751,17 @@ def scan_context(
     return context
 
 
+def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    result = scan_context(connection, args.scan_id, args.occurrence_id)
+    if result["scan"]["progress"]["status"] != "running":
+        scan = require_scan(connection, args.scan_id)
+        try:
+            result["scan"] = dict(result["scan"], coverage=coverage_summary_for_history(scan))
+        except (OSError, RuntimeError, SystemExit):
+            pass  # Historical artifacts may no longer be available or verifiable.
+    return result
+
+
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
@@ -3507,7 +3524,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         elif args.command == "get-scan":
             if args.check_target:
                 require_scan_target_unchanged(require_scan(connection, args.scan_id))
-            result = scan_context(connection, args.scan_id, args.occurrence_id)
+            result = get_scan(connection, args)
         elif args.command == "rename-scan":
             result = scan_history.rename_scan(
                 connection, require_scan(connection, args.scan_id), args.name
