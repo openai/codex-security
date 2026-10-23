@@ -261,9 +261,32 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
-def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
-    rows = coverage.get("deferred", [])
+def _append_previous_finding(
+    item: dict[str, Any], finding: dict[str, Any], *, clone: bool = False
+) -> None:
+    if not isinstance(item.get("previousFindings"), list):
+        item["previousFindings"] = []
+    history = item["previousFindings"]
+    if not any(
+        isinstance(previous, dict)
+        and _finding_key(previous) == _finding_key(finding)
+        and _finding_content(previous) == _finding_content(finding)
+        for previous in history
+    ):
+        history.append(copy.deepcopy(finding) if clone else finding)
+
+
+def _has_candidate_metadata(row: dict[str, Any]) -> bool:
+    return any(key in row for key in ("candidateId", "candidate", "finding"))
+
+
+def _coverage_rows(coverage: dict[str, Any], field: str) -> list[Any]:
+    rows = coverage.get(field, [])
     return rows if isinstance(rows, list) else []
+
+
+def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
+    return _coverage_rows(coverage, "deferred")
 
 
 def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
@@ -274,7 +297,7 @@ def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> li
     try:
         # Invalid closure metadata cannot discard the evidence it names.
         _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
-        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
+        _validate_resolved_deferred({**coverage, "deferred": _coverage_rows(coverage, "deferred")})
     except ContractError:
         return []
     return rows
@@ -289,15 +312,14 @@ def _merge_tied_parent_observations(
             merged["findings"].append(copy.deepcopy(finding))
     coverage = merged["coverage"]
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = previous["coverage"].get(field, [])
         output = coverage.setdefault(field, [])
-        if isinstance(rows, list) and isinstance(output, list):
-            for row in rows:
+        if isinstance(output, list):
+            for row in _coverage_rows(previous["coverage"], field):
                 if row not in output:
                     output.append(copy.deepcopy(row))
     pending_ids = {
         identity
-        for row in _deferred_rows(coverage)
+        for row in _coverage_rows(coverage, "deferred")
         if isinstance(row, dict)
         for identity in (row.get("id"), row.get("candidateId"))
         if isinstance(identity, str)
@@ -327,9 +349,7 @@ def _deferred_candidate_id(
     identity = row.get("candidateId") or row.get("id")
     if not isinstance(identity, str):
         return None
-    if (owner, identity) in ambiguous_deferred and not any(
-        key in row for key in ("candidateId", "candidate", "finding")
-    ):
+    if (owner, identity) in ambiguous_deferred and not _has_candidate_metadata(row):
         return None
     return identity
 
@@ -394,8 +414,7 @@ def _generic_surface_updates(
 
     saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
     for relative, draft, owner in sources:
-        rows = draft["coverage"].get("surfaces", [])
-        for row in rows if isinstance(rows, list) else []:
+        for row in _coverage_rows(draft["coverage"], "surfaces"):
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
     replaced: set[int] = set()
@@ -419,8 +438,7 @@ def _generic_surface_updates(
                 if source_order[relative] == source_order[latest_source]
             )
         for relative, draft, owner in sources:
-            rows = draft["coverage"].get("surfaces", [])
-            for row in rows if isinstance(rows, list) else []:
+            for row in _coverage_rows(draft["coverage"], "surfaces"):
                 if (
                     isinstance(row, dict)
                     and "id" not in row
@@ -457,8 +475,7 @@ def _generic_surface_updates(
         }
         if not closed_ids and not reopened_ids and receipt_root is None:
             continue
-        current = draft["coverage"].get("surfaces", [])
-        for surface in current if isinstance(current, list) else []:
+        for surface in _coverage_rows(draft["coverage"], "surfaces"):
             if not isinstance(surface, dict):
                 continue
             reopening = surface.get("disposition") == "needs_follow_up"
@@ -480,9 +497,7 @@ def _generic_surface_updates(
             by_source = dict(matches)
             if any(row != by_source[saved_path] for saved_path, row in matches):
                 continue
-            if any(
-                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
-            ):
+            if any(_has_candidate_metadata(row) for _, row in matches):
                 continue
             if any(
                 row is not surface
@@ -499,7 +514,7 @@ def _generic_surface_updates(
                     or (
                         isinstance(row.get("id"), str)
                         and (owner, row["id"]) in ambiguous_deferred
-                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                        and not _has_candidate_metadata(row)
                     )
                 )
                 and linked(row, identity)
@@ -1095,16 +1110,13 @@ def merge_saved_results(
     for field in ("deferred", "surfaces"):
         named_rows: dict[str | None, list[dict[str, Any]]] = {}
         for _, draft, owner in all_sources:
-            rows = draft["coverage"].get(field, [])
             named_rows.setdefault(owner, []).extend(
                 row
-                for row in (rows if isinstance(rows, list) else [])
+                for row in _coverage_rows(draft["coverage"], field)
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
             )
         for _, draft, owner in all_sources:
-            rows = draft["coverage"].get(field, [])
-            if not isinstance(rows, list):
-                continue
+            rows = _coverage_rows(draft["coverage"], field)
             reserved = {
                 row["id"]
                 for row in rows
@@ -1113,9 +1125,7 @@ def merge_saved_results(
             for row in rows:
                 if not isinstance(row, dict) or "id" in row:
                     continue
-                if field == "deferred" and any(
-                    key in row for key in ("candidateId", "candidate", "finding")
-                ):
+                if field == "deferred" and _has_candidate_metadata(row):
                     continue
                 content = {"receiptRefs": [], **row} if field == "surfaces" else row
                 identity = next(
@@ -1310,9 +1320,7 @@ def merge_saved_results(
                 (coverage, parent["coverage"]) if preserve_canonical_parent else (coverage,)
             )
             for field in ("surfaces", "explicitExclusions", "deferred")
-            for item in (
-                parent_coverage.get(field) if isinstance(parent_coverage.get(field), list) else []
-            )
+            for item in _coverage_rows(parent_coverage, field)
         }
         if parent_is_canonical
         else set()
@@ -1449,7 +1457,8 @@ def merge_saved_results(
 
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
-        relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
+        relative: _coverage_rows(draft["coverage"], "deferred")
+        for relative, draft, _ in all_sources
     }
     # Accepted heads can replace equal tasks before they reach output coalescing.
     equivalent_tasks: dict[str | None, list[dict[str, Any]]] = {}
@@ -1473,15 +1482,14 @@ def merge_saved_results(
         candidate_aliases = {
             identity
             for row in deferred_rows[relative]
-            if isinstance(row, dict)
-            and any(key in row for key in ("candidateId", "candidate", "finding"))
+            if isinstance(row, dict) and _has_candidate_metadata(row)
             for identity in (row.get("id"), row.get("candidateId"))
             if isinstance(identity, str)
         }
         for row in deferred_rows[relative]:
             if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
                 continue
-            if any(key in row for key in ("candidateId", "candidate", "finding")):
+            if _has_candidate_metadata(row):
                 continue
             if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
                 ambiguous_deferred.add((owner, identity))
@@ -1562,7 +1570,7 @@ def merge_saved_results(
                 isinstance(row, dict)
                 and isinstance(identity := row.get("id"), str)
                 and (owner, identity) in ambiguous_deferred
-                and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                and not _has_candidate_metadata(row)
                 and (owner, row) not in reopened_rows
             ):
                 reopened_rows.append((owner, row))
@@ -1600,8 +1608,7 @@ def merge_saved_results(
             ):
                 outcomes.append((relative, owner, candidate_id, "reported"))
         for field in ("surfaces", "explicitExclusions"):
-            items = draft["coverage"].get(field, [])
-            for item in items if isinstance(items, list) else []:
+            for item in _coverage_rows(draft["coverage"], field):
                 if (
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
@@ -2329,10 +2336,7 @@ def merge_saved_results(
         if (
             selected_coverage_superseded
             and field != "deferred"
-            and not (
-                isinstance(item, dict)
-                and any(key in item for key in ("candidateId", "candidate", "finding"))
-            )
+            and not (isinstance(item, dict) and _has_candidate_metadata(item))
         ):
             return False
         # A selected outcome must retain its evidence even if its result write failed.
@@ -2367,7 +2371,7 @@ def merge_saved_results(
         for owner, row in reopened_rows
         if isinstance(row.get("id"), str)
         and (owner, row["id"]) in ambiguous_deferred
-        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+        and not _has_candidate_metadata(row)
         for identity in [
             row["id"],
             *(row.get("surfaceIds", []) if isinstance(row.get("surfaceIds", []), list) else []),
@@ -2375,14 +2379,21 @@ def merge_saved_results(
         if isinstance(identity, str)
     }
     for _, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
         by_id: dict[str, dict[str, Any]] = {}
-        for surface in surfaces if isinstance(surfaces, list) else []:
+        for surface in _coverage_rows(draft["coverage"], "surfaces"):
             if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
                 continue
             if identity in by_id and surface != by_id[identity]:
                 ambiguous_surface_ids.add((owner, identity))
             by_id[identity] = surface
+
+    def ambiguous_pending_surface(row: dict[str, Any], owner: str | None) -> bool:
+        return (
+            isinstance(row.get("id"), str)
+            and (owner, row["id"]) in ambiguous_surface_ids
+            and row.get("disposition") == "needs_follow_up"
+            and not _has_candidate_metadata(row)
+        )
 
     replaced_deferred = {
         id(row)
@@ -2417,18 +2428,11 @@ def merge_saved_results(
                     prospective_tasks.append(
                         (owner, _project_worker_coverage_row(row, owner, "deferred"))
                     )
-            rows = draft["coverage"].get("surfaces", [])
-            for row in rows if isinstance(rows, list) else []:
+            for row in _coverage_rows(draft["coverage"], "surfaces"):
                 if owner is None or not isinstance(row, dict):
                     continue
                 emitted = coverage_row_is_retained("surfaces", row, owner, selection)
-                ambiguous = (
-                    isinstance(row.get("id"), str)
-                    and (owner, row["id"]) in ambiguous_surface_ids
-                    and row.get("disposition") == "needs_follow_up"
-                    and not any(key in row for key in ("candidateId", "candidate", "finding"))
-                )
-                if not emitted and not ambiguous:
+                if not emitted and not ambiguous_pending_surface(row, owner):
                     continue
                 projected = _project_worker_coverage_row(row, owner, "surfaces")
                 if isinstance(row.get("id"), str):
@@ -2513,14 +2517,10 @@ def merge_saved_results(
         if isinstance(pending, list):
             append_coverage_row(pending, item, owner, "deferred")
     for _, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
+        for surface in _coverage_rows(draft["coverage"], "surfaces"):
             if (
                 isinstance(surface, dict)
-                and isinstance(surface.get("id"), str)
-                and (owner, surface["id"]) in ambiguous_surface_ids
-                and surface.get("disposition") == "needs_follow_up"
-                and not any(key in surface for key in ("candidateId", "candidate", "finding"))
+                and ambiguous_pending_surface(surface, owner)
                 and isinstance(coverage.get("surfaces"), list)
             ):
                 retained = append_coverage_row(
@@ -2657,23 +2657,13 @@ def merge_saved_results(
             }:
                 if preserve_canonical_parent:
                     rejected_history.setdefault((worker_id, candidate_id), []).append(finding)
-                surfaces = coverage.get("surfaces")
-                for item in surfaces if isinstance(surfaces, list) else []:
+                for item in _coverage_rows(coverage, "surfaces"):
                     if (
                         isinstance(item, dict)
                         and item.get("candidateId") == candidate_id
                         and (not preserve_canonical_parent or item.get("workerId") == worker_id)
                     ):
-                        if not isinstance(item.get("previousFindings"), list):
-                            item["previousFindings"] = []
-                        history = item["previousFindings"]
-                        if not any(
-                            isinstance(previous, dict)
-                            and _finding_key(previous) == _finding_key(finding)
-                            and _finding_content(previous) == _finding_content(finding)
-                            for previous in history
-                        ):
-                            history.append(finding)
+                        _append_previous_finding(item, finding)
                 continue
             for key in ("findingId", "occurrenceId", "fingerprints"):
                 finding.pop(key, None)
@@ -2850,17 +2840,8 @@ def merge_saved_results(
                     and (history_findings := rejected_history.get((worker_id, item["candidateId"])))
                 ):
                     item = copy.deepcopy(item)
-                    if not isinstance(item.get("previousFindings"), list):
-                        item["previousFindings"] = []
-                    history = item["previousFindings"]
                     for finding in history_findings:
-                        if not any(
-                            isinstance(previous, dict)
-                            and _finding_key(previous) == _finding_key(finding)
-                            and _finding_content(previous) == _finding_content(finding)
-                            for previous in history
-                        ):
-                            history.append(copy.deepcopy(finding))
+                        _append_previous_finding(item, finding, clone=True)
                 if field == "surfaces" and isinstance(item, dict):
                     item = {**item, "receiptRefs": item.get("receiptRefs", [])}
                 if isinstance(item, dict) and "id" not in item:
@@ -2996,11 +2977,8 @@ def merge_saved_results(
     # Candidate metadata can give an anonymous row the same preliminary ID as
     # another surface, so only the final surface ID can be used for its links.
     retained_surface_links: dict[int, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
-    output_tasks = coverage.get("deferred", [])
-    task_candidates = [
-        (worker_row_owners.get(id(row)), row)
-        for row in (output_tasks if isinstance(output_tasks, list) else [])
-    ]
+    output_tasks = _coverage_rows(coverage, "deferred")
+    task_candidates = [(worker_row_owners.get(id(row)), row) for row in output_tasks]
     for task, published_id, surface, _, task_source in surface_links:
         retained_surface = linked_surface(surface, linked_surface_outputs, worker_surface_outputs)
         if retained_surface is None or not isinstance(retained_surface.get("id"), str):
@@ -3026,8 +3004,7 @@ def merge_saved_results(
         named_surface_outputs = {
             identity for outputs in worker_surface_outputs.values() for identity in outputs
         }
-        surfaces = coverage.get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
+        for surface in _coverage_rows(coverage, "surfaces"):
             if not isinstance(surface, dict):
                 continue
             owner, identity = worker_row_owners.get(id(surface)), surface.get("id")
@@ -3041,7 +3018,7 @@ def merge_saved_results(
                     and id(existing) not in named_surface_outputs
                 ):
                     worker_surfaces[key] = surface
-        for task in output_tasks if isinstance(output_tasks, list) else []:
+        for task in output_tasks:
             if (
                 not isinstance(task, dict)
                 or (owner := worker_row_owners.get(id(task))) is None
@@ -3058,13 +3035,13 @@ def merge_saved_results(
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
+        if not isinstance(items, list):
+            continue
         reserved = {
-            row["id"]
-            for row in (items if isinstance(items, list) else [])
-            if isinstance(row, dict) and isinstance(row.get("id"), str)
+            row["id"] for row in items if isinstance(row, dict) and isinstance(row.get("id"), str)
         }
         normalized_items = []
-        for item in items if isinstance(items, list) else []:
+        for item in items:
             normalized_items.append(item)
             if not isinstance(item, dict):
                 continue
