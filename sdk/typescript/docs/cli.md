@@ -2838,7 +2838,7 @@ scan on a directory named `dependencies`, use `cs scan ./dependencies`.
 | `--auth auto\|chatgpt\|api-key`, `--model MODEL`, `--effort LEVEL`, `--provider PROVIDER` | Reuse scan authentication and model settings. Authentication defaults to `auto`; model and effort retain the existing scan defaults. |
 | `--codex KEY=VALUE`, `--plugin-path PATH`, `--python PATH`                                | Reuse the existing Codex and plugin runtime configuration. `--codex` can be repeated.                                                |
 | `--output-dir PATH`, `--max-cost USD`                                                     | Choose the artifact directory and optional assessment cost limit. No cost limit is added by default.                                 |
-| `--verbose`, `--show-cost`                                                                | Include diagnostics or estimated model cost in progress output.                                                                      |
+| `--verbose`, `--show-cost`                                                                | Log timestamped milestones and Codex activity, or show estimated model cost. A cost limit also enables cost display.                 |
 | `--json`, `--format FORMAT`, `--full-output`                                              | Select structured command output. `--json` is shorthand for `--format json`.                                                         |
 
 The command supports project `auth`, `codex`, `output.directory`, and
@@ -2851,8 +2851,8 @@ Source paths and diffs, scan modes and Deep Scan settings, custom prompts,
 knowledge bases, Cyber access program and safety-identifier selectors, severity
 gates, patching, archive replacement, workflow selection, dry runs, and mock
 scans are unsupported. `--headless` is also unsupported: dependency assessment
-always uses a plain summary without an interactive dashboard. Unsupported
-settings fail instead of silently changing the requested scope or behavior.
+automatically selects terminal progress or plain output. Unsupported settings
+fail instead of silently changing the requested scope or behavior.
 
 By default, the summary and diagnostics go to stderr and stdout remains empty.
 `--json` emits the native dependency result, including all matches and coverage;
@@ -2870,6 +2870,37 @@ With JSON or JSONL, `--full-output` wraps the result; incomplete execution retur
 Advisories do not set a failing exit code. A cost stop or interruption preserves
 available artifacts and reports their directory. OSV's own process exit codes
 remain in the saved scanner evidence.
+
+### Dependency scan progress
+
+When stderr is a terminal, the command shows a live line with the phase, elapsed
+time, work counts, and time since the last observed event. Matching shows finished
+OSV invocations and failed inputs; assessment shows completed, failed, and queued
+assessments. The current dependency file, package and advisory, or latest Codex
+activity appears when space permits. `--show-cost` or `--max-cost` includes the
+estimated model cost. Cost is unavailable until usage is reported.
+
+The line reflects observed work, without an estimated completion time. A quiet
+interval does not establish that a scan is stuck. Completed assessments include
+`needs_review` verdicts; failed assessments are counted separately. Saved
+`partial` checkpoints do not mean the command has stopped. The final result and
+exit code describe the outcome.
+
+Redraws are disabled when stderr is redirected, `CI` is set, or `TERM=dumb`.
+Use `--verbose` to retain timestamped milestones and observed Codex activity in
+those environments. Otherwise they keep the existing summary-only output.
+Interactive and verbose runs also report the artifact directory after the initial
+checkpoint is saved. All progress goes to stderr, including with `--json`:
+
+```bash
+cs scan dependencies . --verbose --show-cost --json \
+  > /path/outside/repository/dependency-result.json \
+  2> /path/outside/repository/dependency-progress.log
+```
+
+Choose an existing directory outside the scanned repository for redirected
+files. A growing progress log inside the repository changes the source snapshot
+and can interrupt assessment.
 
 ### Supported dependency inputs
 
