@@ -2090,6 +2090,82 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     assert.deepEqual(coverage.deferred, [{ id: "new-review", ...generic }]);
   });
 
+  for (const pendingBefore of [false, true]) {
+    for (const pendingAfter of [false, true]) {
+      test(`${layout}: surface-only progress respects retained pending work, before=${pendingBefore}, after=${pendingAfter}`, async (t) => {
+        const f = await fixture(t, layout);
+        const reviewed = {
+          id: "api",
+          label: "API review",
+          disposition: "no_issue_found",
+          notes: "The original caller was reviewed.",
+          receiptRefs: ["artifacts/original.md"],
+        };
+        const prior = { id: "prior-review", ...generic };
+        const later = { id: "later-review", ...generic };
+        await f.write(
+          f.draft(
+            { surfaces: [reviewed], deferred: pendingBefore ? [prior] : [] },
+            true,
+          ),
+        );
+        const followUp = {
+          ...reviewed,
+          disposition: "needs_follow_up",
+          notes: "A newly discovered caller still needs review.",
+          receiptRefs: ["artifacts/new-caller.md"],
+        };
+        for (const progress of [
+          f.draft({
+            surfaces: [followUp],
+            deferred: pendingAfter ? [later] : [],
+          }),
+          f.draft(),
+        ]) {
+          await f.write(progress);
+          const saved = await f.read();
+          assert.deepEqual(
+            saved.surfaces.find(
+              (row: { id: string }) => row.id === reviewed.id,
+            ),
+            pendingBefore ? followUp : reviewed,
+          );
+          const published = await readJson(
+            f.root,
+            layout === "worker" ? "result.json" : "scan-manifest.json",
+          );
+          const complete =
+            layout === "worker" ? published.complete : published.scan.complete;
+          if (pendingBefore || pendingAfter) assert.equal(complete, false);
+          else assert.notEqual(complete, false);
+        }
+        await f.write(
+          f.draft(
+            {
+              surfaces: [reviewed],
+              resolvedDeferred: [
+                ...(pendingBefore ? [close(prior.id)] : []),
+                ...(pendingAfter ? [close(later.id)] : []),
+              ],
+            },
+            true,
+          ),
+        );
+        const finished = await f.read();
+        assert.deepEqual(finished.deferred, []);
+        assert.equal(finished.surfaces[0].disposition, "no_issue_found");
+        const published = await readJson(
+          f.root,
+          layout === "worker" ? "result.json" : "scan-manifest.json",
+        );
+        assert.notEqual(
+          layout === "worker" ? published.complete : published.scan.complete,
+          false,
+        );
+      });
+    }
+  }
+
   test(`${layout}: late progress survives an identical terminal retry`, async (t) => {
     const f = await fixture(t, layout);
     await f.write(f.draft({}, true));

@@ -653,7 +653,10 @@ async function preserveScanDraft(
         ),
       ),
     ]);
-    let acceptProgress = coverageHasOutstandingWork(result.coverage);
+    const retainedHasOutstandingWork = coverageHasOutstandingWork(
+      result.coverage,
+    );
+    let acceptProgress = retainedHasOutstandingWork;
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
       const deferred = progress.coverage.deferred.filter(
@@ -713,7 +716,8 @@ async function preserveScanDraft(
               (keepsGenericWork(surface) ||
                 (!terminalOutcomeIds.has(surface.id as string) &&
                   !terminalOutcomeIds.has(surface.candidateId as string))) &&
-              (surface.disposition !== "needs_follow_up" ||
+              (retainedHasOutstandingWork ||
+                surface.disposition !== "needs_follow_up" ||
                 !terminalSurfaceIds.has(
                   (surface.candidateId ?? surface.id) as string,
                 ) ||
