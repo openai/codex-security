@@ -2555,7 +2555,7 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     unique: dict[tuple[str, int, int], dict[str, Any]] = {}
     for location in locations:
         key = (
-            location["path"],
+            PurePosixPath(location["path"]).as_posix(),
             location["startLine"],
             location.get("endLine", location["startLine"]),
         )
