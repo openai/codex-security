@@ -38,6 +38,7 @@ async function fixture(
   const repository = join(root, "repository");
   writeSource(repository, "guard.ts", "export const allowed = false;\n");
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "fixture");
   return remediationInput(

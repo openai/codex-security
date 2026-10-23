@@ -184,7 +184,9 @@ def budget_scan_fixture(
     return state_dir, target, scan_dir, scan_id, ledger
 
 
-def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
+def complete_budget_scan(
+    state_dir: Path, scan_id: str, *, warning: str = BUDGET_WARNING, check: bool = True
+) -> dict[str, object]:
     return scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
@@ -192,7 +194,7 @@ def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -
         "--cost-json",
         json.dumps(BUDGET_COST),
         "--message",
-        BUDGET_WARNING,
+        warning,
         check=check,
     )
 
@@ -223,23 +225,36 @@ def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limi
     assert scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]["maxCostUsd"] == 0.005
 
 
+@pytest.mark.parametrize(
+    "warning",
+    [
+        BUDGET_WARNING,
+        BUDGET_WARNING
+        + "\n"
+        + "Synthetic diagnostic detail.\n" * 100
+        + "Final cost-limit diagnostic.",
+    ],
+)
 def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     tmp_path: Path,
+    warning: str,
 ) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     original_ledger = ledger.read_bytes()
 
-    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+    completed = complete_budget_scan(state_dir, scan_id, warning=warning)["scan"]
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
     assert completed["cost"] == BUDGET_COST
-    assert completed["warnings"] == [BUDGET_WARNING]
+    assert completed["warnings"] == [warning]
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == [warning]
     assert ledger.read_bytes() == original_ledger
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["displayName"] == target.name
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert manifest["scan"]["sealedAt"]
+    assert warning in manifest["scan"]["scope"]["limitations"]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["mode"] == "deep_repository"
 

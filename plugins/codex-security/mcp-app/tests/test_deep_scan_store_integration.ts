@@ -6,7 +6,14 @@ import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
@@ -1180,20 +1187,106 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       scanId: run.scanId,
       threadId,
     });
-    const worker = await createWorkerFixture(run, "saved", "discovery");
-    await store.updateWorker({ ...worker, status: "running" });
-    await saveScanDraftCheckpoint(
-      { root: worker.artifactDir, layout: "worker", repoRoot: targetPath },
-      {
+    const workers: { id: string }[] = [];
+    for (const label of [
+      "valid",
+      "second-valid",
+      "anonymous",
+      "mismatch",
+      "corrupt",
+      "missing",
+    ]) {
+      const worker = await createWorkerFixture(run, label, "discovery");
+      await store.updateWorker({ ...worker, status: "running" });
+      const context = {
+        root: worker.artifactDir,
+        layout: "worker",
+        repoRoot: targetPath,
+      };
+      const saved = {
         ...checkpoint(
           run.scanId,
           "pending-review",
           "Worker did not finish reviewing this source.",
         ),
-        findings: [finding("saved", "fixture.py")],
-      },
-    );
-    await store.updateWorker({ ...worker, status: "canceled" });
+        findings: [finding(label, "fixture.py")],
+      };
+      if (label === "valid" || label === "second-valid") {
+        if (label === "valid") {
+          saved.findings.push(finding("out-of-scope", "../outside.py"));
+          saved.findings.push({
+            title: "Unvalidated, incomplete finding",
+          } as (typeof saved.findings)[number]);
+        } else {
+          saved.findings = [];
+        }
+        await mkdir(path.join(worker.artifactDir, "artifacts"));
+        await writeFile(
+          path.join(worker.artifactDir, "artifacts/review.md"),
+          `Source evidence for ${label}.\n`,
+        );
+        await saveScanDraftCheckpoint(context, {
+          ...saved,
+          coverage: {
+            ...saved.coverage,
+            surfaces: [
+              {
+                id: "api",
+                label: `${label} API`,
+                disposition: "no_issue_found",
+                receiptRefs: ["artifacts/review.md"],
+              },
+            ],
+            deferred: [
+              ...saved.coverage.deferred,
+              {
+                id: "surface-review",
+                reason: "Review remains.",
+                surfaceIds: ["api"],
+              },
+            ],
+          },
+        });
+      } else if (label === "anonymous") {
+        for (const reason of [
+          "Review authentication.",
+          "Review authorization.",
+        ]) {
+          await saveScanDraftCheckpoint(context, {
+            scanId: run.scanId,
+            complete: false,
+            findings: [],
+            threatModel: {},
+            coverage: {
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [{ reason }],
+            },
+          });
+        }
+      } else if (label === "mismatch") {
+        await saveScanDraftCheckpoint(context, {
+          ...saved,
+          scanId: randomUUID(),
+        });
+      } else {
+        await mkdir(path.join(worker.artifactDir, "checkpoints"), {
+          recursive: true,
+        });
+        const name = "a".repeat(64) + ".json";
+        await writeFile(
+          path.join(worker.artifactDir, "checkpoint-head.json"),
+          JSON.stringify({ checkpoint: name }),
+        );
+        if (label === "corrupt")
+          await writeFile(
+            path.join(worker.artifactDir, "checkpoints", name),
+            '{"scanId":',
+          );
+      }
+      await store.updateWorker({ ...worker, status: "canceled" });
+      workers.push(worker);
+    }
     const context = await createScanArtifactContext(run.scanId, runWorkbench, {
       requireRunning: true,
     });
@@ -1229,6 +1322,26 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const beforeFailure = await Promise.all(
       draftNames.map((name) => readFile(path.join(run.scanDir, name), "utf8")),
     );
+    const readObservationTimes = () =>
+      Promise.all(
+        draftNames.map(
+          async (name) =>
+            (await stat(path.join(run.scanDir, name), { bigint: true }))
+              .mtimeNs,
+        ),
+      );
+    const observationTimesBeforeFailure = await readObservationTimes();
+    const checkpointDirectory = path.join(run.scanDir, "checkpoints");
+    const readParentCheckpoints = async () =>
+      Promise.all(
+        (await readdir(checkpointDirectory))
+          .sort()
+          .map(async (name) => [
+            name,
+            await readFile(path.join(checkpointDirectory, name), "utf8"),
+          ]),
+      );
+    const checkpointsBeforeFailure = await readParentCheckpoints();
     const database = path.join(
       environment.CODEX_SECURITY_STATE_DIR,
       "workbench.sqlite3",
@@ -1265,6 +1378,16 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       beforeFailure,
       "a failed finish commit must restore the unsealed parent and accepted checkpoint head",
     );
+    assert.deepEqual(
+      await readParentCheckpoints(),
+      checkpointsBeforeFailure,
+      "rollback must not publish an aggregate checkpoint as new parent evidence",
+    );
+    assert.deepEqual(
+      await readObservationTimes(),
+      observationTimesBeforeFailure,
+      "rollback must preserve parent observation order",
+    );
     assert.equal((await store.get(run.scanId, threadId)).status, "running");
     await runSql("DROP TRIGGER reject_deadline_commit;");
     const finished = await store.finish({
@@ -1283,11 +1406,27 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const recovered = await readJson(run.scanDir, "findings.json");
     assert.deepEqual(
       recovered.findings.map((item: { title: string }) => item.title),
-      ["Unsafe request output saved"],
+      ["Unsafe request output valid"],
     );
-    assert.equal(recovered.findings[0].provenance.workerId, worker.id);
+    assert.equal(recovered.findings[0].provenance.workerId, workers[0].id);
     const coverage = await readJson(run.scanDir, "coverage.json");
-
+    assert.equal(coverage.surfaces.length, 2);
+    for (const [index, label] of ["valid", "second-valid"].entries()) {
+      const workerId: string = workers[index].id;
+      const surface = coverage.surfaces.find(
+        (row: { workerId: string }) => row.workerId === workerId,
+      );
+      const task = coverage.deferred.find(
+        (row: { id: string }) => row.id === `${workerId}/surface-review`,
+      );
+      assert.equal(surface.id, `${workerId}/api`);
+      assert.equal(surface.disposition, "no_issue_found");
+      assert.deepEqual(task.surfaceIds, [surface.id]);
+      assert.equal(
+        await readFile(path.join(run.scanDir, surface.receiptRefs[0]), "utf8"),
+        `Source evidence for ${label}.\n`,
+      );
+    }
     assert.equal(
       coverage.deferred.some((item: { reason: string }) =>
         /time limit elapsed/.test(item.reason),
@@ -1301,12 +1440,25 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       ),
       true,
     );
+    const anonymousTasks = coverage.deferred.filter(
+      (row: { workerId?: string }) => row.workerId === workers[2].id,
+    );
+    assert.deepEqual(
+      new Set(anonymousTasks.map((row: { reason: string }) => row.reason)),
+      new Set(["Review authentication.", "Review authorization."]),
+    );
     const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(manifest.scan.threatModel, undefined);
+    const savedScan = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+    assert.match(
+      JSON.stringify(savedScan),
+      /Skipped malformed saved threat model.*missing required schema property/,
+    );
     assert.equal(manifest.scan.sealedAt, undefined);
     assert.equal(manifest.scan.complete, undefined);
     assert.equal(
       Object.keys(manifest.scan.preservedSources).some((source) =>
-        source.includes("saved/output/checkpoints/"),
+        source.includes("valid/output/checkpoints/"),
       ),
       true,
     );
@@ -1325,6 +1477,14 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       beforeReplay,
     );
     await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    assert.deepEqual(
+      (await readJson(run.scanDir, "coverage.json")).surfaces,
+      coverage.surfaces,
+    );
+    assert.deepEqual(
+      (await readJson(run.scanDir, "coverage.json")).deferred,
+      coverage.deferred,
+    );
     const sealed = await readJson(run.scanDir, "scan-manifest.json");
     assert.equal(typeof sealed.scan.sealedAt, "string");
     assert.deepEqual(

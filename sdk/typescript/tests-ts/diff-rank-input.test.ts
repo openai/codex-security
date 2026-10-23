@@ -28,6 +28,7 @@ test("diff previews stay inside the selected repository", () => {
   const nested = join(repository, "src", "nested");
   mkdirSync(nested, { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   writeFileSync(join(repository, "src", "handler.py"), "value = 1\n");
   writeFileSync(join(repository, "src", "deleted.py"), "removed = True\n");
   writeFileSync(join(repository, "src", "entry.py"), "handler.py");
@@ -112,6 +113,7 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   const source = join(repository, "src", "変更.py");
   mkdirSync(join(repository, "src"), { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   writeFileSync(source, "value = 1\n");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "base");
@@ -204,6 +206,7 @@ testPosix(
     mkdirSync(shimDirectory, { recursive: true });
     mkdirSync(externalBin);
     git(repository, "init", "-q");
+    git(repository, "config", "--local", "core.autocrlf", "false");
     writeFileSync(join(repository, "source.py"), "value = 1\n");
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "base");

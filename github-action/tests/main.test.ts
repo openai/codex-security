@@ -1,11 +1,14 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
+import { BlobClient } from '@azure/storage-blob';
 import { runAction } from '../src/main.js';
 import { INPUT_NAMES } from '../src/inputs.js';
 import { gitEnvironment } from '../src/targets.js';
@@ -208,6 +211,22 @@ test('scheduled complete report-only scan succeeds', async (t) => {
   assert.match(result.logs, /Estimated cost: \$0.1250/);
   assert.match(result.logs, /Scan completed\. Findings are reported without failing the job\./);
   assert.match(result.summary, /\*\*Scan completed\. Findings are reported without failing the job\.\*\*/);
+});
+
+test('usage without a cached count preserves a successful Action and its reports', async t => {
+  const app = await harness(t);
+  app.configure({scanResult: value => {
+    value.turn = {usage: {input_tokens: 1200, output_tokens: 50}};
+  }});
+  const result = await app.run();
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['report-status'], 'ready');
+  assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.equal(result.cleanups, 1);
+  assert.ok(result.summary.includes('1,200 input (0 cached) · 50 output'));
+  assert.equal(result.outputs['estimated-cost'], '0.125');
 });
 
 test('unrelated ambient input variables do not reject a valid scan', async (t) => {
@@ -616,6 +635,62 @@ test('requested artifact upload failure remains fatal without SARIF', async (t) 
   assert.ok(result.outputs['results-directory']); assert.equal(result.outputs['sarif-path'], '');
   assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
   assert.match(result.summary, /Synthetic artifact upload failure/);
+});
+
+test('archive read failure preserves scan reports, summary and cleanup', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async t => {
+  const app = await harness(t);
+  app.setInput('upload-artifacts', 'true');
+  const requests: string[] = [];
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Read the artifact creation request. */ }
+    requests.push(request.url ?? '');
+    response.writeHead(200, {'Content-Type': 'application/json'});
+    response.end(JSON.stringify({ok: true, signed_upload_url: 'https://example.invalid/artifact'}));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const payload = Buffer.from(JSON.stringify({scp: 'Actions.Results:synthetic-run:synthetic-job'})).toString('base64url');
+  Object.assign(process.env, {
+    ACTIONS_RESULTS_URL: `http://127.0.0.1:${address.port}`,
+    ACTIONS_RUNTIME_TOKEN: `e30.${payload}.synthetic-signature`,
+  });
+  let signal: AbortSignal | undefined;
+  t.mock.method(BlobClient.prototype, 'getBlockBlobClient', () => ({
+    uploadStream: async (input: AsyncIterable<Buffer>, _bufferSize: number, _concurrency: number, options: {abortSignal: AbortSignal}) => {
+      signal = options.abortSignal;
+      for await (const _chunk of input) { /* Consume the real archive stream. */ }
+    },
+  }));
+  let staging = '';
+  let unreadable = '';
+  const uploadArtifact = DefaultArtifactClient.prototype.uploadArtifact;
+  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async function (this: DefaultArtifactClient, ...args: Parameters<typeof uploadArtifact>) {
+    staging = args[2];
+    unreadable = args[1][0];
+    // Fail the archive's actual file read without altering the saved scan report.
+    await chmod(unreadable, 0);
+    return uploadArtifact.apply(this, args);
+  });
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.cleanups, 1);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['report-status'], 'failed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'false');
+  for (const name of ['json-path', 'coverage-path', 'sarif-path']) {
+    assert.ok((await readFile(result.outputs[name])).length);
+  }
+  assert.match(result.summary, /EACCES/);
+  assert.ok(result.summary.includes(unreadable));
+  assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
+  assert.deepEqual(requests, ['/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact']);
+  assert.equal(signal?.aborted, true);
+  await assert.rejects(stat(staging), {code: 'ENOENT'});
 });
 
 test('CLI authentication failure leaves findings unavailable instead of reporting a threshold failure', async (t) => {

@@ -15,6 +15,15 @@ const ajv = new Ajv2020({
   validateFormats: false,
   useDefaults: true,
 });
+
+/** Local storage accepts complete evidence; Cloud publication has payload limits. */
+export type ExternalImportTarget = "local" | "cloud";
+
+const localSchema = JSON.parse(
+  JSON.stringify(schema, (key, value: unknown) =>
+    key === "maxLength" || key === "maxItems" ? undefined : value,
+  ),
+) as typeof schema;
 const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
   description: 65536,
   snippet: 65536,
@@ -56,10 +65,13 @@ export function cloudRepositoryUrlKey(value: string): string {
 // Cloud ImportModel applies these constraints to both requests and responses.
 // Its UTF-8 limits are not exported as JSON Schema character limits: even a
 // plain string field such as a receipt error message inherits the 512-byte bound.
-function validateModelStrings(input: unknown): void {
+function validateModelStrings(
+  input: unknown,
+  target: ExternalImportTarget,
+): void {
   if (input === null || typeof input !== "object") return;
   if (Array.isArray(input)) {
-    for (const item of input) validateModelStrings(item);
+    for (const item of input) validateModelStrings(item, target);
     return;
   }
   for (const [field, value] of Object.entries(input)) {
@@ -73,7 +85,7 @@ function validateModelStrings(input: unknown): void {
           `${field} must be nonempty and contain no NUL characters.`,
         );
       const limit = STRING_BYTE_LIMITS[field] ?? 512;
-      if (Buffer.byteLength(value) > limit)
+      if (target === "cloud" && Buffer.byteLength(value) > limit)
         throw new Error(
           `${field} exceeds its Cloud limit of ${limit} UTF-8 bytes.`,
         );
@@ -81,11 +93,14 @@ function validateModelStrings(input: unknown): void {
       Array.isArray(value) &&
       value.every((item) => typeof item === "string")
     ) {
-      if (value.some((item) => Buffer.byteLength(item) > 512))
+      if (
+        target === "cloud" &&
+        value.some((item) => Buffer.byteLength(item) > 512)
+      )
         throw new Error(
           `${field} entries exceed the Cloud limit of 512 UTF-8 bytes.`,
         );
-    } else validateModelStrings(value);
+    } else validateModelStrings(value, target);
   }
 }
 
@@ -95,7 +110,6 @@ type ModelSchema = {
   properties?: Record<string, ModelSchema>;
   [key: string]: unknown;
 };
-const modelSchemas: Record<string, ModelSchema> = schema.$defs;
 const detailValidators = new Map<string, ReturnType<typeof ajv.compile>>();
 
 /** AJV does not apply defaults through nullable anyOf references. Validate the
@@ -104,6 +118,7 @@ const detailValidators = new Map<string, ReturnType<typeof ajv.compile>>();
 function materializeDetailDefaults(
   value: unknown,
   fieldSchema: ModelSchema,
+  target: ExternalImportTarget,
 ): void {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return;
@@ -111,11 +126,14 @@ function materializeDetailDefaults(
     fieldSchema.$ref ?? fieldSchema.anyOf?.find((branch) => branch.$ref)?.$ref;
   if (!reference) return;
   const name = reference.split("/").at(-1)!;
-  const definition = modelSchemas[name]!;
-  let check = detailValidators.get(reference);
+  const modelSchema = target === "local" ? localSchema : schema;
+  const definition: ModelSchema =
+    modelSchema.$defs[name as keyof typeof schema.$defs]!;
+  const key = `${target}:${reference}`;
+  let check = detailValidators.get(key);
   if (!check) {
-    check = ajv.compile({ $defs: schema.$defs, $ref: reference });
-    detailValidators.set(reference, check);
+    check = ajv.compile({ $defs: modelSchema.$defs, $ref: reference });
+    detailValidators.set(key, check);
   }
   if (!check(value))
     throw new Error(`${name}: ${ajv.errorsText(check.errors)}`);
@@ -125,10 +143,14 @@ function materializeDetailDefaults(
     materializeDetailDefaults(
       (value as Record<string, unknown>)[field],
       childSchema,
+      target,
     );
 }
 
-function normalizeEvidenceDetails(value: unknown): void {
+function normalizeEvidenceDetails(
+  value: unknown,
+  target: ExternalImportTarget,
+): void {
   if (value !== null && typeof value === "object") {
     const fields = value as Record<string, unknown>;
     // Cloud omits these new optional fields when null. Preserve every legacy
@@ -151,38 +173,47 @@ function normalizeEvidenceDetails(value: unknown): void {
             delete (details as Record<string, unknown>)[field];
       materializeDetailDefaults(
         fields["details"],
-        modelSchemas["ImportedFindingEvidence"]!.properties!["details"]!,
+        schema.$defs.ImportedFindingEvidence.properties.details,
+        target,
       );
     }
   }
 }
 
-function validator<T>(name: keyof typeof schema.$defs) {
+function validator<T>(
+  name: keyof typeof schema.$defs,
+  target: ExternalImportTarget = "cloud",
+) {
   const check = ajv.compile<T>({
-    $defs: schema.$defs,
+    $defs: (target === "local" ? localSchema : schema).$defs,
     $ref: `#/$defs/${name}`,
   });
   return (input: unknown): T => {
-    if (name === "ImportedFindingEvidence") normalizeEvidenceDetails(input);
+    if (name === "ImportedFindingEvidence")
+      normalizeEvidenceDetails(input, target);
     else if (input && typeof input === "object") {
       if (name === "SourceReport" && "evidence" in input)
-        normalizeEvidenceDetails(input.evidence);
+        normalizeEvidenceDetails(input.evidence, target);
       if (
         name === "FindingImportRequest" &&
         "items" in input &&
         Array.isArray(input.items)
       )
         for (const item of input.items)
-          normalizeEvidenceDetails(item?.evidence);
+          normalizeEvidenceDetails(item?.evidence, target);
     }
     if (!check(input))
       throw new Error(`${name}: ${ajv.errorsText(check.errors)}`);
-    validateModelStrings(input);
+    validateModelStrings(input, target);
     return input;
   };
 }
 
 const evidence = validator<ExternalFindingEvidence>("ImportedFindingEvidence");
+const localEvidence = validator<ExternalFindingEvidence>(
+  "ImportedFindingEvidence",
+  "local",
+);
 const request = validator<FindingImportRequest>("FindingImportRequest");
 export const validateImportReceipt = validator<FindingImportReceipt>(
   "FindingImportReceipt",
@@ -196,8 +227,9 @@ export const validateSourceReport = validator<SourceReport>("SourceReport");
 
 export function validateExternalEvidence(
   input: unknown,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindingEvidence {
-  const result = evidence(input);
+  const result = (target === "local" ? localEvidence : evidence)(input);
   for (const location of result.locations ?? []) {
     const path = location.path.replaceAll("\\", "/");
     if (
@@ -271,11 +303,13 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
+  // Local evidence still has to be serializable JSON, including acyclic source data.
+  if (target === "local") JSON.stringify(result);
   let numericByteAdjustment = 0;
   const pending: [unknown, number][] = [[result, 0]];
   while (pending.length > 0) {
     const [value, depth] = pending.pop()!;
-    if (depth > 20)
+    if (target === "cloud" && depth > 20)
       throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
     if (value !== null && typeof value === "object") {
       for (const child of Object.values(value))
@@ -298,8 +332,9 @@ export function validateExternalEvidence(
     }
   }
   if (
+    target === "cloud" &&
     Buffer.byteLength(JSON.stringify(result)) + numericByteAdjustment >
-    256 * 1024
+      256 * 1024
   )
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
   return result;
