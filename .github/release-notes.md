@@ -23,6 +23,7 @@
 - isolate artifact upload failures ([#1719](https://github.com/openai/codex-security/pull/1719))
 - report usage and extend integration attribution ([#1703](https://github.com/openai/codex-security/pull/1703))
 - recover publication after a lost reply ([#938](https://github.com/openai/codex-security/pull/938))
+- render MCP threat models in TypeScript ([#1839](https://github.com/openai/codex-security/pull/1839))
 
 <!-- release-section: highlights:end -->
 
