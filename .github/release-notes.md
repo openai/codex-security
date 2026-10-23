@@ -26,6 +26,7 @@
 - render MCP threat models in TypeScript ([#1839](https://github.com/openai/codex-security/pull/1839))
 - recover checkpoints at discovery deadlines ([#1594](https://github.com/openai/codex-security/pull/1594))
 - validate findings after a scan ([#1007](https://github.com/openai/codex-security/pull/1007))
+- bump ruff from 0.17.0 to 0.17.1 in /plugins/codex-security ([#1878](https://github.com/openai/codex-security/pull/1878))
 
 <!-- release-section: highlights:end -->
 
