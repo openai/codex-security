@@ -79,6 +79,7 @@ for (const authored of [false, true]) {
             {
               id: "reviewer",
               kind: "discovery",
+              status: "succeeded",
               artifact_dir: workerRoot,
               result_manifest_path: path.join(workerRoot, "result.json"),
               attempt: 1,
@@ -336,6 +337,7 @@ test("a later worker attempt survives the terminal parent's clock tie", async (t
       {
         id: "reviewer",
         kind: "discovery",
+        status: "succeeded",
         artifact_dir: workerRoot,
         result_manifest_path: path.join(workerRoot, "result.json"),
         attempt: 2,
@@ -772,6 +774,7 @@ for (const [metadata, preservedIdentity] of Object.entries({
         workers.push({
           id: "reviewer",
           kind: "discovery",
+          status: "succeeded",
           artifact_dir: workerRoot,
           result_manifest_path: path.join(workerRoot, "result.json"),
           attempt: 1,
