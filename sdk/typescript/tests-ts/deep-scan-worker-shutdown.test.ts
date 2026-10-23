@@ -15,6 +15,7 @@ for (const boundary of [
       "node",
       [
         "--experimental-strip-types",
+        "--test-reporter=tap",
         "--test-name-pattern",
         `^Deep worker ${boundary}`,
         fileURLToPath(
