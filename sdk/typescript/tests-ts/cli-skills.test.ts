@@ -1511,13 +1511,39 @@ process.stdout.write(JSON.stringify({
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       [
-        "model cache not found",
         "model metadata file not found",
-        "permission denied opening model cache",
         "model 'synthetic'\nconfiguration entry not found",
         "Safety policy: request refused.",
+        "Error loading configuration: config.toml:4:2: model 'gpt-5' not found",
+        "Error loading configuration: config.toml:4:2: responseStatus=401",
+        "/synthetic/model 'gpt-5' not found",
+        "model 'gpt-5' not found.log",
         "permission denied opening /synthetic/response_status=403/cache",
       ].map((detail) => [command, detail, null] as const),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      ["model cache not found", "permission denied opening model cache"].map(
+        (detail) =>
+          [
+            command,
+            detail,
+            "Codex could not load its model metadata.",
+          ] as const,
+      ),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
+          [
+            "error sending request for url (https://example.test/v1?source=config.toml:1:2:) HTTP 401 Unauthorized",
+            "Authentication failed.",
+          ],
+          [
+            "error sending request for url (https://example.test/v1#config.toml:1:2:) HTTP 403 Forbidden",
+            "The selected model is unavailable for the current credentials.",
+          ],
+        ] as const
+      ).map(([detail, advice]) => [command, detail, advice] as const),
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       (
@@ -1545,6 +1571,16 @@ process.stdout.write(JSON.stringify({
         ] as const
       ).map(([detail, advice]) => [command, detail, advice] as const),
     ),
+    [
+      "validate",
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "Authentication failed.",
+    ],
+    [
+      "validate",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      null,
+    ],
   ] as const)(
     "retains failure advice and diagnostics from the %s child: %s",
     async (command, detail, advice) => {
@@ -1559,9 +1595,13 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      if (advice === null)
-        expect(stderr.text()).not.toContain("selected model is unavailable");
-      else expect(stderr.text()).toContain(advice);
+      if (advice === null) {
+        expect(stderr.text()).toBe(
+          `codex-security: ${command} failed with exit code 7.\n${detail}\n`,
+        );
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
       expect(stderr.text()).toContain(detail);
     },
   );
@@ -1637,6 +1677,10 @@ process.stdout.write(JSON.stringify({
 
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
+      ["invalid.api.key", "Authentication failed"],
+      ["token.expired", "Authentication failed"],
+      ["model.not.found", "selected model is unavailable"],
+      ["model.access", "selected model is unavailable"],
       ["HTTP 401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       [
         "403 model access denied /private/repository",
@@ -1657,12 +1701,14 @@ process.stdout.write(JSON.stringify({
       ],
       ["tokens-per-minute limit exceeded", "rate limited"],
       ["tokens_per_minute limit exceeded", "rate limited"],
+      ["tokens.per.minute", "rate limited"],
       [
         "models cache supports_reasoning_summaries /private/home",
         "model metadata",
       ],
       ["ENOTFOUND /private/repository", "could not connect"],
       ["ECONNABORTED sk-proj-SYNTHETIC_SECRET", "could not connect"],
+      ["timed_out", "could not connect"],
       ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
     ];
     for (const [detail, expected] of cases) {
@@ -1734,7 +1780,13 @@ process.stdout.write(JSON.stringify({
 
   test.each([
     "Failed after 1401 bytes",
+    "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
     "permission denied opening cache",
+    "config.toml:401:8: invalid token",
+    "config.toml:403:429: invalid api key",
+    "config.toml:429:8: model access denied",
+    "config.toml:401:8: rate limit exceeded",
+    "config.toml:4:2: response_status=403",
     "permission denied opening model cache",
     "line 1429 could not be parsed",
     "count_tokens_per_minute_limit is undefined",
@@ -1834,6 +1886,14 @@ process.stdout.write(JSON.stringify({
     ["ExpiredTokenException", "Authentication failed"],
     ["HTTP 403 ExpiredTokenException", "Authentication failed"],
     ["HTTP 401; parsed 429 bytes", "Authentication failed"],
+    [
+      "error sending request for url (https://example.test/v1?source=config.toml:1:2:)",
+      "could not connect",
+    ],
+    [
+      "error sending request for url (https://example.test/v1) config.toml:401:8: invalid token",
+      null,
+    ],
     ["HTTP request failed while parsing line 429", null],
     ["permission denied opening /synthetic/403/cache", null],
     ["401 sk-proj-SYNTHETIC_SECRET", null],
@@ -1864,15 +1924,26 @@ process.stdout.write(JSON.stringify({
   });
 
   test.each([
+    "model.access",
+    "model.access.denied",
+    "model.not.found",
+    "invalid.api.key",
+    "token.expired",
     "response_code=401",
     "response-code=403",
     "responseCode=429",
     "responseStatus=401",
     "response_status=403",
-  ])("keeps response-code URL components separate from advice: %s", (code) => {
+  ])("keeps endpoint components separate from diagnostic code %s", (code) => {
     for (const url of [
+      `https://${code}.example/v1`,
+      `https://example.test/${code}/v1`,
+      `https://example.test/${code}`,
       `https://example.test/v1?${code}`,
+      `https://example.test/v1?error=${code}`,
+      `https://example.test/v1?${code}=synthetic`,
       `https://example.test/v1#${code}`,
+      `https://example.test/v1#error=${code}`,
     ]) {
       const detail = `error sending request for url (${url})`;
       const message = skillCommandFailure("validate", 7, detail);

@@ -3677,25 +3677,23 @@ describe("CLI", () => {
     }
   });
 
-  test("classifies provider failures without including upstream context", async () => {
+  test("classifies provider failures while preserving diagnostic text", async () => {
     const { stderr, runCli } = createCliTest(main);
 
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_KEY_123" },
     });
-    deps.createSecurity = () =>
-      failingSecurity(
-        "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
-      );
+    const message =
+      "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123";
+    deps.createSecurity = () => failingSecurity(message);
 
     expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(2);
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.failed classification="unauthorized"',
     );
     expect(stderr.text()).toContain("OPENAI_API_KEY");
-    expect(stderr.text()).not.toContain("org-private");
+    expect(stderr.text()).toContain(message);
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
-    expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
   });
 
   test("keeps unclassified provider context out of structured failure diagnostics", async () => {
@@ -4055,7 +4053,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
   });
 
-  test("turns authentication and rate-limit failures into actionable safe messages", async () => {
+  test("adds actionable advice to authentication and rate-limit diagnostics", async () => {
     for (const [message, expected] of [
       ["401 invalid API key for org-private", "provide a valid API key"],
       ["403 model access denied for org-private", "model access"],
@@ -4068,7 +4066,7 @@ describe("CLI", () => {
 
       expect(await runCli(["scan"], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
-      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(message);
     }
   });
 
@@ -4222,8 +4220,8 @@ describe("CLI", () => {
   });
 
   test("keeps model authorization advice for genuine transport failures", async () => {
-    // The bypass must not swallow real 401/403 handling, and the advice must
-    // still replace upstream text that can name the organization or project.
+    // The local-failure bypass must retain advice for real 401/403 failures
+    // alongside the original diagnostic text.
     for (const [detail, expected] of [
       ["401 invalid API key for org-private", "Authentication failed"],
       [
@@ -4237,7 +4235,7 @@ describe("CLI", () => {
 
       expect(await stderr.run(["scan", "."], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
-      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(detail);
     }
   });
 

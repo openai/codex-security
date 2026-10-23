@@ -900,6 +900,16 @@ describe("one-shot scan events", () => {
         type: "error",
         message: "Reconnecting... 2/5 (429 rate limit reached org-private)",
       };
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 3/5 (error sending request for url (https://example.test/v1?error=invalid.api.key))",
+      };
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 4/5 (error sending request for url (https://example.test/v1#model.not.found))",
+      };
       yield* completedEvents();
     }
 
@@ -912,6 +922,8 @@ describe("one-shot scan events", () => {
     expect(reconnects).toEqual([
       { reason: "network" },
       { reason: "rate_limit" },
+      { reason: "network" },
+      { reason: "network" },
     ]);
     expect(JSON.stringify(reconnects)).not.toContain("org-private");
   });
@@ -920,6 +932,7 @@ describe("one-shot scan events", () => {
     for (const message of [
       "Reconnecting... 1/5 (401 invalid API key org-private)",
       "Reconnecting... 1/5 (403 model access denied org-private)",
+      "Reconnecting... 1/5 (error sending request for url (https://example.test/v1) error=invalid.api.key)",
     ]) {
       const scanDir = join(await temporaryDirectory(), "partial-scan");
       await mkdir(scanDir, { mode: 0o700 });
