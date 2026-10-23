@@ -213,6 +213,22 @@ test('scheduled complete report-only scan succeeds', async (t) => {
   assert.match(result.summary, /\*\*Scan completed\. Findings are reported without failing the job\.\*\*/);
 });
 
+test('usage without a cached count preserves a successful Action and its reports', async t => {
+  const app = await harness(t);
+  app.configure({scanResult: value => {
+    value.turn = {usage: {input_tokens: 1200, output_tokens: 50}};
+  }});
+  const result = await app.run();
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['report-status'], 'ready');
+  assert.equal(result.outputs['sarif-upload-ready'], 'true');
+  assert.equal(result.cleanups, 1);
+  assert.ok(result.summary.includes('1,200 input (0 cached) · 50 output'));
+  assert.equal(result.outputs['estimated-cost'], '0.125');
+});
+
 test('unrelated ambient input variables do not reject a valid scan', async (t) => {
   const app = await harness(t); process.env.INPUT_FOO = 'unrelated workflow value';
   app.setInput('effort', 'medium');

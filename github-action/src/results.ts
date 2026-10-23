@@ -36,7 +36,9 @@ export interface ScanResults {
   reportStatus: ReportStatus;
   findings: Finding[];
   counts?: Record<Severity, number>;
+  usage?: { input_tokens: number; cached_input_tokens: number; output_tokens: number };
   estimatedCost?: number;
+  estimatedCostRange?: { min: number; max: number | null };
   paths: ResultPaths;
   errors: string[];
   sarifUploadReady: boolean;
@@ -143,7 +145,10 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
   }
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
+  const usage = value.turn?.usage;
+  result.usage = usage == null ? undefined : {...usage, cached_input_tokens: usage.cached_input_tokens ?? 0};
   result.estimatedCost = value.cost?.estimatedUsd;
+  result.estimatedCostRange = value.cost?.estimatedUsdRange;
   result.paths = {resultsDirectory: options.resultsDirectory, manifestPath: join(options.resultsDirectory, 'scan-manifest.json'),
     jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: join(options.resultsDirectory, 'coverage.json'), sarifPath: ''};
   const warnings: string[] = value.warnings ?? [];
