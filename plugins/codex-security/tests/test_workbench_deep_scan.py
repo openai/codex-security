@@ -366,8 +366,10 @@ def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
 
 def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     target.mkdir()
     write_deep_config(
         codex_home,

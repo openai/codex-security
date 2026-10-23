@@ -1932,7 +1932,7 @@ try {
   ]);
   assert.deepEqual(submit._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectTarget._meta.ui.visibility, ["app"]);
-  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app"]);
+  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app", "model"]);
   assert.deepEqual(start._meta.ui.visibility, ["app"]);
   assert.deepEqual(startDeepScan._meta.ui.visibility, ["model"]);
   assert.ok(startDeepScan.inputSchema.properties.scanId);

@@ -14,6 +14,8 @@ import { isPermissionProfileFallbackWarning } from "../../../scripts/codex_profi
 export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
   "codex_security_deep_scan_worker";
 
+const REDUCER_FEATURES = ["code_mode", "code_mode_host"] as const;
+
 export interface DeepScanPermissionProfilePreflightOptions {
   /** The exact Codex executable that will run the worker turn. */
   readonly codexPath: string;
@@ -33,6 +35,8 @@ export interface DeepScanPermissionProfilePreflightOptions {
   readonly allowOpenAiApiKeyFallback?: boolean;
   /** The injected profile before app-server expands omitted options to null. */
   readonly expectedProfile: Readonly<Record<string, unknown>>;
+  /** Reducer paging requires code mode and its host before starting a turn. */
+  readonly requireCodeMode?: boolean;
   readonly signal: AbortSignal;
   /** Internal SDK helper context changes the wrapper-owned subject label. */
   readonly context?: "helper";
@@ -68,6 +72,21 @@ export async function readDeepScanRuntimeConfig(
     if (!config) throw malformedPreflightError(options.context);
     return config;
   });
+}
+
+function enabledFeature(features: unknown, name: string): unknown {
+  const value = record(features)?.[name];
+  return typeof value === "boolean" ? value : record(value)?.enabled;
+}
+
+/** Supply reducer defaults only for switches unset in Codex's effective config. */
+export async function deepScanReducerFeatureDefaults(
+  options: RuntimeConfigReadOptions,
+): Promise<string[]> {
+  const { features } = await readDeepScanRuntimeConfig(options);
+  return REDUCER_FEATURES.filter(
+    (name) => enabledFeature(features, name) == null,
+  ).map((name) => `features.${name}.enabled=true`);
 }
 
 /** Read native origins and ordered layers without starting a thread. */
@@ -244,6 +263,21 @@ export async function preflightDeepScanWorkerPermissionProfile(
       catalogEntry,
       requirementsResponse,
     );
+    if (options.requireCodeMode) {
+      const { requirements } = await client.request("configRequirements/read");
+      const pins = record(record(requirements)?.featureRequirements);
+      const features = record(configResponse.config)?.features;
+      if (
+        REDUCER_FEATURES.some(
+          (name) =>
+            pins?.[name] === false || enabledFeature(features, name) !== true,
+        )
+      ) {
+        throw new DeepScanNonRetryableError(
+          "Deep Scan reducers require features.code_mode.enabled=true and features.code_mode_host.enabled=true. The selected Codex configuration does not enable both; no reducer model work started.",
+        );
+      }
+    }
     if (
       !options.allowOpenAiApiKeyFallback ||
       record(configResponse.config)?.forced_login_method === "chatgpt"

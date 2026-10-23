@@ -1501,7 +1501,7 @@ async function testMissingReducerResultResumesExistingThread(
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+    /record_codex_security_deep_reduction\(\{ scanId, findings, retainedFindingRefs\?, threatModel\?, scope\? \}\)/,
   );
   assert.doesNotMatch(
     executor.dedupContinuationPrompts[1] ?? "",
