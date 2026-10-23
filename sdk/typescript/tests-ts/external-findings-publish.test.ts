@@ -3494,6 +3494,131 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
   });
 });
 
+test("OpenGrep publication retains grouped evidence through Cloud readback and replay", async () => {
+  const { opengrepTraceJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepTraceJson();
+  const { results, ...report } = input;
+  const f = await fixture(input);
+  const settings = {
+    ...options,
+    provider: "opengrep" as const,
+    sourceKey: "organization/project/main/opengrep",
+    sourceRepositoryUrl: "https://github.com/example/project",
+  };
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(prepared.preview.source).toEqual({
+    provider: "semgrep",
+    source_key: settings.sourceKey,
+  });
+  expect(prepared.preview.report).toEqual(report);
+  expect(prepared.preview.findings).toHaveLength(1);
+  expect(prepared.preview.excluded).toEqual([]);
+  const first = await prepared.publish();
+  expect(first.counts.created).toBe(1);
+  expect(first.verified).toBe(1);
+  expect(first.report).toEqual(report);
+  const original = structuredClone([...f.reports.values()][0]!);
+  expect(original).toMatchObject({
+    origin: "imported",
+    source: { provider: "semgrep" },
+    assessment: { state: "not_assessed" },
+    evidence: {
+      details: { kind: "sast", scanner_origin: "OpenGrep" },
+      source_data: { scan_error_count: input.errors.length },
+    },
+  });
+  expect(original.evidence.source_data!["results"]).toHaveLength(2);
+  expect(original.evidence.source_data!["results"]).toEqual(
+    expect.arrayContaining(results),
+  );
+  expect(original.evidence).not.toHaveProperty("confidence");
+  expect(JSON.parse(f.posts[0]!).source.provider).toBe("semgrep");
+  const repeated = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(repeated.counts.unchanged).toBe(1);
+  expect(repeated.report).toEqual(report);
+
+  input.results[0]!.extra.message = "Updated OpenGrep evidence";
+  input.results[0]!.extra.fingerprint = "new-scanner-fingerprint_9";
+  await writeFile(f.file, JSON.stringify(input));
+  const changed = await (
+    await prepareExternalPublication(f.file, settings, f.deps)
+  ).publish();
+  expect(changed.counts.updated).toBe(1);
+  expect(changed.verified).toBe(1);
+  expect(changed.report).toEqual(report);
+  expect([...f.reports.values()]).toHaveLength(1);
+  const updated = [...f.reports.values()][0]!;
+  expect(updated).toMatchObject({
+    id: original.id,
+    canonical_finding_id: original.canonical_finding_id,
+    source_finding_id: original.source_finding_id,
+    version: 2,
+    origin: "imported",
+    assessment: { state: "not_assessed" },
+  });
+  expect(updated.evidence.source_data!["results"]).toHaveLength(2);
+  expect(updated.evidence.source_data!["results"]).toEqual(
+    expect.arrayContaining(input.results),
+  );
+});
+
+test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading", async () => {
+  const { opengrepJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepJson();
+  input.results = [];
+  const f = await fixture(input);
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider: "opengrep",
+        sourceRepositoryUrl: "https://github.com/example/project",
+      },
+      f.deps,
+    ),
+  ).rejects.toThrow(input.errors[0]!.message);
+  expect(f.posts).toHaveLength(0);
+});
+
+test("OpenGrep CLI Cloud preview forwards source provenance without uploading", async () => {
+  const { opengrepJson } =
+    await import("./support/opengrep-import-fixtures.js");
+  const input = opengrepJson();
+  const f = await fixture(input);
+  const command = [
+    ...f.command,
+    "--dry-run",
+    "--source-repository-url",
+    "https://github.com/example/project",
+  ];
+  command[command.indexOf("--provider") + 1] = "opengrep";
+  const cli = createCliTest(main);
+  expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    source: { provider: "semgrep", source_key: options.sourceKey },
+    report: { errors: input.errors },
+    findings: [
+      {
+        evidence: {
+          details: { scanner_origin: "OpenGrep" },
+          source_data: { results: input.results },
+        },
+      },
+    ],
+  });
+  const humanCommand = [...command];
+  humanCommand.splice(humanCommand.indexOf("--format"), 2);
+  const human = createCliTest(main);
+  expect(await human.runCli(humanCommand, f.cliDeps)).toBe(0);
+  expect(human.stderr.text()).toContain(input.errors[0]!.message);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
   const { semgrepJson, semgrepSarif } =
     await import("./support/semgrep-import-fixtures.js");

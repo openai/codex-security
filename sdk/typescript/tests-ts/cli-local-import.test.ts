@@ -13,6 +13,7 @@ import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import { opengrepJson } from "./support/opengrep-import-fixtures.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -186,6 +187,71 @@ test("CLI imports a vendor report, reads local evidence, and updates the same so
   });
   expect(result.findings[0].evidence.code_revision).toBeNull();
   expect(result.findings[0].evidence.confidence).toBeUndefined();
+});
+
+test("CLI imports OpenGrep evidence locally without assessing it", async () => {
+  const f = await fixture();
+  const report = opengrepJson();
+  await writeFile(f.file, JSON.stringify(report));
+  const sourceRepositoryUrl = "https://github.com/example/project";
+  const imported = createCliTest(main);
+  expect(
+    await imported.runCli(
+      [
+        "publish",
+        "findings",
+        "selected.json",
+        "--to",
+        "local",
+        "--repository",
+        "example project",
+        "--provider",
+        "opengrep",
+        "--source-repository-url",
+        sourceRepositoryUrl,
+        "--source-key",
+        "example/opengrep",
+        "--yes",
+        "--format",
+        "json",
+      ],
+      f.deps,
+    ),
+  ).toBe(0);
+  const result = JSON.parse(imported.stdout.text());
+  expect(result.report.errors).toEqual(report.errors);
+  expect(result.counts).toEqual({
+    created: 1,
+    updated: 0,
+    unchanged: 0,
+  });
+  const readback = createCliTest(main);
+  expect(
+    await readback.runCli(
+      ["findings", "imported", "example project", "--format", "json"],
+      f.deps,
+    ),
+  ).toBe(0);
+  const findings = JSON.parse(readback.stdout.text()).findings;
+  expect(findings).toHaveLength(1);
+  expect(findings[0]).toMatchObject({
+    provider: "semgrep",
+    assessment: { state: "not_assessed" },
+    evidence: {
+      severity: "unknown",
+      details: {
+        scanner_origin: "OpenGrep",
+        repository: { url: sourceRepositoryUrl },
+      },
+      source_data: {
+        report: {
+          version: report.version,
+        },
+        scan_error_count: report.errors.length,
+        results: report.results,
+      },
+    },
+  });
 });
 
 test("local import confirms exclusions and returns partial status after storing ready records", async () => {

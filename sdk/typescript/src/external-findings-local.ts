@@ -74,6 +74,7 @@ export interface LocalExternalImportPreview extends ExternalFindings {
 export interface LocalExternalImportResult {
   repository: string;
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   findings: StoredExternalFinding[];
@@ -578,6 +579,7 @@ export async function prepareNormalizedLocalImport(
       return {
         repository,
         read: current.read,
+        ...(current.report === undefined ? {} : { report: current.report }),
         ready: current.findings.length,
         excluded: current.excluded,
         findings: result["findings"] as unknown as StoredExternalFinding[],

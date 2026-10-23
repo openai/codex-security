@@ -651,6 +651,12 @@ options where supported, and changing formats can change record identities or
 replace richer evidence with less detail. See the
 [import guide](docs/cli.md#import-vendor-findings-locally) for format selection.
 
+For OpenGrep, use `--provider opengrep` with native JSON or gzip and an explicit
+`--source-repository-url`. Local and Cloud imports retain unassessed OpenGrep
+evidence through the existing Semgrep source-provider contract. See the
+[OpenGrep guide](../../docs/scanner-imports/opengrep.md) for preview commands,
+coverage diagnostics, stable source identities, and local SDK assessment.
+
 For Wiz, prefer supported native JSON acquired through an authorized MCP or API
 connection. The [CSV compatibility reader](docs/cli.md#import-wiz-findings) covers
 repository package vulnerabilities (SCA) only; it does not add SAST, CSPM or

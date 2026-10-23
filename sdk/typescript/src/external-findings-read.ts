@@ -7,6 +7,7 @@ import type { Provider } from "./external-import-models.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { readSemgrepFindings } from "./semgrep-findings.js";
+import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -18,6 +19,8 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
   snyk: "snyk",
   semgrep: "semgrep",
+  // OpenGrep uses the existing SAST contract; evidence retains its scanner origin.
+  opengrep: "semgrep",
   endor: "endor",
   github: "github",
 } as const satisfies Record<string, Provider>;
@@ -47,6 +50,12 @@ export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
 ): Promise<ReadExternalFindings> {
+  if (options.provider === "opengrep")
+    return {
+      findings: await readOpenGrepFindings(path, {
+        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+      }),
+    };
   if (options.provider === "snyk") {
     const findings = await readSnykFindings(path);
     return {

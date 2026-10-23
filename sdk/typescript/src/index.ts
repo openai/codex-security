@@ -323,6 +323,11 @@ export type {
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
 export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
+export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,
   normalizeSnykSarif,

@@ -97,6 +97,7 @@ export interface ExternalPublicationResult {
   cloudUrl?: string;
   status: "complete" | "partial" | "interrupted";
   read: number;
+  report?: ExternalFindings["report"];
   ready: number;
   excluded: ExternalFindings["excluded"];
   receipts: FindingImportReceipt[];
@@ -438,8 +439,9 @@ async function preparePublicationInput(
     legacyIdentity,
   } = input;
   if (parsed.findings.length === 0) {
+    const diagnostics = parsed.report?.["errors"];
     throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}`,
+      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
   progress({ phase: "discovering", completed: 0 });
@@ -879,6 +881,7 @@ async function preparePublicationInput(
           status:
             parsed.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
+          ...(parsed.report === undefined ? {} : { report: parsed.report }),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,
