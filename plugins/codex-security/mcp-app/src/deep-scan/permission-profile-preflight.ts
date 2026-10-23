@@ -24,13 +24,15 @@ export interface DeepScanPermissionProfilePreflightOptions {
   /** Provider metadata needed for managed selection; credentials stay in private profiles. */
   readonly providerConfigOverrides?: readonly string[];
   /**
-   * Exact environment snapshot shared with the SDK worker. The caller resolves
+   * Exact environment snapshot shared with the worker. The caller resolves
    * relative CODEX_HOME values before changing the preflight subprocess cwd.
    * Omit it to retain Node's default child-process environment inheritance.
    */
   readonly env?: Readonly<Record<string, string>>;
   /** Check native authentication before using an otherwise ignored OPENAI_API_KEY. */
   readonly allowOpenAiApiKeyFallback?: boolean;
+  /** Preserve native CODEX_API_KEY precedence when managed policy permits API-key auth. */
+  readonly allowCodexApiKey?: boolean;
   /** The injected profile before app-server expands omitted options to null. */
   readonly expectedProfile: Readonly<Record<string, unknown>>;
   readonly signal: AbortSignal;
@@ -215,13 +217,13 @@ export async function prepareCliDeepScanSession(
  * arrive too late to keep a fallback profile safe.
  *
  * This is intentionally a pragmatic preflight, not an atomic reservation:
- * managed config can change between this check and `codex exec`. Callers must
+ * managed config can change between this check and the worker turn. Callers must
  * also reject the exact runtime fallback warning via
  * `deepScanPermissionProfileFallbackError` before accepting worker output.
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
-): Promise<{ useOpenAiApiKey: boolean }> {
+): Promise<{ useOpenAiApiKey: boolean; useCodexApiKey: boolean }> {
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -245,10 +247,10 @@ export async function preflightDeepScanWorkerPermissionProfile(
       requirementsResponse,
     );
     if (
-      !options.allowOpenAiApiKeyFallback ||
+      (!options.allowOpenAiApiKeyFallback && !options.allowCodexApiKey) ||
       record(configResponse.config)?.forced_login_method === "chatgpt"
     ) {
-      return { useOpenAiApiKey: false };
+      return { useOpenAiApiKey: false, useCodexApiKey: false };
     }
     // Reuse Codex's selected credential store, including keyring, instead of
     // interpreting auth.json here. Custom provider auth is loaded privately by exec.
@@ -256,8 +258,13 @@ export async function preflightDeepScanWorkerPermissionProfile(
       refreshToken: false,
     });
     return {
+      useCodexApiKey: Boolean(
+        options.allowCodexApiKey && account.requiresOpenaiAuth === true,
+      ),
       useOpenAiApiKey:
-        account.requiresOpenaiAuth === true && account.account === null,
+        !options.allowCodexApiKey &&
+        account.requiresOpenaiAuth === true &&
+        account.account === null,
     };
   });
 }
@@ -315,7 +322,7 @@ class AppServerPreflightClient {
       for (const override of options.configOverrides) {
         args.push("--config", override);
       }
-      // App-server loads credential-free metadata; exec reads private provider profiles.
+      // Startup needs provider identity; private provider credentials are passed separately.
       for (const override of options.providerConfigOverrides ?? []) {
         args.push("--config", override);
       }

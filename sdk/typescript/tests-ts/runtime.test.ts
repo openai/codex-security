@@ -5804,10 +5804,15 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       temporaryDirectories.track(output);
 
-      await expect(
-        requireSecureOutputAncestry(output),
-      ).resolves.toBeUndefined();
-      expect(await prepareOutputDir(output, "repo")).toBe(output);
+      try {
+        await expect(
+          requireSecureOutputAncestry(output),
+        ).resolves.toBeUndefined();
+        expect(await prepareOutputDir(output, "repo")).toBe(output);
+      } finally {
+        // macOS recursive cleanup can fail while this fixture remains sticky.
+        await chmod(shared, 0o700);
+      }
     },
   );
 

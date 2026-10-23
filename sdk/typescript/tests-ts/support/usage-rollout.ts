@@ -87,7 +87,7 @@ export function ownershipRollout(
     {
       type: "event_msg",
       timestamp: uuid7EventTimestamp,
-      payload: { type: "task_complete" },
+      payload: { type: "task_complete", turn_id: higherUuid7Turn },
     },
   ];
 }

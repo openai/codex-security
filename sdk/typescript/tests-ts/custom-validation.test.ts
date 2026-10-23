@@ -29,7 +29,11 @@ import {
   type ScanManifest,
   type ScanProgress,
 } from "../src/index.js";
-import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
+import {
+  createMarketplace,
+  resolveCodexCommand,
+  resolveScanSessionPaths,
+} from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
@@ -37,6 +41,7 @@ import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
+import { readNativeSessionSqliteHome } from "../src/provider-profile.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -547,19 +552,29 @@ describe("custom validation", () => {
     await expect(readFile(join(outside, "candidates.json"))).rejects.toThrow();
   });
 
-  const completionScenarios = [
+  const workbenchScenarios = [
     "standard",
     "progress",
     "diff",
     "empty",
     "incomplete",
     "dismissed",
+    "budgeted",
+    "budgeted-relative-sqlite",
+    "budgeted-profile-sqlite",
+    "unowned-validation-worker",
     "unfinished-source",
   ];
-  test.each(completionScenarios)(
+  test.each(workbenchScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
+      const relativeSqlite =
+        scenario === "budgeted-relative-sqlite" ||
+        scenario === "budgeted-profile-sqlite";
+      const budgeted =
+        scenario.startsWith("budgeted") ||
+        scenario === "unowned-validation-worker";
       const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
       const root = await temporaryDirectory();
@@ -567,6 +582,13 @@ describe("custom validation", () => {
       const scanDir = join(root, "scan");
       const codexHome = join(root, "codex-home");
       const stateDir = join(root, "state");
+      const sqliteHome = relativeSqlite
+        ? join(scanDir, "selected-state")
+        : codexHome;
+      const stateDatabase = join(
+        sqliteHome,
+        relativeSqlite ? "state_7.sqlite" : "state_5.sqlite",
+      );
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
       await mkdir(join(repository, "src"), { recursive: true });
@@ -625,27 +647,47 @@ describe("custom validation", () => {
           input,
         );
       const client = new TestClient(
-        profileDisabledTools === undefined
-          ? {}
-          : {
-              codexOverrides: {
-                profile: "synthetic.validation",
-                profiles: {
-                  "synthetic.validation": {
-                    mcp_servers: {
-                      "codex-security": {
-                        disabled_tools: profileDisabledTools,
+        relativeSqlite
+          ? {
+              codexOverrides:
+                scenario === "budgeted-profile-sqlite"
+                  ? {
+                      profile: "synthetic",
+                      profiles: {
+                        synthetic: { sqlite_home: "selected-state" },
+                      },
+                    }
+                  : { sqlite_home: "selected-state" },
+            }
+          : profileDisabledTools === undefined
+            ? {}
+            : {
+                codexOverrides: {
+                  profile: "synthetic.validation",
+                  profiles: {
+                    "synthetic.validation": {
+                      mcp_servers: {
+                        "codex-security": {
+                          disabled_tools: profileDisabledTools,
+                        },
                       },
                     },
                   },
                 },
               },
-            },
         {
-          environment: { CODEX_SECURITY_STATE_DIR: stateDir },
+          environment: {
+            CODEX_SECURITY_STATE_DIR: stateDir,
+            ...(budgeted && !relativeSqlite
+              ? { CODEX_STATE_DB: stateDatabase }
+              : {}),
+          },
           now: () => Date.UTC(2026, 0, 1),
           prepareRuntime: async () => {
             const runtime = preparedRuntime(codexHome);
+            if (relativeSqlite) runtime.environment["CODEX_HOME"] = codexHome;
+            if (budgeted && !relativeSqlite)
+              runtime.environment["CODEX_STATE_DB"] = stateDatabase;
             runtime.plugin.version = (
               await json<{ version: string }>(
                 join(PLUGIN_ROOT, ".codex-plugin/plugin.json"),
@@ -654,6 +696,7 @@ describe("custom validation", () => {
             return runtime;
           },
           resolvePluginPython: async () => python!,
+          resolveScanSessionPaths,
           prepareOutputDir: async () => scanDir,
           createCodex: (options) => {
             expect(options.config?.["mcp_servers"]).toMatchObject({
@@ -683,6 +726,30 @@ describe("custom validation", () => {
                       "daybreak_blue",
                     );
                     turns += 1;
+                    if (relativeSqlite) {
+                      const command = resolveCodexCommand({});
+                      const selected = await readNativeSessionSqliteHome(
+                        {
+                          ...command,
+                          args: [
+                            ...(command.args ?? []),
+                            "-c",
+                            "features.plugins=false",
+                            "-c",
+                            "features.apps=false",
+                            "-c",
+                            'otel.exporter="none"',
+                            "-c",
+                            'otel.metrics_exporter="none"',
+                          ],
+                        },
+                        options.env!,
+                        threadOptions.workingDirectory!,
+                        turnOptions.signal,
+                        options.config,
+                      );
+                      expect(selected).toBe(sqliteHome);
+                    }
                     if (turns === 1) {
                       expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
                         maxTimeMinutes !== undefined,
@@ -783,13 +850,16 @@ describe("custom validation", () => {
                       output.reason =
                         "The validation environment did not start.";
                     }
-                    if (scenario === "standard") {
+                    if (scenario === "standard" || budgeted) {
                       await mkdir(join(codexHome, "sessions"), {
                         recursive: true,
                       });
                       for (const [id, cwd] of [
                         ["thread-1", scanDir],
                         ["validation-thread", join(scanDir, "artifacts")],
+                        ...(budgeted
+                          ? [["validation-worker", join(scanDir, "artifacts")]]
+                          : []),
                       ]) {
                         const records = [
                           {
@@ -798,6 +868,9 @@ describe("custom validation", () => {
                               id,
                               cwd,
                               timestamp: "2026-08-21T00:00:00Z",
+                              ...(id === "validation-worker"
+                                ? { parent_thread_id: "validation-thread" }
+                                : {}),
                             },
                           },
                           {
@@ -812,6 +885,14 @@ describe("custom validation", () => {
                               },
                             },
                           },
+                          ...(budgeted
+                            ? [
+                                {
+                                  type: "event_msg",
+                                  payload: { type: "task_complete" },
+                                },
+                              ]
+                            : []),
                           ...(id === "validation-thread"
                             ? [
                                 {
@@ -829,6 +910,39 @@ describe("custom validation", () => {
                           jsonLines(records) + "\n",
                         );
                       }
+                    }
+                    if (budgeted) {
+                      const ids = [
+                        "thread-1",
+                        "validation-thread",
+                        "validation-worker",
+                      ];
+                      const owned =
+                        scenario === "unowned-validation-worker"
+                          ? ids.slice(0, 2)
+                          : ids;
+                      execFileSync(python!, [
+                        "-I",
+                        "-B",
+                        "-c",
+                        [
+                          "import json,sqlite3,sys",
+                          "database,ids,paths=json.loads(sys.argv[1])",
+                          "c=sqlite3.connect(database)",
+                          "c.execute('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL)')",
+                          "c.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)')",
+                          "c.executemany('INSERT INTO threads VALUES (?,?)',zip(ids,paths))",
+                          "if 'validation-worker' in ids: c.execute(\"INSERT INTO thread_spawn_edges VALUES ('validation-thread','validation-worker')\")",
+                          "c.commit();c.close()",
+                        ].join("\n"),
+                        JSON.stringify([
+                          stateDatabase,
+                          owned,
+                          owned.map((id) =>
+                            join(codexHome, "sessions", `rollout-${id}.jsonl`),
+                          ),
+                        ]),
+                      ]);
                     }
                     return {
                       events: responseEvents(
@@ -857,6 +971,7 @@ describe("custom validation", () => {
       try {
         const pending = client.run(repository, {
           cyberAccessProgram: "daybreak_blue",
+          ...(budgeted ? { maxCostUsd: 1 } : {}),
           maxTimeMinutes,
           ...(scenario === "standard"
             ? { validationPromptFile: workflowFile }
@@ -867,7 +982,14 @@ describe("custom validation", () => {
             : {}),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
-        if (scenario === "unfinished-source") {
+        if (scenario === "unowned-validation-worker") {
+          await expect(pending).rejects.toThrow(
+            "cost limit could not be verified",
+          );
+          expect(commands).toContain("fail-scan");
+          expect(commands).not.toContain("complete-scan");
+          return;
+        } else if (scenario === "unfinished-source") {
           await expect(pending).rejects.toThrow(
             "The latest saved scan draft is incomplete",
           );
@@ -927,6 +1049,10 @@ describe("custom validation", () => {
           ).toHaveLength(1);
           expect(completed.cost?.inputTokens).toBe(20);
         }
+        if (budgeted) {
+          expect(completed.cost?.inputTokens).toBe(30);
+          expect(completed.cost?.outputTokens).toBe(9);
+        }
         expect(turns).toBe(count === 0 ? 1 : 2);
         expect(workingDirectories).toEqual(
           count === 0 ? [scanDir] : [scanDir, join(scanDir, "artifacts")],
@@ -954,8 +1080,8 @@ describe("custom validation", () => {
           completed.manifest.scan.artifacts.map((artifact) => artifact.path),
         ).toContain("artifacts/custom-validation/candidates.json");
         expect(completed.turnResult.usage).toMatchObject({
-          input_tokens: count === 0 ? 10 : 20,
-          output_tokens: count === 0 ? 3 : 6,
+          input_tokens: count === 0 ? 10 : budgeted ? 30 : 20,
+          output_tokens: count === 0 ? 3 : budgeted ? 9 : 6,
         });
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           count === 0 ? "No findings" : "Fixture 0",

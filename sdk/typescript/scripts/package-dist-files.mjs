@@ -139,6 +139,7 @@ const distModules = [
   "version",
   "windows-path",
   "worker-progress",
+  "zstd",
 ];
 
 export const packageDistFiles = distModules.flatMap((module) =>

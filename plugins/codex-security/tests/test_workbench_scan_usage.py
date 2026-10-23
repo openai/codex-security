@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     begin_deep_scan,
+    claim_deep_scan_dedup,
     create_saved_workspace,
     fail_scan,
     initialize_git_repository,
@@ -939,6 +940,130 @@ def test_completion_includes_cached_and_cache_write_tokens(
     )
 
 
+@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
+@pytest.mark.parametrize(
+    ("snapshots", "expected_input", "expected_writes"),
+    [
+        ([(100, 50), (100, None), (100, 50)], 100, 50),
+        ([(100, 80), (200, None), (200, 80)], 200, 80),
+        ([(100, 40), (200, None), (300, 60)], 300, 60),
+        ([(100, 40), (20, None), (100, 20)], 200, 60),
+        ([(100, 40), (200, 20), (300, 30)], 300, 70),
+        ([(100, None), (100, 50)], 100, 50),
+    ],
+    ids=[
+        "same-total",
+        "increasing",
+        "new-writes",
+        "epoch-reset",
+        "explicit-decrease",
+        "initial-omission",
+    ],
+)
+def test_completion_retains_cache_write_baseline_across_omissions(
+    tmp_path: Path,
+    cache_write_field: str,
+    snapshots: list[tuple[int, int | None]],
+    expected_input: int,
+    expected_writes: int,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = []
+    for input_tokens, writes in snapshots:
+        event = _token_event(counted, input_tokens, 0)
+        reported = event["payload"]["info"]["total_token_usage"]
+        reported.pop("cache_write_input_tokens")
+        if writes is not None:
+            reported[cache_write_field] = writes
+        events.append(event)
+    parent = _rollout(tmp_path, "scan-parent", events)
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(expected_input, 0, 0, cache_write_input_tokens=expected_writes),
+            "threadCount": 1,
+        }.items()
+    )
+
+
+@pytest.mark.parametrize("previous_native", [False, True])
+@pytest.mark.parametrize("current_native", [False, True])
+def test_legacy_cache_refinement_survives_turn_boundaries(
+    tmp_path: Path, previous_native: bool, current_native: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    initial = _token_event(started, 100, 10)
+    initial["payload"]["info"]["total_token_usage"].pop("cache_write_input_tokens")
+    refined = _token_event(started, 100, 10, cached_input_tokens=20)
+    refined["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
+    later = _token_event(started, 150, 20, cached_input_tokens=20)
+    later["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
+    events = [
+        _event(started, "event_msg", {"type": "task_started", "turn_id": "previous"}),
+        initial,
+    ]
+    if previous_native:
+        events.append(
+            _response_event(
+                started,
+                "scan-parent",
+                "previous",
+                100,
+                10,
+                turn_id="previous",
+                cached_input_tokens=7,
+            )
+        )
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "current"}),
+            refined,
+        ]
+    )
+    if current_native:
+        events.append(
+            _response_event(
+                started,
+                "scan-parent",
+                "current",
+                50,
+                10,
+                turn_id="current",
+                cached_input_tokens=5,
+            )
+        )
+    events.append(later)
+    events.extend(
+        _event(started, "event_msg", {"type": "task_complete", "turn_id": turn})
+        for turn in ("previous", "current")
+    )
+    parent = _rollout(tmp_path, "scan-parent", events)
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+
+    result = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, parent),
+        started_at=started,
+        completed_at=started,
+    )
+
+    assert result.tokens == _counts(
+        150,
+        (7 if previous_native else 20) + (5 if current_native else 0),
+        20,
+        cache_write_input_tokens=0 if previous_native else 30,
+    )
+    assert result.warnings == set()
+
+
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1224,34 +1349,161 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     )
 
 
-def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+@pytest.mark.parametrize(
+    "kind,retried", [("discovery", False), ("discovery", True), ("dedup", True)]
+)
+def test_completion_counts_deep_sdk_workers_and_descendants(
+    tmp_path: Path, kind: str, retried: bool
+) -> None:
+    state_dir = tmp_path / "workbench-state"
+    target = tmp_path / "target"
+    target.mkdir()
+    environment = {
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
+        "CODEX_STATE_DB": "",
+    }
+    deep = begin_deep_scan(
+        state_dir,
+        "scan-parent",
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--scan-root",
+        str(tmp_path / "scans"),
+        "--available-parallelism",
+        "4",
+        environment=environment,
+    )["deepScan"]
+    scan_id = str(deep["scanId"])
+    scan_dir = Path(str(deep["scanDir"]))
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        row = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    assert row is not None
+    fixture = ScanFixture(
+        state_dir,
+        target,
+        scan_id,
+        scan_dir,
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
+        environment,
+        "deep",
+    )
     counted = fixture.started_at + timedelta(microseconds=1)
     artifact = fixture.scan_dir / "artifacts" / "usage-worker"
     artifact.mkdir(parents=True)
     prompt = artifact / "prompt.md"
     prompt.write_text("Review the fixture target.\n", encoding="utf-8")
     worker_id = str(uuid.uuid4())
-    for attempt, thread in [(1, "sdk-worker"), (2, "sdk-retry"), (2, "sdk-retry")]:
-        upsert_deep_worker(
-            fixture.state_dir,
-            fixture.scan_id,
+    if kind == "dedup":
+        inputs = []
+        for index in range(2):
+            seed = artifact / f"discovery-{index}"
+            seed.mkdir()
+            result = seed / "result.json"
+            result.write_text("{}\n", encoding="utf-8")
+            seed_id = str(uuid.uuid4())
+            for status in ("running", "succeeded"):
+                upsert_deep_worker(
+                    state_dir,
+                    scan_id,
+                    seed_id,
+                    "discovery",
+                    status,
+                    str(prompt),
+                    str(seed),
+                    *(["--result-manifest-path", str(result)] if status == "succeeded" else []),
+                    environment=environment,
+                )
+            inputs.extend(("--input-worker-id", seed_id))
+        claim_deep_scan_dedup(
+            state_dir,
+            scan_id,
             worker_id,
-            "discovery",
+            str(prompt),
+            str(artifact),
+            *inputs,
+            environment=environment,
+        )
+    for attempt, thread_id in ([(1, "sdk-prior-worker")] if retried else []) + [
+        (2 if retried else 1, "sdk-worker")
+    ]:
+        upsert_deep_worker(
+            state_dir,
+            scan_id,
+            worker_id,
+            kind,
             "running",
             str(prompt),
             str(artifact),
+            "--sdk-thread-id",
+            thread_id,
             "--attempt",
             str(attempt),
+            environment=environment,
+        )
+    if retried:
+        # A new process must retain prior attempts when reopening the saved scan.
+        scan_command(
+            state_dir,
+            "get-deep-scan",
+            scan_id,
+            "--thread-id",
+            "scan-parent",
+            environment=environment,
+        )
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            assert connection.execute(
+                "SELECT sdk_thread_id FROM deep_scan_worker_threads WHERE worker_id = ? ORDER BY sdk_thread_id",
+                (worker_id,),
+            ).fetchall() == [("sdk-prior-worker",), ("sdk-worker",)]
+        other_target = tmp_path / "other-target"
+        other_target.mkdir()
+        other = begin_deep_scan(
+            state_dir,
+            "other-parent",
+            "--target-path",
+            str(other_target),
+            "--scope",
+            ".",
+            "--scan-root",
+            str(tmp_path / "other-scans"),
+            environment=environment,
+        )["deepScan"]
+        other_artifact = Path(str(other["scanDir"])) / "artifacts" / "worker"
+        other_artifact.mkdir(parents=True)
+        other_prompt = other_artifact / "prompt.md"
+        other_prompt.write_text("Separate scan.\n", encoding="utf-8")
+        upsert_deep_worker(
+            state_dir,
+            str(other["scanId"]),
+            str(uuid.uuid4()),
+            "discovery",
+            "running",
+            str(other_prompt),
+            str(other_artifact),
             "--sdk-thread-id",
-            thread,
-            environment=fixture.environment,
+            "unrelated-worker",
+            environment=environment,
         )
     _state_graph(
         fixture.environment,
         {
             "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
             "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
+            **(
+                {
+                    "sdk-prior-worker": _rollout(
+                        tmp_path, "sdk-prior-worker", [_token_event(counted, 30, 6)]
+                    ),
+                    "unrelated-worker": _rollout(
+                        tmp_path, "unrelated-worker", [_token_event(counted, 1000, 100)]
+                    ),
+                }
+                if retried
+                else {}
+            ),
             "sdk-child": _rollout(
                 tmp_path,
                 "sdk-child",
@@ -1268,8 +1520,8 @@ def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -
         >= {
             "coverage": "complete",
             "source": "codex_rollout",
-            **_counts(67, 0, 13),
-            "threadCount": 4,
+            **_counts(67 if retried else 37, 0, 16 if retried else 10),
+            "threadCount": 4 if retried else 3,
         }.items()
     )
 
@@ -2508,5 +2760,55 @@ def test_completion_marks_closed_turn_without_receipt_partial(tmp_path: Path) ->
             **_counts(10, 0, 2),
             "threadCount": 1,
             "warnings": ["token_record_missing"],
+        }.items()
+    )
+
+
+def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    artifact = fixture.scan_dir / "artifacts" / "usage-worker"
+    artifact.mkdir(parents=True)
+    prompt = artifact / "prompt.md"
+    prompt.write_text("Review the fixture target.\n", encoding="utf-8")
+    worker_id = str(uuid.uuid4())
+    for attempt, thread in [(1, "sdk-worker"), (2, "sdk-retry"), (2, "sdk-retry")]:
+        upsert_deep_worker(
+            fixture.state_dir,
+            fixture.scan_id,
+            worker_id,
+            "discovery",
+            "running",
+            str(prompt),
+            str(artifact),
+            "--attempt",
+            str(attempt),
+            "--sdk-thread-id",
+            thread,
+            environment=fixture.environment,
+        )
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
+            "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
+            "sdk-child": _rollout(
+                tmp_path,
+                "sdk-child",
+                [_token_event(counted, 7, 2)],
+                parent_thread_id="sdk-worker",
+            ),
+            "sdk-retry": _rollout(tmp_path, "sdk-retry", [_token_event(counted, 30, 3)]),
+        },
+        [("sdk-worker", "sdk-child")],
+    )
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(67, 0, 13),
+            "threadCount": 4,
         }.items()
     )

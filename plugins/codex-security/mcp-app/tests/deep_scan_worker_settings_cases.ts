@@ -7,7 +7,6 @@ import { stringify as stringifyToml } from "smol-toml";
 import type { CodexSdkWorkerExecutor as Executor } from "../src/deep-scan/executor.js";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 
 export async function testWorkerCyberAccessSettings({
@@ -356,13 +355,24 @@ export async function testWorkerCyberAccessSettings({
             );
           }),
         );
-        const workerLaunches = launches.filter(
-          ({ args }) => args[0] === "exec",
+        const recorded = await Promise.all(
+          launches.map(async (launch) => ({
+            ...launch,
+            invocation: await readJson(launch.markerPath),
+          })),
+        );
+        const workerLaunches = recorded.filter(
+          ({ invocation }) => invocation.thread !== undefined,
         );
         assert.equal(workerLaunches.length, cases.length);
         const preflights = await Promise.all(
           launches
-            .filter(({ args }) => args.includes("app-server"))
+            .filter(
+              (launch) =>
+                !workerLaunches.some(
+                  (worker) => worker.markerPath === launch.markerPath,
+                ),
+            )
             .map(async (launch) => ({
               ...launch,
               invocation: await readJson(launch.markerPath),
@@ -394,7 +404,7 @@ export async function testWorkerCyberAccessSettings({
               features.api_key_model_discovery,
           });
           const launch = workerLaunches.find(
-            ({ args }) => args[args.indexOf("--model") + 1] === name,
+            ({ invocation }) => invocation.thread.params.model === name,
           );
           const invocation = await readJson(launch!.markerPath);
           assert.deepEqual(
@@ -405,14 +415,14 @@ export async function testWorkerCyberAccessSettings({
               ? []
               : [`service_tier=${JSON.stringify(serviceTier)}`],
           );
-          if (program === undefined) {
-            assert.equal(
-              invocation.argv.includes("--cyber-access-program"),
-              false,
-            );
-          } else {
-            assertFlagPair(invocation.argv, "--cyber-access-program", program);
-          }
+          assert.equal(
+            invocation.turn.params.cyberAccessProgram,
+            program === "daybreak_blue"
+              ? "daybreakBlue"
+              : program === "daybreak_red"
+                ? "daybreakRed"
+                : program,
+          );
           assertConfigOverrides(invocation.argv, {
             daybreak,
             "features.cli_daybreak": features.cli_daybreak,
@@ -426,7 +436,7 @@ export async function testWorkerCyberAccessSettings({
             "synthetic-worker-api-key",
           );
           assert.equal(
-            invocation.argv.includes("resume"),
+            invocation.thread.method === "thread/resume",
             resumeThreadId !== undefined,
           );
           assertReadOnlyWorkerPolicy(invocation.argv);

@@ -199,9 +199,9 @@ check or part of the release trigger.
 Runner trials use Bun 1.4.3, including the
 [isolated subprocess fix](https://github.com/oven-sh/bun/pull/44581).
 `--parallel=2` runs files in two worker processes and isolates each file; it does
-not make tests inside one file concurrent. Required CI and the mutation trial
-remain on Bun 1.3.14 until a newer release passes the full SDK suite in every mode
-on all three platforms.
+not make tests inside one file concurrent. Required CI retains Bun 1.4.2, while
+the mutation trial remains on Bun 1.3.14. Adopting the diagnostic runner version
+still requires the full SDK suite to pass in every mode on all three platforms.
 
 Runner modes use the same property seed and coverage settings as each other.
 Required CI uses the default property seed and collects Linux coverage, while

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { configuredCodexHome } from "./auth.js";
@@ -17,9 +17,11 @@ import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
   executablePathForSpawn,
+  expandHome,
   requirePrivateCredentialHome,
   resolveCodexCommand,
   type CodexCommand,
+  type ProcessEnvironment,
 } from "./runtime.js";
 
 export interface ProviderProfile {
@@ -156,6 +158,78 @@ export async function preflightReadOnlyProfileCodex(
   return { permissionProfileId, configOverrides };
 }
 
+/** Older workers must inherit the same effective provider as the parent scan. */
+export async function legacyWorkerUsesScanProvider(
+  command: CodexCommand,
+  environment: Record<string, string>,
+  cwd: string,
+  modelProvider: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const preflight = await nativePermissionPreflight();
+  const env = bundledCodexSdkEnvironment(command.command, environment);
+  return await withCodexPreflightLock(env, signal, async () => {
+    const options = {
+      codexPath: executablePathForSpawn(command.command),
+      commandArgs: command.args,
+      cwd,
+      env,
+      signal: signal ?? new AbortController().signal,
+      context: "helper",
+    };
+    const worker = await preflight.readDeepScanRuntimeConfig({
+      ...options,
+      configOverrides: [],
+    });
+    const parent = await preflight.readDeepScanRuntimeConfig({
+      ...options,
+      configOverrides: [`model_provider=${JSON.stringify(modelProvider)}`],
+    });
+    return (
+      (worker.model_provider ?? "openai") ===
+      (parent.model_provider ?? "openai")
+    );
+  });
+}
+
+/** @internal */
+export async function readNativeSessionSqliteHome(
+  command: CodexCommand,
+  environment: ProcessEnvironment,
+  cwd: string,
+  signal?: AbortSignal,
+  nativeConfig: JsonObject = {},
+): Promise<string | undefined> {
+  const preflight = await nativePermissionPreflight();
+  const sqliteHome = resolveCodexProfile(nativeConfig)["sqlite_home"];
+  const env = bundledCodexSdkEnvironment(
+    command.command,
+    Object.fromEntries(
+      Object.entries(environment).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+  );
+  return await withCodexPreflightLock(env, signal, async () => {
+    const config = await preflight.readDeepScanRuntimeConfig({
+      codexPath: executablePathForSpawn(command.command),
+      commandArgs: command.args,
+      cwd,
+      env,
+      signal: signal ?? new AbortController().signal,
+      context: "helper",
+      configOverrides:
+        typeof sqliteHome === "string"
+          ? [
+              `sqlite_home=${inlineToml(resolve(cwd, expandHome(sqliteHome, environment)))}`,
+            ]
+          : [],
+    });
+    return typeof config.sqlite_home === "string"
+      ? config.sqlite_home
+      : undefined;
+  });
+}
 export async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,

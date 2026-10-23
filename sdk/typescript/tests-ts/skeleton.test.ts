@@ -534,8 +534,8 @@ describe("TypeScript package skeleton", () => {
     });
     for (const [job, version] of [
       [runner, "1.4.3"],
-      [ci.jobs["test"]!, "1.3.14"],
-      [ci.jobs["windows-test"]!, "1.3.14"],
+      [ci.jobs["test"]!, "1.4.2"],
+      [ci.jobs["windows-test"]!, "1.4.2"],
       [quality.jobs["mutation"]!, "1.3.14"],
     ] as const) {
       expect(

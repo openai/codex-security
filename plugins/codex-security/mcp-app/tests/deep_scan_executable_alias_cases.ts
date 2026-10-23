@@ -115,7 +115,7 @@ export async function testConcurrentWorkerExecutableAliases({
           assert.equal(invocation.codexHome, scan.fixture.root);
           assert.equal(preflight.codexHome, scan.fixture.root);
           assert.equal(
-            invocation.argv.includes("resume"),
+            invocation.thread.method === "thread/resume",
             resumeThreadId !== undefined,
           );
           assertConfigOverrides(invocation.argv, {
