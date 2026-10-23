@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+from unittest import mock
 
 import pytest
 from workbench_test_support import load_script, windows_file_backend
@@ -62,3 +63,33 @@ def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch
         with pytest.raises(FINALIZER.ContractError):
             FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
         assert "writeup" in findings["findings"][0]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("error_code", [2, 3])
+def test_windows_writeup_recovery_omits_missing_parent_directories(
+    tmp_path, monkeypatch, error_code
+):
+    backend = load_script("windows_scan_local_files")
+    scan_dir = tmp_path.resolve()
+    missing_parent = scan_dir / "findings" / "missing"
+
+    def open_directory(path, **_options):
+        if path == missing_parent:
+            raise backend.WindowsScanLocalFileError(
+                error_code, "Synthetic missing parent directory", str(path)
+            )
+        return mock.Mock(value=1)
+
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
+    monkeypatch.setattr(backend, "_create_file", open_directory)
+    monkeypatch.setattr(backend, "_verify_directory", lambda *_args: None)
+    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
+    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
+    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
+    findings = {"findings": [{"writeup": {"reportPath": "findings/missing/report.md"}}]}
+
+    warnings = FINALIZER._prepare_derived_writeups(scan_dir, findings, allow_missing=True)
+
+    assert findings == {"findings": [{}]}
+    assert len(warnings) == 1

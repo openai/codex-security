@@ -63,3 +63,22 @@ test('report fields preserve Markdown punctuation as literal content', () => {
   assert.ok(summary.includes('<code>pkg/&#95;&#95;init&#95;&#95;.py</code>'));
   assert.ok(summary.includes('<code>pkg/&#95;&#95;init&#95;&#95;.py:1</code>'));
 });
+
+test('summary shows configured provider, measured tokens and available cost estimates', () => {
+  const inputs = parseInputs(name => name === 'provider' ? 'amazon-bedrock' : '', '/checkout');
+  const target = {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false};
+  const result = {scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',errors:[],findings:[]} as unknown as ScanResults;
+  const usage = {input_tokens:1200,cached_input_tokens:200,output_tokens:50};
+  for (const [metrics, expected] of [
+    [{usage, estimatedCost:0.125}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250'],
+    [{usage, estimatedCost:0.125, estimatedCostRange:{min:0.125,max:0.25}}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250–$0.2500'],
+    [{usage, estimatedCost:0.125, estimatedCostRange:{min:0.125,max:null}}, '1,200 input (200 cached) · 50 output · **Estimated cost:** $0.1250 (upper estimate unavailable)'],
+    [{usage}, '1,200 input (200 cached) · 50 output · **Estimated cost:** unavailable'],
+    [{usage:{input_tokens:0,cached_input_tokens:0,output_tokens:0},estimatedCost:0,estimatedCostRange:{min:0,max:0}}, '0 input (0 cached) · 0 output · **Estimated cost:** $0.0000'],
+    [{}, 'unavailable · **Estimated cost:** unavailable'],
+  ] as const) {
+    const summary = resultSummary({...result, ...metrics}, inputs, target);
+    assert.ok(summary.includes('**Configured provider:** <code>amazon-bedrock</code>'));
+    assert.ok(summary.includes(`**Tokens:** ${expected}`));
+  }
+});

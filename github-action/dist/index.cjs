@@ -56232,7 +56232,10 @@ async function analyzeResults(options) {
   }
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
+  const usage = value.turn?.usage;
+  result.usage = usage == null ? void 0 : { ...usage, cached_input_tokens: usage.cached_input_tokens ?? 0 };
   result.estimatedCost = value.cost?.estimatedUsd;
+  result.estimatedCostRange = value.cost?.estimatedUsdRange;
   result.paths = {
     resultsDirectory: options.resultsDirectory,
     manifestPath: (0, import_node_path5.join)(options.resultsDirectory, "scan-manifest.json"),
@@ -99196,8 +99199,8 @@ async function collectReports(result) {
 async function uploadReports(reports, inputs, tempRoot) {
   if (!reports.size) throw new Error("Artifact upload requested, but no validated reports are available.");
   const staging = await (0, import_promises9.mkdtemp)((0, import_node_path6.join)(tempRoot, "codex-security-upload-"));
-  await (0, import_promises9.chmod)(staging, 448);
   try {
+    await (0, import_promises9.chmod)(staging, 448);
     const files = [];
     for (const [name, bytes] of reports) {
       const dest = (0, import_node_path6.join)(staging, name === "exports/results.sarif" ? "results.sarif" : name);
@@ -99228,12 +99231,17 @@ function resultTitle(result, inputs) {
 function resultSummary(result, inputs, target) {
   const esc = (value, limit = 4e3) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(" \xB7 ") : "unavailable";
+  const usage = result.usage;
+  const tokens = usage ? `${usage.input_tokens.toLocaleString("en-US")} input (${usage.cached_input_tokens.toLocaleString("en-US")} cached) \xB7 ${usage.output_tokens.toLocaleString("en-US")} output` : "unavailable";
+  const range2 = result.estimatedCostRange;
+  const cost = range2 && range2.max !== range2.min ? range2.max === null ? `$${range2.min.toFixed(4)} (upper estimate unavailable)` : `$${range2.min.toFixed(4)}\u2013$${range2.max.toFixed(4)}` : result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} \xB7 **Findings policy:** ${result.policyStatus} \xB7 **Report:** ${result.reportStatus}`,
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
-    `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
+    `**Configured provider:** <code>${esc(inputs.provider)}</code> \xB7 **Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
+    `**Tokens:** ${tokens} \xB7 **Estimated cost:** ${cost}`,
     `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."

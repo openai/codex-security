@@ -125,6 +125,7 @@ async function fixture(
   ])
     writeSource(repository, name, "export const value = 1;\n");
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "fixture");
   return {
