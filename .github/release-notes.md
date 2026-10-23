@@ -10,6 +10,7 @@
 - build owner reports without extra model calls ([#1845](https://github.com/openai/codex-security/pull/1845))
 - isolate audits and retain exact file identities ([#1859](https://github.com/openai/codex-security/pull/1859))
 - update Node to security release 26.12.1 ([#1870](https://github.com/openai/codex-security/pull/1870))
+- preserve large Git configuration environments ([#1882](https://github.com/openai/codex-security/pull/1882))
 
 <!-- release-section: highlights:end -->
 
