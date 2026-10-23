@@ -39,6 +39,12 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from workbench.retained_coverage import (
+    _append_previous_finding as _append_previous_finding,
+)
+from workbench.retained_coverage import (
+    _coverage_rows as _coverage_rows,
+)
+from workbench.retained_coverage import (
     _ensure_finding_identities as _ensure_finding_identities,
 )
 from workbench.retained_coverage import (
@@ -52,6 +58,9 @@ from workbench.retained_coverage import (
 )
 from workbench.retained_coverage import (
     _finding_key as _finding_key,
+)
+from workbench.retained_coverage import (
+    _has_candidate_metadata as _has_candidate_metadata,
 )
 from workbench.retained_coverage import (
     _identity_candidate as _identity_candidate,
