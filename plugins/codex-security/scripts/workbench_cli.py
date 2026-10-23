@@ -308,7 +308,6 @@ def parse_args(description: str) -> argparse.Namespace:
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
-    subparsers.add_parser("local-dedupe")
     args = parser.parse_args()
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")

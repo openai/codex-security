@@ -8,7 +8,7 @@ import type {
 import { CodexSecurityError } from "../errors.js";
 import { workflowDigest } from "../finding-workflow.js";
 import {
-  resolveWorkbenchRuntime,
+  bundledPluginRoot,
   workbenchEnvironment,
   runWorkbench,
   type WorkbenchCommandOptions,
@@ -36,7 +36,7 @@ export interface FindingEmbeddingBinding {
 
 /** Direct workbench adapter. Importing it starts no HTTP or MCP server. */
 export class LocalDeduplication {
-  private options?: Promise<WorkbenchCommandOptions>;
+  private options?: Promise<Omit<WorkbenchCommandOptions, "python">>;
   private cacheKeys: Record<string, string> = {};
   private readonly space: string;
   private readonly embedding: FindingEmbeddingBinding;
@@ -137,13 +137,8 @@ export class LocalDeduplication {
     this.signal?.throwIfAborted();
     this.options ??= (async () => {
       const environment = workbenchEnvironment(this.environment);
-      const [python, pluginRoot] = await resolveWorkbenchRuntime({
-        environment,
-        protectedRoot: this.repositoryPath,
-        signal: this.signal,
-      });
+      const pluginRoot = await bundledPluginRoot();
       return {
-        python,
         pluginRoot,
         environment,
         signal: this.signal,
@@ -155,8 +150,9 @@ export class LocalDeduplication {
         failureMessage: "Could not access local deduplication state",
       };
     })();
+    const options = await this.options;
     const result = await this.workbench(
-      await this.options,
+      options,
       [
         payload.action === "neighbors"
           ? "find-potential-duplicates"
