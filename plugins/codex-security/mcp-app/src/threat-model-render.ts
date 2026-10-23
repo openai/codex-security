@@ -1,5 +1,5 @@
 import { isRecord } from "./record.js";
-import { nonblank, text } from "./threat-model-format.js";
+import { nonblank, pathText, text } from "./threat-model-format.js";
 import { threatModelSchemas } from "./threat-model-schema.js";
 import * as z from "zod/v4";
 
@@ -116,14 +116,16 @@ function scopeLines(scope: unknown, label: string): string[] {
   ) {
     return [`- ${label}: not recorded`];
   }
-  const lines = [`- ${label}: ${text(scope.includePaths.join(", "), "none")}`];
+  const lines = [
+    `- ${label}: ${scope.includePaths.map(pathText).join(", ") || "none"}`,
+  ];
   if (
     Array.isArray(scope.excludePaths) &&
     scope.excludePaths.length &&
     scope.excludePaths.every((path) => typeof path === "string")
   ) {
     lines.push(
-      `- ${label} exclusions: ${text(scope.excludePaths.join(", "), "none")}`,
+      `- ${label} exclusions: ${scope.excludePaths.map(pathText).join(", ") || "none"}`,
     );
   }
   if (typeof scope.summary === "string" && scope.summary)

@@ -45,15 +45,15 @@ def _strings(value: Any) -> list[str]:
     return [text for item in value if (text := _text(item, ""))]
 
 
-def _path_label(value: str) -> str:
+def _path_label(value: str, *, ensure_ascii: bool = False) -> str:
     if "," in value or value != " ".join(value.split()) or any(ord(c) < 32 for c in value):
-        quoted = json.dumps(value, ensure_ascii=False)
+        quoted = json.dumps(value, ensure_ascii=ensure_ascii)
         return "".join(c if c.isprintable() else json.dumps(c)[1:-1] for c in quoted)
     return value
 
 
-def _path_text(value: str) -> str:
-    label = _path_label(value)
+def _path_text(value: str, *, ensure_ascii: bool = False) -> str:
+    label = _path_label(value, ensure_ascii=ensure_ascii)
     if label != value:
         marker = _code_fence(label, minimum=1)
         return f"{marker}{label}{marker}"
