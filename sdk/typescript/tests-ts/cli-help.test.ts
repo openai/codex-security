@@ -224,6 +224,8 @@ describe("CLI help", () => {
       expect(option(text, flag), flag).not.toBe("");
     for (const flag of ["--path", "--mode", "--headless", "--fail-on-severity"])
       expect(option(text, flag), flag).toBe("");
+    expect(text).toContain("continue");
+    expect(text).toContain("prior spend");
     const schema = JSON.parse(
       await help([
         "scan",
@@ -238,6 +240,7 @@ describe("CLI help", () => {
       config: { type: "string" },
       model: { type: "string" },
       maxCost: { type: "number" },
+      outputDir: { description: expect.stringContaining("continue") },
     });
     for (const key of ["path", "mode", "headless", "failOnSeverity"])
       expect(schema.options.properties).not.toHaveProperty(key);

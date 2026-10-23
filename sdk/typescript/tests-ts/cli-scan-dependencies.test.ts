@@ -8,7 +8,7 @@ import {
   ScanInterruptedError,
   ScanCostLimitExceededError,
 } from "../src/errors.js";
-import { estimateScanCost, formatUsd } from "../src/cost.js";
+import { estimateScanCost } from "../src/cost.js";
 import type {
   CodexSecurityConfig,
   DependencyScanOptions,
@@ -398,7 +398,9 @@ describe("scan dependencies CLI", () => {
           },
         });
         redraw();
-        expect(stderr.text()).toContain("Assessing 1/4, 1 failed, 1 queued");
+        expect(stderr.text()).toContain(
+          "Assessing 1/4 · 1 active · 1 failed · 1 queued",
+        );
         expect(stderr.text()).toContain(
           "synthetic-package@1.0.0 (SYNTHETIC-3)",
         );
@@ -416,8 +418,10 @@ describe("scan dependencies CLI", () => {
         now = 6_000;
         redraw();
         expect(stderr.text()).toContain("last event 1s");
-        expect(stderr.text()).toContain(`est. ${formatUsd(cost.estimatedUsd)}`);
         expect(stderr.text()).toContain(
+          `est. $${cost.estimatedUsdRange!.min.toFixed(2)}–$${cost.estimatedUsdRange!.max!.toFixed(2)}`,
+        );
+        expect(stderr.text()).not.toContain(
           "Tool running: rg token=SYNTHETIC_VALUE",
         );
         expect(stderr.text()).not.toContain("\u001b[31m");
@@ -477,7 +481,8 @@ describe("scan dependencies CLI", () => {
             stderr.text().split("\r").at(-1)!,
           );
           expect(line).toContain(`last event ${seconds}s`);
-          expect(line).toContain(`est. ${expectedCost}/$5.00`);
+          expect(line).toContain(`est. ${expectedCost}`);
+          expect(line).toContain("budget $5.00");
           expect(line.length).toBeLessThan(80);
         };
         checkLine(600, "n/a");
@@ -486,7 +491,10 @@ describe("scan dependencies CLI", () => {
           output_tokens: 1000,
         })!;
         options.onCost?.(cost, 5);
-        checkLine(600, formatUsd(cost.estimatedUsd));
+        checkLine(
+          600,
+          `$${cost.estimatedUsdRange!.min.toFixed(2)}–$${cost.estimatedUsdRange!.max!.toFixed(2)}`,
+        );
         return dependencyResult();
       },
     });
@@ -547,7 +555,7 @@ describe("scan dependencies CLI", () => {
         expect(stderr.text()).toContain("Tool running: rg synthetic .");
       } else {
         expect(stderr.text()).not.toContain("Discovering");
-        expect(stderr.text()).not.toContain("Matching");
+        expect(stderr.text()).not.toContain("Matching 1/2");
         expect(stderr.text()).not.toContain("rg synthetic");
       }
     },
@@ -1296,6 +1304,28 @@ describe("scan dependencies CLI", () => {
       );
       expect(stderr.text()).toContain('"dependencies"');
     },
+  );
+});
+
+test("shows advisory facts before assessment and names inconclusive outcomes at completion", async () => {
+  const result = dependencyResult();
+  addMatch(result);
+  result.assessments[0]!.verdict = "needs_review";
+  const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+  const deps = dependencies({
+    onScanDependencies: async (options) => {
+      options.onInventory?.(result);
+      expect(stderr.text()).toContain("synthetic-package@1.0.0");
+      expect(stderr.text()).toContain("SYNTHETIC-ADVISORY-1");
+      expect(stderr.text()).toContain("candidate fixes: 1.0.1");
+      expect(stderr.text()).not.toContain("Assessment outcomes:");
+      return result;
+    },
+  });
+  expect(await runCli(["scan", "dependencies", "--json"], deps)).toBe(0);
+  expect(JSON.parse(stdout.text())).toEqual(result);
+  expect(stderr.text()).toContain(
+    "0 confirmed, 0 not actionable, 1 inconclusive",
   );
 });
 

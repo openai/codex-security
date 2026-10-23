@@ -2821,25 +2821,52 @@ cs scan dependencies . --auth api-key --json \
 
 The repository defaults to the current directory. Output defaults to a persistent
 per-run directory under the Codex Security state's `dependencies` directory.
-`--output-dir` must select a new or empty directory outside the repository and
+`--output-dir` selects a new or empty directory, or continues unfinished
+assessments in an existing dependency run. It must be outside the repository and
 its enclosing Git worktree; existing output directories must be private to you
 on macOS and Linux. The command reports the artifact directory in its result.
 These are standalone dependency artifacts; they are not registered in source
 scan history.
+
+To continue after a budget stop, use the reported artifact directory and choose
+a cumulative budget that includes the earlier attempt:
+
+```bash
+cs scan dependencies . --output-dir /path/outside/repository/dependency-results --max-cost 10
+```
+
+Continuation retains completed assessments and scanner facts, and retries only
+unfinished or failed assessments. If matching was incomplete and every recorded
+advisory has already been assessed, start a new run in a new output directory to
+repeat matching. Continuation verifies the original source snapshot
+(including dirty and ignored files), model, reasoning effort, other native
+`model_*` settings (such as verbosity and context limits), provider,
+developer, model, and compaction instructions (including selected file paths
+and contents), and assessment skill before updating results.
+A changed branch or source requires
+restoring the original source or starting a new run. A completed run, a legacy
+run without a continuation checkpoint, or an unrelated nonempty directory is
+not reusable. Omit `--output-dir` or choose a new directory to refresh advisory
+matching. The command rejects concurrent use of the same artifact directory.
+With `--max-cost`, assessment stops if the latest usage cannot be verified,
+even when earlier cost estimates are available. Completed results remain saved.
+If earlier model usage is unavailable, a cost-limited continuation cannot
+verify cumulative spend and is rejected; without a limit its total cost remains
+explicitly unavailable.
 
 Compatibility: `cs scan dependencies` now selects this command. To run a source
 scan on a directory named `dependencies`, use `cs scan ./dependencies`.
 
 ### Dependency command options
 
-| Options                                                                                   | Behavior                                                                                                                             |
-| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `-c`, `--config FILE`                                                                     | Load supported project settings; configured paths remain relative to the configuration file.                                         |
-| `--auth auto\|chatgpt\|api-key`, `--model MODEL`, `--effort LEVEL`, `--provider PROVIDER` | Reuse scan authentication and model settings. Authentication defaults to `auto`; model and effort retain the existing scan defaults. |
-| `--codex KEY=VALUE`, `--plugin-path PATH`, `--python PATH`                                | Reuse the existing Codex and plugin runtime configuration. `--codex` can be repeated.                                                |
-| `--output-dir PATH`, `--max-cost USD`                                                     | Choose the artifact directory and optional assessment cost limit. No cost limit is added by default.                                 |
-| `--verbose`, `--show-cost`                                                                | Log timestamped milestones and Codex activity, or show estimated model cost. A cost limit also enables cost display.                 |
-| `--json`, `--format FORMAT`, `--full-output`                                              | Select structured command output. `--json` is shorthand for `--format json`.                                                         |
+| Options                                                                                   | Behavior                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-c`, `--config FILE`                                                                     | Load supported project settings; configured paths remain relative to the configuration file.                                                              |
+| `--auth auto\|chatgpt\|api-key`, `--model MODEL`, `--effort LEVEL`, `--provider PROVIDER` | Reuse scan authentication and model settings. Authentication defaults to `auto`; model and effort retain the existing scan defaults.                      |
+| `--codex KEY=VALUE`, `--plugin-path PATH`, `--python PATH`                                | Reuse the existing Codex and plugin runtime configuration. `--codex` can be repeated.                                                                     |
+| `--output-dir PATH`, `--max-cost USD`                                                     | Choose a new artifact directory or continue an interrupted run. The optional cumulative cost limit includes prior attempts. No limit is added by default. |
+| `--verbose`, `--show-cost`                                                                | Log timestamped milestones and Codex activity, or show estimated model cost. A cost limit also enables cost display.                                      |
+| `--json`, `--format FORMAT`, `--full-output`                                              | Select structured command output. `--json` is shorthand for `--format json`.                                                                              |
 
 The command supports project `auth`, `codex`, `output.directory`, and
 `limits.max_cost_usd_per_scan` settings. Explicit source-scan settings in the
@@ -2875,14 +2902,19 @@ remain in the saved scanner evidence.
 
 When stderr is a terminal, the command shows a live line with the phase, elapsed
 time, work counts, and time since the last observed event. Matching shows finished
-OSV invocations and failed inputs; assessment shows completed, failed, and queued
-assessments. The current dependency file, package and advisory, or latest Codex
-activity appears when space permits. `--show-cost` or `--max-cost` includes the
-estimated model cost. Cost is unavailable until usage is reported.
+OSV invocations and failed inputs; assessment shows examined, active, failed,
+and queued assessments. Before model work, interactive and verbose output lists
+matched packages, dependency files, advisory severities, candidate fixed
+versions, and locally resolved introduction chains. The current package and
+advisory remain visible when space permits; raw Codex activity is available with
+`--verbose`. `--show-cost` or `--max-cost` includes the estimated model cost
+range. Cost is unavailable until usage is reported. The separate budget is the
+cumulative short-context estimate, not the range's upper bound or a billing cap.
 
 The line reflects observed work, without an estimated completion time. A quiet
 interval does not establish that a scan is stuck. Completed assessments include
-`needs_review` verdicts; failed assessments are counted separately. Saved
+`needs_review` verdicts, shown as inconclusive in outcome summaries; failed and
+unfinished assessments are counted separately. Saved
 `partial` checkpoints do not mean the command has stopped. The final result and
 exit code describe the outcome.
 
@@ -2937,6 +2969,11 @@ remotes also leave package origins unresolved. npm v2/v3 and pnpm v9 lockfiles
 with explicit tarball URLs outside the public npm registry leave those origins
 unresolved.
 
+A Cargo lock entry with no registry source whose name and version match the
+adjacent manifest's own package is recorded as first-party code, separately
+from unresolved dependency origins. Other workspace and path dependencies
+remain unresolved unless their origin can be established.
+
 Advisory matching uses observed package names and versions; it does not establish
 registry origin. Gradle and NuGet locks do not record the selected repository or
 feed, and npm locks can omit resolved URLs. Composer archive URLs identify package
@@ -2955,9 +2992,10 @@ const result = await security.scanDependencies({
   repositoryPath: "/path/to/repository",
   outputDir: "/path/outside/repository/dependencies",
   maxCostUsd: 5, // optional; applies to static model assessment
+  onInventory: (inventory) => console.error(inventory.matches),
   onProgress: (progress) => console.error(progress),
   onActivity: (activity) => console.error(activity.description),
-  onCost: (cost) => console.error(`Estimated cost: $${cost.estimatedUsd}`),
+  onCost: (cost) => console.error(cost.estimatedUsdRange),
 });
 console.log(result.status, result.matches.length, result.outputDir);
 ```
@@ -2965,13 +3003,16 @@ console.log(result.status, result.matches.length, result.outputDir);
 Options also accept the existing `auth` mode and `signal`. Source matching runs
 before model authentication. Zero matches with complete coverage require no
 model call. Model errors preserve the scanner evidence and return `partial`.
+`onInventory` receives a detached checkpoint of scanner and package facts before
+model assessment, including retained facts when continuing a run.
 Optional `onProgress` callbacks receive `DependencyScanProgress` snapshots for
 preparation, discovery, matching, assessment preparation, assessment, and saving.
 Matching counts finished OSV invocations separately from failed inputs;
 selection alone does not count as processed work. Assessment counts advance
 after the result is saved. A `needs_review` verdict is a completed assessment.
 `onActivity` reports observed Codex activity; `onUsage` and `onCost` report model
-usage and estimated cost across assessment turns. `onOutputDirReady` reports
+usage in the current attempt and cumulative estimated cost across assessment
+turns and continued attempts. `onOutputDirReady` reports
 the output directory after its initial checkpoint is saved.
 Activity IDs are scoped to their advisory match, so separate assessment turns
 can be displayed without overwriting earlier activity.
@@ -2980,7 +3021,18 @@ and rejected promises are passed to `onObserverError` without stopping the scan.
 Events are observations, not a durable log or a promise of future progress.
 Use the returned result or interruption error for the terminal outcome; saved
 `partial` checkpoints do not mean a running scan has stopped.
-Each matched advisory gets a separate assessment turn. The SDK saves completed
+Each matched advisory gets a separate assessment turn, ordered by source
+severity with explicit development-only use as a secondary scheduling hint.
+Advisories for the same package occurrence reuse a Codex thread. Each turn reads
+focused evidence instead of the entire component inventory. When available,
+local npm/pnpm package manifests and exact installed versions provide an
+observed introduction chain and a source path, including ignored `node_modules`
+and workspace importers recorded in the lockfile. Update handoffs retain these
+observed chains and their limitations.
+This does not install or execute dependencies, establish a complete graph, or
+prove deployment or attacker reachability. Other ecosystems still use static
+repository evidence and report the automatic source-resolution limitation.
+The SDK saves completed
 assessments before continuing, and an invalid response affects only its match.
 Each assessment retains its originating `threadId` once its Codex thread starts,
 including when that assessment fails. Older saved assessments may omit this
@@ -2988,7 +3040,11 @@ field.
 Retained triage ranks apply within each single-match result; they do not form a
 priority queue across the scan. The recorded skill digest includes the triage
 skill, output schema, and required local assessment references.
-The cost limit applies to the estimated total across assessment turns. It is an
+The cost limit applies to the cumulative short-context estimate, including
+previous attempts when continuing. `model.cost` retains the full token counts
+and available cost range; `model.costUsd` remains the short-context baseline for
+compatibility. Unknown context can make the range higher than that baseline.
+The limit is an
 interruption threshold, not a pre-request billing ceiling; in-flight work can
 exceed it. If source files
 change, assessment stops; earlier results describe the original source and the
@@ -2997,7 +3053,10 @@ Invalid arguments, cancellation, and exceeded budgets use the existing SDK
 errors; interruption errors include the directory containing partial output.
 
 The output directory contains `osv-output.json`, `osv-stderr.log`,
-`sca-result.json`, and `report.md`. The adapter scans each selected lockfile
+`sca-result.json`, and `report.md`, plus `sca-assessment-input.json` for the
+current or most recent model turn. The report places advisory conclusions,
+evidence gaps, and next actions before coverage details and the full inventory.
+The adapter scans each selected lockfile
 sequentially. For multiple inputs it also preserves each invocation's verbatim
 JSON and stderr; `scanner.invocations` records their arguments, exit codes,
 and file paths. `osv-output.json` aggregates source records, while `scanner.argv`

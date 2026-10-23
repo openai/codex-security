@@ -7,6 +7,12 @@ import { withCodexPreflightLock } from "./provider-profile.js";
 import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
 import type { DependencyScanProgress } from "./sca-progress.js";
+import {
+  dependencyAssessmentSummary,
+  dependencyCostSummary,
+  dependencyInventorySummary,
+  prioritizedDependencyMatches,
+} from "./sca-summary.js";
 
 import {
   execFile as execFileCallback,
@@ -7006,13 +7012,22 @@ export async function main(
           "Scans the whole repository. Source scopes, modes, prompts, severity policy, and workflow options are not supported.\n" +
           "Results are separate SCA artifacts: sca-result.json and report.md.\n" +
           "Interactive terminals show live progress; --verbose logs milestones and Codex activity to stderr.\n" +
+          "Repeat --output-dir to continue unfinished assessments of unchanged source; --max-cost includes prior spend.\n" +
           "Incomplete JSON/JSONL --full-output returns ok: false and keeps SCA results under data.\n" +
           "Use codex-security scan ./dependencies to scan a repository named dependencies.",
         destructive: true,
         mcp: false,
         alias: { config: "c" },
         args: SCAN_REPOSITORY_ARGUMENTS,
-        options: z.object(SHARED_SCAN_OPTION_SCHEMAS),
+        options: z.object({
+          ...SHARED_SCAN_OPTION_SCHEMAS,
+          outputDir: SHARED_SCAN_OPTION_SCHEMAS.outputDir.describe(
+            "Artifact directory outside the repository; reuse an interrupted run to continue (default: new directory in Codex Security state).",
+          ),
+          maxCost: SHARED_SCAN_OPTION_SCHEMAS.maxCost.describe(
+            "Stop above this cumulative short-context USD estimate, including earlier attempts; not a billing cap.",
+          ),
+        }),
         output: scanOutputSchema("SCAN_FAILED"),
         async run({ args, options, format, error: incurError }) {
           let outcome: ScanOutcome;
@@ -7253,7 +7268,7 @@ function dependencyProgressDescription(update: DependencyScanProgress): {
         (update.current === null ? 0 : 1);
       const current = update.current;
       return {
-        summary: `Assessing ${update.assessmentsCompleted}/${update.assessmentsTotal}, ${update.assessmentsFailed} failed, ${queued} queued`,
+        summary: `Assessing ${update.assessmentsCompleted}/${update.assessmentsTotal} · ${update.current === null ? 0 : 1} active${update.assessmentsFailed ? ` · ${update.assessmentsFailed} failed` : ""}${queued ? ` · ${queued} queued` : ""}`,
         ...(current === null
           ? {}
           : {
@@ -7286,7 +7301,6 @@ async function runDependencyScan(
   let update: DependencyScanProgress = { phase: "preparing" };
   let cost: Readonly<ScanCost> | null = null;
   let lastObservedAt = dependencies.now();
-  let activity: string | undefined;
   let lastMilestone: string | undefined;
   let stopped = false;
   const removeSignals = listenForAbort(dependencies, controller, (signal) => {
@@ -7303,16 +7317,27 @@ async function runDependencyScan(
       0,
       Math.floor((dependencies.now() - lastObservedAt) / 1_000),
     );
+    const amount = (value: number) => `$${value.toFixed(2)}`;
+    const range = cost?.estimatedUsdRange;
+    const estimate =
+      cost === null
+        ? "n/a"
+        : range === undefined
+          ? amount(cost.estimatedUsd)
+          : range.max === null
+            ? `≥${amount(range.min)}`
+            : range.max === range.min
+              ? amount(range.min)
+              : `${amount(range.min)}–${amount(range.max)}`;
     return diagnosticValue(
       [
-        summary,
+        ...(showCost ? [`est. ${estimate}`] : []),
+        ...(options.maxCostUsd === undefined
+          ? []
+          : [`budget ${amount(options.maxCostUsd)}`]),
         `last event ${seconds}s`,
-        ...(showCost
-          ? [
-              `est. ${cost === null ? "n/a" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`}`,
-            ]
-          : []),
-        activity ?? detail,
+        summary,
+        detail,
       ]
         .filter((part) => part !== undefined)
         .join(" · "),
@@ -7337,6 +7362,10 @@ async function runDependencyScan(
       );
     }
     notify(() => {
+      if ((verbose || progress.interactive) && options.maxCostUsd !== undefined)
+        milestone(
+          `Budget: ${formatUsd(options.maxCostUsd)} of cumulative short-context estimates. Estimated ranges may be higher; this is not a billing cap.`,
+        );
       if (verbose) milestone(dependencyProgressDescription(update).summary);
       if (progress.interactive) progress.startTimer(timerMessage);
     });
@@ -7380,12 +7409,25 @@ async function runDependencyScan(
     result = await security.scanDependencies({
       ...options,
       signal: controller.signal,
+      onInventory: (inventory) =>
+        notify(() => {
+          if (stopped || (!verbose && !progress.interactive)) return;
+          for (const line of dependencyInventorySummary(inventory))
+            milestone(line);
+        }),
       onProgress: (event) =>
         notify(() => {
           if (stopped) return;
           update = event;
           lastObservedAt = dependencies.now();
-          activity = undefined;
+          if (
+            progress.interactive &&
+            event.phase === "assessing" &&
+            event.current === null
+          )
+            milestone(
+              `Assessment: ${event.assessmentsCompleted} examined, ${event.assessmentsInconclusive ?? 0} inconclusive, ${event.assessmentsFailed} failed.`,
+            );
           if (verbose) {
             const { summary, detail } = dependencyProgressDescription(event);
             milestone(
@@ -7401,8 +7443,8 @@ async function runDependencyScan(
             event.kind === "command" || event.kind === "tool"
               ? "Tool"
               : "Codex";
-          activity = `${label} ${event.status}: ${event.description}`;
-          if (verbose) milestone(activity);
+          if (verbose)
+            milestone(`${label} ${event.status}: ${event.description}`);
         }),
       onCost: (estimate) => {
         if (stopped) return;
@@ -7470,6 +7512,31 @@ async function runDependencyScan(
       `Coverage: ${result.coverage.status}\n` +
       `Artifacts: ${result.outputDir}`,
   );
+  for (const line of dependencyInventorySummary(result)) writeDiagnostic(line);
+  writeDiagnostic(
+    `Assessment outcomes: ${dependencyAssessmentSummary(result)}.`,
+  );
+  for (const match of prioritizedDependencyMatches(result)) {
+    const component = result.components.find(
+      (item) => item.id === match.componentId,
+    )!;
+    const assessment = result.assessments.find(
+      (item) => item.matchId === match.id,
+    );
+    const outcome =
+      assessment?.status === "completed"
+        ? assessment.verdict === "needs_review"
+          ? "inconclusive"
+          : assessment.verdict?.replaceAll("_", " ")
+        : assessment?.status === "failed"
+          ? "failed"
+          : "unfinished";
+    writeDiagnostic(
+      `${component.name}@${component.version ?? "unknown"} (${match.advisoryIds.join(", ")}): ${outcome}.`,
+    );
+    if (assessment?.triage)
+      writeDiagnostic(`  Next: ${assessment.triage.recommended_next_step}`);
+  }
   for (const diagnostic of [
     ...result.coverage.limitations,
     ...result.diagnostics,
@@ -7484,7 +7551,7 @@ async function runDependencyScan(
   }
   if (presentation.showCost || options.maxCostUsd !== undefined) {
     writeDiagnostic(
-      `Estimated cost: ${result.model.costUsd === null ? "unavailable" : formatUsd(result.model.costUsd)}`,
+      `Estimated cost: ${dependencyCostSummary(result)}${options.maxCostUsd === undefined ? "" : `; cumulative short-context baseline ${result.model.costUsd === null ? "unavailable" : formatUsd(result.model.costUsd)} / ${formatUsd(options.maxCostUsd)} limit`}`,
     );
   }
   return {
