@@ -2677,6 +2677,11 @@ codex-security verify-fix finding.md --verification-mode static
 `--assess-patch-risk` runs an advisory assessment after patching. Human-readable
 output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
+Saved-scan patch flows stop automatic assessment or publication if the selected
+path is no longer a directory or points to a different location after patching.
+Supplied-issue flows can continue from the captured repository root when a patch
+removes the caller's subdirectory. Both flows preserve the selected Git context;
+local edits remain available for review.
 The assessment does not change the patch or merge state.
 
 Post-patch Git snapshots, including initialized submodules, use the patch's

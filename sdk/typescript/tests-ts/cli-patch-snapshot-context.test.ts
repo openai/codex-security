@@ -697,9 +697,31 @@ test.each([
     expect(snapshots).toBeGreaterThan(0);
     expect(trees).toHaveLength(2);
     expect(trees[1]).toBe(trees[0]);
-    if (filtered)
-      for (const binding of bindings)
-        expect(binding).toHaveProperty(selector, environment[selector]);
+    if (filtered) {
+      const alternates = (value: string | undefined) =>
+        execFileSync("git", ["count-objects", "-v"], {
+          cwd: repository,
+          env: { ...environment, GIT_ALTERNATE_OBJECT_DIRECTORIES: value },
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+          .split("\n")
+          .filter((line) => line.startsWith("alternate: "));
+      const expectedAlternates =
+        selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+          ? alternates(environment[selector])
+          : undefined;
+      if (expectedAlternates !== undefined)
+        expect(expectedAlternates.length).toBeGreaterThan(0);
+      for (const binding of bindings) {
+        if (expectedAlternates === undefined)
+          expect(binding).toHaveProperty(selector, environment[selector]);
+        else {
+          expect(binding).toHaveProperty(selector);
+          expect(alternates(binding[selector])).toEqual(expectedAlternates);
+        }
+      }
+    }
   },
   nativeSnapshotTimeout,
 );

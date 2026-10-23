@@ -461,10 +461,12 @@ for (const linked of [false, true]) {
       const originalLink = linked ? await readlink(marker) : undefined;
       const index = await readFile(join(selected.root, ".git", "index"));
       const source = `
+import { test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { runGitRepositoryCommand, runWorkflow } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
 const root = ${JSON.stringify(selected.root)};
+test("bounded Git marker probe", async () => {
 let launches = 0;
 process.stdout.write("PROBE_READY\\n");
 const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
@@ -478,22 +480,25 @@ const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
   },
 });
 process.stdout.write(JSON.stringify({ launches, ...outcome }));
+}, 30_000);
 `;
-      const script = join(support, "probe.mts");
+      const script = join(support, "probe.test.ts");
       await writeFile(script, source);
       // Keep a regression in marker probing from hanging the test runner itself.
-      const result = spawnSync(process.execPath, [script], {
+      const result = spawnSync(process.execPath, ["test", script], {
         cwd: selected.root,
         encoding: "utf8",
         timeout: 10_000,
         killSignal: "SIGKILL",
       });
-      expect(result.stdout).toStartWith("PROBE_READY\n");
+      const readyMarker = "PROBE_READY\n";
+      const readyOffset = result.stdout.indexOf(readyMarker);
+      expect(readyOffset, result.stderr).toBeGreaterThanOrEqual(0);
       expect(result.error, result.stderr).toBeUndefined();
       expect(result.status, result.stderr).toBe(0);
       const outcome: Awaited<ReturnType<typeof runWorkflow>> & {
         launches: number;
-      } = JSON.parse(result.stdout.slice("PROBE_READY\n".length));
+      } = JSON.parse(result.stdout.slice(readyOffset + readyMarker.length));
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(outcome.launches).toBe(1);
       expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);

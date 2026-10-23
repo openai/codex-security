@@ -1892,6 +1892,7 @@ describe("skill authentication", () => {
         await stderr.run(
           [command, "Synthetic issue", "--auth", "api-key"],
           dependencies({
+            currentDirectory: stateDirectory,
             manualCodexPreparation: true,
             onCodex: (_args, output, environment, input) =>
               runCodexSkillCommand(
