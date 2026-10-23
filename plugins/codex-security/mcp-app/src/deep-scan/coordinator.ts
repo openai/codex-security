@@ -27,12 +27,11 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
-  boundedDeepScanErrorPair,
   confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
@@ -434,7 +433,7 @@ export class DeepScanCoordinator {
         error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
-      const persistedMessage = boundedDeepScanErrorMessage(error);
+      const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete) {
         this.log({
           event: "setup_failed",
@@ -519,16 +518,10 @@ export class DeepScanCoordinator {
           try {
             await this.options.onStopped(current);
           } catch (error) {
-            const publicationFailure = boundedDeepScanErrorMessage(
-              `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
-            );
+            const publicationFailure = `Saved result publication failed: ${deepScanErrorMessage(error)}`;
             const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
-              ? boundedDeepScanErrorPair(
-                  publicationFailure,
-                  "\nOriginal Deep Scan failure:\n",
-                  originalFailure,
-                )
+              ? `${publicationFailure}\nOriginal Deep Scan failure:\n${originalFailure}`
               : publicationFailure;
             const localState = {
               ...this.state,
