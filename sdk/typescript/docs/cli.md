@@ -2780,6 +2780,11 @@ for `patch`. Omit it or use `--verification-mode standard` for the default check
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
+Authentication and execution failures print diagnostics on stderr and return
+`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message` with `--json`
+or `--format jsonl`. With JSON/JSONL `--full-output`, failures use an `ok: false`
+error envelope. Other formats retain stderr-only failures. Interruptions retain
+exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 

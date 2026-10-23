@@ -34,6 +34,7 @@
 - allow readable interactive verification results ([#1836](https://github.com/openai/codex-security/pull/1836))
 - upgrade Codex and preserve oversized MCP recovery ([#1879](https://github.com/openai/codex-security/pull/1879))
 - normalize location paths before deduplicating ([#1867](https://github.com/openai/codex-security/pull/1867))
+- report verification failures in structured output ([#1835](https://github.com/openai/codex-security/pull/1835))
 
 <!-- release-section: highlights:end -->
 
