@@ -2917,6 +2917,25 @@ The extraction root is not enforced.
         )
         self.assertNotIn("relatedLocations", result)
 
+    def test_sarif_deduplicates_dot_prefixed_location_paths(self) -> None:
+        sarif_finding = self.sarif_finding("fingerprint")
+        sarif_finding["locations"] = [{"path": "./src/write.py", "startLine": 30, "role": "sink"}]
+        sarif_finding["codeEvidence"] = [
+            {
+                "id": "duplicate-sink",
+                "label": "Duplicate sink",
+                "path": "src/write.py",
+                "startLine": 30,
+                "code": "write(user_input)",
+                "explanation": "Already present in locations.",
+            }
+        ]
+
+        result = FINALIZER._sarif_result(sarif_finding, 0)
+
+        self.assertEqual(len(result["locations"]), 1)
+        self.assertEqual(result["locations"][0]["message"], {"text": "sink"})
+
     @pytest.mark.cross_platform
     def test_sarif_includes_legacy_code_evidence_locations(self) -> None:
         sarif_finding = self.sarif_finding("fingerprint")

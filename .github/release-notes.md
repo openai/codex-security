@@ -33,6 +33,7 @@
 - keep saved-results source within import limit ([#1891](https://github.com/openai/codex-security/pull/1891))
 - allow readable interactive verification results ([#1836](https://github.com/openai/codex-security/pull/1836))
 - upgrade Codex and preserve oversized MCP recovery ([#1879](https://github.com/openai/codex-security/pull/1879))
+- normalize location paths before deduplicating ([#1867](https://github.com/openai/codex-security/pull/1867))
 
 <!-- release-section: highlights:end -->
 
