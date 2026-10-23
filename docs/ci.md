@@ -2,11 +2,11 @@
 
 The `node-ci` workflow selects checks from the complete pull request diff. An
 ordinary documentation-only change runs static checks and the final `ci` gate.
-Plugin skills, references, schemas, examples, and unrecognized paths still run
-source qualification: plugin Markdown is part of the product. SDK README and
-documentation changes also run source qualification because those files are
+Plugin skills, references, schemas, examples, and unrecognized paths receive
+full qualification: plugin Markdown is part of the product. SDK README and
+documentation changes also receive full qualification because those files are
 required package contents; deleting or renaming them must pass archive checks.
-`RELEASING.md` also runs source qualification because SDK tests validate its
+`RELEASING.md` also receives full qualification because SDK tests validate its
 canonical release recovery example.
 
 Source changes run the complete SDK suite on Linux, macOS, and Windows, plus
@@ -15,12 +15,19 @@ are discovered from the source tree, including new files without timing data.
 Platform-specific filesystem, credential, process, cancellation, and resumed
 worker cases remain enabled.
 
-Ordinary pull requests test the minimum supported Node 22, 24, and 26 versions,
+Pull requests limited to `.ts` files under `sdk/typescript/src/`,
+`sdk/typescript/tests-ts/`, `plugins/codex-security/mcp-app/src/`, and
+`plugins/codex-security/mcp-app/tests/`, optionally mixed with ordinary docs,
+use reduced version matrices. They test the minimum Node 22, 24, and 26 versions,
 current Node 24 for the Action adapter, macOS installation, and Windows Node 22
-installation. Node dependencies, build tooling, native code, and CI changes also
-select current Node 26 and Windows Node 24 installation checks. Python runs the
-full suite on 3.12 and the native subsets on macOS and Windows; Python source,
-dependencies, schema, or CI changes also select the 3.10 and 3.14 Linux suites.
+installation. Python runs the full suite on 3.12 and the native subsets on macOS
+and Windows. All source changes still select container validation.
+
+Every other path selects full qualification, including workflow checks,
+containers, current Node 26, Windows Node 24 installation, and Python 3.10 and
+3.14 Linux suites. This includes dependency configuration such as `.npmrc` and
+`pnpm-workspace.yaml`, build tooling, Python and native code, and unknown paths
+even when mixed with ordinary source or documentation.
 
 Every push to `main`, nightly run, manual `node-ci` dispatch, and pull-request
 retarget runs the complete version matrices. Release automation still requires

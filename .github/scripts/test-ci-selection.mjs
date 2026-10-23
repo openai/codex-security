@@ -7,11 +7,76 @@ import { failedChecks } from "./check-ci-results.mjs";
 const select = (paths, options = {}) =>
   selectChecks(paths, { event: "pull_request", ...options });
 
+const regularSource = {
+  "source-required": "true",
+  "workflow-quality": "false",
+  "container-validate": "true",
+  "compatibility-matrix": JSON.stringify({
+    include: [
+      { os: "ubuntu-latest", node: "22.13.0" },
+      { os: "ubuntu-latest", node: "24.0.0" },
+      { os: "ubuntu-latest", node: "24" },
+      { os: "ubuntu-latest", node: "26.0.0" },
+      { os: "macos-latest", node: "22.13.0" },
+    ],
+  }),
+  "python-matrix": JSON.stringify({
+    include: [
+      { os: "ubuntu-latest", python: "3.12", markers: "" },
+      {
+        os: "macos-latest",
+        python: "3.12",
+        markers: "cross_platform or native_macos",
+      },
+      {
+        os: "windows-latest",
+        python: "3.12",
+        markers: "cross_platform or native_windows",
+      },
+    ],
+  }),
+  "windows-node-matrix": JSON.stringify({ node: ["22.13.0"] }),
+};
+const fullQualification = {
+  "source-required": "true",
+  "workflow-quality": "true",
+  "container-validate": "true",
+  "compatibility-matrix": JSON.stringify({
+    include: [
+      { os: "ubuntu-latest", node: "22.13.0" },
+      { os: "ubuntu-latest", node: "24.0.0" },
+      { os: "ubuntu-latest", node: "24" },
+      { os: "ubuntu-latest", node: "26.0.0" },
+      { os: "ubuntu-latest", node: "26" },
+      { os: "macos-latest", node: "22.13.0" },
+    ],
+  }),
+  "python-matrix": JSON.stringify({
+    include: [
+      { os: "ubuntu-latest", python: "3.10", markers: "" },
+      { os: "ubuntu-latest", python: "3.12", markers: "" },
+      { os: "ubuntu-latest", python: "3.14", markers: "" },
+      {
+        os: "macos-latest",
+        python: "3.12",
+        markers: "cross_platform or native_macos",
+      },
+      {
+        os: "windows-latest",
+        python: "3.12",
+        markers: "cross_platform or native_windows",
+      },
+    ],
+  }),
+  "windows-node-matrix": JSON.stringify({ node: ["22.13.0", "24"] }),
+};
+
 test("only ordinary documentation can skip source qualification", () => {
-  assert.equal(
-    select(["README.md", "docs/bedrock.md"])["source-required"],
-    "false",
-  );
+  assert.deepEqual(select(["README.md", "docs/bedrock.md"]), {
+    ...regularSource,
+    "source-required": "false",
+    "container-validate": "false",
+  });
   for (const path of [
     "plugins/codex-security/skills/security-scan/SKILL.md",
     "plugins/codex-security/references/core-scan.md",
@@ -39,8 +104,7 @@ test("packaged SDK documentation keeps package validation selected", () => {
   for (const file of manifest.files.filter((file) => file.endsWith(".md"))) {
     const path = `sdk/typescript/${file}`;
     const selected = select([path]);
-    assert.equal(selected["source-required"], "true", path);
-    assert.equal(selected["container-validate"], "true", path);
+    assert.deepEqual(selected, fullQualification, path);
   }
   // The --no-renames diff reports the old path when a required doc is renamed.
   const renamed = select([
@@ -57,7 +121,7 @@ test("packaged SDK documentation keeps package validation selected", () => {
 test("release recovery documentation keeps its SDK contract selected", () => {
   for (const paths of [["RELEASING.md"], ["README.md", "RELEASING.md"]]) {
     const outputs = select(paths);
-    assert.equal(outputs["source-required"], "true");
+    assert.deepEqual(outputs, fullQualification);
     // release-automation.test.ts validates the documented recovery marker.
     const missing = failedChecks({
       "classify-changes": { result: "success", outputs },
@@ -74,83 +138,78 @@ test("release helper changes select their release-progress regression checks", (
   );
 });
 
-test("regular PRs retain supported Node minimums, current Action runtime and native Python coverage", () => {
-  const selected = select(["sdk/typescript/src/cost.ts"]);
-  assert.deepEqual(JSON.parse(selected["compatibility-matrix"]).include, [
-    { os: "ubuntu-latest", node: "22.13.0" },
-    { os: "ubuntu-latest", node: "24.0.0" },
-    { os: "ubuntu-latest", node: "24" },
-    { os: "ubuntu-latest", node: "26.0.0" },
-    { os: "macos-latest", node: "22.13.0" },
-  ]);
-  assert.deepEqual(JSON.parse(selected["windows-node-matrix"]).node, [
-    "22.13.0",
-  ]);
-  assert.deepEqual(
-    JSON.parse(selected["python-matrix"]).include.map(({ os, python }) => [
-      os,
-      python,
-    ]),
-    [
-      ["ubuntu-latest", "3.12"],
-      ["macos-latest", "3.12"],
-      ["windows-latest", "3.12"],
-    ],
-  );
+test("ordinary TypeScript source and tests retain the reduced version matrices", () => {
+  for (const path of [
+    "sdk/typescript/src/cost.ts",
+    "sdk/typescript/tests-ts/skeleton.test.ts",
+    "sdk/typescript/tests-ts/support/test-subprocess.ts",
+    "plugins/codex-security/mcp-app/src/stdio-transport.ts",
+    "plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
+    "plugins/codex-security/mcp-app/tests/support/fixture.ts",
+  ]) {
+    assert.deepEqual(select([path]), regularSource, path);
+    assert.deepEqual(select(["README.md", path]), regularSource, path);
+  }
 });
 
-test("runtime and Python build inputs expand the corresponding version matrix", () => {
+test("unknown paths and dependency configuration receive full qualification", () => {
+  for (const paths of [
+    ["new-runtime/file"],
+    ["sdk/typescript/src/new-runtime.json"],
+    ["sdk/typescript/src/runtime.mjs"],
+    ["sdk/typescript/tests-ts/runtime.mts"],
+    ["sdk/typescript/src-extra/runtime.ts"],
+    ["plugins/codex-security/mcp-app/src/runtime.yaml"],
+    ["plugins/codex-security/mcp-app/main.ts"],
+    ["other/sdk/typescript/src/runtime.ts"],
+    [".npmrc"],
+    ["sdk/typescript/.npmrc"],
+    ["plugins/codex-security/mcp-app/src/.npmrc"],
+    ["pnpm-workspace.yaml"],
+    ["sdk/typescript/pnpm-workspace.yaml"],
+    ["plugins/codex-security/mcp-app/pnpm-workspace.yaml"],
+    ["evals/triage-finding/pnpm-workspace.yaml"],
+    ["README.md", "new-runtime/file"],
+    ["sdk/typescript/src/cost.ts", "new-runtime/file"],
+    // --no-renames reports both sides when source becomes an unknown input.
+    ["sdk/typescript/src/runtime.ts", "new-runtime/runtime.ts"],
+    ["sdk/typescript/src/runtime.ts", "sdk/typescript/.npmrc"],
+  ]) {
+    assert.deepEqual(select(paths), fullQualification, paths.join(", "));
+  }
+});
+
+test("tooling and non-TypeScript product inputs receive full qualification", () => {
   for (const path of [
     "package.json",
     "sdk/typescript/pnpm-lock.yaml",
+    "sdk/typescript/bunfig.toml",
+    "sdk/typescript/tsconfig.json",
     "plugins/codex-security/native/src/lib.rs",
     "sdk/typescript/scripts/build-plugin.mjs",
     ".github/workflows/node-ci.yml",
-  ]) {
-    const selected = select([path]);
-    assert.equal(
-      JSON.parse(selected["compatibility-matrix"]).include.length,
-      6,
-      path,
-    );
-    assert.equal(
-      JSON.parse(selected["windows-node-matrix"]).node.length,
-      2,
-      path,
-    );
-  }
-  for (const path of [
     "plugins/codex-security/scripts/workbench_db.py",
     "plugins/codex-security/tests/test_database.py",
     "plugins/codex-security/requirements-test.txt",
     "plugins/codex-security/pyproject.toml",
     "plugins/codex-security/schemas/finding.schema.json",
+    "plugins/codex-security/skills/security-scan/SKILL.md",
     ".github/actions/setup-tools/action.yml",
   ]) {
-    assert.equal(
-      JSON.parse(select([path])["python-matrix"]).include.length,
-      5,
-      path,
-    );
+    assert.deepEqual(select([path]), fullQualification, path);
   }
 });
 
-test("main, scheduled, manual and retargeted qualification use full matrices", () => {
+test("main, scheduled, manual, empty and retargeted changes receive full qualification", () => {
   for (const options of [
     { event: "push" },
     { event: "schedule" },
     { event: "workflow_dispatch" },
     { baseChanged: true },
   ]) {
-    const selected = select(["README.md"], options);
-    assert.equal(selected["source-required"], "true");
-    assert.equal(
-      JSON.parse(selected["compatibility-matrix"]).include.length,
-      6,
-    );
-    assert.equal(JSON.parse(selected["windows-node-matrix"]).node.length, 2);
-    assert.equal(JSON.parse(selected["python-matrix"]).include.length, 5);
+    assert.deepEqual(select(["README.md"], options), fullQualification);
   }
+  assert.deepEqual(select([]), fullQualification);
 });
 
 test("the final gate rejects every missing or unsuccessful selected check", () => {
