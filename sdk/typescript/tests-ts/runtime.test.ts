@@ -43,7 +43,7 @@ import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -3323,9 +3323,88 @@ describe("runtime directories and plugin Python boundary", () => {
         new URL("../src/runtime.ts", import.meta.url).href,
         join(root, "state"),
       ],
-      { timeout: 25_000, windowsHide: true },
+      { timeout: 120_000, windowsHide: true },
     );
-  });
+  }, 125_000);
+
+  test("credential-lock fixture tolerates slow holder and legacy startup", async () => {
+    const root = await temporaryDirectory();
+    const runtime = join(root, "delayed-runtime.mjs");
+    await writeFile(
+      runtime,
+      `export * from ${JSON.stringify(new URL("../src/runtime.ts", import.meta.url).href)};
+       // Exceed the old holder lifetime and allow a heartbeat during legacy startup.
+       const mode = process.argv[4];
+       if (mode === "hold" || mode === "legacy") {
+         await new Promise(resolve => setTimeout(resolve, mode === "hold" ? 21_000 : 6_000));
+       }
+      `,
+    );
+    await promisify(execFile)(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
+        ),
+        pathToFileURL(runtime).href,
+        join(root, "state"),
+      ],
+      { timeout: 120_000, windowsHide: true },
+    );
+  }, 125_000);
+
+  test("credential-lock fixture diagnoses an owner exit during legacy startup", async () => {
+    const root = await temporaryDirectory();
+    const runtime = join(root, "exiting-runtime.mjs");
+    const runtimeUrl = JSON.stringify(
+      new URL("../src/runtime.ts", import.meta.url).href,
+    );
+    await writeFile(
+      runtime,
+      `export * from ${runtimeUrl};
+       import { acquireCodexSecurityCredentialHomeLock as acquire } from ${runtimeUrl};
+       import { existsSync } from "node:fs";
+       import { writeFile } from "node:fs/promises";
+       import { join } from "node:path";
+       import { once } from "node:events";
+       const exitMarker = join(process.argv[3], "exit-holder");
+       export async function acquireCodexSecurityCredentialHomeLock(...args) {
+         const release = await acquire(...args);
+         if (process.argv[4] === "hold") {
+           setInterval(() => {
+             if (existsSync(exitMarker)) process.exit(23);
+           }, 25);
+         }
+         return release;
+       }
+       if (process.argv[4] === "legacy") {
+         // Coordinate an explicit exit: Windows reports external termination as
+         // an exit code instead of a Unix signal.
+         await writeFile(exitMarker, "exit");
+         // Stay in startup until the parent notices the owner exit and cleans up.
+         process.stdin.resume();
+         await once(process.stdin, "end");
+       }
+      `,
+    );
+    await expect(
+      promisify(execFile)(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
+          ),
+          pathToFileURL(runtime).href,
+          join(root, "state"),
+        ],
+        { timeout: 120_000, windowsHide: true },
+      ),
+    ).rejects.toMatchObject({
+      stderr: expect.stringMatching(
+        /Credential-lock holder exited during legacy contender startup.*code=23, signal=null, watchdog=false/,
+      ),
+    });
+  }, 125_000);
 
   test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
     const root = await temporaryDirectory();
