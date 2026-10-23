@@ -178,8 +178,6 @@ export interface SecurityPolicyDraft
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = "policy-draft.json";
 const ORIGINAL_NAME = "previous-SECURITY.md";
-// This is the input contract enforced by the resolve-security-md helper.
-const MAX_SECURITY_MD_BYTES = 1024 * 1024;
 // The define-security-policy skill asks at most three questions at once.
 const OWNER_QUESTION_BATCH_SIZE = 3;
 
@@ -262,21 +260,7 @@ async function readPolicyFile(
         `Security policy must not be a hard-linked file: ${path}. Copy it to a separate file.`,
       );
     }
-    validatePolicySize(metadata.size);
-    const bytes = Buffer.allocUnsafe(MAX_SECURITY_MD_BYTES + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const { bytesRead } = await file.read(
-        bytes,
-        length,
-        bytes.length - length,
-        null,
-      );
-      if (bytesRead === 0) break;
-      length += bytesRead;
-    }
-    validatePolicySize(length);
-    return decodePolicyText(bytes.subarray(0, length), path);
+    return decodePolicyText(await file.readFile(), path);
   } finally {
     await file.close();
   }
@@ -1051,16 +1035,6 @@ function validatePolicyContent(
   if (!content.isWellFormed()) {
     throw new CodexSecurityError(
       `The ${stage === "policy" ? "security policy" : stage.replace("_", " ")} must contain valid Unicode text.`,
-    );
-  }
-  if (stage === "policy")
-    validatePolicySize(Buffer.byteLength(content, "utf8"));
-}
-
-function validatePolicySize(size: number): void {
-  if (size > MAX_SECURITY_MD_BYTES) {
-    throw new CodexSecurityError(
-      "SECURITY.md exceeds the policy resolver's 1 MiB limit.",
     );
   }
 }

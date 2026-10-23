@@ -1,3 +1,4 @@
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
@@ -48,7 +49,10 @@ function severity(value: unknown): string {
     : "unknown";
 }
 
-function codeScanningFinding(record: Record<string, unknown>): ExternalFinding {
+function codeScanningFinding(
+  record: Record<string, unknown>,
+  target: ExternalImportTarget = "cloud",
+): ExternalFinding {
   const repository = repositoryName(record["repository"]);
   const alert = object(record["alert"]);
   const number = record["number"];
@@ -104,43 +108,51 @@ function codeScanningFinding(record: Record<string, unknown>): ExternalFinding {
   const sourceId = `${host}/${repository.toLowerCase()}/code-scanning/${number}/${hash("sha256", ref)}`;
   return {
     source_finding_id: sourceId,
-    evidence: validateExternalEvidence({
-      title:
-        text(rule?.["name"]) ??
-        text(rule?.["description"]) ??
-        `GitHub code-scanning alert #${number}`,
-      severity: severity(rule?.["security_severity_level"]),
-      description:
-        [...new Set([message, description].filter(Boolean))].join("\n\n") ||
-        null,
-      url,
-      locations: path ? [{ path, line: location?.["start_line"] ?? null }] : [],
-      branch: ref,
-      code_revision: text(instance?.["commit_sha"]),
-      source_updated_at: sourceTimestamp(alert["updated_at"]),
-      source_data: record,
-      details: {
-        kind: "sast",
-        repository: {
-          url: `${origin}/${repository}`,
-          name: repository,
+    evidence: validateExternalEvidence(
+      {
+        title:
+          text(rule?.["name"]) ??
+          text(rule?.["description"]) ??
+          `GitHub code-scanning alert #${number}`,
+        severity: severity(rule?.["security_severity_level"]),
+        description:
+          [...new Set([message, description].filter(Boolean))].join("\n\n") ||
+          null,
+        url,
+        locations: path
+          ? [{ path, line: location?.["start_line"] ?? null }]
+          : [],
+        branch: ref,
+        code_revision: text(instance?.["commit_sha"]),
+        source_updated_at: sourceTimestamp(alert["updated_at"]),
+        source_data: record,
+        details: {
+          kind: "sast",
+          repository: {
+            url: `${origin}/${repository}`,
+            name: repository,
+          },
+          // Dismissal covers every branch; detection state belongs to the selected ref.
+          source_status:
+            alert["state"] === "dismissed"
+              ? "dismissed"
+              : (text(instance?.["state"]) ?? text(alert["state"])),
+          scanner_origin: text(tool?.["name"]),
+          rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
+          weakness_ids: weaknessIds,
+          remediation_instructions: text(rule?.["help"]),
+          code: path ? { end_line: location?.["end_line"] ?? null } : null,
         },
-        // Dismissal covers every branch; detection state belongs to the selected ref.
-        source_status:
-          alert["state"] === "dismissed"
-            ? "dismissed"
-            : (text(instance?.["state"]) ?? text(alert["state"])),
-        scanner_origin: text(tool?.["name"]),
-        rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
-        weakness_ids: weaknessIds,
-        remediation_instructions: text(rule?.["help"]),
-        code: path ? { end_line: location?.["end_line"] ?? null } : null,
       },
-    }),
+      target,
+    ),
   };
 }
 
-function advisoryFinding(record: Record<string, unknown>): ExternalFinding {
+function advisoryFinding(
+  record: Record<string, unknown>,
+  target: ExternalImportTarget = "cloud",
+): ExternalFinding {
   const repository = repositoryName(record["repository"]);
   const advisory = object(record["advisory"]);
   const id = text(record["ghsaId"]);
@@ -212,40 +224,46 @@ function advisoryFinding(record: Record<string, unknown>): ExternalFinding {
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
     source_finding_id: `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`,
-    evidence: validateExternalEvidence({
-      title: text(advisory["summary"]) ?? id,
-      severity: severity(advisory["severity"]),
-      description: text(advisory["description"]),
-      url,
-      advisory_ids: [...new Set(advisoryIds)],
-      packages,
-      source_updated_at: sourceTimestamp(advisory["updated_at"]),
-      source_data: record,
-      details: {
-        kind: "advisory",
-        advisory: { source: selection },
-        ...(selection === "repository"
-          ? {
-              repository: {
-                url: `${origin}/${repository}`,
-                name: repository,
-              },
-            }
-          : {}),
-        source_status: text(advisory["withdrawn_at"])
-          ? "withdrawn"
-          : (text(advisory["state"]) ??
-            (selection === "global" ? "published" : null)),
-        scanner_origin: "GitHub Security Advisories",
-        weakness_ids: cwes
-          .map((value) => text(object(value)?.["cwe_id"]))
-          .filter((value): value is string => value !== null),
+    evidence: validateExternalEvidence(
+      {
+        title: text(advisory["summary"]) ?? id,
+        severity: severity(advisory["severity"]),
+        description: text(advisory["description"]),
+        url,
+        advisory_ids: [...new Set(advisoryIds)],
+        packages,
+        source_updated_at: sourceTimestamp(advisory["updated_at"]),
+        source_data: record,
+        details: {
+          kind: "advisory",
+          advisory: { source: selection },
+          ...(selection === "repository"
+            ? {
+                repository: {
+                  url: `${origin}/${repository}`,
+                  name: repository,
+                },
+              }
+            : {}),
+          source_status: text(advisory["withdrawn_at"])
+            ? "withdrawn"
+            : (text(advisory["state"]) ??
+              (selection === "global" ? "published" : null)),
+          scanner_origin: "GitHub Security Advisories",
+          weakness_ids: cwes
+            .map((value) => text(object(value)?.["cwe_id"]))
+            .filter((value): value is string => value !== null),
+        },
       },
-    }),
+      target,
+    ),
   };
 }
 
-function normalizeRecords(records: readonly unknown[]): ExternalFindings {
+function normalizeRecords(
+  records: readonly unknown[],
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
@@ -258,9 +276,9 @@ function normalizeRecords(records: readonly unknown[]): ExternalFindings {
       if (!record) throw new Error("GitHub finding must be an object.");
       let finding: ExternalFinding;
       if (record["source"] === "github-code-scanning")
-        finding = codeScanningFinding(record);
+        finding = codeScanningFinding(record, target);
       else if (record["source"] === "github-security-advisory")
-        finding = advisoryFinding(record);
+        finding = advisoryFinding(record, target);
       else
         throw new Error(
           "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
@@ -286,24 +304,30 @@ function normalizeRecords(records: readonly unknown[]): ExternalFindings {
 /** Map selected code-scanning instances while retaining complete upstream evidence. */
 export function normalizeGitHubCodeScanningAlerts(
   alerts: readonly ImportedGitHubCodeScanningAlert[],
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(alerts);
+  return normalizeRecords(alerts, target);
 }
 
 /** Map advisory disclosures without asserting an installed vulnerable dependency. */
 export function normalizeGitHubAdvisories(
   advisories: readonly ImportedGitHubAdvisory[],
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(advisories);
+  return normalizeRecords(advisories, target);
 }
 
 /** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */
 export async function readGitHubFindings(
   path: string,
+  target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
   try {
     const payload = parseJsonOrJsonl(await readScannerText(path));
-    return normalizeRecords(Array.isArray(payload) ? payload : [payload]);
+    return normalizeRecords(
+      Array.isArray(payload) ? payload : [payload],
+      target,
+    );
   } catch (cause) {
     throw new CodexSecurityError(
       `Could not read GitHub findings as UTF-8 JSON or JSONL: ${errorMessage(cause)}`,

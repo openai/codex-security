@@ -353,7 +353,7 @@ export async function importScan(
         "fail-scan",
         "--scan-id",
         activeScan.id,
-        `--message=${errorMessage(error).slice(0, 2400)}`,
+        `--message=${errorMessage(error)}`,
       ]).catch(() => undefined);
     }
     if (signal?.aborted) {

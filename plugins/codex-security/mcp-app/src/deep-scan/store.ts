@@ -7,7 +7,7 @@ import { parseDeepScan, parseWorker } from "./response.js";
 
 export { parseDeepScan };
 import {
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
   DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
@@ -66,7 +66,7 @@ class DeepScanPersistenceError extends Error {
     const operation = args[0] ?? "unknown";
     const scanId = argumentValue(args, "--scan-id");
     const workerId = argumentValue(args, "--worker-id");
-    const diagnostic = boundedDeepScanErrorMessage(error);
+    const diagnostic = deepScanErrorMessage(error);
     super(
       `Deep Scan persistence operation ${operation} failed after ${attempts} attempts` +
         `${scanId ? ` for scan ${scanId}` : ""}` +
@@ -478,7 +478,7 @@ export class WorkbenchDeepScanStore {
               signal: failure.signal,
               killed: failure.killed,
               timeoutMs: failure.timeoutMs,
-              error: boundedDeepScanErrorMessage(error),
+              error: deepScanErrorMessage(error),
             }),
           );
           throw failure;

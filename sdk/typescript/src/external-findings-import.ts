@@ -21,7 +21,7 @@ export async function prepareLocalExternalImport(
 ) {
   dependencies.signal?.throwIfAborted();
   const parsed = await abortable(
-    () => readExternalFindings(path, options),
+    () => readExternalFindings(path, options, "local"),
     dependencies.signal,
   );
   const normalizedOptions = {
