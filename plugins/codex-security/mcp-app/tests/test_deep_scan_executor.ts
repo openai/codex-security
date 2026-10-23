@@ -2252,6 +2252,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 "mcp",
                 "server.mjs",
               ),
+              "mcp_servers.cs_artifacts.args.1": "--artifact-writer",
+              "mcp_servers.cs_artifacts.args.2": "--stdio",
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PLUGIN_ROOT":
                 path.join(fixture.root, `plugin-${index}`),
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
