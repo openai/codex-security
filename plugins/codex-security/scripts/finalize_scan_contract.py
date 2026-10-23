@@ -2800,14 +2800,17 @@ def build_sarif_projection(
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
     execution_successful = manifest["scan"]["status"] == "completed"
-    if not execution_successful or coverage["deferred"]:
+    messages = [item["reason"] for item in coverage["deferred"]]
+    for warning in manifest["scan"].get("warnings", []):
+        if warning not in messages:
+            messages.append(warning)
+    if not execution_successful or messages:
         run = sarif["runs"][0]
         run["invocations"] = [
             {
                 "executionSuccessful": execution_successful,
                 "toolExecutionNotifications": [
-                    {"level": "warning", "message": {"text": item["reason"]}}
-                    for item in coverage["deferred"]
+                    {"level": "warning", "message": {"text": message}} for message in messages
                 ],
             }
         ]
@@ -3208,6 +3211,24 @@ def _write_prepared_scan_finalization(
     scan_dir = prepared.scan_dir
     scan = _require_dict(prepared.manifest, "scan", "manifest")
     if not prepared.was_sealed:
+        # Capture warnings before the first seal; later operation diagnostics must
+        # not change an existing scan's portable results.
+        # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
+        warnings = list(
+            dict.fromkeys(
+                warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
+                for warning in [
+                    *scan.get("warnings", []),
+                    *(projection_warnings or []),
+                    *prepared.warnings,
+                ]
+            )
+        )
+        if warnings:
+            scan["warnings"] = warnings
+            validate_against_schema(
+                prepared.manifest, prepared.schema_dir / "scan-manifest.schema.json"
+            )
         _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
         _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
     write_scan_local_bytes(scan_dir, "report.md", prepared.report_markdown_bytes)
