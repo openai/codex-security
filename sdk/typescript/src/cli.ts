@@ -59,6 +59,7 @@ import {
 import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
+import { formatCoverageScope } from "./coverage-presentation.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -5818,7 +5819,9 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ format, options }) {
+      async run({ format, options, error: incurError }) {
+        const diagnostics = captureOutput();
+        let failureReported = false;
         try {
           if (options.host)
             throw new CodexSecurityError("Use verify-fix --host alone.");
@@ -5906,13 +5909,23 @@ export async function main(
               identifiers.length,
             );
             progress.startVerification();
+            const verificationErrors = new NodeWritable({
+              write(chunk, _encoding, callback) {
+                diagnostics.stream.write(chunk);
+                progress.stop();
+                void writeCliOutput(errorOutput, chunk).then(
+                  () => callback(),
+                  callback,
+                );
+              },
+            });
             try {
               exitCode = await runSkill(
                 "verify-fix",
                 selected === undefined ? [...positionals, ...imports] : [],
                 options,
                 response.stream,
-                errorOutput,
+                verificationErrors,
                 dependencies,
                 {
                   directory: repository,
@@ -5927,9 +5940,15 @@ export async function main(
                 },
               );
               if (exitCode !== 0) {
-                if (exitCode !== 130 && exitCode !== 143) exitCode = 2;
-                frameworkExit = exitCode;
-                return undefined;
+                if (exitCode === 130 || exitCode === 143) {
+                  frameworkExit = exitCode;
+                  return undefined;
+                }
+                failureReported = diagnostics.text().trim().length > 0;
+                throw new CodexSecurityError(
+                  diagnostics.text().trim() ||
+                    `Codex verification failed with exit code ${exitCode}.`,
+                );
               }
 
               results = parseFindingVerifications(response.text(), identifiers);
@@ -5960,8 +5979,15 @@ export async function main(
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
-          throw error;
+          const message = errorMessage(error);
+          if (!failureReported)
+            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
+          return finishScan(
+            { exitCode, error: message },
+            format,
+            incurError,
+            "VERIFICATION_FAILED",
+          );
         }
       },
     })
@@ -10696,6 +10722,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

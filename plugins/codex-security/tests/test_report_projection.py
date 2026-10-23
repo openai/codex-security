@@ -851,7 +851,8 @@ def test_projection_preserves_follow_up_without_classifying_its_reason(reason: s
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "No findings were reported." in markdown
-    assert "## Open Questions And Follow Up" in markdown
+    assert "## Deferred Requested Work" in markdown
+    assert "## Open Questions And Follow Up" not in markdown
     assert reason in markdown
     assert "Review deferred unit candidate-parser" in markdown
     assert "Paths: src/parser.py." in markdown
@@ -866,7 +867,7 @@ def test_finding_summary_link_uses_stable_markdown_anchor() -> None:
     assert '<a id="finding-1"></a>' in markdown
 
 
-def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
+def test_projection_separates_deferred_work_from_open_questions() -> None:
     manifest, findings, coverage = canonical_documents()
 
     coverage["openQuestions"] = [{"question": "Is production authentication enabled?"}]
@@ -886,6 +887,12 @@ def test_projection_keeps_deferred_follow_up_with_open_questions() -> None:
     assert "Review deferred unit parser-review" in markdown
     assert "Paths: src/parser.py." in markdown
     assert "Surfaces: parser-surface." in markdown
+    deferred_section, optional_section = markdown.split("## Open Questions And Follow Up")
+    assert "## Deferred Requested Work" in deferred_section
+    assert "Parser review incomplete." in deferred_section
+    assert "Is production authentication enabled?" not in deferred_section
+    assert "Is production authentication enabled?" in optional_section
+    assert "Parser review incomplete." not in optional_section
 
 
 def test_projection_includes_surface_evidence_receipts() -> None:

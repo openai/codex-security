@@ -29,6 +29,8 @@ Use `scope` for reviewed context, artifacts, runtime/test status, validation mod
 
 ## Coverage And Pending Work
 
+Keep unfinished requested work and essential in-scope proof gaps in `coverage.deferred`. The report presents these in `Deferred Requested Work`, separately from optional `coverage.openQuestions` follow-up. Neither section changes the scan execution outcome.
+
 Standard and diff drafts use `{ surfaces, explicitExclusions, deferred }`. Give surfaces meaningful labels and schema-defined dispositions, preserving saved surface IDs in updates. Retain reasons and evidence for rejected, not-applicable, and follow-up work. Open questions may be strings or `{ question, followUpPrompt? }` objects. An open question does not prevent the configured review from finishing.
 
 Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and copy IDs assigned by the draft response into later updates. Close a generic saved task in the final Standard or diff draft with `coverage.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
