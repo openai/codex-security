@@ -1,10 +1,9 @@
 name: Invoice Desk OpenAI scan
-run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0} @ {1}', inputs.pr_number, inputs.source_sha) || (github.event_name == 'workflow_run' && 'PR fallback' || 'main baseline') }}"
+run-name: "Invoice Desk scan — ${{ inputs.pr_number && format('PR #{0} @ {1}', inputs.pr_number, inputs.source_sha) || 'main baseline' }}"
 
 on:
-  workflow_run:
-    workflows: ["Invoice Desk sample"]
-    types: [completed]
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
     inputs:
       pr_number:
@@ -20,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: invoice-desk-scan-${{ github.event_name == 'workflow_dispatch' && (inputs.pr_number && format('pr-{0}-{1}', inputs.pr_number, inputs.source_sha) || 'main') || format('fallback-{0}', github.run_id) }}
+  group: invoice-desk-scan-${{ inputs.pr_number && format('pr-{0}', inputs.pr_number) || 'main' }}
   cancel-in-progress: true
 
 env:
@@ -31,13 +30,11 @@ jobs:
     # Only a workflow on protected main can request the inference environment.
     if: >-
       github.ref == 'refs/heads/main' && github.ref_protected &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event.workflow_run.event == 'pull_request')
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
     runs-on: ubuntu-24.04
     # This job reads only trusted helpers and event metadata before caching public packages.
     cache-mode: write
     permissions:
-      actions: write
       contents: read
       pull-requests: read
     outputs:
