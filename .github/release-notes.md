@@ -44,6 +44,7 @@
 - separate report readers from source providers ([#1871](https://github.com/openai/codex-security/pull/1871))
 - persist run warnings in SARIF exports ([#1893](https://github.com/openai/codex-security/pull/1893))
 - keep HTML entities literal in report text ([#1851](https://github.com/openai/codex-security/pull/1851))
+- keep saved findings consistent through recovery ([#1310](https://github.com/openai/codex-security/pull/1310))
 
 <!-- release-section: highlights:end -->
 

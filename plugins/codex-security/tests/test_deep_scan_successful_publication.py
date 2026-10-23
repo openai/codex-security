@@ -941,6 +941,42 @@ def test_stopped_deep_projection_filters_the_canonical_parent(
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
 
 
+@pytest.mark.parametrize("scope", ["subdir/extract.py", "./subdir/extract.py"])
+def test_stopped_file_scope_filters_siblings_before_assigning_identity(
+    workbench_api, workbench_db, publication_scan, scope
+):
+    scan = publication_scan(paths=[scope])
+    finding = copy.deepcopy(scan.findings[0])
+    for key in ("identity", "findingId", "occurrenceId", "fingerprints"):
+        finding.pop(key, None)
+    finding["extensions"] = {"candidateId": "candidate-review"}
+    descendant = copy.deepcopy(finding)
+    descendant["locations"] = [{"path": "subdir/extract.py/generated", "startLine": 1}]
+    checkpoint = write_checkpoint(
+        scan.scan_dir / "checkpoints",
+        saved_draft(scan.scan_id, findings=[finding, descendant]),
+    )
+    checkpoint_bytes = checkpoint.read_bytes()
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Interrupted."),
+    )
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["locations"][0]["path"] == "subdir/extract.py"
+    assert findings[0]["identity"] == {"anchor": "candidate-review"}
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in names}
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
+    assert checkpoint.read_bytes() == checkpoint_bytes
+
+
 def test_already_sealed_legacy_capped_scan_remains_immutable(
     workbench_api, workbench_db, publication_scan
 ):

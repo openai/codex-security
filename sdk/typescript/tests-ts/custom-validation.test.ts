@@ -559,6 +559,30 @@ describe("custom validation", () => {
     });
   });
 
+  test.each([{ artifacts: [] }, { artifacts: null }])(
+    "validates an unfinished draft with %j",
+    async ({ artifacts }) => {
+      const f = await fixture();
+      const manifest = await json<{ scan: Record<string, unknown> }>(
+        join(f.scanDir, "scan-manifest.json"),
+      );
+      manifest.scan["artifacts"] = artifacts;
+      manifest.scan["sealedAt"] = null;
+      await save(join(f.scanDir, "scan-manifest.json"), manifest);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      await runCustomValidation({ ...f, run });
+      expect(run).toHaveBeenCalledTimes(1);
+      const findings = await json<FindingsDocument>(
+        join(f.scanDir, "findings.json"),
+      );
+      expect(findings.findings).toHaveLength(1);
+      expect(findings.findings[0]).toMatchObject({
+        identity: f.findings.findings[0]!.identity,
+        validation: { disposition: "reportable" },
+      });
+    },
+  );
+
   test.each([
     "sealedAt",
     "artifacts",
@@ -571,7 +595,14 @@ describe("custom validation", () => {
       join(f.scanDir, "scan-manifest.json"),
     );
     if (kind === "sealedAt") manifest.scan.sealedAt = "2026-01-01T00:00:00Z";
-    if (kind === "artifacts") manifest.scan.artifacts = [];
+    if (kind === "artifacts")
+      manifest.scan.artifacts = [
+        {
+          path: "findings.json",
+          sha256: "0".repeat(64),
+          mediaType: "application/json",
+        },
+      ];
     if (kind === "manifest ID") manifest.scan.id = randomUUID();
     if (kind === "findings ID" || kind === "coverage ID") {
       const name = kind === "findings ID" ? "findings.json" : "coverage.json";

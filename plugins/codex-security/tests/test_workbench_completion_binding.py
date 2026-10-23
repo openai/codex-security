@@ -1185,6 +1185,26 @@ def test_completion_rejects_malformed_finding_identity(tmp_path: Path, field: st
     assert findings_path.read_bytes() == original
 
 
+def test_completion_rejects_canonical_finding_without_identity(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    del findings["findings"][0]["identity"]
+    findings_path.write_text(json.dumps(findings))
+    original = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "Scan result contains invalid findings" in rejected["stderr"]
+    assert "identity" in rejected["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    assert {name: (scan_dir / name).read_bytes() for name in original} == original
+
+
 def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     tmp_path: Path,
 ) -> None:
@@ -1198,7 +1218,7 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     unsafe_location["identity"]["anchor"] = "unsafe-location"
     unsafe_location["locations"][0]["path"] = "../outside.py"
     missing_identity = copy.deepcopy(valid)
-    missing_identity.pop("identity")
+    missing_identity["identity"] = {}
     invalid_evidence_id = copy.deepcopy(valid)
     invalid_evidence_id["identity"]["anchor"] = "invalid-evidence-id"
     invalid_evidence_id["codeEvidence"][0]["id"] = "src/extract.py:41"

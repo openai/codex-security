@@ -211,8 +211,12 @@ export async function runCustomValidation(options: {
   ];
   if (
     manifest.scan?.scope?.validationMode !== "custom_pending" ||
-    manifest.scan.sealedAt !== undefined ||
-    manifest.scan.artifacts !== undefined ||
+    manifest.scan.sealedAt != null ||
+    (manifest.scan.artifacts != null &&
+      !(
+        Array.isArray(manifest.scan.artifacts) &&
+        manifest.scan.artifacts.length === 0
+      )) ||
     manifest.scan.id !== scanId ||
     findingsDocument.scanId !== scanId ||
     coverage.scanId !== scanId

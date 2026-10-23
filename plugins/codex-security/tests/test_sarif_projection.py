@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 from workbench_test_support import load_script
 
@@ -271,9 +272,15 @@ class SarifProjectionTest(unittest.TestCase):
                 self.assertEqual(before, {path: path.read_bytes() for path in before})
 
                 stderr = io.StringIO()
-                with redirect_stderr(stderr):
+                with (
+                    redirect_stderr(stderr),
+                    mock.patch.object(
+                        FINALIZER, "write_sarif_projection", wraps=FINALIZER.write_sarif_projection
+                    ) as write_projection,
+                ):
                     FINALIZER.finalize_scan(scan_dir)
-                self.assertIn(f"warning: automatic SARIF export failed: {error}", stderr.getvalue())
+                write_projection.assert_not_called()
+                self.assertEqual(stderr.getvalue(), "")
                 self.assertEqual(before, {path: path.read_bytes() for path in before})
                 self.assertEqual(
                     FINALIZER.build_findings_export(scan_dir, "json"),

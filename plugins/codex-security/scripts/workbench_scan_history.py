@@ -20,6 +20,7 @@ from finalize_scan_contract import (
     _prepare_scan_finalization,
     _read_scan_local_json_bytes,
     _read_sealed_scan,
+    manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
@@ -128,10 +129,7 @@ def cli_scan_resume(
         if manifest_path is not None:
             manifest = wb.read_json_object(manifest_path)
             manifest_scan = manifest.get("scan")
-            if isinstance(manifest_scan, dict) and (
-                manifest_scan.get("sealedAt") is not None
-                or manifest_scan.get("artifacts") is not None
-            ):
+            if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
                 try:
                     binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
                     _prepare_scan_finalization(
