@@ -371,6 +371,16 @@ test.each([
 
 test("CLI resumes through native execution with current permissions and preserves interrupted state", async () => {
   const f = await interruptedScan();
+  const feedbackPath = join(
+    f.scanDir,
+    "artifacts",
+    "01_context",
+    "false_positive_feedback.json",
+  );
+  const originalFeedback =
+    JSON.stringify([{ reason: "Original reviewer rationale." }]) + "\n";
+  await mkdir(join(f.scanDir, "artifacts", "01_context"), { recursive: true });
+  await writeFile(feedbackPath, originalFeedback, { mode: 0o600 });
   const originalHome = join(f.root, "original-codex-home");
   await appendFile(
     f.sessionPath,
@@ -415,7 +425,16 @@ test("CLI resumes through native execution with current permissions and preserve
           ),
         }),
         resolvePluginPython: async () => f.python,
-        runWorkbench,
+        runWorkbench: (options, args, input) =>
+          args[0] === "get-scan-feedback"
+            ? Promise.resolve({
+                scanId: f.scanId,
+                targetId: f.registration["targetId"]!,
+                falsePositives: Array.from({ length: 55 }, (_, index) => ({
+                  reason: `New reviewer rationale ${index}`,
+                })),
+              })
+            : runWorkbench(options, args, input),
         runDeepScan: async function* () {
           throw new Error("Resumed scans must refresh native permissions.");
         },
@@ -447,6 +466,9 @@ test("CLI resumes through native execution with current permissions and preserve
             return {
               id: threadId,
               async runStreamed(prompt) {
+                expect(await readFile(feedbackPath, "utf8")).toBe(
+                  originalFeedback,
+                );
                 expect(prompt).toContain(f.scanId);
                 expect(prompt).toContain(
                   "Keep the original scan instructions.",
@@ -488,6 +510,7 @@ test("CLI resumes through native execution with current permissions and preserve
     (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
   ).toMatchObject({ progress: { status: "running" } });
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+  expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
 });
 
 test("resumed Bedrock scans retain provider context for the account advisory", async () => {

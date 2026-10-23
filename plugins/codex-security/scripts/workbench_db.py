@@ -1250,7 +1250,7 @@ def complete_budget_exhausted_scan(
             if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
             else budget_exhausted_candidates(scan, scan_dir)
         )
-        warning = optional_text(args.message, maximum=2400)
+        warning = optional_text(args.message)
         if warning is None:
             warning = (
                 f"Deep Scan reached its cost limit after an estimated "
