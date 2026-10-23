@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
-import { selectChecks } from "../../../.github/scripts/select-ci-checks.mjs";
 import {
   type AttackPathDataflow,
   type AttackPathReachability,
@@ -14,6 +13,18 @@ import {
 import { main } from "../src/cli.js";
 import { capture } from "./cli-fixtures.js";
 import { bashCommand, runCommand } from "./support/shell.js";
+
+const { selectChecks } = (await import(
+  new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
+)) as {
+  selectChecks(
+    paths: string[],
+    options: { event: string; baseChanged?: boolean },
+  ): Record<
+    "compatibility-matrix" | "windows-node-matrix" | "python-matrix",
+    string
+  >;
+};
 
 interface WorkflowStep {
   name?: string;
