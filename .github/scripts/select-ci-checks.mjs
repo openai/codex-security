@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const documentation =
-  /^(?:README\.md|CONTRIBUTING\.md|RELEASING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
+  /^(?:README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
 const infrastructure =
   /^\.github\/(?:workflows\/|actions\/|scripts\/|actionlint\.yaml$|zizmor\.yml$)/;
 const nodeInputs =

@@ -54,6 +54,19 @@ test("packaged SDK documentation keeps package validation selected", () => {
   );
 });
 
+test("release recovery documentation keeps its SDK contract selected", () => {
+  for (const paths of [["RELEASING.md"], ["README.md", "RELEASING.md"]]) {
+    const outputs = select(paths);
+    assert.equal(outputs["source-required"], "true");
+    // release-automation.test.ts validates the documented recovery marker.
+    const missing = failedChecks({
+      "classify-changes": { result: "success", outputs },
+      "static-checks": { result: "success" },
+    });
+    assert.ok(missing.includes("test"));
+  }
+});
+
 test("release helper changes select their release-progress regression checks", () => {
   assert.equal(
     select(["sdk/typescript/scripts/release-pr.mjs"])["workflow-quality"],

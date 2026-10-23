@@ -6,6 +6,8 @@ Plugin skills, references, schemas, examples, and unrecognized paths still run
 source qualification: plugin Markdown is part of the product. SDK README and
 documentation changes also run source qualification because those files are
 required package contents; deleting or renaming them must pass archive checks.
+`RELEASING.md` also runs source qualification because SDK tests validate its
+canonical release recovery example.
 
 Source changes run the complete SDK suite on Linux, macOS, and Windows, plus
 MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
