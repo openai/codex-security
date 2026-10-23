@@ -15,7 +15,7 @@ Resolve the repository or component from the user's request. Ask if the target i
 <plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --list
 ```
 
-On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The resolver enforces repository-local paths and a 1 MiB limit for regular files and linked policies. Report rejected policies and the resulting coverage gap rather than bypassing those protections.
+On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The resolver reads regular UTF-8 policy files, including symbolic links whose targets remain within the repository. Report rejected policies and the resulting coverage gap rather than bypassing those protections.
 
 Read `../../references/security-guidance.md`, then resolve the policy chain for the file or directory being reviewed:
 

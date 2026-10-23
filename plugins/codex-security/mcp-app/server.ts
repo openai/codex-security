@@ -362,7 +362,7 @@ const progressSchema = {
 };
 const failSchema = {
   ...continuationMutationClaimSchema,
-  message: requiredText.max(2400),
+  message: requiredText,
   scanId: z.string().uuid(),
 };
 const completeScanSchema = {
