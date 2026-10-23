@@ -1033,6 +1033,8 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         schema,
         {"old": [task], "current": []},
         set(),
+        canonical_rows=set(),
+        coverage_sources={},
         surface_is_retained=lambda _relative, _owner, _row: True,
         eligible_receipt_sources={"old", "current"},
         receipt_root=tmp_path,
