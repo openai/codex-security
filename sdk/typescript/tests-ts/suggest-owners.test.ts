@@ -582,6 +582,45 @@ test.each(["author", "checkout"] as const)(
   },
 );
 
+test("scan hints match the cited commit when Git emails differ in case", async () => {
+  const repo = await repository();
+  await writeFile(
+    join(repo.path, "handler.ts"),
+    "// Record access\nexport function readRecord(id) {\n  return records.get(id);\n}\n",
+  );
+  await repo.git(
+    "-c",
+    "user.email=Alex@Example.test",
+    "commit",
+    "-qam",
+    "Use a record map",
+  );
+  const revision = await repo.git("rev-parse", "HEAD");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwnersFromScan(
+    repo.path,
+    [
+      {
+        ...finding,
+        sourceRevision: revision,
+        extensions: {
+          ownerSuggestion: {
+            email: "Alex@Example.test",
+            commit: revision,
+            reason: "Alex changed the affected record lookup.",
+          },
+        },
+      },
+    ],
+    { codex },
+  );
+  expect(calls).toHaveLength(0);
+  expect(report.results[0]).toMatchObject({
+    status: "identified",
+    owner: { name: "Alex Example", email: "Alex@Example.test" },
+  });
+});
+
 test("rejects invented identities and citations and preserves later results", async () => {
   const repo = await repository();
   const invalid: ((context: OwnerContext) => unknown)[] = [
