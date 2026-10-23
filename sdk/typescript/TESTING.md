@@ -1,6 +1,6 @@
 # Testing the SDK and CLI
 
-Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
+Use the pnpm version in `package.json` and Bun 1.4.3, matching required CI.
 Install both the SDK and MCP app dependencies before building or testing.
 Prepare the [universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
 before running a command that builds the bundled plugin.
@@ -44,7 +44,7 @@ Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
 
 The local test commands pass a 30-second per-test timeout explicitly. Windows
-CI and the Windows runner experiment allow 120 seconds for slower native
+CI and the Windows runner diagnostics allow 120 seconds for slower native
 credential and document checks. `test:ci` writes `reports/junit.xml` and
 `coverage/lcov.info`. Coverage measures loaded
 JavaScript and TypeScript, not the Python helpers or child processes. It is
@@ -143,8 +143,9 @@ consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
 The full Bun suite runs once per OS under Node 22: three file shards on Linux
-and macOS, and seven on Windows. The other Node versions run the installed
-package checks instead of repeating the same Bun suite. MCP and Python tests
+and macOS, and seven on Windows. Each shard uses `--parallel=2` to run files in
+two worker processes with per-file isolation. The other Node versions run the
+installed package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
@@ -156,7 +157,7 @@ snapshot. New files are included automatically with the mean known-file duration
 deleted files in the timing snapshot are ignored. Timing hints never select or
 exclude tests, and adding or splitting tests does not require updating them.
 To reproduce one Windows shard locally after building the plugin, run
-`node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
+`node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --parallel=2 --seed=12345`.
 
 Refresh timing hints from successful CI JUnit artifacts when shard runtimes
 become uneven. From the SDK directory, pass reports for one platform to
@@ -177,12 +178,11 @@ do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
 and runs on pull requests that change its workflow, setup tools, Bun configuration,
 shard runner, timing metadata, report comparator, or Windows test-root helper.
-It compares Bun's default runner, `--isolate`, and `--parallel=2` on Linux, macOS,
-and Windows.
+It compares a serial baseline with `--parallel=2` on Linux, macOS, and Windows.
 Each mode uses the same duration-based file assignment and production shard count:
-three on Linux/macOS and seven on Windows. This gives 39 sharded runner jobs in place
-of 19 jobs that included an unsharded Windows baseline. It measures the production
-partition rather than cross-file interactions across one unsharded suite; local
+three on Linux/macOS and seven on Windows, for 26 sharded runner jobs.
+It measures the production partition rather than cross-file interactions across
+one unsharded suite; local
 full-suite runs still cover that ordering. More jobs add setup overhead, so compare
 workflow wall time and runner minutes, alongside shard test timings, before
 adopting a runner change.
@@ -196,17 +196,16 @@ parameterized tests while detecting missing or extra instances. It records every
 shard's timing, including failed shards, in the job summary. It is not a required
 check or part of the release trigger.
 
-Runner trials use Bun 1.4.3, including the
+Required CI and runner diagnostics use Bun 1.4.3, including the
 [isolated subprocess fix](https://github.com/oven-sh/bun/pull/44581).
 `--parallel=2` runs files in two worker processes and isolates each file; it does
-not make tests inside one file concurrent. Required CI and the mutation trial
-remain on Bun 1.3.14 until a newer release passes the full SDK suite in every mode
-on all three platforms.
+not make tests inside one file concurrent.
 
 Runner modes use the same property seed and coverage settings as each other.
 Required CI uses the default property seed and collects Linux coverage, while
-these diagnostics use the seed above and omit coverage instrumentation. Compare
-inventories across required CI and diagnostics, but measure scheduling speed
+these diagnostics use the seed above and the same Linux LCOV instrumentation.
+Diagnostic artifacts include JUnit and coverage in separate OS/mode/shard paths.
+Compare inventories across required CI and diagnostics, but measure scheduling speed
 between diagnostic modes to avoid attributing these differences to the runner.
 Both workflows install ripgrep on Linux so the inventory-path test executes.
 
@@ -218,6 +217,7 @@ runtime are not necessarily part of Bun's import graph.
 
 Mutation tests require Node 22.18+ or 24.11+ because Stryker 10 uses Babel 8.
 CI runs this tooling on Node 24.15.0. The SDK itself still supports Node 22.13+.
+The mutation trial remains on Bun 1.3.14.
 
 ```sh
 pnpm run test:mutation
