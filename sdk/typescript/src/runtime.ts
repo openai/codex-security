@@ -124,7 +124,6 @@ const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
-const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
@@ -727,8 +726,7 @@ export async function streamWindowsCredentialAclDescriptors(
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    const remaining = MAX_WINDOWS_CREDENTIAL_ACL_STDERR - stderr.length;
-    if (remaining > 0) stderr += chunk.slice(0, remaining);
+    stderr += chunk;
   });
 
   let descendantsChanged = false;
@@ -1669,9 +1667,8 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    // OS argv cannot carry NUL, but workbench text fields can.
-    const framedArguments =
-      !native && arguments_.some((argument) => argument.includes("\0"));
+    // Workbench text fields can contain NUL or exceed OS command-line limits.
+    const framedArguments = !native;
     let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
     if (framedArguments)
       program =
