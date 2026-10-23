@@ -30,6 +30,7 @@
 - bump @linear/sdk from 97.2.0 to 98.0.0 in /sdk/typescript ([#1881](https://github.com/openai/codex-security/pull/1881))
 - bump ip-address from 10.7.2 to 10.7.4 in /plugins/codex-security/mcp-app ([#1876](https://github.com/openai/codex-security/pull/1876))
 - bump taiki-e/install-action from 2.87.28 to 2.87.29 ([#1877](https://github.com/openai/codex-security/pull/1877))
+- keep saved-results source within import limit ([#1891](https://github.com/openai/codex-security/pull/1891))
 
 <!-- release-section: highlights:end -->
 
