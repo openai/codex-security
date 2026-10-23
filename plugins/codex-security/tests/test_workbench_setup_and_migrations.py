@@ -95,6 +95,7 @@ EXPECTED_MIGRATIONS = [
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
     (53, "store external source findings without assessments"),
+    (54, "freeze stopped scan checkpoint selections"),
 ]
 
 

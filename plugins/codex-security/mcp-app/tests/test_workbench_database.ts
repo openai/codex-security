@@ -168,6 +168,160 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+for (const { missingVersions, legacyCheckpoint, mainReader } of [
+  { missingVersions: [54], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
+  { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 50, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 52, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 53, mainReader: false },
+  { missingVersions: [43], legacyCheckpoint: 47, mainReader: false },
+  { missingVersions: [44, 45, 46], legacyCheckpoint: 47, mainReader: false },
+]) {
+  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersions.join(",")} (legacy checkpoint: ${legacyCheckpoint}, main reader: ${mainReader})`, async () => {
+    const directory = await temporary.create("workbench-checkpoint-upgrade-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const sources = JSON.stringify({ "results.json": "retained-digest" });
+    const heads = JSON.stringify({ worker: "accepted-checkpoint" });
+    const context = JSON.stringify("Original discovery context");
+    let originalDiscoveryMigration: Record<string, unknown> | undefined;
+    let originalCheckpointMigration: Record<string, unknown> | undefined;
+    const old = new DatabaseSync(databasePath);
+    try {
+      applyMigrations(
+        old,
+        migrations
+          .filter(
+            (item) =>
+              !missingVersions.includes(item.version) &&
+              !(legacyCheckpoint && [52, 53].includes(item.version)) &&
+              !(
+                [47, 48, 50].includes(legacyCheckpoint) &&
+                [50, 51].includes(item.version)
+              ) &&
+              !(
+                [47, 48].includes(legacyCheckpoint) &&
+                [48, 49].includes(item.version)
+              ) &&
+              !(legacyCheckpoint === 47 && item.version === 47),
+          )
+          .map((item) =>
+            legacyCheckpoint && item.version === 54
+              ? { ...item, version: legacyCheckpoint }
+              : item,
+          ),
+      );
+      if (mainReader)
+        old.exec(
+          migrations.find((item) => item.version === 47)!.statements.join("\n"),
+        );
+      insertScan(old);
+      old.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
+        workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
+        VALUES ('scan', 1, 'v1', 'failed', 'terminal', 1, 0, 7, 10, 'created', 'updated')`);
+      if (legacyCheckpoint !== 47 || mainReader) {
+        old
+          .prepare("UPDATE deep_scan_runs SET discovery_user_context_json = ?")
+          .run(context);
+        originalDiscoveryMigration = old
+          .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+          .get();
+      }
+      old
+        .prepare(
+          "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
+        )
+        .run(sources);
+      if (!missingVersions.includes(54)) {
+        old
+          .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
+          .run(heads);
+      }
+      originalCheckpointMigration = old
+        .prepare(
+          "SELECT name, applied_at FROM schema_migrations WHERE version = ?",
+        )
+        .get(legacyCheckpoint || 54);
+    } finally {
+      old.close();
+    }
+    await databaseInfo(directory);
+    const upgraded = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        upgraded
+          .prepare("SELECT retained_checkpoint_heads_json FROM scans")
+          .get()?.retained_checkpoint_heads_json,
+        !missingVersions.includes(54) ? heads : null,
+      );
+      upgraded
+        .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
+        .run(heads);
+    } finally {
+      upgraded.close();
+    }
+    await databaseInfo(directory);
+    const reopened = new DatabaseSync(databasePath);
+    try {
+      const scan = reopened.prepare("SELECT * FROM scans").get()!;
+      assert.equal(scan.status, "failed");
+      assert.equal(scan.retained_source_digests_json, sources);
+      assert.equal(scan.retained_checkpoint_heads_json, heads);
+      if (originalCheckpointMigration !== undefined) {
+        assert.deepEqual(
+          reopened
+            .prepare(
+              "SELECT name, applied_at FROM schema_migrations WHERE version = 54",
+            )
+            .get(),
+          originalCheckpointMigration,
+        );
+      }
+      assert.equal(
+        reopened
+          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+          .get()?.count,
+        migrations.length,
+      );
+      assert.equal(
+        reopened
+          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+          .get()?.version,
+        54,
+      );
+      for (const version of [43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54]) {
+        assert.equal(
+          reopened
+            .prepare(
+              "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = ?",
+            )
+            .get(version)?.count,
+          1,
+        );
+      }
+      assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
+      assert.equal(
+        reopened
+          .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+          .get()?.discovery_user_context_json,
+        legacyCheckpoint !== 47 || mainReader ? context : null,
+      );
+      assertMigrationNames(reopened, 47, 48, 49, 50, 51, 52, 53, 54);
+      if (legacyCheckpoint !== 47) {
+        assert.deepEqual(
+          reopened
+            .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+            .get(),
+          originalDiscoveryMigration,
+        );
+      }
+    } finally {
+      reopened.close();
+    }
+  });
+}
+
 test("worker thread history survives retry, replay, and worker retirement", (t) => {
   const database = memory(t, 49);
   insertScan(database);

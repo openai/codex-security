@@ -759,7 +759,7 @@ def test_head_snapshot_reads_content_and_time_from_one_descriptor(
     }
 
 
-def test_legacy_live_head_sources_keep_their_recorded_digest(
+def test_legacy_live_head_sources_convert_their_recorded_observation(
     tmp_path: Path, checkpoint_scan
 ) -> None:
     scan_id, pending, closed, binding = checkpoint_scan
@@ -780,7 +780,18 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
     )
     assert first is not None
     assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
-    assert first[0]["scan"]["preservedSources"] == frozen
+    published = first[0]["scan"]["preservedSources"]
+    assert "checkpoint-head.json" not in published
+    assert published[paths[0]] == frozen[paths[0]]
+    assert (
+        saved._read_saved_result(tmp_path, "checkpoint-head.json", scan_id)[1]
+        == frozen["checkpoint-head.json"]
+    )
+    snapshot = next(path for path in published if path.startswith("checkpoint-heads/"))
+    assert json.loads((tmp_path / snapshot).read_text()) == {
+        "checkpoint": checkpoint.name,
+        "observedAtNs": "200",
+    }
     select(tmp_path, checkpoint, 300)
     with pytest.raises(
         saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
@@ -795,6 +806,8 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
             reason="interrupted",
             frozen_source_digests=frozen,
         )
+    replayed = replay_saved_results(saved, first, tmp_path, scan_id, binding, [], stopped=True)
+    assert replayed[2] == first[2]
 
 
 @pytest.mark.parametrize("evidence", ["deferred", "reported"])
@@ -1133,3 +1146,50 @@ def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for result in (first, replay):
         assert result[2]["surfaces"] == [current]
+
+
+@pytest.mark.parametrize("scan_id", ["legacy-tied-head", "frozen-worker-heads"])
+def test_legacy_tied_worker_heads_keep_pending_work_on_replay(tmp_path: Path, scan_id: str) -> None:
+    pending, closed = drafts(scan_id)
+    binding = saved_binding("deep_repository", repository="synthetic")
+    output = tmp_path / "worker"
+    completed = write_checkpoint(output / "checkpoints", closed)
+    reopened = write_checkpoint(output / "checkpoints", pending)
+    frozen = {}
+    for checkpoint in (completed, reopened):
+        os.utime(checkpoint, ns=(100, 100))
+        select(output, checkpoint, 500)
+        frozen.update(
+            {
+                path: digest
+                for path, (digest, _) in saved._capture_saved_source(
+                    tmp_path, "worker/checkpoint-head.json", scan_id
+                ).items()
+            }
+        )
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+    )
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    repeated = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=replay[0]["scan"]["preservedSources"],
+        checkpoint_heads=replay[0]["scan"]["preservedCheckpointHeads"],
+    )
+    for documents in (first, replay, repeated):
+        assert pending["coverage"]["deferred"][0] in documents[2]["deferred"]
+        assert not documents[2].get("resolvedDeferred")
