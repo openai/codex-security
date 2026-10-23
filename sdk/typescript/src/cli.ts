@@ -60,6 +60,7 @@ import { Cli, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
+import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -72,7 +73,7 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
@@ -164,7 +165,6 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
-  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -1470,117 +1470,25 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = parseToml(
-        stringifyToml(output.codexOverrides ?? {}),
-      ) as JsonObject;
-      const config = deepMerge(structuredClone(ambientConfig), overrides);
-      const provider = output.modelProvider ?? scanModelProvider(config);
-      // Native Codex ignores configured tables for these built-in providers.
-      const providerConfiguration =
-        typeof provider === "string" &&
-        !["openai", "ollama", "lmstudio"].includes(provider)
-          ? (
-              config["model_providers"] as
-                Record<string, JsonObject> | undefined
-            )?.[provider]
-          : undefined;
-      const providerEnvKey =
-        typeof providerConfiguration?.["env_key"] === "string"
-          ? providerConfiguration["env_key"]
-          : undefined;
-      const commandAuth = providerConfiguration?.["auth"] != null;
-      const explicitChatgpt =
-        output.auth === "chatgpt" && !isExternalModelProvider(provider);
-      const providerBearer =
-        typeof providerConfiguration?.["experimental_bearer_token"] ===
-        "string";
-      const providerKeyConfigured =
-        providerEnvKey !== undefined || providerBearer;
-      const requiresOpenAiAuth =
-        !commandAuth &&
-        (explicitChatgpt || !providerKeyConfigured) &&
-        (provider === undefined ||
-          provider === "openai" ||
-          providerConfiguration?.["requires_openai_auth"] === true ||
-          (explicitChatgpt && providerKeyConfigured));
+      const resolved = resolveSkillAuthentication(
+        { ...output, auth: output.auth },
+        processEnvironment,
+        ambientConfig,
+      );
+      const {
+        provider,
+        providerConfiguration,
+        providerEnvKey,
+        requiresOpenAiAuth,
+      } = resolved;
+      authentication = resolved.authentication;
       modelProvider = output.modelProvider;
       let credentialConfig: JsonObject | undefined;
-      if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
-        const key = environmentEntry(
-          processEnvironment,
-          providerEnvKey,
-        )?.trim();
-        if (!key && output.auth === "api-key") {
-          throw new AuthenticationRequiredError(
-            `API-key authentication requires ${providerEnvKey}. Set a valid API key for the selected provider.`,
-          );
-        }
-        authentication = key
-          ? { method: "api_key", source: providerEnvKey, verified: false }
-          : { method: "stored_credentials", verified: false };
-      } else {
-        authentication = scanAuthentication(
-          processEnvironment,
-          output.auth,
-          provider,
-          commandAuth,
-        );
-      }
-      if (
-        authentication.method === "stored_credentials" &&
-        isExternalModelProvider(provider)
-      ) {
-        const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
-        throw new AuthenticationRequiredError(
-          `Set ${providerEnvKey ?? externalProvider.env_key} to run ${output.command} through ${externalProvider.name}.`,
-        );
-      }
-      let selected = selectedScanEnvironment(
-        processEnvironment,
-        authentication.method === "command" ? "chatgpt" : output.auth,
-        provider,
-      );
-      if (
-        explicitChatgpt &&
-        !commandAuth &&
-        providerConfiguration !== undefined &&
-        providerKeyConfigured
-      ) {
-        if (providerEnvKey !== undefined) {
-          selected = Object.fromEntries(
-            Object.entries(selected).filter(([name]) =>
-              process.platform === "win32"
-                ? name.toUpperCase() !== providerEnvKey.toUpperCase()
-                : name !== providerEnvKey,
-            ),
-          );
-        }
-        // Native provider keys take precedence over stored authentication.
-        // Apply explicit ChatGPT selection to the home and CLI configuration.
-        const providerOverrides =
-          typeof provider === "string"
-            ? (
-                overrides["model_providers"] as
-                  Record<string, JsonObject> | undefined
-              )?.[provider]
-            : undefined;
-        for (const selectedConfig of [
-          providerConfiguration,
-          providerOverrides,
-        ]) {
-          if (selectedConfig === undefined) continue;
-          delete selectedConfig["env_key"];
-          delete selectedConfig["experimental_bearer_token"];
-          selectedConfig["requires_openai_auth"] = true;
-        }
-        args = [
-          ...args,
-          ...modelProviderConfigOverride(overrides).flatMap((value) => [
-            "--config",
-            value,
-          ]),
-        ];
-      }
+      let selected = resolved.environment;
+      args = [
+        ...args,
+        ...resolved.configOverrides.flatMap((value) => ["--config", value]),
+      ];
       if (
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
