@@ -196,6 +196,10 @@ test.each(formats)(
       );
       expect(prepared.preview.findings).toHaveLength(1);
       expect(prepared.preview.excluded).toEqual([]);
+      expect(prepared.preview.source).toEqual({
+        provider: "semgrep",
+        source_key: options.sourceKey,
+      });
       const imported = await prepared.import();
       expect(imported.counts).toEqual({ created: 1, updated: 0, unchanged: 0 });
 

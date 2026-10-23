@@ -41,6 +41,7 @@
 - preserve Unicode colon source paths ([#542](https://github.com/openai/codex-security/pull/542))
 - simplify security skill instructions ([#1676](https://github.com/openai/codex-security/pull/1676))
 - update the GitHub Action runtime to 0.6.0 ([#1906](https://github.com/openai/codex-security/pull/1906))
+- separate report readers from source providers ([#1871](https://github.com/openai/codex-security/pull/1871))
 
 <!-- release-section: highlights:end -->
 

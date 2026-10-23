@@ -96,6 +96,10 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
       dependencies,
     );
     expect(prepared.preview.findings).toEqual(parsed.findings);
+    expect(prepared.preview.source).toEqual({
+      provider: "wiz",
+      source_key: options.sourceKey,
+    });
     await expect(
       access(join(fixture.stateDirectory, "workbench.sqlite3")),
     ).rejects.toThrow();
@@ -107,6 +111,7 @@ test("Wiz JSON imports retain parsed evidence through SQLite readback and update
     );
     expect(stored).toEqual(first.findings);
     expect(stored[0]).toMatchObject({
+      provider: "wiz",
       sourceFindingId: "package-occurrence",
       assessment: { state: "not_assessed" },
       version: 1,

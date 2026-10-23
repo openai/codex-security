@@ -3,6 +3,7 @@ import type {
   ExternalPublicationInput,
   ExternalSourceRepository,
 } from "./external-findings.js";
+import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
@@ -13,9 +14,24 @@ import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 
+/** File reader names mapped to their stored and Cloud source provider. */
+export const EXTERNAL_FINDINGS_PROVIDERS = {
+  wiz: "wiz",
+  snyk: "snyk",
+  semgrep: "semgrep",
+  endor: "endor",
+  github: "github",
+} as const satisfies Record<string, Provider>;
+
+export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
+
+export const EXTERNAL_FINDINGS_READERS = Object.keys(
+  EXTERNAL_FINDINGS_PROVIDERS,
+) as ExternalFindingsReader[];
+
 /** File readers available in this SDK, shared by local and Cloud imports. */
 export interface ExternalFindingsReaderOptions {
-  provider: "wiz" | "snyk" | "semgrep" | "endor" | "github";
+  provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
 }
 

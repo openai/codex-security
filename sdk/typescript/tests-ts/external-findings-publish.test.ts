@@ -3463,9 +3463,12 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
     sourceKey: "organization/project/main",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const first = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  expect(prepared.preview.source).toEqual({
+    provider: "semgrep",
+    source_key: settings.sourceKey,
+  });
+  const first = await prepared.publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
   const original = structuredClone([...f.reports.values()][0]!);
