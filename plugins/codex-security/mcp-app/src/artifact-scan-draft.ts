@@ -1302,6 +1302,22 @@ function reconcileDeferredSurfaces(
   return resolved;
 }
 
+/** Read the immutable checkpoint selected by the current worker writer. */
+export async function readCurrentScanDraftCheckpoint(
+  context: ArtifactContext,
+): Promise<JsonObject | undefined> {
+  const head = await readCheckpointHead(context, "current");
+  if (!head) return;
+  return parseJsonObject(
+    await readArtifactText(
+      context,
+      ["checkpoints", head.checkpoint],
+      "current scan checkpoint",
+    ),
+    "current scan checkpoint",
+  );
+}
+
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
@@ -2006,6 +2022,48 @@ export async function getCodexSecurityCompletedScan(
   }
 
   return { scanId: parsed.scanId, manifest, findings, coverage };
+}
+
+/** Project canonical documents through the same semantic parser as worker drafts. */
+export async function readScanAuditDraft(input: {
+  root: string;
+  scanId?: string;
+  manifest: JsonObject;
+  findings: JsonObject;
+  coverage: JsonObject;
+}): Promise<ScanDraftInput> {
+  const context: ArtifactContext = {
+    root: input.root,
+    repoRoot: input.root,
+    layout: "scan",
+    scanId: input.scanId,
+  };
+  const head = await readCheckpointHead(context, "current");
+  if (head !== undefined) {
+    const { saved } = await readPreviousScanDocuments(context);
+    // The writer commits its head before replacing the canonical documents.
+    if (
+      head.modifiedMs >=
+      Math.min(...saved.map((record) => record?.modifiedMs ?? 0))
+    ) {
+      const draft = parsePersistedCheckpoint(
+        parseJsonObject(
+          await readArtifactText(
+            context,
+            ["checkpoints", head.checkpoint],
+            "current scan checkpoint",
+          ),
+          "current scan checkpoint",
+        ),
+      );
+      if (draft.scanId !== input.scanId)
+        throw new Error(
+          "scan checkpoint: current checkpoint belongs to a different scan.",
+        );
+      return draft;
+    }
+  }
+  return parseCanonicalScanDraft(input);
 }
 
 function safeRelativePath(value: string, context: string): string {

@@ -208,6 +208,8 @@ export interface WorkbenchCommandOptions {
   currentDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
+  /** Read committed Deep settings through the existing private workbench channel. */
+  withExecutionSettings?: boolean;
 }
 
 export interface ScanArtifactRestorer {
@@ -1672,7 +1674,11 @@ export async function runWorkbench(
     // OS argv cannot carry NUL, but workbench text fields can.
     const framedArguments =
       !native && arguments_.some((argument) => argument.includes("\0"));
-    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
+    let program = archiveHandshake
+      ? ARCHIVE_REGISTRATION_PROGRAM
+      : options.withExecutionSettings
+        ? "import inspect, runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(**({'with_execution_settings': True} if 'with_execution_settings' in inspect.signature(main).parameters else {}))"
+        : undefined;
     if (framedArguments)
       program =
         WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
@@ -1702,6 +1708,7 @@ export async function runWorkbench(
           )
         : input,
       signal,
+      undefined,
       archiveHandshake,
       // Match native argv's UTF-8 encoding for the private argument frame.
       framedArguments
@@ -3214,6 +3221,7 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
+  cwd?: string,
   archiveHandshake = false,
   stdinPrefix?: string,
 ): Promise<CodexCommandResult> {
@@ -3229,6 +3237,7 @@ export async function runCodexCommand(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
+      ...(cwd === undefined ? {} : { cwd }),
     },
   );
   let stdout = "";

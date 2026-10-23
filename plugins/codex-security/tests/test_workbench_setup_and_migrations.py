@@ -95,6 +95,11 @@ EXPECTED_MIGRATIONS = [
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
     (53, "store external source findings without assessments"),
+    (54, "retain deep scan attempts and exact merge inputs"),
+    (55, "persist selected deep scan finalization input"),
+    (56, "freeze stopped scan checkpoint selections"),
+    (57, "bind original deep scan parent usage turn"),
+    (58, "bind original deep scan execution settings"),
 ]
 
 
@@ -2923,3 +2928,88 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize("legacy_version", [48, 51, "published", "branch", "pre-merge"])
+def test_local_cache_upgrade_preserves_deep_scan_migration_history(
+    legacy_version: int | str,
+) -> None:
+    current = SCHEMA.MIGRATIONS
+    published = isinstance(legacy_version, str)
+    branch = legacy_version == "branch"
+    pre_merge = legacy_version == "pre-merge"
+    historical = tuple(
+        migration
+        for migration in current
+        if migration[0] <= (52 if pre_merge else 47 if branch else 46 if published else 43)
+    )
+
+    def historical_version(version: int) -> int:
+        if pre_merge:
+            return version - 1
+        return version - (6 if branch else 7 if published or version == 58 else 9)
+
+    historical += tuple(
+        (historical_version(version), name, sql)
+        for version, name, sql in current
+        if 54 <= version <= 58 and (published or historical_version(version) <= legacy_version)
+    )
+    connection, apply_migrations = create_historical_database(1, historical)
+    connection.execute(
+        "INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) "
+        "VALUES ('finding', 'fingerprint', 'rule', 'anchor', 'created', 'updated')"
+    )
+    connection.execute(
+        "INSERT INTO finding_embeddings (finding_id, model, vector_json) "
+        "VALUES ('finding', 'service-model', '[1, 0]')"
+    )
+    recorded = {
+        row["name"]: row["applied_at"]
+        for row in connection.execute("SELECT name, applied_at FROM schema_migrations")
+    }
+    original_tables = {
+        row["name"]: row["sql"]
+        for row in connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'")
+        if row["name"].startswith("deep_scan_")
+    }
+    connection.commit()
+    for _ in range(2):
+        apply_migrations(connection)
+        assert [
+            tuple(row) for row in connection.execute("SELECT version, name FROM schema_migrations")
+        ] == EXPECTED_MIGRATIONS
+        for row in connection.execute("SELECT name, applied_at FROM schema_migrations"):
+            if row["name"] in recorded:
+                assert row["applied_at"] == recorded[row["name"]]
+        upgraded_tables = {
+            row["name"]: row["sql"]
+            for row in connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table'"
+            )
+            if row["name"].startswith("deep_scan_")
+        }
+        assert upgraded_tables["deep_scan_runs"].count(", discovery_user_context_json TEXT") == 1
+        if not (branch or pre_merge):
+            upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(
+                ", discovery_user_context_json TEXT", "", 1
+            )
+        if legacy_version == 48:
+            assert upgraded_tables["deep_scan_runs"].count(", execution_settings_json TEXT") == 1
+            upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(
+                ", execution_settings_json TEXT", "", 1
+            )
+        assert {name: upgraded_tables[name] for name in original_tables} == original_tables
+        assert any(
+            row["name"] == "execution_settings_json" and row["type"] == "TEXT"
+            for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+        )
+        assert dict(connection.execute("SELECT * FROM finding_embeddings").fetchone()) == {
+            "finding_id": "finding",
+            "model": "service-model",
+            "vector_json": "[1, 0]",
+            "cache_key": None,
+        }
+        assert (
+            connection.execute("SELECT COUNT(*) FROM local_finding_embeddings").fetchone()[0] == 0
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

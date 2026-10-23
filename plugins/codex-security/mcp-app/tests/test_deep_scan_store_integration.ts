@@ -675,7 +675,20 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-integration-thread";
   const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = mock.fn(createWorkbenchRunner(environment));
+  const finishCalls: string[][] = [];
+  const executeWorkbench = createWorkbenchRunner(environment);
+  const runWorkbench = mock.fn(async (args: string[]) => {
+    const result = await executeWorkbench(args);
+    if (args[0] === "finish-deep-scan") {
+      finishCalls.push([...args]);
+      if (finishCalls.length === 1)
+        throw Object.assign(
+          new Error("Synthetic lost committed finish response"),
+          { code: "ETIMEDOUT" },
+        );
+    }
+    return result;
+  });
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
@@ -899,6 +912,8 @@ connection.rollback()`,
       omittedWorkerIds: [late.id],
     });
     assert.equal(finished.status, "succeeded");
+    assert.equal(finishCalls.length, 2);
+    assert.deepEqual(finishCalls[1], finishCalls[0]);
     assert.equal(finished.terminalReason, "saturated");
     assert.equal(finished.manifestPath, manifestPath);
 

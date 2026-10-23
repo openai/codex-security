@@ -378,7 +378,21 @@ stops, the scan combines and returns completed findings. See
 Deep discovery retains its enforced deadline, with a default and maximum of
 5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
 
+When a Deep scan has a saved accepted aggregate, recovering an interrupted
+publication reuses that aggregate and its original stop reason without another
+discovery or reducer run. Explicit cancellation and cost stops retain their
+stopped or partial-result behavior.
+Scans created by earlier versions keep their original workflow when resumed.
+
 ### Progress and cost
+
+Deep Scan accounting includes failed, replaced, and canceled worker attempts and
+their descendants once. Shared conversation usage is limited to the original
+scan turn and scan interval. Missing usage remains unavailable or partial;
+reported zero remains zero. When sessions use different models, `cost.modelCosts`
+records each model's tokens, estimate, and pricing basis, and `estimatedUsd` sums
+those estimates. A partial estimate has `cost.coverage: "partial"`; missing model
+attribution leaves the estimate unavailable until usage can be reconciled.
 
 Use `onProgress` for scan progress and `onCost` for cost updates.
 

@@ -1,5 +1,15 @@
 [
   [
+    "-- Relocate known Deep Scan preview histories before applying main migrations.",
+    "WITH input AS (SELECT :history AS history),",
+    "moves(version, destination, name) AS (VALUES (45, 54, 'retain deep scan attempts and exact merge inputs'), (47, 54, 'retain deep scan attempts and exact merge inputs'), (48, 54, 'retain deep scan attempts and exact merge inputs'), (46, 55, 'persist selected deep scan finalization input'), (48, 55, 'persist selected deep scan finalization input'), (49, 55, 'persist selected deep scan finalization input'), (47, 56, 'freeze stopped scan checkpoint selections'), (49, 56, 'freeze stopped scan checkpoint selections'), (50, 56, 'freeze stopped scan checkpoint selections'), (48, 57, 'bind original deep scan parent usage turn'), (50, 57, 'bind original deep scan parent usage turn'), (51, 57, 'bind original deep scan parent usage turn'), (51, 58, 'bind original deep scan execution settings'), (52, 58, 'bind original deep scan execution settings'), (52, 54, 'retain deep scan attempts and exact merge inputs'), (53, 55, 'persist selected deep scan finalization input'), (54, 56, 'freeze stopped scan checkpoint selections'), (55, 57, 'bind original deep scan parent usage turn'), (56, 58, 'bind original deep scan execution settings'), (53, 54, 'retain deep scan attempts and exact merge inputs'), (54, 55, 'persist selected deep scan finalization input'), (55, 56, 'freeze stopped scan checkpoint selections'), (56, 57, 'bind original deep scan parent usage turn'), (57, 58, 'bind original deep scan execution settings'))",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination ||",
+    "    ' WHERE version = ' || version || ' AND name = ' || quote(name) AS value",
+    "FROM moves JOIN schema_migrations USING (version, name)",
+    "ORDER BY destination DESC;"
+  ],
+  [
     "-- Move source-scope previews before the shared history repairs.",
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",

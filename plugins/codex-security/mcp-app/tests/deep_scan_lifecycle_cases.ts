@@ -40,6 +40,8 @@ export async function testDeepScanLifecycle({
   };
   const errors = [];
   for (const test of [
+    resumedSelectedCancellationWaitsForCleanup,
+    resumedSelectedFailureWaitsForCleanup,
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
@@ -62,6 +64,109 @@ export async function testDeepScanLifecycle({
   }
   if (errors.length)
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
+
+  async function resumedSelectedCancellationWaitsForCleanup(
+    failPublication = false,
+  ) {
+    const fixture = await fixtureRun(config);
+    fixture.run.workflowVersion = "deep-security-scan/v2";
+    fixture.run.finalizationInput = {
+      version: 1,
+      resultPath: null,
+      resultSha256: null,
+      terminalReason: "capped",
+      omittedWorkerIds: [],
+      selectedAt: "2026-01-01T00:00:00Z",
+    };
+    const store = new FakeStore(fixture.run);
+    const publishing = Promise.withResolvers<void>();
+    const publishRelease = Promise.withResolvers<void>();
+    const admission = Promise.withResolvers<void>();
+    const admissionRelease = Promise.withResolvers<void>();
+    const publicationReturned = Promise.withResolvers<void>();
+    const preserving = Promise.withResolvers<void>();
+    const preserveRelease = Promise.withResolvers<void>();
+    store.finish = async () => {
+      store.run.status = "succeeded";
+      return structuredClone(store.run);
+    };
+    const coordinator = createCoordinator(fixture, store, new FakeExecutor(), {
+      threadId: "fixture-owner",
+      onComplete: async (_draft: unknown, signal: AbortSignal) => {
+        publishing.resolve();
+        await publishRelease.promise;
+        signal.throwIfAborted();
+        publicationReturned.resolve();
+        if (failPublication)
+          throw new Error("synthetic selected publication failure");
+      },
+      onStopped: async () => {
+        preserving.resolve();
+        await preserveRelease.promise;
+      },
+    });
+    let settledStatus: string | undefined;
+    let cancellationSettled = false;
+    const settled = coordinator.settled().then(
+      (result: DeepScanRunState) => {
+        settledStatus = result.status;
+        return result;
+      },
+      (error: unknown) => {
+        settledStatus = "rejected";
+        throw error;
+      },
+    );
+    void settled.catch(() => {});
+    coordinator.start();
+    await publishing.promise;
+    const cancellation = coordinator
+      .cancelAfterPersistence(
+        "cancel resumed selection",
+        async () => {
+          store.run.status = "canceled";
+        },
+        async () => {
+          admission.resolve();
+          await admissionRelease.promise;
+          return { status: "running" };
+        },
+      )
+      .then((result: DeepScanRunState) => {
+        cancellationSettled = true;
+        return result;
+      });
+    void cancellation.catch(() => {});
+    try {
+      await admission.promise;
+      publishRelease.resolve();
+      await publicationReturned.promise;
+      await new Promise(setImmediate);
+      admissionRelease.resolve();
+      await preserving.promise;
+      assert.equal(
+        settledStatus,
+        undefined,
+        "terminal waiters include stopped-result publication",
+      );
+      assert.equal(
+        cancellationSettled,
+        false,
+        "cancellation joins common cleanup",
+      );
+    } finally {
+      publishRelease.resolve();
+      admissionRelease.resolve();
+      preserveRelease.resolve();
+      await Promise.allSettled([settled, cancellation]);
+    }
+    assert.equal((await settled).status, "canceled");
+    assert.equal((await cancellation).status, "canceled");
+  }
+
+  async function resumedSelectedFailureWaitsForCleanup() {
+    await resumedSelectedCancellationWaitsForCleanup(true);
+  }
 
   async function failedParentCancellationStopsActiveWorker() {
     for (const terminalReadFails of [false, true]) {
@@ -1398,6 +1503,89 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   for (const worker of store.workers.values()) {
     if (worker.kind !== "discovery") continue;
     const draft = await readJson(worker.resultManifestPath!);
+    assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
+    assert.equal(draft.coverage.deferred.length, 1);
+  }
+}
+
+export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    stopAfterNoNew: 2,
+    maxDiscoveryRuns: 2,
+  });
+  const executor = new FakeExecutor();
+  const run = executor.run.bind(executor);
+  const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
+  const workerReviewed = {
+    ...reviewed,
+    receiptRefs: ["artifacts/worker-receipt.md"],
+  };
+  const followUp = {
+    label: "Worker follow-up",
+    disposition: "needs_follow_up",
+  };
+  executor.run = async (request) => {
+    const outcome = await run(request);
+    if (request.kind !== "discovery") return outcome;
+    const resultPath = path.join(request.artifactContext!.root, "result.json");
+    await mkdir(path.join(request.artifactContext!.root, "artifacts"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(request.artifactContext!.root, "artifacts/worker-receipt.md"),
+      "Synthetic review receipt.\n",
+    );
+    const draft = JSON.parse(await readFile(resultPath, "utf8"));
+    draft.coverage = {
+      completeness:
+        request.kind === "discovery" &&
+        request.promptPath.includes("discovery-0002")
+          ? "unknown"
+          : "partial",
+      surfaces: [workerReviewed, followUp],
+      explicitExclusions: [],
+      deferred: [
+        { reason: "An independent review left this question unresolved." },
+      ],
+    };
+    await writeFile(resultPath, JSON.stringify(draft));
+    return outcome;
+  };
+  const completed: ScanDraftInput[] = [];
+  const terminal = await runCoordinator(fixture, store, executor, {
+    onComplete: async (draft) => void completed.push(structuredClone(draft)),
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(completed.length, 1);
+  const projection = completed[0].coverage as unknown as {
+    completeness: string;
+    deferred: { provenance: { attempt: number; workerId: string } }[];
+    surfaces: unknown[];
+    reviews: { completeness: string }[];
+  };
+  assert.equal(projection.completeness, undefined);
+  assert.equal(projection.deferred.length, 2);
+  assert.equal(projection.surfaces.length, 4);
+  assert.equal(projection.reviews.length, 2);
+  assert.deepEqual(
+    new Set(
+      projection.reviews.map(
+        (review: { completeness: string }) => review.completeness,
+      ),
+    ),
+    new Set([undefined]),
+  );
+  for (const item of projection.deferred) {
+    assert.equal(item.provenance.attempt, 1);
+    assert.ok(store.workers.has(item.provenance.workerId));
+  }
+  for (const worker of store.workers.values()) {
+    if (worker.kind !== "discovery") continue;
+    const draft = JSON.parse(
+      await readFile(worker.resultManifestPath!, "utf8"),
+    );
+    assert.notEqual(draft.coverage.completeness, "complete");
     assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
     assert.equal(draft.coverage.deferred.length, 1);
   }

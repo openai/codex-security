@@ -625,6 +625,7 @@ def test_standard_publication_preserves_deferred_work(
 ):
     scan = publication_scan(mode="standard")
     scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
+    scan.coverage["reviews"] = []
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
     complete(workbench_api, workbench_db, scan)
@@ -869,6 +870,63 @@ def test_stopped_deep_projection_filters_the_canonical_parent(
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 0
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
+
+
+@pytest.mark.parametrize("operation", ["fail", "cancel"])
+def test_stopped_legacy_reducers_keep_latest_completed_result(
+    workbench_api, workbench_db, publication_scan, operation
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'reducing', "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    evidence = {}
+    for index, worker_id in enumerate(
+        ("ffffffff-ffff-4fff-8fff-ffffffffffff", "00000000-0000-4000-8000-000000000001")
+    ):
+        result = add_worker(workbench_db, scan)
+        finding = copy.deepcopy(scan.findings[0])
+        finding["identity"]["anchor"] = f"legacy-reducer-{index}"
+        finding["summary"] = f"Synthetic reducer result {index}."
+        result.write_text(
+            json.dumps({"scanId": scan.scan_id, "complete": True, "findings": [finding]})
+        )
+        evidence[result] = result.read_bytes()
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET id = ?, kind = 'dedup', merge_state = 'none', "
+                "prompt_path = ?, completed_at = ? WHERE result_manifest_path = ?",
+                (
+                    worker_id,
+                    str(scan.scan_dir / f"legacy-review-{index}" / "prompt.md"),
+                    f"2026-01-0{index + 1}T00:00:00Z",
+                    str(result),
+                ),
+            )
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    saved_results = workbench_api["saved_results"]
+    args = Namespace(
+        scan_id=scan.scan_id,
+        claim_token=None,
+        thread_id=None,
+        cost_json=None,
+        message="Synthetic stop.",
+    )
+    getattr(saved_results, f"{operation}_scan")(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+    )
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert [finding["summary"] for finding in findings] == ["Synthetic reducer result 1."]
+    published = (scan.scan_dir / "findings.json").read_bytes()
+    getattr(saved_results, f"{operation}_scan")(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+    )
+    assert (scan.scan_dir / "findings.json").read_bytes() == published
+    assert {path: path.read_bytes() for path in evidence} == evidence
 
 
 def test_already_sealed_legacy_capped_scan_remains_immutable(
