@@ -61,6 +61,90 @@ const normalized = (id = "vendor-1", severity = "high") => ({
   },
 });
 
+for (const value of [undefined, "", "0", "true", " 1 "]) {
+  test(`external publication stays disabled without exact opt-in (${JSON.stringify(value)})`, async () => {
+    const f = await fixture();
+    let sideEffects = 0;
+    const disabled = {
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: value,
+      },
+      credentials: async () => {
+        sideEffects++;
+        throw new Error("Unexpected credential read");
+      },
+      fetch: async () => {
+        sideEffects++;
+        throw new Error("Unexpected Cloud request");
+      },
+    };
+    // The missing path would fail differently if the file reader ran first.
+    await expect(
+      prepareExternalPublication(
+        join(f.root, "missing.json"),
+        options,
+        disabled,
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    await expect(
+      prepareNormalizedExternalPublication(
+        { read: 0, findings: [], excluded: [] },
+        options,
+        disabled,
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(sideEffects).toBe(0);
+    await expect(
+      readdir(f.environment.CODEX_SECURITY_STATE_DIR),
+    ).rejects.toThrow("ENOENT");
+  });
+}
+
+test("concurrent external publications use their own opt-in environments", async () => {
+  const f = await fixture();
+  const parsed = await readVendorFindings(f.file);
+  let disabledSideEffects = 0;
+  const disabled = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+    },
+    credentials: async () => {
+      disabledSideEffects++;
+      throw new Error("Unexpected credential read");
+    },
+    fetch: async () => {
+      disabledSideEffects++;
+      throw new Error("Unexpected Cloud request");
+    },
+  };
+  const results = await Promise.allSettled([
+    prepareExternalPublication(f.file, options, f.deps),
+    prepareExternalPublication(f.file, options, disabled),
+    prepareNormalizedExternalPublication(parsed, options, f.deps),
+    prepareNormalizedExternalPublication(parsed, options, disabled),
+  ]);
+  expect(results.map((result) => result.status)).toEqual([
+    "fulfilled",
+    "rejected",
+    "fulfilled",
+    "rejected",
+  ]);
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      expect(result.value.preview.findings).toHaveLength(1);
+    } else {
+      expect(String(result.reason)).toContain(
+        "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+      );
+    }
+  }
+  expect(disabledSideEffects).toBe(0);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("Wiz's gzip JSON report retains finding identity, evidence and repository locations", async () => {
   const report = {
     id: "vendor-report-1",
@@ -159,6 +243,7 @@ async function fixture(
   await writeFile(file, JSON.stringify(records));
   const environment = {
     ...process.env,
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(root, "credentials"),
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };

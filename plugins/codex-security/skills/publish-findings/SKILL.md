@@ -1,9 +1,11 @@
 ---
 name: publish-findings
-description: Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
+description: Disabled by default; requires user opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import selected Snyk Open Source findings, Semgrep Code CLI/CI reports, Endor Labs findings, GitHub code-scanning alerts or GHSA advisories, or Wiz package vulnerabilities, SAST, repository secrets, and IaC findings locally or to Codex Security Cloud after previewing the destination and evidence. Prefers native JSON; also supports Snyk plugin SCA bundles, Snyk Open Source and Semgrep Code SARIF, endorctl SARIF, saved GitHub JSON/JSONL, Wiz normalized JSONL and repository package-vulnerability CSV, and gzip; does not import workload secrets or cloud configuration, run a scan, assess findings, or synchronize triage decisions.
 ---
 
 # Publish external findings
+
+This workflow is disabled by default. Before acquiring or importing findings, check that the user has opted in with `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the command environment. If it is not set to exactly `1`, stop and explain the prerequisite. Do not set the flag on the user's behalf.
 
 Use the installed `codex-security publish findings` command for preview and import. It owns source mapping and local persistence or Cloud publication. Select `--to local` for the local workbench SQLite database or `--to cloud` for Cloud. Do not implement another store or uploader or put credentials in a command argument.
 

@@ -1149,6 +1149,7 @@ async function testOpenAiCredentialsReachWorker() {
       DYLD_LIBRARY_PATH: path.join(fixture.root, "dylibs"),
       DYLD_FALLBACK_LIBRARY_PATH: path.join(fixture.root, "fallback-libraries"),
       CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       RUNNER_TRACKING_ID: "synthetic-worker-job",
     };
     const previousEnvironment = [
@@ -1390,6 +1391,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
@@ -1473,6 +1475,17 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       const providerKeys = settings.map((_, index) =>
         index === 0 ? undefined : ` synthetic-gateway-key-${index} `,
       );
+      const externalImports: {
+        inherited: string | undefined;
+        override?: string;
+      }[] = [
+        { inherited: undefined },
+        { inherited: "1" },
+        { inherited: "0" },
+        { inherited: "0", override: "1" },
+        { inherited: "1", override: "0" },
+        { inherited: "" },
+      ];
       const providerHeaders = settings.map((_, index) =>
         index === 0 ? undefined : ` synthetic-header-${index}\t`,
       );
@@ -1644,6 +1657,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 : {
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
+                    ...(externalImports[index].override === undefined
+                      ? {}
+                      : {
+                          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS:
+                            externalImports[index].override,
+                        }),
                     CODEX_SQLITE_HOME: path.join(
                       fixture.root,
                       `native-state-${index}`,
@@ -1898,6 +1917,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           await Promise.all(
             executors.map((executor, index) => {
               // Snapshot each scan environment independently.
+              restoreEnv(
+                "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
+                externalImports[index].inherited,
+              );
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
               Object.assign(process.env, temporaryEnvironments[index]);
               process.env.CODEX_SECURITY_STATE_DIR = path.join(
@@ -2015,6 +2038,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            assert.equal(
+              invocation.runtimeEnvironment
+                .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
+              externalImports[index].override ??
+                externalImports[index].inherited,
+            );
+            assert.equal(
+              process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
+              externalImports.at(-1)!.inherited,
+            );
             if (
               process.platform === "win32" &&
               configuration === "" &&

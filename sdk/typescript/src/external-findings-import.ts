@@ -9,6 +9,7 @@ import {
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
 import { abortable } from "./targets.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 
 /** Read an installed vendor format and prepare it for the local workbench. */
 export async function prepareLocalExternalImport(
@@ -16,6 +17,7 @@ export async function prepareLocalExternalImport(
   options: ExternalPublicationOptions,
   dependencies: LocalExternalImportDependencies = {},
 ) {
+  requireExternalImports(dependencies.environment ?? process.env);
   dependencies.signal?.throwIfAborted();
   const parsed = await abortable(
     () => readExternalFindings(path, options, "local"),

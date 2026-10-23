@@ -1,5 +1,8 @@
 # Import Semgrep Code findings
 
+Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+
 Prefer native **Semgrep Code/SAST CLI or CI JSON** for this reader. It preserves
 the scanner's original severity and source evidence. Self-contained SARIF 2.1.0
 is a compatibility path. Both formats may be plain or gzip-compressed.

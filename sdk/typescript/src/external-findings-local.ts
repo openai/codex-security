@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isNumberObject } from "node:util/types";
 import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 import type {
   ExternalFindings,
   ExternalSourceRepository,
@@ -480,6 +481,7 @@ export async function prepareNormalizedLocalImport(
   options: NormalizedLocalImportOptions,
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
+  requireExternalImports(dependencies.environment ?? process.env);
   dependencies.signal?.throwIfAborted();
   requireIdentity(options.sourceKey, "Source key");
   const current = structuredClone(input);
@@ -592,6 +594,7 @@ export async function listLocalExternalFindings(
   selection: { repository: string; id?: string },
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
+  requireExternalImports(dependencies.environment ?? process.env);
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
   const { repository, options } = await localContext(
     selection.repository,

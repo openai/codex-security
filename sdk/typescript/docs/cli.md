@@ -934,26 +934,27 @@ For filesystem and approval behavior, see the
 
 ### Environment variables
 
-| Variable                                                                    | Effect                                                                                                               |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                        |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                    |
-| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
-| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
-| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
-| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
-| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
-| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                     |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                             |
-| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`. |
-| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                            |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                               |
-| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                           |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                  |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                |
-| `CI`                                                                        | Disable interactive update notices.                                                                                  |
-| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                   |
+| Variable                                                                    | Effect                                                                                                                        |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan credentials; the first takes precedence.                                                                                 |
+| `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS`                                    | Set to `1` to enable vendor finding imports, imported-findings readback, and GitHub advisory acquisition; disabled otherwise. |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Private history, database, and default artifacts.                                                                             |
+| `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                                     |
+| `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                                       |
+| `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                                        |
+| `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                                    |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                              |
+| `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                                     |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                                                                              |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                                                                                      |
+| `CODEX_SECURITY_CLOUD_BASE_URL`                                             | Cloud API root for discovery, imports, and scan publication. Defaults to `https://chatgpt.com/backend-api/aardvark`.          |
+| `CODEX_SECURITY_CLOUD_WEB_URL`                                              | Cloud app URL for repository links when an alternate deployment serves its UI separately.                                     |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.                                                                        |
+| `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                                                                                    |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                                                                           |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                                                                                         |
+| `CI`                                                                        | Disable interactive update notices.                                                                                           |
+| `NO_COLOR`, `TERM`                                                          | Disable colored history when `NO_COLOR` is defined or `TERM=dumb`.                                                            |
 
 Custom Codex executables need thread source attribution for `exec` and
 `app-server` (Codex 0.149.1+). On Windows, use a native `.exe` or `.com`;
@@ -1253,6 +1254,24 @@ follow-up notes and do not fail the scan. An incompatible plugin stops the scan.
 Supply the validation prompt again when rerunning.
 
 ## Import vendor findings locally
+
+External finding imports are disabled by default. Opt in for the current shell:
+
+```bash
+export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
+```
+
+In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
+Only `1` enables the feature. Without it, `publish findings`, `findings imported`,
+and `import github-advisories` are absent from command help and schemas and cannot
+run. The SDK's external publication, local import/readback, and advisory
+acquisition APIs require the same flag in their effective environment. An explicit
+`dependencies.environment` is used instead of the process environment. Pure
+normalizers and file readers remain available as library utilities.
+
+This flag does not affect `publish scan`, `publish check`, `scan import`, or the
+existing `import github` alert collector. Disabling it retains previously imported
+records; enable it again to read them with `findings imported`.
 
 Prefer the provider's supported native JSON from its CLI, plugin, or API. Native
 reports can retain details omitted by SARIF. Use SARIF or CSV as compatibility
@@ -2353,6 +2372,9 @@ installation fails. The installer respects `core.hooksPath`.
 
 ## Import GitHub findings locally or to Cloud
 
+Local and Cloud ingestion require the [external-import opt-in](#import-vendor-findings-locally).
+The existing alert collector remains available without it.
+
 Acquire code-scanning findings with the existing `import github` collector and
 save its complete JSON output. In Codex, the official
 [GitHub Codex plugin](https://github.com/openai/plugins/tree/main/plugins/github)
@@ -2443,6 +2465,8 @@ its preview, and call `import()`. `prepareLocalExternalImport()` accepts the sav
 import file directly. Read records with `listLocalExternalFindings({ repository })`.
 
 ### Import GHSA advisories separately
+
+Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` before using this command or its SDK API.
 
 **Importing a GHSA advisory does not establish an installed dependency or
 applicability to the destination repository.** Repository advisories are

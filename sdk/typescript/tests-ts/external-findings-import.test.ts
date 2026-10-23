@@ -8,6 +8,36 @@ import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
+test("requires opt-in before reading the source file", async () => {
+  const fixture = await localFindingsFixture();
+  try {
+    const environment: NodeJS.ProcessEnv = { ...fixture.environment };
+    delete environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"];
+    let workbenchCalls = 0;
+    await expect(
+      prepareLocalExternalImport(
+        join(fixture.root, "missing-findings.json"),
+        {
+          repository: fixture.repository,
+          provider: "wiz",
+          sourceKey: "example-project/main",
+        },
+        {
+          environment,
+          runWorkbench: async () => {
+            workbenchCalls++;
+            throw new Error("Disabled imports must not access the workbench");
+          },
+        },
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(workbenchCalls).toBe(0);
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test("cancels preparation while the source file read is pending", async () => {
   const fixture = await localFindingsFixture();
   try {

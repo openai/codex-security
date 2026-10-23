@@ -25,7 +25,11 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
     root,
     repository,
     stateDirectory,
-    environment: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDirectory },
+    environment: {
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+    },
     dispose: () => rm(root, { recursive: true, force: true }),
   };
 }

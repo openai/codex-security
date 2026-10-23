@@ -636,6 +636,14 @@ grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-clou
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
 
+External vendor imports are opt-in. Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`
+to enable `publish findings`, `findings imported`, `import github-advisories`, and
+the SDK's external publication, local import/readback, and advisory acquisition
+APIs. They are disabled otherwise; CLI commands are hidden from help and schemas.
+SDK callers can supply the flag through the existing per-call
+`dependencies.environment`. Pure normalizers and file readers remain available.
+This does not affect scan publishing or the existing GitHub alert collector.
+
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
 vendor exports and `prepareNormalizedExternalPublication(findings, options)` for
 normalized external evidence from any provider in the Cloud import contract.

@@ -11,8 +11,22 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { dependencies, FakeSignals } from "./cli-fixtures.js";
+import {
+  dependencies as cliDependencies,
+  FakeSignals,
+} from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+
+const dependencies: typeof cliDependencies = (options = {}) => {
+  const result = cliDependencies(options);
+  return {
+    ...result,
+    environment: {
+      ...result.environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+    },
+  };
+};
 
 const roots: string[] = [];
 afterEach(async () => {
