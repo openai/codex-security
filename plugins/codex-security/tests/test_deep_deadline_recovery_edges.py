@@ -5,7 +5,6 @@ import json
 import os
 import signal
 import sqlite3
-import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -432,6 +431,8 @@ def test_deadline_interrupt_preserves_only_committed_publication(
 def test_mid_merge_failure_removes_only_created_recovery_evidence(
     tmp_path: Path, monkeypatch, workbench_api, write_kind: str
 ):
+    from workbench import retained_coverage, saved_sources
+
     scan = deadline_fixture(tmp_path, "valid")
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     before = {
@@ -459,11 +460,8 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
             raise RuntimeError("Synthetic merge failure")
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", fail_during_merge)
-    monkeypatch.setattr(
-        sys.modules[saved._capture_saved_source.__module__],
-        "write_scan_local_bytes",
-        fail_during_merge,
-    )
+    monkeypatch.setattr(saved_sources, "write_scan_local_bytes", fail_during_merge)
+    monkeypatch.setattr(retained_coverage, "write_scan_local_bytes", fail_during_merge)
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         record = workbench_api["require_scan"](connection, scan.scan_id)
@@ -482,6 +480,8 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
 def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
     tmp_path, monkeypatch, workbench_api, snapshot_failure
 ):
+    from workbench import retained_coverage, saved_sources
+
     scan = deadline_fixture(tmp_path, "valid")
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     before = {
@@ -501,11 +501,8 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
         write(directory, relative, contents)
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", fail_before_snapshot_directory)
-    monkeypatch.setattr(
-        sys.modules[saved._capture_saved_source.__module__],
-        "write_scan_local_bytes",
-        fail_before_snapshot_directory,
-    )
+    monkeypatch.setattr(saved_sources, "write_scan_local_bytes", fail_before_snapshot_directory)
+    monkeypatch.setattr(retained_coverage, "write_scan_local_bytes", fail_before_snapshot_directory)
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute(

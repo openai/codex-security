@@ -461,12 +461,14 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
         wrapper,
         state_dir,
         codex_home,
+        "from workbench import retained_coverage\n"
         "original_write = workbench_saved_results.write_scan_local_bytes\n"
         "def fail_parent_checkpoint(scan_dir, relative_path, payload, **kwargs):\n"
         "    if relative_path.startswith('checkpoints/'):\n"
         "        raise OSError('injected parent checkpoint failure')\n"
         "    return original_write(scan_dir, relative_path, payload, **kwargs)\n"
-        "workbench_saved_results.write_scan_local_bytes = fail_parent_checkpoint\n",
+        "workbench_saved_results.write_scan_local_bytes = fail_parent_checkpoint\n"
+        "retained_coverage.write_scan_local_bytes = fail_parent_checkpoint\n",
         "recover-scan-results",
         "--scan-id",
         scan_id,

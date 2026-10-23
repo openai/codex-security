@@ -47,7 +47,7 @@ def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: 
     return saved_discovery_worker(output, worker_id, 1)
 
 
-def recover(root: Path, module, workers, frozen=None):
+def recover(root: Path, module, workers, frozen=None, *, preserve_reduction=False):
     binding = {
         "status": "interrupted",
         "allowedTargetKinds": ["git_revision"],
@@ -66,9 +66,12 @@ def recover(root: Path, module, workers, frozen=None):
         binding,
         workers,
         [],
-        stopped=True,
+        stopped=not preserve_reduction,
         reason="interrupted",
         frozen_source_digests=frozen,
+        preserve_canonical_parent=preserve_reduction,
+        current_contract=preserve_reduction,
+        scan_mode="deep" if preserve_reduction else None,
     )
     assert result is not None
     return result
@@ -1180,8 +1183,9 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("reversed_rows", [False, True])
 @pytest.mark.parametrize("revised_identity", ["explicit", "implicit", "anonymous"])
+@pytest.mark.parametrize("preserve_reduction", [False, True])
 def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
-    tmp_path, saved_results, reversed_rows, revised_identity
+    tmp_path, saved_results, reversed_rows, revised_identity, preserve_reduction
 ):
     first = {
         "ruleId": "fixture.review",
@@ -1218,8 +1222,16 @@ def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": f"{saved_results._digest(latest)}.json"}))
     os.utime(head, ns=(300, 300))
-    documents = recover(tmp_path, saved_results, [worker])
-    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    if preserve_reduction:
+        write_saved_parent(tmp_path, saved_draft("identity-scan", complete=True), 2000)
+    documents = recover(tmp_path, saved_results, [worker], preserve_reduction=preserve_reduction)
+    replay = recover(
+        tmp_path,
+        saved_results,
+        [worker],
+        documents[0]["scan"]["preservedSources"],
+        preserve_reduction=preserve_reduction,
+    )
     for result in (documents, replay):
         findings = result[1]["findings"]
         assert len(findings) == (3 if revised_identity == "anonymous" else 2)

@@ -8,12 +8,10 @@ import json
 import os
 import re
 import stat
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _read_scan_local_json,

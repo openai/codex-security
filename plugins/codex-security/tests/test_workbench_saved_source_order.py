@@ -21,7 +21,7 @@ from workbench_test_support import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
 import workbench_saved_results as saved
-import workbench_saved_sources as saved_sources
+from workbench import saved_sources
 
 
 def call_workbench(monkeypatch, state, codex_home, *args):

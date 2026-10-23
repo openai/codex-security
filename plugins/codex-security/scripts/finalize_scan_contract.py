@@ -1207,6 +1207,7 @@ def _recover_unsealed_findings(
                         f"Skipped malformed {auxiliary} for finding {index + 1}: {exc}."
                     )
             _validate_schema_node(finding, finding_schema, context, schema)
+            _require_safe_json_value(finding, context)
             if current_contract:
                 _validate_current_findings({"findings": [finding]}, schema_dir)
         except ContractError as exc:
@@ -1264,9 +1265,12 @@ def _recover_unsealed_coverage(
     scan_dir: Path,
     warnings: list[str],
     discarded_findings: list[str],
-) -> None:
+    *,
+    worker_draft: bool = False,
+) -> set[str]:
     schema = _read_json(schema_dir / "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
+    discarded_fields: set[str] = set()
     if (
         coverage.get("mode") == "deep_repository"
         and coverage.get("inventoryStrategy") != "repository"
@@ -1276,16 +1280,24 @@ def _recover_unsealed_coverage(
 
     surface_ids: set[str] = set()
     receipt_paths: dict[str, str] = {}
-    for field, label in (
+    fields = [
         ("surfaces", "coverage surface"),
         ("explicitExclusions", "coverage exclusion"),
         ("deferred", "deferred coverage item"),
-    ):
+    ]
+    if worker_draft:
+        if "openQuestions" in coverage:
+            _normalize_unsealed_open_questions(coverage)
+            fields.append(("openQuestions", "coverage open question"))
+        if "resolvedDeferred" in coverage:
+            fields.append(("resolvedDeferred", "resolved deferred item"))
+    for field, label in fields:
         array_schema = _require_dict(properties, field, "coverage.schema.properties")
         item_schema = _require_dict(array_schema, "items", f"coverage.schema.properties.{field}")
         items = coverage.get(field)
         if not isinstance(items, list):
             warnings.append(f"Skipped malformed {label} records: expected an array.")
+            discarded_fields.add(field)
             coverage[field] = []
             continue
 
@@ -1298,7 +1310,9 @@ def _recover_unsealed_coverage(
                 if field == "surfaces":
                     surface_receipt_paths = dict(receipt_paths)
                     surface_id = _require_str(item, "id", context)
-                    if surface_id in surface_ids:
+                    if worker_draft:
+                        _require_str(item, "label", context)
+                    if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
                     surface_recovered = False
@@ -1348,12 +1362,18 @@ def _recover_unsealed_coverage(
                     item["receiptRefs"] = recovered_receipts
                     if surface_recovered:
                         item["disposition"] = "needs_follow_up"
+                        discarded_fields.add(field)
 
                 if field == "deferred":
                     _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
+                if field == "resolvedDeferred":
+                    _validate_resolved_deferred({"resolvedDeferred": [item]})
+                if worker_draft:
+                    _require_safe_json_value(item, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
+                discarded_fields.add(field)
                 continue
 
             if field == "surfaces":
@@ -1365,6 +1385,13 @@ def _recover_unsealed_coverage(
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
+            if (
+                worker_draft
+                and surface.get("candidateId")
+                and surface["disposition"] in {"rejected", "not_applicable"}
+            ):
+                # A valid explicit outcome can still resolve that worker's history.
+                continue
             surface["disposition"] = "needs_follow_up"
         coverage["deferred"].extend(
             {"id": f"discarded-finding-{index}", "reason": warning}
@@ -1379,9 +1406,13 @@ def _recover_unsealed_coverage(
                 "coverage.resolvedDeferred",
             )
             _validate_resolved_deferred(coverage)
+            if worker_draft:
+                _require_safe_json_value(coverage["resolvedDeferred"], "coverage.resolvedDeferred")
         except ContractError as exc:
             coverage.pop("resolvedDeferred")
             warnings.append(f"Skipped malformed resolved deferred work: {exc}.")
+            discarded_fields.add("resolvedDeferred")
+    return discarded_fields
 
 
 def _recover_unsealed_hardening(
