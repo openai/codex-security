@@ -2604,8 +2604,9 @@ describe("GitHub release workflow safeguards", () => {
       ref: "refs/heads/main",
       "persist-credentials": false,
     });
-    expect(progress.concurrency).toBeUndefined();
+    expect(progress.concurrency?.["cancel-in-progress"]).toBe(false);
     expect(progress.jobs["report"]?.concurrency?.["queue"]).toBe("max");
+    expect(progress.jobs["report"]?.needs).toBe("identify");
     expect(progress.jobs["watch"]?.permissions).toEqual({
       actions: "write",
       contents: "read",
@@ -2615,7 +2616,10 @@ describe("GitHub release workflow safeguards", () => {
       "github.event.action == 'in_progress'",
     );
     expect(progress.jobs["watch"]?.if).toContain("inputs.watch");
-    expect(progress.jobs["watch"]?.steps?.[0]?.with).toEqual(checkout?.with);
+    expect(progress.jobs["watch"]?.steps?.[0]?.with).toEqual({
+      ref: "refs/heads/main",
+      "persist-credentials": false,
+    });
     expect(
       progress.jobs["watch"]?.steps?.at(-1)?.env?.["RELEASE_PROGRESS_WATCH"],
     ).toBe("true");
