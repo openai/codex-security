@@ -101,9 +101,9 @@ jobs:
           MUSL_RESULT: ${{ needs.musl.result }}
         run: |
           set -euo pipefail
-          [[ "$PREPARE_RESULT" == success ]]
+          [[ "$PREPARE_RESULT" == success ]] || exit 1
           if [[ "$CACHE_HIT" != true ]]; then
-            [[ "$UNIX_RESULT" == success && "$WINDOWS_RESULT" == success && "$MUSL_RESULT" == success ]]
+            [[ "$UNIX_RESULT" == success && "$WINDOWS_RESULT" == success && "$MUSL_RESULT" == success ]] || exit 1
           fi
       - name: Download verified platform payloads
         if: needs.prepare.outputs.cache-hit != 'true'
