@@ -500,7 +500,8 @@ def preserve_deep_deadline_draft(
             stopped=not preserve_reduction,
             preserve_canonical_parent=preserve_reduction,
             project_worker_coverage=True,
-            scan_mode="deep",
+            # Without reduction, the coordinator's empty draft cannot replace worker evidence.
+            scan_mode="deep" if preserve_reduction else None,
             finding_scope=db.requested_finding_scope(scan),
             created_paths=created_paths,
             current_contract=True,
