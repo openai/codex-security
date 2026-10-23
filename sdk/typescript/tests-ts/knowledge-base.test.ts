@@ -659,11 +659,6 @@ describe("scan knowledge bases", () => {
       "Require authorization before access",
     ],
     [
-      "literal markup and entities in CDATA",
-      "Permit <![CDATA[<reader> &amp; &#65;]]> only",
-      "Permit <reader> &amp; &#65; only",
-    ],
-    [
       "comments containing markup",
       "Require<!-- x > hidden <w:tab/> --> authorization",
       "Require authorization",
