@@ -3362,12 +3362,25 @@ describe("runtime directories and plugin Python boundary", () => {
     await writeFile(
       runtime,
       `export * from ${runtimeUrl};
-       import { readFile } from "node:fs/promises";
+       import { acquireCodexSecurityCredentialHomeLock as acquire } from ${runtimeUrl};
+       import { existsSync } from "node:fs";
+       import { writeFile } from "node:fs/promises";
        import { join } from "node:path";
        import { once } from "node:events";
+       const exitMarker = join(process.argv[3], "exit-holder");
+       export async function acquireCodexSecurityCredentialHomeLock(...args) {
+         const release = await acquire(...args);
+         if (process.argv[4] === "hold") {
+           setInterval(() => {
+             if (existsSync(exitMarker)) process.exit(23);
+           }, 25);
+         }
+         return release;
+       }
        if (process.argv[4] === "legacy") {
-         const owner = JSON.parse(await readFile(join(process.argv[3], ".codex-security-scan.lock", "owner.json"), "utf8"));
-         process.kill(owner.pid, "SIGKILL");
+         // Coordinate an explicit exit: Windows reports external termination as
+         // an exit code instead of a Unix signal.
+         await writeFile(exitMarker, "exit");
          // Stay in startup until the parent notices the owner exit and cleans up.
          process.stdin.resume();
          await once(process.stdin, "end");
@@ -3388,7 +3401,7 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ).rejects.toMatchObject({
       stderr: expect.stringMatching(
-        /Credential-lock holder exited during legacy contender startup.*signal=SIGKILL/,
+        /Credential-lock holder exited during legacy contender startup.*code=23, signal=null, watchdog=false/,
       ),
     });
   }, 125_000);
