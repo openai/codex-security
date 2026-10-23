@@ -109,6 +109,56 @@ equivalent(
     },
   },
 );
+for (const [paths, expected] of [
+  [
+    [
+      ".",
+      "src/",
+      "path with space",
+      "src/[queue]",
+      "tmp/*",
+      "Résumé.md",
+      "😀.md",
+    ],
+    String.raw`., src/, path with space, src/\[queue\], tmp/\*, Résumé.md, 😀.md`,
+  ],
+  [
+    ["a,b.ts", "a, b.ts", "a  b", "a b", " ", "  "],
+    '`"a,b.ts"`, `"a, b.ts"`, `"a  b"`, a b, `" "`, `"  "`',
+  ],
+  [
+    [" a`b ", "a``b,c", "`literal`"],
+    '``" a`b "``, ```"a``b,c"```, \\`literal\\`',
+  ],
+  [
+    [
+      "docs/Résumé, final.md",
+      "a\u202eb, c.md",
+      "a\u00a0b",
+      "😀, c.md",
+      "\u{1fae9},notes.md",
+    ],
+    '`"docs/R\\u00e9sum\\u00e9, final.md"`, `"a\\u202eb, c.md"`, `"a\\u00a0b"`, `"\\ud83d\\ude00, c.md"`, `"\\ud83e\\udee9,notes.md"`',
+  ],
+  [
+    ["a\u001bb", "a\u007fb, c.md", "a\nb", "a\tb"],
+    '`"a\\u001bb"`, `"a\\u007fb, c.md"`, `"a\\nb"`, `"a\\tb"`',
+  ],
+] satisfies [string[], string][]) {
+  test(`literal scope paths match Python: ${JSON.stringify(paths)}`, () => {
+    const scope = { includePaths: paths, excludePaths: paths };
+    const input = {
+      threatModel: { ...markdownModel, scope },
+      provenance: { scanScope: scope },
+    };
+    const rendered = renderThreatModel(input);
+    assert.equal(rendered, pythonRender(input));
+    for (const label of ["Model scope", "Scan scope"]) {
+      assert.ok(rendered.includes(`- ${label}: ${expected}\n`));
+      assert.ok(rendered.includes(`- ${label} exclusions: ${expected}\n`));
+    }
+  });
+}
 for (const ending of ["", "\n", "\n\n", "\r\n"]) {
   equivalent(`authored Markdown ending ${JSON.stringify(ending)}`, {
     ...markdownModel,
@@ -174,7 +224,11 @@ test("non-object models report a threatModel diagnostic", () => {
 });
 
 test("Python finalizer recognizes native renderer bytes as the current projection", () => {
-  const threatModel = { summary: "Saved model", assets: ["Queue"] };
+  const scope = {
+    includePaths: ["src", "a,b.ts", "a  b", "\u{1fae9},notes.md"],
+    excludePaths: [" "],
+  };
+  const threatModel = { summary: "Saved model", assets: ["Queue"], scope };
   const scan = {
     id: "example-scan",
     status: "running",
@@ -183,7 +237,7 @@ test("Python finalizer recognizes native renderer bytes as the current projectio
       displayName: "Example [workspace]",
       revision: "example-revision",
     },
-    scope: { includePaths: ["src"], excludePaths: [] },
+    scope,
   };
   const markdown = renderThreatModel({
     threatModel,

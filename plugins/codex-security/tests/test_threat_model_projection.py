@@ -80,6 +80,36 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         self.assertIn(b"tmp/\\*", document)
         self.assertIn(b"Service boundaries.", document)
 
+    def test_scope_paths_keep_ambiguous_literals_distinct(self) -> None:
+        scope = {"includePaths": ["a,b.ts", "a  b", "src"], "excludePaths": [" "]}
+        document = FINALIZER._render_threat_model(
+            {"summary": "Existing structured model.", "scope": scope}, {"scanScope": scope}
+        )
+        for label in (b"Model scope", b"Scan scope"):
+            self.assertIn(label + b': `"a,b.ts"`, `"a  b"`, src\n', document)
+            self.assertIn(label + b' exclusions: `" "`\n', document)
+
+    def test_legacy_empty_scope_paths_keep_none_placeholder(self) -> None:
+        scope = {"includePaths": [""], "excludePaths": [""]}
+        document = FINALIZER._render_threat_model(
+            {"summary": "Existing structured model.", "scope": scope}, {"scanScope": scope}
+        )
+        for label in (b"Model scope", b"Scan scope"):
+            self.assertIn(label + b": none\n", document)
+            self.assertIn(label + b" exclusions: none\n", document)
+
+    def test_quoted_scope_paths_use_version_independent_unicode_escapes(self) -> None:
+        scope = {"includePaths": ["Résumé.md", "Résumé, final.md", "\U0001fae9,notes.md"]}
+        document = FINALIZER._render_threat_model(
+            {"summary": "Existing structured model.", "scope": scope}, {"scanScope": scope}
+        ).decode()
+        for label in ("Model scope", "Scan scope"):
+            self.assertIn(
+                f'- {label}: Résumé.md, `"R\\u00e9sum\\u00e9, final.md"`, '
+                '`"\\ud83e\\udee9,notes.md"`\n',
+                document,
+            )
+
     def test_exports_legacy_structured_model_extensions(self) -> None:
         for extensions, expected_origin in (
             ({"format": "markdown"}, "not recorded"),

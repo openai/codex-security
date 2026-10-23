@@ -37,6 +37,7 @@
 - report verification failures in structured output ([#1835](https://github.com/openai/codex-security/pull/1835))
 - retain unfinished deadline checkpoints ([#1710](https://github.com/openai/codex-security/pull/1710))
 - clarify requested scope and deferred work ([#586](https://github.com/openai/codex-security/pull/586))
+- preserve literal scope paths across renderers ([#1850](https://github.com/openai/codex-security/pull/1850))
 
 <!-- release-section: highlights:end -->
 
