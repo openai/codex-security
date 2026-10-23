@@ -1,3 +1,4 @@
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type {
@@ -31,12 +32,14 @@ export const {
   AsyncLock,
   classifyCodexWorkerError,
   startOrJoinDeepScanCoordinator,
+  recordCodexSecurityWorkerScanDraft,
 } = await importModule({
   stdin: {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
+      export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
   },
@@ -661,7 +664,7 @@ export function standardScanDraft(
   scanId: string,
   candidateId: string | undefined,
   workerLabel: string,
-) {
+): ScanDraftInput {
   return {
     scanId,
     threatModel: { summary: `Independent threat model for ${workerLabel}.` },

@@ -1038,6 +1038,17 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
       if (receiptIoFailure)
         f.environment.TEST_WORKBENCH_RECEIPT_IO_FAILURE = "1";
       const before = await f.workers();
+      const expectedReviews = before.workers
+        .filter(
+          (worker) =>
+            worker.kind === "discovery" && worker.status === "succeeded",
+        )
+        .map((worker) => ({ workerId: worker.id, attempt: worker.attempt }));
+      assert.equal(expectedReviews.length, 4);
+      const expectedDraft = {
+        ...f.draft,
+        coverage: { ...f.draft.coverage, reviews: expectedReviews },
+      };
       const sources = await Promise.all(
         f.results.map((file) => readFile(file)),
       );
@@ -1071,7 +1082,7 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
         clock: { now: () => Date.parse(f.instant), sleep: async () => {} },
         onComplete: async (draft, signal, publication) => {
           publications++;
-          assert.deepEqual(draft, f.draft);
+          assert.deepEqual(draft, expectedDraft);
           assert.deepEqual(publication, {
             coordinatorGeneration: 2,
             resultPath: f.results[1],

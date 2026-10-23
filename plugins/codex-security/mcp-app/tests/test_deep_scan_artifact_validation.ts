@@ -15,12 +15,15 @@ import {
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
+import type { DeepReductionInput } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
 const {
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   aggregateDiscoveryCoverage,
+  aggregateSourceCoverage,
+  projectDiscoveryCoverage,
 } = await importSource(
   path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
 );
@@ -43,6 +46,7 @@ try {
   await testCoveragePublicationParity(root);
   await testWorkerPublicationBeforeCheckpoint(root);
   await testLegacyDeferredPublication(root);
+  testResolvedDeferredPublication();
   await testMissingReceiptRepair(root);
   for (const reverse of [false, true])
     await testMissingReceiptRepair(root, { shared: true, reverse });
@@ -73,6 +77,45 @@ try {
 }
 
 console.log("deep scan artifact validation tests passed");
+
+function testResolvedDeferredPublication() {
+  const source = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [{ id: "pending", reason: "A separate task remains." }],
+    resolvedDeferred: [{ id: "1", reason: "The original review finished." }],
+  };
+  let previous: DeepReductionInput | null = null;
+  for (const worker of [
+    { id: "first", attempt: 1 },
+    { id: "second", attempt: 1 },
+    { id: "first", attempt: 2 },
+  ]) {
+    const coverage = projectDiscoveryCoverage(source, worker, "worker/output");
+    const result = { scanId, findings: [] };
+    previous = {
+      ...result,
+      sourceCoverage: aggregateSourceCoverage(
+        [{ workerId: worker.id, coverage, result }],
+        previous,
+      ),
+    };
+  }
+  const parsed: ScanDraftInput = parseScanDraft({
+    ...draft([]),
+    coverage: previous!.sourceCoverage,
+  });
+  const closures = parsed.coverage.resolvedDeferred ?? [];
+  assert.equal(new Set(closures.map((row) => row.id)).size, 3);
+  assert.deepEqual(
+    closures.map((row) => row.reason),
+    Array(3).fill("The original review finished."),
+  );
+  assert.equal(parsed.coverage.deferred.length, 3);
+  assert.deepEqual(source.resolvedDeferred, [
+    { id: "1", reason: "The original review finished." },
+  ]);
+}
 
 async function testDiscoveryReceipts(root: string) {
   const result = draft([], {
@@ -138,10 +181,13 @@ async function testDiscoveryReceipts(root: string) {
   const [retained] = accepted.coverage.surfaces;
   assert.equal(retained.id, "api");
   assert.deepEqual(retained.receiptRefs, [
-    "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+    workerReceiptRef(
+      output,
+      "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+    ),
   ]);
   assert.equal(
-    await readFile(path.join(output, retained.receiptRefs[0]), "utf8"),
+    await readFile(receiptPath(output, retained.receiptRefs[0]), "utf8"),
     "Original attempt review evidence.\n",
   );
   assert.equal(
@@ -162,7 +208,7 @@ async function testDiscoveryReceipts(root: string) {
   assert.equal(retried.coverage.surfaces.length, 1);
   for (const ref of retried.coverage.surfaces[0].receiptRefs) {
     assert.equal(
-      await readFile(path.join(output, ref), "utf8"),
+      await readFile(receiptPath(output, ref), "utf8"),
       "Original attempt review evidence.\n",
     );
   }
@@ -278,10 +324,13 @@ async function testArchivedReceiptPathValidation(
   if (includeValidCheckpoint) {
     const refs = accepted.coverage.surfaces[0].receiptRefs;
     assert.deepEqual(refs, [
-      "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+      workerReceiptRef(
+        output,
+        "artifacts/archived-receipts/attempt-01/artifacts/review.md",
+      ),
     ]);
     assert.equal(
-      await readFile(path.join(output, refs[0]), "utf8"),
+      await readFile(receiptPath(output, refs[0]), "utf8"),
       "Original review.\n",
     );
   } else {
@@ -466,7 +515,9 @@ async function testMissingReceiptRepair(
   assert.deepEqual(
     new Set(
       await Promise.all(
-        receipts.map((ref: string) => readFile(path.join(output, ref), "utf8")),
+        receipts.map((ref: string) =>
+          readFile(receiptPath(output, ref), "utf8"),
+        ),
       ),
     ),
     new Set(["Original valid evidence.\n", "Corrected review evidence.\n"]),
@@ -504,7 +555,7 @@ async function testMissingReceiptRepair(
     new Set(
       await Promise.all(
         retried.coverage.surfaces[0].receiptRefs.map((ref: string) =>
-          readFile(path.join(output, ref), "utf8"),
+          readFile(receiptPath(output, ref), "utf8"),
         ),
       ),
     ),
@@ -894,10 +945,13 @@ async function testReducerValidation(root: string) {
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
   const admitted = await readJson(resultPath);
+  const { sourceCoverage, ...persistedResult } = validatedSnapshot.result;
+  assert.ok(sourceCoverage);
+  assert.equal(sourceCoverage.completeness, undefined);
   assert.deepEqual(
-    validatedSnapshot.result,
+    persistedResult,
     admitted,
-    "validation returns the same reconciled result that was accepted on disk",
+    "accepted findings retain the legacy persisted shape while coverage stays host-owned",
   );
   assert.equal(Object.hasOwn(admitted, "coverage"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
@@ -1425,7 +1479,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
     assert.equal(row.disposition, "no_issue_found");
     assert.equal(row.receiptRefs.length, 1);
     const content = await readFile(
-      path.join(output, row.receiptRefs[0]),
+      receiptPath(output, row.receiptRefs[0]),
       "utf8",
     );
     assert.equal(
@@ -1438,7 +1492,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
   const retainedWriter = accepted.coverage.surfaces.find(
     (row: JsonObject) => row.id === "writer",
   )!;
-  const retainedPath = path.join(output, retainedWriter.receiptRefs[0]);
+  const retainedPath = receiptPath(output, retainedWriter.receiptRefs[0]);
   await rm(retainedPath);
   await recordCodexSecurityWorkerScanDraft(context, accepted);
   await validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId);
@@ -1506,7 +1560,9 @@ async function testCurrentAnonymousReceiptSelection(
     "Replacement review.\n",
   );
   const originalReceipts = await Promise.all(
-    [selectedRef, historicalRef].map((ref) => readFile(path.join(output, ref))),
+    [selectedRef, historicalRef].map((ref) =>
+      readFile(receiptPath(output, ref)),
+    ),
   );
   const context = {
     root: output,
@@ -1552,12 +1608,16 @@ async function testCurrentAnonymousReceiptSelection(
     const selected = accepted.coverage.surfaces.find(
       (row: JsonObject) => row.label === "Current anonymous review",
     );
-    assert.deepEqual(selected.receiptRefs, [selectedRef]);
+    assert.deepEqual(selected.receiptRefs, [
+      workerReceiptRef(output, selectedRef),
+    ]);
     assert.equal(selected.disposition, "no_issue_found");
     const writer = accepted.coverage.surfaces.find(
       (row: JsonObject) => row.id === "writer",
     );
-    assert.deepEqual(writer.receiptRefs, ["artifacts/replacement.md"]);
+    assert.deepEqual(writer.receiptRefs, [
+      workerReceiptRef(output, "artifacts/replacement.md"),
+    ]);
   }
   assert.deepEqual(
     await Promise.all(
@@ -1570,7 +1630,7 @@ async function testCurrentAnonymousReceiptSelection(
   assert.deepEqual(
     await Promise.all(
       [selectedRef, historicalRef].map((ref) =>
-        readFile(path.join(output, ref)),
+        readFile(receiptPath(output, ref)),
       ),
     ),
     originalReceipts,
@@ -1682,17 +1742,23 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
         (row: JsonObject) => row.id === keptId,
       );
       assert.deepEqual(kept.receiptRefs, [
-        `artifacts/archived-receipts/attempt-01/${refs[keptId]}`,
+        workerReceiptRef(
+          output,
+          `artifacts/archived-receipts/attempt-01/${refs[keptId]}`,
+        ),
       ]);
       assert.equal(
-        await readFile(path.join(output, kept.receiptRefs[0]), "utf8"),
+        await readFile(receiptPath(output, kept.receiptRefs[0]), "utf8"),
         await readFile(path.join(archive, refs[keptId]), "utf8"),
       );
       const repaired = result.coverage.surfaces.find(
         (row: JsonObject) => row.id === repairId,
       );
       if (candidate) assert.equal(repaired, undefined);
-      else assert.deepEqual(repaired.receiptRefs, ["artifacts/replacement.md"]);
+      else
+        assert.deepEqual(repaired.receiptRefs, [
+          workerReceiptRef(output, "artifacts/replacement.md"),
+        ]);
       assert.equal(
         await readFile(path.join(archive, "result.json"), "utf8"),
         oldResult,
@@ -1714,4 +1780,19 @@ function reduction<Finding extends Record<string, unknown>>(
   extra = {},
 ) {
   return { scanId, findings, ...extra };
+}
+
+function workerReceiptRef(
+  output: string,
+  ref: string,
+  directory = "output",
+): string {
+  return `artifacts/deep_discovery/workers/${path.basename(path.dirname(output))}/${directory}/${ref}`;
+}
+
+function receiptPath(output: string, ref: string): string {
+  const root = ref.startsWith("artifacts/deep_discovery/workers/")
+    ? path.resolve(output, "../../../../..")
+    : output;
+  return path.join(root, ref);
 }

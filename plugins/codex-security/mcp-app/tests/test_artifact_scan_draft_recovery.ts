@@ -650,7 +650,7 @@ from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from workbench_saved_results import merge_saved_results
 root,output=Path(sys.argv[2]),Path(sys.argv[3])
-worker={"id":"worker","kind":"discovery","artifact_dir":str(output),"result_manifest_path":None,"attempt":1}
+worker={"id":"worker","kind":"discovery","artifact_dir":str(output),"result_manifest_path":None,"attempt":1,"status":"failed","merged_output_path":None}
 binding={"status":"interrupted","allowedTargetKinds":["git_revision"],"target":{"kind":"git_revision","repository":"synthetic","revision":"head"},"scope":{"includePaths":["."],"excludePaths":[]},"coverageMode":"repository"}
 first=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted")
 replay=merge_saved_results(root,sys.argv[4],binding,[worker],[],stopped=True,reason="interrupted",frozen_source_digests=first[0]["scan"]["preservedSources"])
@@ -915,7 +915,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     }
   });
 
-  test(`${layout}: a legacy ID-less checkpoint retains one closable task`, async (t) => {
+  test(`${layout}: a legacy ID-less checkpoint retains one closable task through host snapshots`, async (t) => {
     const f = await fixture(t, layout);
     await saveScanDraftCheckpoint(
       f.context,
@@ -923,7 +923,24 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       false,
     );
     let id;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (const canonicalParent of [undefined, false, true]) {
+      if (canonicalParent !== undefined) {
+        await assert.rejects(
+          f.write({ ...f.draft({}, true), canonicalParent }),
+          /canonicalParent/,
+        );
+        const headPath = path.join(f.root, "checkpoint-head.json");
+        const head = await readJson(headPath);
+        const snapshot = {
+          ...(await readJson(f.root, "checkpoints", head.checkpoint)),
+          canonicalParent,
+          previousParentCheckpoints: [`checkpoints/${head.checkpoint}`],
+        };
+        const contents = JSON.stringify(snapshot);
+        const checkpoint = `${hash("sha256", contents)}.json`;
+        await writeFile(path.join(f.root, "checkpoints", checkpoint), contents);
+        await writeJson(headPath, { checkpoint });
+      }
       const result = await f.write(f.draft({}, true));
       assert.equal(result.coverage.deferred.length, 1);
       id ??= result.coverage.deferred[0].id;

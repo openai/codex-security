@@ -91,6 +91,58 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
     assert all(p.read_bytes() == contents for p, contents in originals.items())
 
 
+def test_accepted_attempt_reconciles_legacy_parent_worker_projection(tmp_path):
+    surface = {
+        "id": "api",
+        "label": "Worker review",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/review.md"],
+    }
+    task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
+    source = worker(
+        tmp_path,
+        "first",
+        saved_draft("coverage-scan", complete=True, surfaces=[surface], deferred=[task]),
+    )
+    source.update(
+        status="succeeded", result_manifest_path=str(Path(source["artifact_dir"]) / "result.json")
+    )
+    write_saved_parent(
+        tmp_path,
+        saved_draft(
+            "coverage-scan",
+            complete=True,
+            surfaces=[
+                {
+                    **surface,
+                    "id": "first/api",
+                    "workerId": "first",
+                    "receiptRefs": [
+                        "artifacts/deep_discovery/workers/first/output/artifacts/review.md"
+                    ],
+                }
+            ],
+            deferred=[
+                {**task, "id": "first/review", "workerId": "first", "surfaceIds": ["first/api"]}
+            ],
+        ),
+        200,
+    )
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    first = recover(tmp_path, [source], project=True)
+    replay = recover(tmp_path, [source], project=True, frozen=first[0]["scan"]["preservedSources"])
+    for documents in (first, replay):
+        surfaces = documents[2]["surfaces"]
+        tasks = [row for row in documents[2]["deferred"] if row["id"] != "scan-stopped"]
+        assert len(surfaces) == len(tasks) == 1
+        assert surfaces[0]["provenance"] == {"workerId": "first", "attempt": 1, "sourceId": "api"}
+        assert tasks[0]["provenance"] == {"workerId": "first", "attempt": 1, "sourceId": "review"}
+        assert tasks[0]["surfaceIds"] == [surfaces[0]["id"]]
+        assert (tmp_path / surfaces[0]["receiptRefs"][0]).read_text() == "first source review\n"
+    assert replay[2] == first[2]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_replay(tmp_path):
     surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
     pending = saved_draft(
@@ -1025,7 +1077,6 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     warnings = []
     _, updates = saved._generic_surface_updates(
         sources,
-        {"old": (0, 0), "current": (1, 0)},
         {("first", "review"): ((1, 0), {"id": "review", "reason": "Review completed."}, "current")},
         {},
         {},
@@ -1033,14 +1084,15 @@ def test_current_receipt_spelling_precedes_historical_receipts(
         schema,
         {"old": [task], "current": []},
         set(),
-        canonical_rows=set(),
-        coverage_sources={},
+        lambda _field, owner, row: (owner, row),
+        lambda relative, _owner, _row: {"old": (0, 0), "current": (1, 0)}[relative],
+        lambda _relative, row: row.get("receiptRefs", []),
         surface_is_retained=lambda _relative, _owner, _row: True,
         eligible_receipt_sources={"old", "current"},
         receipt_root=tmp_path,
         receipt_warnings=warnings,
     )
-    receipts = {row["id"]: row["receiptRefs"] for _, row, _ in updates}
+    receipts = {row["id"]: row["receiptRefs"] for _, _, _, row in updates}
     assert receipts == {"reader": [prefix + "new-review.md"], "writer": [prefix + "Review.md"]}
     assert any("duplicate artifact path" in warning for warning in warnings)
     scan = {

@@ -45,12 +45,6 @@ from workbench.retained_coverage import (
     _coverage_rows as _coverage_rows,
 )
 from workbench.retained_coverage import (
-    _deferred_candidate_id as _deferred_candidate_id,
-)
-from workbench.retained_coverage import (
-    _deferred_rows as _deferred_rows,
-)
-from workbench.retained_coverage import (
     _ensure_finding_identities as _ensure_finding_identities,
 )
 from workbench.retained_coverage import (
@@ -66,9 +60,6 @@ from workbench.retained_coverage import (
     _finding_key as _finding_key,
 )
 from workbench.retained_coverage import (
-    _generic_surface_updates as _generic_surface_updates,
-)
-from workbench.retained_coverage import (
     _has_candidate_metadata as _has_candidate_metadata,
 )
 from workbench.retained_coverage import (
@@ -76,12 +67,6 @@ from workbench.retained_coverage import (
 )
 from workbench.retained_coverage import (
     _inherit_coverage_sources as _inherit_coverage_sources,
-)
-from workbench.retained_coverage import (
-    _merge_tied_parent_observations as _merge_tied_parent_observations,
-)
-from workbench.retained_coverage import (
-    _resolved_deferred_rows as _resolved_deferred_rows,
 )
 from workbench.retained_coverage import (
     _retained_findings as _retained_findings,
@@ -93,6 +78,15 @@ from workbench.retained_coverage import (
     _worker_candidate_key as _worker_candidate_key,
 )
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
+from workbench.saved_coverage import (
+    _deferred_rows as _deferred_rows,
+)
+from workbench.saved_coverage import (
+    _merge_tied_parent_observations as _merge_tied_parent_observations,
+)
+from workbench.saved_coverage import (
+    _resolved_deferred_rows as _resolved_deferred_rows,
+)
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
 )
@@ -133,6 +127,12 @@ from workbench.saved_sources import (
     _worker_outputs as _worker_outputs,
 )
 from workbench_constants import PHASES
+from workbench_coverage_receipts import (
+    _deferred_candidate_id as _deferred_candidate_id,
+)
+from workbench_coverage_receipts import (
+    _generic_surface_updates as _generic_surface_updates,
+)
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"

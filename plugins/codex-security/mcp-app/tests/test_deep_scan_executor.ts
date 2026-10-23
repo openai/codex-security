@@ -1,3 +1,4 @@
+import { testArtifactStartupTimeoutClassification } from "./deep_scan_startup_cases.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   createFakeCodexFixture,
@@ -159,6 +160,7 @@ try {
       );
       await check(t, testExternalProviderCredentialsReachWorker);
       await check(t, testArtifactServerUsesExtendedStartupTimeout);
+      await check(t, testReducerAttemptContext);
       await check(t, testZeroSubagentsPreservesHostRestrictions);
       await check(t, testSdkResumesExistingThread);
     }
@@ -227,7 +229,11 @@ try {
       await check(t, testPolicyFailuresRemainWorkerErrors);
       await check(t, testMalformedCommandEventsRemainRetryable);
       await check(t, testRateLimitPolicyFailureRemainsRetryable);
-      await check(t, testArtifactStartupTimeoutClassification);
+      await check(
+        t,
+        () => testArtifactStartupTimeoutClassification(runFixtureWorker),
+        testArtifactStartupTimeoutClassification.name,
+      );
     }
   });
 } finally {
@@ -2951,6 +2957,63 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
   });
 }
 
+async function testReducerAttemptContext() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md");
+    const workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "fixture reducer prompt\n");
+    const deepReducer = {
+      scanRoot: path.join(fixture.root, "scans"),
+      claimedWorkers: [
+        {
+          id: "worker-1",
+          resultPath: path.join(fixture.root, "worker", "result.json"),
+          attempt: 2,
+        },
+      ],
+    };
+    for (const resume of [false, true]) {
+      await new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          scanRoot: deepReducer.scanRoot,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan-id",
+        },
+      }).run({
+        kind: "dedup",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: new AbortController().signal,
+        ...(resume
+          ? {
+              resumeThreadId: "fixture-existing-thread",
+              continuationPrompt: "continue the reducer\n",
+            }
+          : {}),
+        artifactContext: {
+          root: workingDirectory,
+          layout: "reducer",
+          deepReducer,
+        },
+      });
+      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
+      assertConfigOverrides(invocation.argv, {
+        "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON":
+          JSON.stringify(deepReducer),
+      });
+    }
+  } finally {
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
 async function testSdkResumesExistingThread() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "original worker prompt\n");
@@ -3620,35 +3683,6 @@ async function testMalformedCommandEventsRemainRetryable() {
       const threadId = onThreadId.mock.calls.at(-1)?.arguments[0];
       assert.equal(threadId, "fixture-thread-id");
     });
-  }
-}
-
-async function testArtifactStartupTimeoutClassification() {
-  for (const prompt of [
-    "ARTIFACT_MCP_STARTUP_TIMEOUT",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_SYNC_AUTH_WARNING",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT_SYNC_AUTH_WARNING",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_BOTH_AUTH_WARNINGS",
-    "LEGACY_ARTIFACT_MCP_STARTUP_TIMEOUT_BOTH_AUTH_WARNINGS",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_MISSING_API_KEY",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_WITH_POLICY_REFUSAL",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING_WITH_MISSING_API_KEY",
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_BOTH_AUTH_WARNINGS_WITH_POLICY_REFUSAL",
-    "OTHER_MCP_STARTUP_TIMEOUT",
-    "OTHER_MCP_STARTUP_TIMEOUT_REQUEST_TIMED_OUT_SYNC_AUTH_WARNING",
-    "CATALOG_AUTH_ONLY",
-    "SYNC_AUTH_ONLY",
-  ]) {
-    await assert.rejects(
-      runFixtureWorker(prompt),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error",
-      `${prompt} should remain retryable`,
-    );
   }
 }
 

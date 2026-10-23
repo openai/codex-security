@@ -9,6 +9,7 @@ import os
 import re
 import stat
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from finalize_scan_contract import (
     manifest_is_sealed,
     write_scan_local_bytes,
 )
+from workbench_coverage_receipts import capture_receipt_checkpoints
 
 
 def _encoded(value: Any) -> bytes:
@@ -99,7 +101,13 @@ def _capture_saved_source(
 ) -> dict[str, tuple[str, int]]:
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
-        return {relative: (digest, observed)}
+        return capture_receipt_checkpoints(
+            relative,
+            kind,
+            {relative: (digest, observed)},
+            partial(_checkpoint_paths, scan_dir),
+            partial(_read_saved_result, scan_dir, scan_id=scan_id),
+        )
     head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {
         **{key: head[key] for key in ("checkpoint", "inputCheckpoint") if key in head},

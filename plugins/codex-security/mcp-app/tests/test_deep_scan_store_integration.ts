@@ -1126,7 +1126,7 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
     const coverage = await readJson(run.scanDir, "coverage.json");
-    for (const field of ["surfaces", "explicitExclusions", "deferred"]) {
+    for (const field of ["surfaces", "deferred"]) {
       assert.equal(coverage[field].length, 4, field);
       assert.equal(
         new Set(coverage[field].map((row: { id: string }) => row.id)).size,
@@ -1134,12 +1134,25 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
         field,
       );
     }
+    assert.equal(coverage.explicitExclusions.length, 4);
+    assert.equal(
+      new Set(
+        coverage.explicitExclusions.map(
+          (row: { pattern: string; provenance: { workerId: string } }) =>
+            `${row.provenance.workerId}/${row.pattern}`,
+        ),
+      ).size,
+      4,
+      "independent worker exclusions retain their provenance",
+    );
     assert.equal(coverage.openQuestions.length, 2);
     for (const row of coverage.surfaces) {
       if (row.label !== "Request entry") continue;
+      assert.equal(row.provenance.sourceId, "1");
+      assert.equal(row.provenance.attempt, 1);
       assert.equal(
         row.id,
-        `${row.workerId}/1`,
+        `${row.provenance.workerId}-attempt-1-surface-1`,
         "explicit source IDs retain their links",
       );
       assert.equal(

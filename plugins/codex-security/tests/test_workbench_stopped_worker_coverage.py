@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -15,12 +16,37 @@ from workbench_test_support import (
     get_scan,
     preserve_scan_results,
     saved_draft,
+    upsert_deep_worker,
+    worker_paths,
 )
 
 
+def coverage_worker(
+    state_dir: Path, codex_home: Path, scan_dir: Path, scan_id: str, name: str, accepted: bool
+) -> tuple[str, Path]:
+    if accepted:
+        return accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id, name=name)
+    worker_id = str(uuid.uuid4())
+    prompt, artifacts, result = worker_paths(scan_dir, name)
+    upsert_deep_worker(
+        state_dir,
+        scan_id,
+        worker_id,
+        "discovery",
+        "running",
+        str(prompt),
+        str(artifacts),
+        "--attempt",
+        "1",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    return worker_id, result
+
+
+@pytest.mark.parametrize("accepted", [False, True], ids=["running", "accepted"])
 @pytest.mark.parametrize("termination", ["failed", "interrupted", "canceled"])
 def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
-    tmp_path: Path, termination: str
+    tmp_path: Path, termination: str, accepted: bool
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
     environment = {"CODEX_HOME": str(codex_home)}
@@ -28,8 +54,8 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     workers = {}
     originals = {}
     for name in ("first", "second"):
-        worker_id, result = accepted_standard_worker(
-            state_dir, codex_home, scan_dir, scan_id, name=name
+        worker_id, result = coverage_worker(
+            state_dir, codex_home, scan_dir, scan_id, name, accepted
         )
         receipt = result.parent / "artifacts/review.md"
         receipt.parent.mkdir()
@@ -38,7 +64,7 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
             json.dumps(
                 saved_draft(
                     scan_id,
-                    complete=True,
+                    complete=accepted,
                     findings=[finding] if name == "first" else [],
                     surfaces=[
                         {
@@ -73,14 +99,32 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert "completeness" not in coverage
     assert {row["id"] for row in coverage["surfaces"]} == {
-        f"{worker_id}/api" for worker_id, _ in workers.values()
+        f"{worker_id}-attempt-1-surface-1" if accepted else f"{worker_id}/api"
+        for worker_id, _ in workers.values()
     }
     for name, (worker_id, receipt) in workers.items():
-        surface = next(row for row in coverage["surfaces"] if row["workerId"] == worker_id)
-        task = next(row for row in coverage["deferred"] if row.get("workerId") == worker_id)
+        surface = next(row for row in coverage["surfaces"] if row["label"] == name)
+        task = next(
+            row for row in coverage["deferred"] if row["reason"] == f"Review {name} remains."
+        )
+        if accepted:
+            assert surface["provenance"] == {
+                "workerId": worker_id,
+                "attempt": 1,
+                "sourceId": "api",
+            }
+            assert task["provenance"] == {
+                "workerId": worker_id,
+                "attempt": 1,
+                "sourceId": "review",
+            }
+        else:
+            assert surface["workerId"] == task["workerId"] == worker_id
         assert surface["disposition"] == "no_issue_found"
         assert surface["receiptRefs"] == [receipt.relative_to(scan_dir).as_posix()]
-        assert task["id"] == f"{worker_id}/review"
+        assert task["id"] == (
+            f"{worker_id}-attempt-1-deferred-1" if accepted else f"{worker_id}/review"
+        )
         assert task["surfaceIds"] == [surface["id"]]
         assert (scan_dir / surface["receiptRefs"][0]).read_text() == f"Synthetic {name} review.\n"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
@@ -98,14 +142,19 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     assert all(path.read_bytes() == content for path, content in originals.items())
 
 
-def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("accepted", [False, True], ids=["running", "accepted"])
+def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(
+    tmp_path: Path, accepted: bool
+) -> None:
     state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    worker_id, result = coverage_worker(
+        state_dir, codex_home, scan_dir, scan_id, "standard-worker", accepted
+    )
     result.write_text(
         json.dumps(
             saved_draft(
                 scan_id,
-                complete=True,
+                complete=accepted,
                 surfaces=[
                     {
                         "id": "api",
@@ -123,7 +172,11 @@ def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(tmp_pat
 
     coverage_path = scan_dir / "coverage.json"
     surface = json.loads(coverage_path.read_text())["surfaces"][0]
-    assert surface["id"] == f"{worker_id}/api"
+    assert surface["id"] == (f"{worker_id}-attempt-1-surface-1" if accepted else f"{worker_id}/api")
+    if accepted:
+        assert surface["provenance"] == {"workerId": worker_id, "attempt": 1, "sourceId": "api"}
+    else:
+        assert surface["workerId"] == worker_id
     assert surface["disposition"] == "needs_follow_up"
     assert surface["receiptRefs"] == []
     assert any(

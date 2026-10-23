@@ -1374,7 +1374,11 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   const coverage = completed[0].coverage as unknown as {
     surfaces: { id: string; workerId: string; receiptRefs?: string[] }[];
     explicitExclusions: { workerId: string; pattern: string }[];
-    deferred: { id: string; surfaceIds: string[]; workerId: string }[];
+    deferred: {
+      id: string;
+      surfaceIds: string[];
+      provenance: { workerId: string; sourceId: string; attempt: number };
+    }[];
     openQuestions: { question: string; workerId: string }[];
   };
 
@@ -1384,8 +1388,12 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   assert.equal(coverage.explicitExclusions.length, 2);
   assert.equal(coverage.openQuestions.length, 2);
   for (const row of coverage.deferred) {
-    assert.equal(row.id, `${row.workerId}/shared-task`);
-    assert.deepEqual(row.surfaceIds, [`${row.workerId}/shared-surface`]);
+    assert.equal(row.provenance.sourceId, "shared-task");
+    assert.ok(store.workers.has(row.provenance.workerId));
+    assert.equal(row.provenance.attempt, 1);
+    assert.deepEqual(row.surfaceIds, [
+      `${row.provenance.workerId}-attempt-1-surface-1`,
+    ]);
   }
   for (const row of coverage.surfaces) {
     for (const ref of row.receiptRefs ?? []) {

@@ -524,8 +524,10 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
 
 @pytest.mark.parametrize("directory", ["checkpoints", "checkpoint-heads", "source-order"])
 def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
-    tmp_path: Path, workbench_api, directory: str
+    tmp_path: Path, workbench_api, monkeypatch, directory: str
 ):
+    from workbench import retained_coverage, saved_sources
+
     scan = deadline_fixture(tmp_path)
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     saved = workbench_api["saved_results"]
@@ -562,6 +564,16 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
             raise
         with pytest.raises(saved.ContractError) as rejected:
             saved.write_scan_local_bytes(scan.directory, relative.as_posix(), b"{}")
+        write = saved.write_scan_local_bytes
+        attempted_writes = set()
+
+        def record_write(directory, relative, contents):
+            attempted_writes.add(relative)
+            write(directory, relative, contents)
+
+        monkeypatch.setattr(saved, "write_scan_local_bytes", record_write)
+        monkeypatch.setattr(saved_sources, "write_scan_local_bytes", record_write)
+        monkeypatch.setattr(retained_coverage, "write_scan_local_bytes", record_write)
         try:
             publication = saved.preserve_deep_deadline_draft(
                 SimpleNamespace(**workbench_api), connection, record
@@ -574,7 +586,10 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
                     "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
                 ).fetchone()[0]
             )
-            assert any(str(rejected.value) in warning for warning in warnings)
+            # Existing checkpoint names participate in the parent snapshot digest,
+            # so this entry can remain untouched while a new checkpoint is written.
+            if relative.as_posix() in attempted_writes:
+                assert any(str(rejected.value) in warning for warning in warnings)
             connection.rollback()
             saved._restore_published_outputs(*publication)
     assert target.is_symlink()

@@ -2,13 +2,15 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
-  aggregateDiscoveryCoverage,
+  aggregateSourceCoverage,
+  deepReductionToScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -366,13 +368,7 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            coverage: aggregateDiscoveryCoverage(
-              this.artifacts,
-              schedulerResult.discoveries,
-            ),
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -946,6 +942,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
           observe(reducer);
@@ -1095,12 +1092,14 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
+        this.state,
       );
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
         result,
         completionSequence: worker.completionSequence,
+        attempt: worker.attempt,
       });
     }
     return recovered.sort(compareCompletionSequence);
@@ -1155,6 +1154,34 @@ export class DeepScanCoordinator {
           previousReducerResultPath: resultPath,
         },
         this.state.scanId,
+      );
+      const accepted = discoveries.filter((source) =>
+        inputs.some(
+          (input) =>
+            input.dedupWorkerId === worker.id &&
+            input.discoveryWorkerId === source.id,
+        ),
+      );
+      const sources = await readDeepReductionSources({
+        root: worker.artifactDir,
+        repoRoot: this.state.targetPath,
+        scanId: this.state.scanId,
+        layout: "reducer",
+        scope: this.state.scope,
+        includePaths: this.state.includePaths,
+        filePaths: this.state.filePaths,
+        deepReducer: {
+          scanRoot: this.artifacts.scanDir,
+          claimedWorkers: accepted.map((source) => ({
+            id: source.id,
+            resultPath: source.resultPath,
+            attempt: source.attempt,
+          })),
+        },
+      });
+      result.sourceCoverage = aggregateSourceCoverage(
+        sources.discoveries,
+        latestResult ?? null,
       );
       latestResult = result;
       resultPath = worker.resultManifestPath;

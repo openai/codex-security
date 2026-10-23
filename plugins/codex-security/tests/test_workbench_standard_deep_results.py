@@ -18,6 +18,7 @@ from workbench_test_support import (
     cancel_scan,
     claim_deep_scan_dedup,
     commit_deep_dedup,
+    empty_target_scan,
     fail_deep_scan,
     fail_scan,
     finish_deep_scan,
@@ -768,6 +769,55 @@ def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:
 
     assert failed["findingCount"] == 1
     assert failed["findings"][0]["locations"][0]["path"] == "src/app.py"
+
+
+def test_canonical_finding_validation_survives_frozen_publication_retry(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["severity"]["level"] = "informational"
+    stronger = copy.deepcopy(finding)
+    stronger["severity"]["level"] = "critical"
+    malformed_identity = copy.deepcopy(finding)
+    malformed_identity["identity"] = {"anchor": []}
+    findings["findings"].extend([stronger, malformed_identity])
+    findings_path.write_text(json.dumps(findings))
+    original = findings_path.read_bytes()
+
+    failed = run_workbench_with_fault(
+        tmp_path / "fail_canonical_publication.py",
+        state_dir,
+        tmp_path / "codex-home",
+        "def fail_publication(*args, **kwargs):\n"
+        "    raise OSError('injected publication failure')\n"
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n",
+        "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Finding repair was interrupted.",
+    )
+    assert failed.returncode == 0, failed.stderr
+    assert findings_path.read_bytes() == original
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+    frozen = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    assert frozen
+
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+
+    assert recovered["resultsRecoveryNeeded"] is False
+    assert recovered["findingCount"] == 1
+    finding = json.loads(findings_path.read_text())["findings"][0]
+    assert finding["severity"]["level"] == "critical"
+    assert any(
+        previous["severity"]["level"] == "informational"
+        for previous in finding["provenance"]["previousFindings"]
+    )
+    assert any("duplicate logical finding" in warning for warning in recovered["warnings"])
+    assert any("identity" in warning for warning in recovered["warnings"])
+    assert all(path.read_bytes() == content for path, content in frozen.items())
 
 
 def test_canceled_scan_retries_failed_publication_from_frozen_sources(
@@ -2346,8 +2396,10 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
             {
                 "id": worker_id,
                 "kind": "discovery",
+                "status": "running",
                 "artifact_dir": str(output),
                 "result_manifest_path": None,
+                "attempt": 1,
             }
         )
         draft = saved_draft(
@@ -2393,7 +2445,16 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
         row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
     } == expected
 
-    assert not coverage.get("resolvedDeferred")
+    assert coverage.get("resolvedDeferred", []) == (
+        [
+            {
+                "id": "worker-one-attempt-1-resolved-shared-review",
+                "reason": "Review completed.",
+            }
+        ]
+        if closure_time == 200
+        else []
+    )
 
 
 @pytest.mark.parametrize("canonical_time", [100, 200, 300])
@@ -2596,7 +2657,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
         os.utime(output / "result.json", ns=(300, 300))
     workers = [saved_discovery_worker(output, "worker-one", 1 if layout == "current" else 2)]
     if layout == "legacy_attempt_reopens":
-        workers[0].pop("attempt")
+        workers[0]["attempt"] = 0
     binding = saved_binding("deep_repository")
     documents = workbench_saved_results.merge_saved_results(
         scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"

@@ -130,6 +130,7 @@ for (const variant of [
           {
             id: "worker",
             kind: "discovery",
+            status: "succeeded",
             artifact_dir: interruptedRoot,
             result_manifest_path: path.join(interruptedRoot, "result.json"),
             attempt: 1,
@@ -272,6 +273,7 @@ for (const observations of [
         {
           id: "worker",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: interruptedRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -586,6 +588,7 @@ for (const { variant, expectedCount, observation } of terminalDraftCases) {
         {
           id: "worker",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: interrupted.root,
           result_manifest_path: null,
           attempt: 1,
@@ -781,6 +784,7 @@ for (const variant of [
       workers.push({
         id,
         kind: "discovery",
+        status: "canceled",
         artifact_dir: root,
         result_manifest_path: null,
         attempt: 1,
@@ -866,6 +870,7 @@ for (const [kind, metadata, identifier] of [
       {
         id: "reviewer",
         kind: "discovery",
+        status: "canceled",
         artifact_dir: recoveryRoot,
         result_manifest_path: null,
         attempt: 1,
@@ -974,6 +979,7 @@ for (const variant of [
         {
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: rwroot,
           result_manifest_path: null,
           attempt: 1,
@@ -1035,6 +1041,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         workers.push({
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: recoveredSource.root,
           result_manifest_path: null,
           attempt: 1,
@@ -1259,6 +1266,7 @@ for (const field of ["reportId", "ledgerRowId"]) {
       {
         id: "reviewer",
         kind: "discovery",
+        status: "canceled",
         artifact_dir: recoveredRoot,
         result_manifest_path: null,
         attempt: 1,
@@ -1408,6 +1416,7 @@ test("deep: refined candidate retains independent cross-location report", async 
       {
         id: "reviewer",
         kind: "discovery",
+        status: "canceled",
         artifact_dir: recoveredRoot,
         result_manifest_path: null,
         attempt: 1,
@@ -1574,6 +1583,7 @@ for (const authored of [false, true]) {
       workers.push({
         id,
         kind: "discovery",
+        status: "canceled",
         artifact_dir: workerRoot,
         result_manifest_path: null,
         attempt: 1,
@@ -1658,6 +1668,7 @@ for (const order of ["earlier-first", "later-first"]) {
             {
               id: "reviewer",
               kind: "discovery",
+              status: "canceled",
               artifact_dir: recoveredRoot,
               result_manifest_path: null,
               attempt: 1,
@@ -1763,6 +1774,7 @@ for (const sameTitle of [false, true]) {
       workers.push({
         id,
         kind: "discovery",
+        status: "canceled",
         artifact_dir: workerRoot,
         result_manifest_path: null,
         attempt: 1,
@@ -1809,6 +1821,7 @@ for (const authored of [false, true]) {
       {
         id: "worker-a",
         kind: "discovery",
+        status: "canceled",
         artifact_dir: workerRoot,
         result_manifest_path: null,
         attempt: 1,
@@ -1823,6 +1836,7 @@ for (const authored of [false, true]) {
 const savedWorker = (root: string) => ({
   id: "reviewer",
   kind: "discovery",
+  status: "canceled",
   artifact_dir: root,
   result_manifest_path: null,
   attempt: 1,
@@ -2457,6 +2471,7 @@ for (const [field, value] of Object.entries({
         workers.push({
           id,
           kind: "discovery",
+          status: "canceled",
           artifact_dir: workerRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -2658,6 +2673,7 @@ for (const field of ["description", "source", "version"]) {
         {
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: workerRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -2705,6 +2721,7 @@ for (const metadata of ["extensions", "provenance"] as const) {
         {
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: workerRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -2790,6 +2807,7 @@ for (const field of ["description", "source", "version"]) {
           {
             id: "reviewer",
             kind: "discovery",
+            status: "canceled",
             artifact_dir: recoveredRoot,
             result_manifest_path: null,
             attempt: 1,
@@ -2906,6 +2924,7 @@ for (const sameLocation of [false, true]) {
           {
             id: "reviewer",
             kind: "discovery",
+            status: "canceled",
             artifact_dir: workerRoot,
             result_manifest_path: null,
             attempt: 1,
@@ -2937,6 +2956,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         workers.push({
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: recoveredRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -3055,6 +3075,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         workers.push({
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: recoveredRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -3380,6 +3401,7 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
         workers.push({
           id: "reviewer",
           kind: "discovery",
+          status: "canceled",
           artifact_dir: recoveredRoot,
           result_manifest_path: null,
           attempt: 1,
@@ -3911,6 +3933,7 @@ for (const missing of [false, true]) {
       {
         id: "reviewer",
         kind: "discovery",
+        status: "canceled",
         artifact_dir: workerRoot,
         result_manifest_path: null,
         attempt: 1,
