@@ -1117,7 +1117,7 @@ describe("custom validation", () => {
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
-    expect(standard).toContain("use it for the same early model checkpoint");
+    expect(standard).toContain("`complete: false` checkpoint");
     expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");

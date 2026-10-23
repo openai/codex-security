@@ -7,21 +7,23 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   symlink,
   type FileHandle,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import fc from "fast-check";
 import { ContractValidationError, loadContract } from "../src/index.js";
-import { sameCheckedFileDevice } from "../src/contract.js";
+import { readScanFile, sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
 import { propertyOptions } from "./support/property.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -299,6 +301,109 @@ describe("canonical scan contract", () => {
         { dev: identity.dev, ino: largeInode + 1n },
       ),
     ).resolves.toBe(false);
+  });
+
+  test("rejects scan-file replacements whose numeric file IDs collide", async () => {
+    const title =
+      "rejects scan-file replacements whose numeric file IDs collide";
+    if (runTestInSubprocess(import.meta.path, title)) return;
+    const scanDir = await realpath(await copyExample());
+    const path = join(scanDir, "coverage.json");
+    const selectedInode = 2n ** 60n;
+    const replacementInode = selectedInode + 1n;
+    expect(Number(selectedInode)).toBe(Number(replacementInode));
+    const files = await import("node:fs/promises");
+    const originalLstat = files.lstat;
+    const originalOpen = files.open;
+    let replaced = false;
+    let restoreOpenedStat: (() => void) | undefined;
+    const inspecting = spyOn(files, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof files.lstat>
+    ) => {
+      const metadata = await originalLstat(...args);
+      if (args[0] === path) {
+        const inode = replaced ? replacementInode : selectedInode;
+        metadata.ino = typeof metadata.ino === "bigint" ? inode : Number(inode);
+      }
+      return metadata;
+    }) as typeof files.lstat);
+    const opening = spyOn(files, "open").mockImplementation(async (...args) => {
+      if (args[0] !== path) return await originalOpen(...args);
+      await rename(path, `${path}.original`);
+      await writeFile(path, "replacement");
+      replaced = true;
+      const file = await originalOpen(...args);
+      const originalStat = file.stat.bind(file);
+      const openedStat = spyOn(file, "stat").mockImplementation((async (
+        ...statArgs: Parameters<typeof file.stat>
+      ) => {
+        const metadata = await originalStat(...statArgs);
+        metadata.ino =
+          typeof metadata.ino === "bigint"
+            ? replacementInode
+            : Number(replacementInode);
+        return metadata;
+      }) as typeof file.stat);
+      restoreOpenedStat = () => openedStat.mockRestore();
+      return file;
+    });
+    try {
+      await expect(
+        readScanFile(scanDir, "coverage.json", "coverage"),
+      ).rejects.toThrow("expected the checked regular file");
+      expect(replaced).toBe(true);
+    } finally {
+      restoreOpenedStat?.();
+      opening.mockRestore();
+      inspecting.mockRestore();
+    }
+  });
+
+  test("rejects scan root replacement when numeric directory IDs collide", async () => {
+    const title =
+      "rejects scan root replacement when numeric directory IDs collide";
+    if (runTestInSubprocess(import.meta.path, title)) return;
+    const scanDir = await realpath(await copyExample());
+    const before = 2n ** 60n;
+    const after = before + 1n;
+    expect(Number(before)).toBe(Number(after));
+    const files = await import("node:fs/promises");
+    const original = { lstat: files.lstat, realpath: files.realpath };
+    let replaced = false;
+    const inspecting = spyOn(files, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof original.lstat>
+    ) => {
+      const metadata = await original.lstat(...args);
+      if (args[0] === scanDir) {
+        const identity = replaced ? after : before;
+        Object.defineProperty(metadata, "ino", {
+          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
+        });
+      }
+      return metadata;
+    }) as typeof original.lstat);
+    const resolving = spyOn(files, "realpath").mockImplementation((async (
+      ...args: Parameters<typeof original.realpath>
+    ) => {
+      const canonical = await original.realpath(...args);
+      if (args[0] === scanDir && !replaced) {
+        replaced = true;
+        await rename(scanDir, `${scanDir}.original`);
+        await mkdir(scanDir, { mode: 0o700 });
+      }
+      return canonical;
+    }) as typeof original.realpath);
+    try {
+      await expect(
+        readScanFile(scanDir, "coverage.json", "coverage.json"),
+      ).rejects.toThrow(
+        "Scan directory must be an existing non-symlink directory",
+      );
+      expect(replaced).toBe(true);
+    } finally {
+      resolving.mockRestore();
+      inspecting.mockRestore();
+    }
   });
 
   test("loads the unchanged plugin example with typed canonical names", async () => {

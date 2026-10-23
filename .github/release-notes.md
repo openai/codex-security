@@ -39,6 +39,7 @@
 - clarify requested scope and deferred work ([#586](https://github.com/openai/codex-security/pull/586))
 - preserve literal scope paths across renderers ([#1850](https://github.com/openai/codex-security/pull/1850))
 - preserve Unicode colon source paths ([#542](https://github.com/openai/codex-security/pull/542))
+- simplify security skill instructions ([#1676](https://github.com/openai/codex-security/pull/1676))
 
 <!-- release-section: highlights:end -->
 
