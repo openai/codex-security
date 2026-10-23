@@ -9,6 +9,7 @@ import {
 import type {
   DeepReductionInput,
   ReducerArtifactValidation,
+  UnresolvedCandidate,
 } from "./artifact-validation.js";
 import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
@@ -71,6 +72,7 @@ export interface ReducerRequest {
   label: string;
   consumed: AcceptedDiscovery[];
   previousReducerResultPath?: string;
+  previousUnresolvedCandidates?: UnresolvedCandidate[];
 }
 
 export interface DeepScanWorkerRunnerOptions {
@@ -235,6 +237,7 @@ export class DeepScanWorkerRunner {
       label: reducerLabel,
       consumed,
       previousReducerResultPath,
+      previousUnresolvedCandidates,
     } = request;
     const { artifacts, run } = this.options;
     const reducerRoot = join(artifacts.dedupRoot, reducerLabel);
@@ -277,6 +280,12 @@ export class DeepScanWorkerRunner {
     // Snapshot inputs before execution: direct file output has the same
     // conservation checks as the MCP writer without rereading consumed sources.
     const sources = await getCodexSecurityDeepReducerInputs(artifactContext);
+    if (sources.previous && previousUnresolvedCandidates !== undefined) {
+      // Recovered candidate state stays in memory; historical files are immutable.
+      sources.previous.unresolvedCandidates = structuredClone(
+        previousUnresolvedCandidates,
+      );
+    }
     let reducerValidation!: ReducerArtifactValidation;
     let outcome = await this.runWorkerWithRetries({
       workerId: reducerId,

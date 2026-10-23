@@ -27,6 +27,12 @@ from urllib.parse import quote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
 import threat_model_projection
+from candidate_identity import (
+    archive_candidate_payloads,
+    coverage_candidate_key,
+    finding_candidate_id,
+    retain_recovered_candidate_gaps,
+)
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -1239,6 +1245,205 @@ def _recover_unsealed_findings(
     return discarded
 
 
+def resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
+    if draft.get("complete") is False:
+        return []
+    coverage = draft["coverage"]
+    rows = coverage.get("resolvedDeferred", [])
+    deferred = coverage.get("deferred", [])
+    try:
+        # Invalid closure metadata cannot discard the evidence it names.
+        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
+        _validate_resolved_deferred(
+            {**coverage, "deferred": deferred if isinstance(deferred, list) else []}
+        )
+    except ContractError:
+        return []
+    return rows
+
+
+def _recover_candidate_receipts(
+    parent: dict[str, Any],
+    scan_dir: Path,
+    warnings: list[str],
+    source: str | None = None,
+    *,
+    owner: str | None = None,
+    reopened: set[tuple[str | None, str]],
+    sections: tuple[str, ...] = ("surfaces", "explicitExclusions"),
+) -> dict[str, Any] | None:
+    surfaces = parent["coverage"].get("surfaces")
+    fields = [
+        field
+        for field in sections
+        if any(
+            isinstance(row, dict)
+            and (
+                (field == "explicitExclusions" and coverage_candidate_key(row, owner) is not None)
+                or row.get("disposition") in ("rejected", "not_applicable")
+            )
+            and (
+                (
+                    field == "surfaces"
+                    and (not isinstance(row.get("label"), str) or not row["label"].strip())
+                )
+                or row.get("receiptRefs")
+                or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
+            )
+            for rows in [parent["coverage"].get(field)]
+            for row in (rows if isinstance(rows, list) else [])
+        )
+    ]
+    if not fields:
+        return parent
+    # Receipt recovery must precede resolution of the candidate's saved proof gaps.
+    directory = Path(".")
+    if source is not None:
+        directory = Path(source).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        scan_dir = scan_dir / directory
+    parent = copy.deepcopy(parent)
+    if source is not None or "explicitExclusions" in fields:
+        coverage = parent["coverage"]
+        closures = []
+        if coverage.get("resolvedDeferred"):
+            schema = _read_json(
+                Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+            )["properties"]["resolvedDeferred"]
+            closures = resolved_deferred_rows(parent, schema)
+        if not isinstance(coverage.get("deferred"), list):
+            coverage["deferred"] = []
+        for field, index, row in (
+            (section, index, row)
+            for section in fields
+            if source is not None or section == "explicitExclusions"
+            for index, row in enumerate(coverage[section])
+        ):
+            if (
+                not isinstance(row, dict)
+                or (
+                    field == "surfaces"
+                    and row.get("disposition") not in ("rejected", "not_applicable")
+                )
+                or (field == "explicitExclusions" and coverage_candidate_key(row, owner) is None)
+            ):
+                continue
+            refs = row.get("receiptRefs", [])
+            invalid = field == "surfaces" and (
+                not isinstance(row.get("label"), str) or not row["label"].strip()
+            )
+            recovered = []
+            warning_start = len(warnings)
+            if invalid:
+                warnings.append(
+                    f"Skipped malformed coverage surface {index + 1}: expected a nonempty label."
+                )
+            if not isinstance(refs, list):
+                warnings.append(
+                    f"Skipped malformed receipt references for coverage surface {index + 1}: expected an array."
+                )
+                invalid = True
+            for position, ref in enumerate(refs if isinstance(refs, list) else []):
+                context = f"coverage.{field}[{index}].receiptRefs[{position}]"
+                try:
+                    ref = _coverage_receipt_ref(scan_dir, ref, context)
+                except ContractError as exc:
+                    warnings.append(
+                        f"Skipped malformed coverage receipt {index + 1}.{position + 1}: {exc}."
+                    )
+                    invalid = True
+                    continue
+                # Publication validates and seals receipts relative to the parent scan.
+                recovered.append((directory / ref).as_posix())
+            row["receiptRefs"] = recovered
+            if invalid:
+                row["disposition"] = "needs_follow_up"
+                if (key := coverage_candidate_key(row, owner)) is not None:
+                    reopened.add(key)
+                    pending = next(
+                        (
+                            item
+                            for item in coverage["deferred"]
+                            if isinstance(item, dict) and coverage_candidate_key(item, owner) == key
+                        ),
+                        None,
+                    )
+                    if pending is None:
+                        identity = row.get("id")
+                        if not isinstance(identity, str) or not identity.strip():
+                            identity = None
+                        pending = {
+                            "candidateId": row["candidateId"],
+                            "reason": "\n".join(warnings[warning_start:]),
+                            **(
+                                {"surfaceIds": [identity]}
+                                if field == "surfaces" and identity is not None
+                                else {}
+                            ),
+                            **{
+                                field: copy.deepcopy(row[field])
+                                for field in ("sourceWorkerId", "workerId", "candidate", "finding")
+                                if field in row
+                            },
+                        }
+                        if source is None:
+                            used_ids = {
+                                item.get("id")
+                                for item in [*coverage["deferred"], *closures]
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            }
+                            base = identity or row["candidateId"]
+                            identity, suffix = base, 2
+                            while identity in used_ids:
+                                identity, suffix = f"{base}-{suffix}", suffix + 1
+                            pending["id"] = identity
+                        coverage["deferred"].append(pending)
+                    archive_candidate_payloads(pending, [row])
+        if closures:
+            # Reopened candidate work must not invalidate unrelated valid closures.
+            active = {
+                row["id"]
+                for row in coverage["deferred"]
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
+            }
+            coverage["resolvedDeferred"] = [row for row in closures if row["id"] not in active]
+        if source is not None:
+            return parent
+    if "surfaces" not in fields:
+        return parent
+    terminal = {
+        coverage_candidate_key(row)
+        for row in surfaces
+        if isinstance(row, dict) and row.get("disposition") in ("rejected", "not_applicable")
+    }
+    _recover_unsealed_coverage(
+        parent["coverage"],
+        Path(__file__).resolve().parent.parent / "schemas",
+        scan_dir,
+        warnings,
+        [],
+    )
+    reopened.update(
+        key
+        for row in parent["coverage"]["surfaces"]
+        if row.get("disposition") == "needs_follow_up"
+        and (key := coverage_candidate_key(row)) is not None
+        and key in terminal
+    )
+    return parent
+
+
+def _coverage_receipt_ref(scan_dir: Path, ref: Any, context: str) -> str:
+    if not isinstance(ref, str):
+        raise ContractError(f"{context}: expected a string")
+    normalized = _require_portable_relative_path(ref, context)
+    if not normalized.startswith("artifacts/"):
+        raise ContractError(f"{context}: expected a file under artifacts/")
+    _require_scan_local_file(scan_dir, normalized, context)
+    return normalized
+
+
 def _recover_unsealed_coverage(
     coverage: dict[str, Any],
     schema_dir: Path,
@@ -1256,6 +1461,7 @@ def _recover_unsealed_coverage(
         warnings.append("Recovered malformed Deep Scan inventory strategy.")
 
     surface_ids: set[str] = set()
+    recovered_candidates: list[tuple[dict[str, Any], str]] = []
     receipt_paths: dict[str, str] = {}
     for field, label in (
         ("surfaces", "coverage surface"),
@@ -1282,6 +1488,7 @@ def _recover_unsealed_coverage(
                     if surface_id in surface_ids:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
+                    warning_start = len(warnings)
                     surface_recovered = False
                     if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
                         warnings.append(
@@ -1304,14 +1511,7 @@ def _recover_unsealed_coverage(
                     for ref_index, ref in enumerate(receipt_refs):
                         ref_context = f"{context}.receiptRefs[{ref_index}]"
                         try:
-                            if not isinstance(ref, str):
-                                raise ContractError(f"{ref_context}: expected a string")
-                            normalized_ref = _require_portable_relative_path(ref, ref_context)
-                            if not normalized_ref.startswith("artifacts/"):
-                                raise ContractError(
-                                    f"{ref_context}: expected a file under artifacts/"
-                                )
-                            _require_scan_local_file(scan_dir, normalized_ref, ref_context)
+                            normalized_ref = _coverage_receipt_ref(scan_dir, ref, ref_context)
                             key = normalized_ref.lower()
                             previous = surface_receipt_paths.get(key)
                             if previous is not None and previous != normalized_ref:
@@ -1339,10 +1539,18 @@ def _recover_unsealed_coverage(
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                if (
+                    surface_recovered
+                    and disposition not in ("reported", "no_issue_found", "needs_follow_up")
+                    and isinstance(item.get("candidateId"), str)
+                ):
+                    recovered_candidates.append((item, "\n".join(warnings[warning_start:])))
                 receipt_paths = surface_receipt_paths
             recovered.append(item)
 
         coverage[field] = recovered
+
+    retain_recovered_candidate_gaps(coverage, recovered_candidates)
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
@@ -1707,11 +1915,9 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
     if "resolvedDeferred" not in coverage:
         return
     active = {
-        identity
+        row["id"]
         for row in coverage.get("deferred", [])
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     resolved: set[str] = set()
     for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):
@@ -1781,6 +1987,25 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    receipt_fields = (
+        ("surfaces", "explicitExclusions")
+        if coverage.get("receiptSealVersion") == 1
+        else ("surfaces",)
+    )
+    for field in receipt_fields:
+        for index, item in enumerate(coverage.get(field, [])):
+            if not isinstance(item, dict):
+                continue
+            if field == "explicitExclusions" and coverage_candidate_key(item) is None:
+                continue
+            context = f"coverage.{field}[{index}]"
+            receipt_refs = item.get("receiptRefs", [])
+            if not isinstance(receipt_refs, list):
+                raise ContractError(f"{context}.receiptRefs: expected an array")
+            for ref_index, ref in enumerate(receipt_refs):
+                receipt_refs[ref_index] = _coverage_receipt_ref(
+                    scan_dir, ref, f"{context}.receiptRefs[{ref_index}]"
+                )
     for index, deferred in enumerate(coverage.get("deferred", [])):
         if isinstance(deferred, dict):
             _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
@@ -2657,8 +2882,14 @@ def _artifact_record(
 def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
     refs = {
         ref: "coverage receipt"
-        for surface in coverage["surfaces"]
-        for ref in surface.get("receiptRefs", [])
+        for field in (
+            ("surfaces", "explicitExclusions")
+            if coverage.get("receiptSealVersion") == 1
+            else ("surfaces",)
+        )
+        for row in coverage.get(field, [])
+        if field != "explicitExclusions" or coverage_candidate_key(row) is not None
+        for ref in row.get("receiptRefs", [])
     }
     extensions = scan.get("extensions")
     imported = extensions.get("import") if isinstance(extensions, dict) else None
@@ -2808,27 +3039,6 @@ def csv_cell(value: Any) -> Any:
     ):
         return f"'{value}"
     return value
-
-
-def finding_candidate_id(finding: dict[str, Any]) -> str | None:
-    provenance = finding.get("provenance")
-    if (
-        isinstance(provenance, dict)
-        and isinstance(value := provenance.get("candidateId"), str)
-        and value.strip()
-    ):
-        return value
-    extensions = finding.get("extensions")
-    if not isinstance(extensions, dict):
-        return None
-    return next(
-        (
-            value
-            for field in ("candidateId", "reportId", "ledgerRowId")
-            if isinstance(value := extensions.get(field), str) and value.strip()
-        ),
-        None,
-    )
 
 
 def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
@@ -3096,6 +3306,20 @@ def _prepare_scan_finalization(
     if not was_sealed and recover_unsealed:
         _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
         _recover_unsealed_hardening(manifest, scan_dir, warnings)
+    if not was_sealed:
+        # Standalone finalization shares exclusion proof recovery with the workbench;
+        # its existing strict surface and finding validation remains unchanged.
+        recovered = _recover_candidate_receipts(
+            {"coverage": coverage},
+            scan_dir,
+            warnings,
+            reopened=set(),
+            sections=("explicitExclusions",),
+        )
+        assert recovered is not None
+        coverage = recovered["coverage"]
+        # Coverage is hash-bound; older seals treated exclusion receipts as opaque metadata.
+        coverage["receiptSealVersion"] = 1
     if was_sealed or scan["status"] != "completed":
         _validate_findings(manifest, findings_for_validation)
     if was_sealed:

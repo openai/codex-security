@@ -9,6 +9,9 @@ import {
 } from "./artifacts.js";
 import {
   aggregateDiscoveryCoverage,
+  collectUnresolvedCandidates,
+  deepReductionScanDraft,
+  discoveryReductionInput,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -368,10 +371,11 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
         ? {
-            ...structuredClone(schedulerResult.result),
+            ...deepReductionScanDraft(schedulerResult.result),
             coverage: aggregateDiscoveryCoverage(
               this.artifacts,
               schedulerResult.discoveries,
+              schedulerResult.result.unresolvedCandidates ?? [],
             ),
           }
         : scanDraftInputSchema.parse({
@@ -953,6 +957,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousUnresolvedCandidates: latestResult?.unresolvedCandidates,
             }),
           );
           observe(reducer);
@@ -1102,6 +1107,7 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
+        { recoverCandidateReceipts: true },
       );
       recovered.push({
         id: worker.id,
@@ -1116,7 +1122,9 @@ export class DeepScanCoordinator {
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[],
   ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
-    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
+    const discoveriesById = new Map(
+      discoveries.map((worker) => [worker.id, worker]),
+    );
     const inputs = this.state.persistedDedupInputs ?? [];
     let resultPath: string | undefined;
     let latestResult: DeepReductionInput | undefined;
@@ -1147,7 +1155,7 @@ export class DeepScanCoordinator {
       }
       const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) => discoveryIds.has(input.discoveryWorkerId));
+        .map((input) => discoveriesById.get(input.discoveryWorkerId));
       if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
@@ -1163,6 +1171,17 @@ export class DeepScanCoordinator {
         },
         this.state.scanId,
       );
+      // Receipt recovery can reopen candidates even in current reducers. Derive
+      // their state from the accepted inputs without rewriting saved artifacts.
+      const pending = collectUnresolvedCandidates(
+        consumed.map((source) => ({
+          workerId: source!.id,
+          result: discoveryReductionInput(source!.result, source!.id),
+        })),
+        latestResult ?? null,
+      );
+      if (pending.length > 0) result.unresolvedCandidates = pending;
+      else delete result.unresolvedCandidates;
       latestResult = result;
       resultPath = worker.resultManifestPath;
     }

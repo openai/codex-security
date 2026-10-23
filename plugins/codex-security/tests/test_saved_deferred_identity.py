@@ -12,6 +12,9 @@ from test_workbench_standard_deep_results import (
     deep_scan_fixture,
     write_saved_parent,
 )
+from test_workbench_standard_deep_results import (
+    generic_review_recovery as generic_review_recovery,
+)
 from workbench_test_support import (
     preserve_scan_results,
     saved_discovery_worker,
@@ -315,7 +318,17 @@ def test_new_work_survives_accepted_candidate_rejection(
     else:
         workers = []
         output = tmp_path
-        write_saved_parent(output, rejected, 200)
+        canonical = {
+            **rejected,
+            "coverage": {
+                **rejected["coverage"],
+                "mode": "deep_repository",
+                "inventoryStrategy": "repository",
+                "includePaths": ["."],
+                "excludePaths": [],
+            },
+        }
+        write_saved_parent(output, canonical, 200)
         checkpoints = [write_checkpoint(output / "checkpoints", draft) for draft in drafts]
         for index, checkpoint in enumerate(checkpoints, 1):
             os.utime(checkpoint, ns=(index * 100, index * 100))
@@ -323,6 +336,9 @@ def test_new_work_survives_accepted_candidate_rejection(
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoints[1].name}))
     os.utime(head, ns=(200, 200))
+    expected_rejection = (
+        {**rejection, "sourceWorkerId": "reviewer"} if layout == "worker" else rejection
+    )
     documents = recover(tmp_path, saved_results, workers)
     replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
     for result in (documents, replay):
@@ -332,7 +348,7 @@ def test_new_work_survives_accepted_candidate_rejection(
         assert len(pending) == 1
         assert {key: value for key, value in pending[0].items() if key != "id"} == reopened
         assert isinstance(pending[0]["id"], str)
-        assert result[2]["surfaces"] == [rejection]
+        assert result[2]["surfaces"] == [expected_rejection]
     assert replay[2] == documents[2]
 
 
@@ -434,6 +450,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
                 **rejection,
                 "id": f"{rejection_worker_id}/{rejection['id']}",
                 "workerId": rejection_worker_id,
+                "sourceWorkerId": rejection_worker_id,
             } in coverage["surfaces"]
         for row in coverage["deferred"]:
             if row["id"] == f"{worker_id}/{candidate['id']}":
@@ -565,6 +582,8 @@ def test_unnamed_observation_does_not_replace_saved_context(
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoints[accepted_index].name}))
     os.utime(head, ns=(observed, observed))
+    if layout == "worker" and "candidateId" in expected:
+        expected = {**expected, "sourceWorkerId": worker_id}
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )

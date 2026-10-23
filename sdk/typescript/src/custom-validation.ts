@@ -8,10 +8,21 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import Ajv2020 from "ajv/dist/2020.js";
 import { readScanFile, requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
-import type { CoverageDocument, FindingsDocument } from "./models.js";
+import {
+  candidateIdentity,
+  coverageCandidateOwner,
+  findingCandidateIds,
+  findingCandidateOwner,
+} from "./candidates.js";
+import type {
+  CoverageDocument,
+  DeferredCoverage,
+  FindingsDocument,
+} from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
 
@@ -24,6 +35,7 @@ type Finding = Pick<
   | "validation"
   | "attackPath"
   | "extensions"
+  | "provenance"
 > &
   Record<string, unknown>;
 type Disposition = "reportable" | "suppressed" | "not_applicable" | "deferred";
@@ -57,6 +69,7 @@ const DOCUMENTS = [
   "findings.json",
   "coverage.json",
 ] as const;
+
 interface Schema {
   $id?: string;
   $defs?: Record<string, Schema>;
@@ -366,27 +379,204 @@ export async function runCustomValidation(options: {
   );
   const decisions = new Map<string, CustomValidationResult["validations"]>();
   const reported: Finding[] = [];
+  const candidateIdentityCounts = new Map<string, number>();
+  for (const finding of findings) {
+    const candidateId = findingCandidateIds(finding)[0];
+    if (candidateId === undefined) continue;
+    const key = candidateIdentity(candidateId, findingCandidateOwner(finding));
+    candidateIdentityCounts.set(
+      key,
+      (candidateIdentityCounts.get(key) ?? 0) + 1,
+    );
+  }
+  const reservedIds = new Set([
+    ...findings.flatMap(findingCandidateIds),
+    ...(coverage.resolvedDeferred ?? []).map((item) => item.id),
+    ...[
+      ...coverage.deferred,
+      ...coverage.surfaces,
+      ...coverage.explicitExclusions,
+    ].flatMap((item) =>
+      [item["id"], item["candidateId"]].filter(
+        (value): value is string => typeof value === "string",
+      ),
+    ),
+  ]);
+  const previousDeferred = new Map<string, DeferredCoverage[]>();
+  coverage.deferred = coverage.deferred.filter((item) => {
+    const owner = coverageCandidateOwner(item);
+    if (
+      typeof item.candidateId !== "string" ||
+      (owner != null && typeof owner !== "string")
+    )
+      return true;
+    const key = candidateIdentity(item.candidateId, owner);
+    if (!candidateIdentityCounts.has(key)) return true;
+    const rows = previousDeferred.get(key) ?? [];
+    rows.push(item);
+    previousDeferred.set(key, rows);
+    return false;
+  });
+  const retainedSurfaceIds = new Set(
+    coverage.deferred.flatMap((item) => item.surfaceIds ?? []),
+  );
+  const previousDecisions = new Map<string, Record<string, unknown>[]>();
+  const retainDecision = (item: Record<string, unknown>, mapped: boolean) => {
+    const owner = coverageCandidateOwner(item);
+    if (
+      typeof item["candidateId"] !== "string" ||
+      (owner != null && typeof owner !== "string") ||
+      (item["disposition"] !== "rejected" &&
+        item["disposition"] !== "not_applicable")
+    )
+      return true;
+    const key = candidateIdentity(item["candidateId"], owner);
+    if (!candidateIdentityCounts.has(key)) return true;
+    const rows = previousDecisions.get(key) ?? [];
+    rows.push(structuredClone(item));
+    previousDecisions.set(key, rows);
+    return mapped;
+  };
+  coverage.surfaces = coverage.surfaces.filter((item) => {
+    if (retainDecision(item, mappedSurfaces.has(item.id))) return true;
+    if (!retainedSurfaceIds.has(item.id)) return false;
+    // Keep linked evidence while the reassessed candidate's old decision is archived.
+    delete item.candidateId;
+    return true;
+  });
+  coverage.explicitExclusions = coverage.explicitExclusions.filter((item) =>
+    retainDecision(item, false),
+  );
+  const surfaceCandidateKeys = new Map<string, Set<string>>();
+  const surfaceIdCounts = new Map<string, number>();
+  for (const surface of coverage.surfaces)
+    surfaceIdCounts.set(surface.id, (surfaceIdCounts.get(surface.id) ?? 0) + 1);
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
-    for (const id of candidate.surfaceIds) {
+    const candidateId = findingCandidateIds(candidate.finding)[0];
+    const sourceWorkerId = findingCandidateOwner(candidate.finding);
+    const key =
+      candidateId === undefined
+        ? undefined
+        : candidateIdentity(candidateId, sourceWorkerId);
+    const reason =
+      validation.counterevidence_or_proof_gap ||
+      validation.remaining_uncertainty ||
+      validation.evidence.join("\n");
+    const history =
+      key === undefined
+        ? []
+        : [
+            ...(previousDeferred.get(key) ?? []),
+            ...(previousDecisions.get(key) ?? []),
+          ];
+    if (history.length > 0) {
+      const originals = Array.isArray(
+        candidate.finding.provenance["originalCandidates"],
+      )
+        ? [...candidate.finding.provenance["originalCandidates"]]
+        : [];
+      for (const item of history) {
+        if (!originals.some((previous) => isDeepStrictEqual(previous, item)))
+          originals.push(structuredClone(item));
+      }
+      candidate.finding.provenance["originalCandidates"] = originals;
+    }
+    const surfaceIds = new Set(candidate.surfaceIds);
+    if (key !== undefined) {
+      const previousSurfaceIds = new Set(
+        (previousDeferred.get(key) ?? []).flatMap(
+          (row) => row.surfaceIds ?? [],
+        ),
+      );
+      const sharedSurfaceIds = new Set(
+        coverage.deferred.flatMap((row) => row.surfaceIds ?? []),
+      );
+      for (const surface of coverage.surfaces) {
+        if (
+          surface.disposition !== "needs_follow_up" ||
+          sharedSurfaceIds.has(surface.id)
+        )
+          continue;
+        const owner = coverageCandidateOwner(surface);
+        const sameCandidate =
+          typeof surface.candidateId === "string"
+            ? (owner == null || typeof owner === "string") &&
+              candidateIdentity(surface.candidateId, owner) === key
+            : previousSurfaceIds.has(surface.id) &&
+              surfaceIdCounts.get(surface.id) === 1;
+        if (sameCandidate) surfaceIds.add(surface.id);
+      }
+    }
+    for (const id of surfaceIds) {
       const values = decisions.get(id) ?? [];
       values.push(update);
       decisions.set(id, values);
+      const keys = surfaceCandidateKeys.get(id) ?? new Set();
+      if (key !== undefined) keys.add(key);
+      surfaceCandidateKeys.set(id, keys);
     }
     if (validation.disposition === "deferred") {
+      const uniqueIdentity =
+        key !== undefined && candidateIdentityCounts.get(key) === 1;
+      const previous = uniqueIdentity
+        ? previousDeferred.get(key)?.[0]
+        : undefined;
+      const baseId = `custom-validation-${candidate.candidateId}`;
+      let deferredId = previous?.id ?? baseId;
+      let suffix = 2;
+      if (previous === undefined) {
+        while (reservedIds.has(deferredId))
+          deferredId = `${baseId}-${suffix++}`;
+      }
+      reservedIds.add(deferredId);
       coverage.deferred.push({
-        id: `custom-validation-${candidate.candidateId}`,
-        reason:
-          validation.counterevidence_or_proof_gap ||
-          validation.remaining_uncertainty ||
-          validation.evidence.join("\n"),
+        ...previous,
+        id: deferredId,
+        candidateId: uniqueIdentity ? candidateId : deferredId,
+        ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
+        candidate: candidate.finding,
+        reason,
         paths: candidate.finding.locations.map((location) => location.path),
-        surfaceIds: candidate.surfaceIds,
+        surfaceIds: [...surfaceIds],
       });
+    }
+    if (
+      validation.disposition === "suppressed" ||
+      validation.disposition === "not_applicable"
+    ) {
+      const uniqueIdentity =
+        key !== undefined && candidateIdentityCounts.get(key) === 1;
+      const previous = uniqueIdentity
+        ? previousDeferred.get(key)?.[0]
+        : undefined;
+      if (key !== undefined) {
+        const baseId = `custom-validation-${candidate.candidateId}`;
+        let id = baseId;
+        let suffix = 2;
+        while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
+        reservedIds.add(id);
+        coverage.surfaces.push({
+          ...previous,
+          id,
+          candidateId: uniqueIdentity ? candidateId : id,
+          ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
+          label: candidate.finding.title,
+          disposition:
+            validation.disposition === "suppressed"
+              ? "rejected"
+              : "not_applicable",
+          reason,
+          notes: reason,
+          finding: candidate.finding,
+          receiptRefs: [RESULTS, ...validation.artifact_paths],
+        });
+      }
     }
     if (validation.disposition !== "reportable") continue;
     const finding = candidate.finding;
+    delete finding.provenance["candidateReopened"];
     finding.validation = {
       ...validation,
       summary: validation.evidence.join("\n"),
@@ -407,9 +597,33 @@ export async function runCustomValidation(options: {
     delete finding.extensions?.["customValidationSurfaceIds"];
     reported.push(finding);
   }
+  const independentDecisions: CoverageDocument["surfaces"] = [];
   for (const surface of coverage.surfaces) {
     const updates = decisions.get(surface.id);
     if (updates === undefined) continue;
+    const owner = coverageCandidateOwner(surface);
+    if (
+      typeof surface.candidateId === "string" &&
+      (surface.disposition === "rejected" ||
+        surface.disposition === "not_applicable") &&
+      !surfaceCandidateKeys
+        .get(surface.id)
+        ?.has(candidateIdentity(surface.candidateId, owner))
+    ) {
+      if (
+        !candidateIdentityCounts.has(
+          candidateIdentity(surface.candidateId, owner),
+        )
+      ) {
+        const baseId = `${surface.id}-decision`;
+        let id = baseId;
+        let suffix = 2;
+        while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
+        reservedIds.add(id);
+        independentDecisions.push({ ...structuredClone(surface), id });
+      }
+      delete surface.candidateId;
+    }
     const values = updates.map((update) => update.validation.disposition);
     surface.disposition = values.includes("reportable")
       ? "reported"
@@ -418,6 +632,15 @@ export async function runCustomValidation(options: {
         : values.includes("suppressed")
           ? "rejected"
           : "not_applicable";
+    if (
+      typeof surface.candidateId === "string" &&
+      (surface.disposition === "rejected" ||
+        surface.disposition === "not_applicable") &&
+      !surfaceCandidateKeys
+        .get(surface.id)
+        ?.has(candidateIdentity(surface.candidateId, owner))
+    )
+      delete surface.candidateId;
     surface.receiptRefs = [
       ...new Set([
         ...surface.receiptRefs,
@@ -426,6 +649,7 @@ export async function runCustomValidation(options: {
       ]),
     ];
   }
+  coverage.surfaces.push(...independentDecisions);
   if (coverage.surfaces.length === 0) {
     coverage.surfaces.push({
       id: "custom-validation",
@@ -439,6 +663,7 @@ export async function runCustomValidation(options: {
     ...new Set([...firstSurface.receiptRefs, CANDIDATES, RESULTS]),
   ];
   delete coverage["completeness"];
+  delete coverage["completenessBeforeCandidates"];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.

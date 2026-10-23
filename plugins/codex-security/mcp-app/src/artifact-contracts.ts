@@ -344,10 +344,15 @@ const draft_coverage = z.looseObject({
     .array(
       z.looseObject({
         id: nonEmptyText.optional(),
-        candidateId: candidateId.optional(),
+        candidateId: nonEmptyText
+          .describe(
+            "Preserve the saved candidate's semantic identity exactly, including names such as review/auth.",
+          )
+          .optional(),
         reason: nonEmptyText,
         paths: draft_textList.optional(),
         surfaceIds: draft_textList.optional(),
+        candidate: z.unknown().optional(),
       }),
     )
     .describe(

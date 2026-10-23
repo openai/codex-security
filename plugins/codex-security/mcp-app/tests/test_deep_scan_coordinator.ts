@@ -3152,12 +3152,21 @@ async function testResumedManifestPreservesCompletedReducer(
   });
   fixture.run.includePaths = includePaths;
   const store = new FakeStore(fixture.run);
+  const pendingCandidate = {
+    candidateId: "pending-review",
+    reason: "Candidate validation remains pending.",
+    candidate: { evidence: "The fixture handler needs review." },
+  };
   store.dedupCommitResponseGate = Promise.withResolvers<void>();
   const original = createCoordinator(
     fixture,
     store,
     new FakeExecutor({
       blockDiscoveryAfterCalls: 2,
+      discoveryDeferred: [
+        pendingCandidate,
+        { reason: "General follow-up work." },
+      ],
       discoveryCandidateId: includePaths ? "scope-candidate" : undefined,
     }),
     { run: store.run },
@@ -3207,6 +3216,7 @@ async function testResumedManifestPreservesCompletedReducer(
     persistedWorkers: structuredClone([...store.workers.values()]),
     persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
+  const publishedDrafts: ScanDraftInput[] = [];
   const acceptedWorkers = store.run.persistedWorkers!.filter(
     (worker) => worker.status === "succeeded",
   );
@@ -3225,13 +3235,43 @@ async function testResumedManifestPreservesCompletedReducer(
   const published: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,
-    onComplete: async (draft) => void published.push(structuredClone(draft)),
+    onComplete: async (draft) => {
+      publishedDrafts.push(structuredClone(draft));
+      published.push(structuredClone(draft));
+    },
   });
   assert.equal(terminal?.status, "succeeded");
   const manifest = await readJson(terminal.manifestPath);
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
   assert.equal(store.dedupCommits.length, 1);
   assert.equal(store.dedupClaims.length, 1);
+  assert.deepEqual(
+    publishedDrafts.map((draft) => draft.coverage),
+    [
+      {
+        surfaces: store.dedupClaims[0].workerIds.map((workerId) => ({
+          label: "Fixture query",
+          disposition: includePaths ? "reported" : "no_issue_found",
+          workerId,
+          id: `${workerId}/0`,
+        })),
+        explicitExclusions: [],
+        deferred: store.dedupClaims[0].workerIds.flatMap((workerId) => [
+          {
+            reason: "General follow-up work.",
+            workerId,
+            id: `${workerId}/0`,
+          },
+          {
+            ...pendingCandidate,
+            sourceWorkerId: workerId,
+            workerId,
+            id: `${workerId}/1`,
+          },
+        ]),
+      },
+    ],
+  );
   assert.equal(
     replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
     0,

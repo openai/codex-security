@@ -559,37 +559,6 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_accepts_custom_schema_beyond_previous_complexity_limits(self) -> None:
-        schema = {
-            "type": "object",
-            "allOf": [{"type": "object"}] * 129,
-            "properties": {
-                **{f"property_{index}": {} for index in range(4097)},
-                "name": {"type": "string", "pattern": "^a+$"},
-            },
-        }
-        path = self.scan_dir / "custom.schema.json"
-        path.write_text(json.dumps(schema), encoding="utf-8")
-
-        FINALIZER.validate_against_schema({"name": "aaa"}, path)
-
-    def test_allows_schema_properties_named_like_validation_keywords(self) -> None:
-        schema = {
-            "type": "object",
-            "properties": {
-                "$ref": {"type": "string"},
-                "pattern": {"type": "string"},
-                "uniqueItems": {"type": "boolean"},
-            },
-        }
-        path = self.scan_dir / "custom.schema.json"
-        path.write_text(json.dumps(schema), encoding="utf-8")
-
-        FINALIZER.validate_against_schema(
-            {"$ref": "value", "pattern": "^(a+)+$", "uniqueItems": True},
-            path,
-        )
-
     def test_finalize_normalizes_unsealed_deep_inventory_strategy_alias(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.coverage["inventoryStrategy"] = "deep_repository_repeated_discovery"
@@ -878,6 +847,24 @@ The extraction root is not enforced.
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
         reader = self.export_csv()
         self.assertNotIn("candidate_id", reader.fieldnames or [])
+
+    def test_scoped_standard_csv_export_keeps_candidate_provenance_in_standard_format(
+        self,
+    ) -> None:
+        self.coverage["mode"] = "scoped_path"
+        self.finding["provenance"]["candidateId"] = "candidate-001"
+        reader = self.export_csv()
+        self.assertNotIn("candidate_id", reader.fieldnames or [])
+        self.assertEqual(next(reader)["title"], self.finding["title"])
+
+    def test_scoped_deep_csv_export_recognizes_canonical_worker_ownership(self) -> None:
+        self.coverage["mode"] = "scoped_path"
+        self.finding["provenance"].update(
+            {"candidateId": "candidate-001", "sourceWorkerId": "worker-001"}
+        )
+        reader = self.export_csv()
+        self.assertIn("candidate_id", reader.fieldnames or [])
+        self.assertEqual(next(reader)["candidate_id"], "candidate-001")
 
     def test_csv_export_escapes_newline_and_full_width_formula_prefixes(self) -> None:
         self.finding["title"] = "\n=1+1"

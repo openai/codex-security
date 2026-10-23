@@ -10456,6 +10456,11 @@ function printScanSummary(
       ? `${elapsed}s`
       : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
   const findingCount = findings.length;
+  const unresolvedCount = result.unresolvedCandidateCount;
+  const candidateSuffix =
+    unresolvedCount > 0
+      ? ` + ${unresolvedCount} candidate${unresolvedCount === 1 ? "" : "s"}`
+      : "";
   const confirmedCount =
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
@@ -10476,7 +10481,7 @@ function printScanSummary(
       (threatModelPath === null
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
-      `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
+      `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}${candidateSuffix}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

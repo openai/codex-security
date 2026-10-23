@@ -48,7 +48,11 @@
             }
           },
           "riskArea": { "type": "string", "minLength": 1 },
-          "notes": { "type": "string", "minLength": 1 }
+          "notes": { "type": "string", "minLength": 1 },
+          "candidateId": {
+            "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+            "tsType": "unknown"
+          }
         },
         "required": ["id", "label", "disposition", "receiptRefs"]
       }
@@ -78,6 +82,14 @@
           "surfaceIds": {
             "type": "array",
             "items": { "type": "string", "minLength": 1 }
+          },
+          "candidateId": {
+            "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+            "tsType": "unknown"
+          },
+          "candidate": {
+            "description": "Saved candidate details and evidence awaiting a final decision.",
+            "tsType": "unknown"
           }
         },
         "required": ["id", "reason"]
@@ -95,6 +107,10 @@
         "additionalProperties": false
       },
       "description": "Completed generic review tasks, with their saved IDs and completion reasons."
+    },
+    "receiptSealVersion": {
+      "const": 1,
+      "description": "Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque."
     },
     "openQuestions": {
       "type": "array",
