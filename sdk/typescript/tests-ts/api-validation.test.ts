@@ -1140,6 +1140,11 @@ describe("CodexSecurity finding validation", () => {
     usePersistedValidationWorkbench(resumed);
     await using client = resumed.client;
     client.config.codexOverrides!["model"] = "changed-validation-model";
+    await client.validate({ ...request, finding: "Second candidate" });
+    expect(modelCalls).toBe(2);
+    expect(resumed.captured.codex?.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
+      request.safetyIdentifier,
+    );
     for (const safetyIdentifier of ["synthetic-validation-second", undefined]) {
       const previousCalls = modelCalls;
       const changedRequest = { ...request, safetyIdentifier };
@@ -1152,7 +1157,7 @@ describe("CodexSecurity finding validation", () => {
       expect(modelCalls).toBe(previousCalls + 1);
     }
     expect(await client.validate(request)).toEqual(first);
-    expect(modelCalls).toBe(3);
+    expect(modelCalls).toBe(4);
   });
 
   test("invalidates cached validation when inline instructions change", async () => {
