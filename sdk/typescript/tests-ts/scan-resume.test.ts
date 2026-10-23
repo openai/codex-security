@@ -1,5 +1,6 @@
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
+import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
@@ -49,6 +50,7 @@ async function interruptedScan(
   resolvedDeep = false,
   modelProvider?: string,
   knowledgeState: "saved" | "legacy" = "saved",
+  separateSetupCommands = false,
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -202,13 +204,9 @@ async function interruptedScan(
   if (knowledgeSnapshot !== undefined)
     await saveScanKnowledge(scanDir, knowledgeSnapshot);
   const threadId = randomUUID();
-  await command([
-    "set-scan-thread",
-    "--scan-id",
-    scanId,
-    "--thread-id",
-    threadId,
-  ]);
+  const setupCommands = [
+    ["set-scan-thread", "--scan-id", scanId, "--thread-id", threadId],
+  ];
   const sessionPath = join(codexHome, "sessions", `rollout-${threadId}.jsonl`);
   await writeFile(
     sessionPath,
@@ -218,7 +216,7 @@ async function interruptedScan(
     }) + "\n",
   );
   if (mode === "deep") {
-    await command([
+    setupCommands.push([
       "begin-deep-scan",
       "--scan-id",
       scanId,
@@ -233,7 +231,7 @@ async function interruptedScan(
     const prompt = join(scanDir, "setup-prompt.md");
     await writeFile(prompt, "Saved setup prompt.\n");
     for (const status of ["running", "succeeded"]) {
-      await command([
+      setupCommands.push([
         "upsert-deep-scan-worker",
         "--scan-id",
         scanId,
@@ -249,6 +247,11 @@ async function interruptedScan(
         scanDir,
       ]);
     }
+  }
+  if (separateSetupCommands) {
+    for (const args of setupCommands) await command(args);
+  } else {
+    await runWorkbenchFixtureCommands(python, environment, setupCommands);
   }
   const checkpoint = join(scanDir, "checkpoint.json");
   await writeFile(checkpoint, '{"completed":"setup"}\n');
@@ -271,7 +274,16 @@ async function interruptedScan(
 }
 
 test("resume resolves an interrupted scan without changing its ID, recipe, or completed workers", async () => {
-  const f = await interruptedScan();
+  // Retain the separate-process setup contract alongside the batched fixtures.
+  const f = await interruptedScan(
+    "deep",
+    false,
+    {},
+    false,
+    undefined,
+    "saved",
+    true,
+  );
   const before = await f.command([
     "get-deep-scan",
     "--scan-id",

@@ -17,7 +17,7 @@ import {
   nativeConfigOverrides,
 } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
-import { mock } from "node:test";
+import { mock, test, type TestContext } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import assert from "node:assert/strict";
 import childProcess, {
@@ -103,67 +103,154 @@ const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 
 try {
-  testCodeModeFrameDiagnosticBoundaries();
-  await testLargeScopeTransport();
-  await testOpenAiCredentialsReachWorker();
-  await testWorkerCancellation();
-  testUsageLimitClassification();
-  await testWorkerTerminalEvents();
-  await testWorkerRuntimeSettings();
-  await testUnsupportedProviderSnapshotFailsBeforeLaunch();
-  await testWorkerCyberAccessSettings({
-    CodexSdkWorkerExecutor,
-    fakeCodexFixture,
-    parentSandbox: trustedParentSandbox,
-    workerRequest,
-    assertConfigOverrides,
-    assertReadOnlyWorkerPolicy,
-    assertWorkerSubagentPolicy,
-    restoreEnv,
-  });
-  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
-  if (process.platform !== "win32") {
-    await testDeepScanContextSnapshots({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-    });
-    await testMissingParentSandboxFailsBeforeWorkerLaunch();
-    await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
-    await testRuntimePermissionProfileFallbackStopsAndDiscards();
-    await testWorkerLaunchesWithoutGlobalCodex();
-    await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
-    await testConcurrentWorkerExecutableAliases({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-      bundledCodexSdkEnvironment,
-      assertReadOnlyWorkerPolicy,
-    });
-    await testSdkInvocationAndThreadCapture();
-    await testBedrockCredentialsReachWorker();
-    await testBedrockCredentialsReachWorker("oidc");
-    await testExternalProviderCredentialsReachWorker();
-    await testArtifactServerUsesExtendedStartupTimeout();
-    await testReducerAttemptContext();
-    await testZeroSubagentsPreservesHostRestrictions();
-    await testSdkResumesExistingThread();
-    await testRetryNotificationDoesNotInterruptTurn();
-    await testSandboxNamespaceDiagnosticIsPreserved();
-    await testOwnedArtifactToolFailureDiagnosticIsPreserved();
-    for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
-      await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+  await test("Deep worker lifecycle", async (t) => {
+    await check(t, testWorkerCancellation);
+    await check(t, testWorkerTerminalEvents);
+    await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    if (process.platform !== "win32") {
+      await check(t, testStreamTerminationWithoutTerminalEventFails);
+      await check(t, testAbortPropagation);
     }
-    await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
-    await testStreamTerminationWithoutTerminalEventFails();
-    await testAbortPropagation();
-    await testUnstructuredConfigurationFailureRemainsRetryable();
-    await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresRemainWorkerErrors();
-    await testMalformedCommandEventsRemainRetryable();
-    await testRateLimitPolicyFailureRemainsRetryable();
-    await testArtifactStartupTimeoutClassification(runFixtureWorker);
-  }
+  });
+
+  await test("Deep worker runtime settings", async (t) => {
+    await check(t, testLargeScopeTransport);
+    await check(t, testOpenAiCredentialsReachWorker);
+    await check(t, testWorkerRuntimeSettings);
+    await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
+    await check(
+      t,
+      () =>
+        testWorkerCyberAccessSettings({
+          CodexSdkWorkerExecutor,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+          workerRequest,
+          assertConfigOverrides,
+          assertReadOnlyWorkerPolicy,
+          assertWorkerSubagentPolicy,
+          restoreEnv,
+        }),
+      "cyber access settings",
+    );
+    if (process.platform !== "win32") {
+      await check(
+        t,
+        () =>
+          testDeepScanContextSnapshots({
+            CodexSdkWorkerExecutor,
+            fakeCodexFixture,
+            parentSandbox: trustedParentSandbox,
+          }),
+        "isolated context snapshots",
+      );
+      await check(t, testMissingParentSandboxFailsBeforeWorkerLaunch);
+      await check(t, testDisallowedWorkerProfileFailsBeforeWorkerLaunch);
+      await check(t, testRuntimePermissionProfileFallbackStopsAndDiscards);
+      await check(t, testSdkInvocationAndThreadCapture);
+      await check(
+        t,
+        () => testBedrockCredentialsReachWorker(),
+        "Bedrock credentials",
+      );
+      await check(
+        t,
+        () => testBedrockCredentialsReachWorker("oidc"),
+        "Bedrock OIDC credentials",
+      );
+      await check(t, testExternalProviderCredentialsReachWorker);
+      await check(t, testArtifactServerUsesExtendedStartupTimeout);
+      await check(t, testReducerAttemptContext);
+      await check(t, testZeroSubagentsPreservesHostRestrictions);
+      await check(t, testSdkResumesExistingThread);
+    }
+  });
+
+  await test("Deep worker executable selection", async (t) => {
+    await check(t, testConfiguredExecutablePaths);
+    if (process.platform !== "win32") {
+      await check(t, testWorkerLaunchesWithoutGlobalCodex);
+      await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
+      await check(
+        t,
+        () =>
+          testConcurrentWorkerExecutableAliases({
+            CodexSdkWorkerExecutor,
+            fakeCodexFixture,
+            parentSandbox: trustedParentSandbox,
+            bundledCodexSdkEnvironment,
+            assertReadOnlyWorkerPolicy,
+          }),
+        "concurrent executable aliases",
+      );
+    }
+    await check(t, testWindowsAppsCodexFallsBackToRelocatedBinary);
+    await check(
+      t,
+      () => testWindowsNpmPackageResolution(),
+      "global Windows npm package resolution",
+    );
+    await check(
+      t,
+      () => testWindowsNpmPackageResolution("managed"),
+      "managed Windows npm package resolution",
+    );
+    if (process.platform === "win32") {
+      await check(t, testWindowsLongExecutableLaunches);
+      await check(t, testWindowsRootRelativePathsStayBoundToOriginalDrive);
+      await check(t, testWindowsWorkerEnvironmentPreservesMixedCaseKeys);
+      await check(t, testWindowsLauncherSkipsExtensionlessNpmShim);
+    }
+  });
+
+  await test("Deep worker diagnostics", async (t) => {
+    await check(t, testCodeModeFrameDiagnosticBoundaries);
+    await check(t, testUsageLimitClassification);
+    await check(t, testOsErrorCodesRemainRetryable);
+    await check(t, testTextualMissingPathErrorsRemainRetryable);
+    await check(t, testWorkerErrorClassificationPreservesExplicitFailures);
+    if (process.platform !== "win32") {
+      await check(t, testRetryNotificationDoesNotInterruptTurn);
+      await check(t, testSandboxNamespaceDiagnosticIsPreserved);
+      await check(t, testOwnedArtifactToolFailureDiagnosticIsPreserved);
+      await check(
+        t,
+        () => testArtifactDiagnosticSurvivesWorkerRetries("discovery:\0" + "0"),
+        "artifact retry diagnostic: controls",
+      );
+      await check(
+        t,
+        () => testArtifactDiagnosticSurvivesWorkerRetries("😀".repeat(1300)),
+        "artifact retry diagnostic: Unicode",
+      );
+      await check(t, testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
+      await check(t, testUnstructuredConfigurationFailureRemainsRetryable);
+      await check(t, testUnstructuredThreadStartFailureRemainsRetryable);
+      await check(t, testPolicyFailuresRemainWorkerErrors);
+      await check(t, testMalformedCommandEventsRemainRetryable);
+      await check(t, testRateLimitPolicyFailureRemainsRetryable);
+      await check(
+        t,
+        () => testArtifactStartupTimeoutClassification(runFixtureWorker),
+        testArtifactStartupTimeoutClassification.name,
+      );
+    }
+  });
+} finally {
+  restoreEnv("FAKE_CODEX_MARKER", previousMarker);
+  await temporaryDirectories.cleanup();
+}
+
+async function check(
+  t: TestContext,
+  run: () => void | Promise<void>,
+  name = run.name,
+) {
+  process.stdout.write(`Running ${t.name} / ${name}\n`);
+  await t.test(name, run);
+}
+
+function testConfiguredExecutablePaths() {
   assert.equal(
     resolveCodexPath({}, "darwin"),
     path.join(process.cwd(), "codex"),
@@ -222,21 +309,6 @@ try {
     ),
     path.join(originalCwd, "codex"),
   );
-  testOsErrorCodesRemainRetryable();
-  testTextualMissingPathErrorsRemainRetryable();
-  testWorkerErrorClassificationPreservesExplicitFailures();
-  await testWindowsAppsCodexFallsBackToRelocatedBinary();
-  await testWindowsNpmPackageResolution();
-  await testWindowsNpmPackageResolution("managed");
-  if (process.platform === "win32") {
-    await testWindowsLongExecutableLaunches();
-    await testWindowsRootRelativePathsStayBoundToOriginalDrive();
-    await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
-    await testWindowsLauncherSkipsExtensionlessNpmShim();
-  }
-} finally {
-  restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-  await temporaryDirectories.cleanup();
 }
 
 function testOsErrorCodesRemainRetryable() {
