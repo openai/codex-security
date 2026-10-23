@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import uuid
 from argparse import Namespace
@@ -348,6 +349,75 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     assert repeated["progress"]["status"] == "complete"
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert_published_aggregate(scan)
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("after_sealing", [False, True])
+def test_completion_captures_target_warnings_before_first_seal(
+    workbench_api, workbench_db, publication_scan, monkeypatch, tmp_path, mode, after_sealing
+):
+    scan = publication_scan(mode=mode)
+    source = tmp_path / "target" / "subdir" / "extract.py"
+    completion_globals = workbench_api["complete_scan_locked"].__globals__
+    prepare = completion_globals["_prepare_scan_finalization"]
+
+    def prepare_then_change_target(*args, **kwargs):
+        prepared = prepare(*args, **kwargs)
+        if not after_sealing:
+            source.write_text("# Changed during finalization\n")
+        return prepared
+
+    with monkeypatch.context() as patch:
+        patch.setitem(completion_globals, "_prepare_scan_finalization", prepare_then_change_target)
+        complete(workbench_api, workbench_db, scan, prepare_only=True)
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    sealed_bytes = manifest_path.read_bytes()
+    if after_sealing:
+        source.write_text("# Changed after preparation sealed the scan\n")
+
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert completed["progress"]["status"] == "complete"
+    assert len(completed["warnings"]) == 1
+    assert manifest_path.read_bytes() == sealed_bytes
+    manifest = json.loads(sealed_bytes)
+    assert manifest["scan"].get("warnings", []) == ([] if after_sealing else completed["warnings"])
+    sarif = json.loads((scan.scan_dir / "exports/results.sarif").read_text())
+    if after_sealing:
+        assert "invocations" not in sarif["runs"][0]
+    else:
+        invocation = sarif["runs"][0]["invocations"][0]
+        assert invocation["executionSuccessful"] is True
+        assert invocation["toolExecutionNotifications"] == [
+            {"level": "warning", "message": {"text": completed["warnings"][0]}}
+        ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix filenames can contain non-UTF-8 bytes")
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_completion_preserves_non_utf8_filename_warning(
+    workbench_api, workbench_db, publication_scan, tmp_path, mode
+):
+    scan = publication_scan(mode=mode)
+    os.mkfifo(os.fsencode(tmp_path / "target") + b"/new-pipe-\xff")
+
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert completed["progress"]["status"] == "complete"
+    warning = completed["warnings"][0]
+    assert "new-pipe-\udcff" in warning
+    portable_warning = warning.replace("\udcff", "\\udcff")
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    sealed_bytes = manifest_path.read_bytes()
+    assert json.loads(sealed_bytes)["scan"]["warnings"] == [portable_warning]
+    sarif = json.loads((scan.scan_dir / "exports/results.sarif").read_text())
+    invocation = sarif["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is True
+    assert invocation["toolExecutionNotifications"] == [
+        {"level": "warning", "message": {"text": portable_warning}}
+    ]
+    complete(workbench_api, workbench_db, scan)
+    assert manifest_path.read_bytes() == sealed_bytes
 
 
 @pytest.mark.cross_platform

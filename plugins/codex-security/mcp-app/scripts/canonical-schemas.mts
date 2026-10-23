@@ -192,6 +192,7 @@ const scanManifest = z.looseObject({
       id: text,
       producer: z.looseObject({ name: text, version: text }),
       status: z.enum(["completed", "failed", "canceled", "interrupted"]),
+      warnings: textList.optional(),
       startedAt: timestamp,
       completedAt: timestamp,
       sealedAt: timestamp,
