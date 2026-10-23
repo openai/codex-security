@@ -1,5 +1,27 @@
 [
   [
+    "-- Keep decision-history receipts while moving their preview version numbers.",
+    "WITH input AS (SELECT :history AS history),",
+    "moves(position, version, destination, name) AS (",
+    "    VALUES",
+    "        (-6, 54, 55, 'bind new finding decisions to admitted scans'),",
+    "        (-5, 53, 54, 'preserve finding decision append chronology'),",
+    "        (-4, 51, 55, 'bind new finding decisions to admitted scans'),",
+    "        (-3, 50, 54, 'preserve finding decision append chronology'),",
+    "        (-2, 49, 55, 'bind new finding decisions to admitted scans'),",
+    "        (-1, 48, 54, 'preserve finding decision append chronology'),",
+    "        (0, 44, 55, 'bind new finding decisions to admitted scans'),",
+    "        (1, 43, 55, 'bind new finding decisions to admitted scans'),",
+    "        (2, 43, 54, 'preserve finding decision append chronology'),",
+    "        (3, 42, 54, 'preserve finding decision append chronology')",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination ||",
+    "    ' WHERE version = ' || version || ' AND name = ' || quote(name) AS value",
+    "FROM moves JOIN schema_migrations USING (version, name)",
+    "ORDER BY position;"
+  ],
+  [
     "-- Move source-scope previews before the shared history repairs.",
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",

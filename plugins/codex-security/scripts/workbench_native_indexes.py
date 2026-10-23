@@ -1,10 +1,11 @@
 """Read-only native findings and repository indexes for the Security workbench."""
 
 import argparse
+import json
 import sqlite3
 import sys
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -12,34 +13,66 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
-from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
+from workbench_constants import DEFAULT_PAGE_SIZE, FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES
 from workbench_validation import bounded_output_text, timestamp_key
 
 
 def list_global_findings(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
+    *,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    limit = min(args.limit, FINDINGS_PAGE_MAX)
+    limit = args.limit
     query = args.query.strip().casefold() if args.query else ""
+    selected_ids = args.target_id
+    target_ids = (
+        {selected_ids}
+        if isinstance(selected_ids, str)
+        else set(selected_ids)
+        if selected_ids is not None
+        else None
+    )
+    selected_paths = getattr(args, "target_path", None)
+    target_paths = (
+        {selected_paths}
+        if isinstance(selected_paths, str)
+        else set(selected_paths)
+        if selected_paths is not None
+        else None
+    )
+    repository = getattr(args, "repository", None)
+    indexed_findings = _indexed_active_findings(
+        connection,
+        read_coverage,
+        target_ids=target_ids,
+        target_paths=target_paths,
+        repository=repository,
+        query=query,
+        include_resolved=getattr(args, "include_resolved", False),
+    )
     findings = (
         row
-        for row in _indexed_findings(connection)
-        if (args.target_id is None or row["target_id"] == args.target_id)
+        for row in indexed_findings
+        if (
+            (target_ids is None and target_paths is None)
+            or (target_ids is not None and row["target_id"] in target_ids)
+            or (target_paths is not None and row["target_path"] in target_paths)
+        )
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
             not query
-            or any(
-                query in value.casefold()
-                for value in (
-                    row["title"],
-                    row["summary"],
-                    row["target_path"],
-                    row["location_path"],
-                )
-                if value is not None
+            or row.get(
+                "active_query_match",
+                any(
+                    query in value.casefold()
+                    for value in (row["title"], row["summary"], row["location_path"])
+                    if value is not None
+                ),
             )
+            or (repository is None and query in row["target_path"].casefold())
+            or row.get("secondary_location_match", 0)
         )
     )
     rows = list(islice(findings, args.offset, args.offset + limit + 1))
@@ -47,13 +80,13 @@ def list_global_findings(
     return {
         "findings": [
             {
-                "confirmedInLatestScan": row["confirmed_in_latest_scan"],
+                "confirmedInLatestScan": row.get("confirmed_in_latest_scan", True),
                 "createdAt": row["created_at"],
                 "findingId": row["finding_id"],
-                "knownSince": row["known_since"],
-                "knownScanIds": row["known_scan_ids"],
+                "knownSince": row.get("known_since", row["scan_started_at"]),
+                "knownScanIds": row.get("known_scan_ids", [row["scan_id"]]),
                 "locationPath": row["location_path"],
-                "matchedFindingIds": row["matched_finding_ids"],
+                "matchedFindingIds": row.get("matched_finding_ids", [row["finding_id"]]),
                 "occurrenceCount": row["occurrence_count"],
                 "occurrenceId": row["occurrence_id"],
                 "scanId": row["scan_id"],
@@ -74,8 +107,19 @@ def list_global_findings(
     }
 
 
-def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
+def _indexed_findings(
+    connection: sqlite3.Connection,
+    allowed_scan_ids: set[str],
+    *,
+    allow_cross_target_matches: bool = False,
+    matching_scan_ids: set[str] | None = None,
+) -> Iterator[dict[str, Any]]:
+    admitted = json.dumps(sorted(allowed_scan_ids))
+    matching_scan_ids = allowed_scan_ids if matching_scan_ids is None else matching_scan_ids
+    matched = json.dumps(sorted(matching_scan_ids))
     parents: dict[tuple[str, str], tuple[str, str]] = {}
+    compatible_scan_pairs: dict[tuple[str, str], bool] = {}
+    checkout_relationships: dict[tuple[str, ...], bool] = {}
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
         while identity in parents:
@@ -84,26 +128,56 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
 
     for match in connection.execute(
         """
-        SELECT before_scans.target_id, before.finding_id AS before_finding_id,
-            after.finding_id AS after_finding_id
+        SELECT COALESCE(before_scans.target_id, before_scans.target_path) AS before_target_id,
+            COALESCE(after_scans.target_id, after_scans.target_path) AS after_target_id,
+            before_scans.id AS before_scan_id, after_scans.id AS after_scan_id,
+            codex_security_finding_group(before.id, before.finding_id) AS before_finding_group,
+            codex_security_finding_group(after.id, after.finding_id) AS after_finding_group
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
         JOIN scans AS before_scans ON before_scans.id = before.scan_id
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
-        WHERE before_scans.target_id = after_scans.target_id
-        """
+        WHERE (before_scans.target_id = after_scans.target_id
+            OR (before_scans.target_id IS NULL AND after_scans.target_id IS NULL
+                AND before_scans.target_path = after_scans.target_path)
+            OR (? AND before_scans.target_id IS NOT NULL AND after_scans.target_id IS NOT NULL))
+            AND before_scans.id IN (SELECT value FROM json_each(?))
+            AND after_scans.id IN (SELECT value FROM json_each(?))
+        """,
+        (allow_cross_target_matches, matched, matched),
     ):
-        before = group((match["target_id"], match["before_finding_id"]))
-        after = group((match["target_id"], match["after_finding_id"]))
+        if (
+            match["before_scan_id"] not in matching_scan_ids
+            or match["after_scan_id"] not in matching_scan_ids
+        ):
+            continue
+        if match["before_target_id"] != match["after_target_id"]:
+            pair = (match["before_scan_id"], match["after_scan_id"])
+            if pair not in compatible_scan_pairs:
+                scans = [
+                    connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+                    for scan_id in pair
+                ]
+                compatible_scan_pairs[pair] = scan_history._same_registered_repository(
+                    connection, *scans, checkout_relationships=checkout_relationships
+                )
+            if not compatible_scan_pairs[pair]:
+                continue
+        before = group((match["before_target_id"], match["before_finding_group"]))
+        after = group((match["after_target_id"], match["after_finding_group"]))
         if before != after:
             parents[after] = before
 
-    latest_scan_by_target = dict(
-        connection.execute(
-            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY julianday(upper(started_at)), id"
+    latest_scan_by_target = {
+        row["indexed_target_id"]: row["id"]
+        for row in connection.execute(
+            "SELECT COALESCE(target_id, target_path) AS indexed_target_id, id FROM scans "
+            "WHERE status = 'complete' AND id IN (SELECT value FROM json_each(?)) ORDER BY rowid",
+            (admitted,),
         )
-    )
+        if row["id"] in allowed_scan_ids
+    }
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
@@ -111,17 +185,35 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
+            codex_security_finding_group(occurrences.id, occurrences.finding_id) AS finding_group,
             occurrences.severity,
             occurrences.created_at,
             scans.id AS scan_id,
             scans.started_at AS scan_started_at,
+            scans.rowid AS scan_sequence,
+            admissions.sequence AS admission_sequence,
             scans.target_id,
-            targets.current_path AS target_path,
+            COALESCE(scans.target_id, scans.target_path) AS indexed_target_id,
+            COALESCE(targets.current_path, scans.target_path) AS target_path,
             scans.scope,
             scans.updated_at,
             triage.status AS decision_status,
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
+            COALESCE(
+                (SELECT MAX(decisions.decision_sequence)
+                 FROM finding_decisions AS decisions
+                 WHERE decisions.occurrence_id = occurrences.id),
+                triage.rowid
+            ) AS decision_sequence,
+            (SELECT decisions.scan_sequence
+             FROM finding_decisions AS decisions
+             WHERE decisions.occurrence_id = occurrences.id
+             ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_scan_sequence,
+            (SELECT decisions.admission_sequence
+             FROM finding_decisions AS decisions
+             WHERE decisions.occurrence_id = occurrences.id
+             ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_admission_sequence,
             occurrences.title,
             occurrences.summary,
             (
@@ -135,45 +227,83 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             ) AS location_path
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
-        JOIN security_targets AS targets ON targets.id = scans.target_id
+        LEFT JOIN scan_admissions AS admissions ON admissions.scan_id = scans.id
+        LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE (targets.id IS NOT NULL OR scans.target_id IS NULL)
+            AND scans.id IN (SELECT value FROM json_each(?))
         """,
+        (admitted,),
     ):
-        grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
+        if row["scan_id"] in allowed_scan_ids:
+            grouped.setdefault(group((row["indexed_target_id"], row["finding_group"])), []).append(
+                row
+            )
 
     findings = []
     for occurrences in grouped.values():
         latest = max(
             occurrences,
-            key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),
+            key=lambda row: (
+                row["scan_sequence"],
+                timestamp_key(row["created_at"]),
+                row["occurrence_id"],
+            ),
         )
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
-            key=lambda row: (timestamp_key(row["decision_updated_at"]), row["occurrence_id"]),
+            key=lambda row: (row["decision_sequence"], row["occurrence_id"]),
             default=None,
         )
         status = decision["decision_status"] if decision is not None else "open"
         if (
             status == "closed"
-            and decision["close_reason"] == "already_fixed"
-            and timestamp_key(latest["created_at"]) > timestamp_key(decision["decision_updated_at"])
+            and decision["close_reason"] in {"already_fixed", "false_positive"}
+            and (
+                any(
+                    row["admission_sequence"] is not None
+                    and row["admission_sequence"] > decision["decision_admission_sequence"]
+                    for row in occurrences
+                )
+                if decision["decision_admission_sequence"] is not None
+                else (
+                    latest["scan_sequence"] > decision["decision_scan_sequence"]
+                    if decision["decision_scan_sequence"] is not None
+                    else (
+                        latest["scan_sequence"] > decision["scan_sequence"]
+                        and timestamp_key(latest["scan_started_at"])
+                        > timestamp_key(decision["decision_updated_at"])
+                    )
+                )
+            )
         ):
             status = "open"
         scans = sorted(
-            {(row["scan_started_at"], row["scan_id"]) for row in occurrences},
-            key=lambda scan: (timestamp_key(scan[0]), scan[1]),
+            {(row["scan_sequence"], row["scan_started_at"], row["scan_id"]) for row in occurrences}
         )
         findings.append(
             {
                 **dict(latest),
-                "confirmed_in_latest_scan": any(
-                    row["scan_id"] == latest_scan_by_target.get(row["target_id"])
-                    for row in occurrences
-                ),
-                "known_since": scans[0][0],
-                "known_scan_ids": [scan_id for _, scan_id in scans],
+                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["indexed_target_id"])
+                == latest["scan_id"],
+                "decision_occurrence_id": decision["occurrence_id"]
+                if decision is not None
+                else None,
+                **{
+                    key: decision[key] if decision is not None else None
+                    for key in (
+                        "decision_status",
+                        "decision_scan_sequence",
+                        "decision_admission_sequence",
+                        "decision_updated_at",
+                    )
+                },
+                "known_since": scans[0][1],
+                "known_scan_ids": [scan_id for _, _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
                 "occurrence_count": len(occurrences),
+                "occurrence_ids": {row["occurrence_id"] for row in occurrences},
+                "occurrences": occurrences,
                 "status": status,
                 "updated_at": (
                     max(
@@ -187,6 +317,10 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             }
         )
 
+    yield from _sorted_findings(findings)
+
+
+def _sorted_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     findings.sort(key=lambda finding: finding["occurrence_id"])
     findings.sort(
         key=lambda finding: (
@@ -196,30 +330,574 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         ),
         reverse=True,
     )
-    yield from findings
+    return findings
+
+
+def indexed_scan_findings(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    through_scan: sqlite3.Row | None = None,
+    include_resolved: bool = True,
+    verification_occurrence_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    if (
+        connection.execute(
+            "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
+        ).fetchone()
+        is None
+    ):
+        return {}
+    scope = (
+        {"target_paths": {scan["target_path"]}}
+        if scan["target_id"] is None
+        else {"target_ids": scan_history.saved_repository_target_ids(connection, scan)}
+    )
+    if through_scan is not None:
+        # Keep the requested scan visible when a comparison runs in reverse order.
+        scope["through_scan_sequence"] = connection.execute(
+            "SELECT MAX(rowid) FROM scans WHERE id IN (?, ?)", (scan["id"], through_scan["id"])
+        ).fetchone()[0]
+    return {
+        occurrence_id: finding
+        for finding in _indexed_active_findings(
+            connection,
+            read_coverage,
+            include_resolved=include_resolved,
+            verification_occurrence_id=verification_occurrence_id,
+            **scope,
+        )
+        for occurrence_id in finding.get("occurrence_ids", ())
+    }
+
+
+def _indexed_active_findings(
+    connection: sqlite3.Connection,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    *,
+    verification_occurrence_id: str | None = None,
+    **settings: Any,
+) -> Iterator[dict[str, Any]]:
+    allowed_scan_ids: set[str] = set()
+    connection.create_function(
+        "codex_security_finding_group",
+        2,
+        lambda occurrence_id, finding_id: f"finding:{finding_id}",
+        deterministic=True,
+    )
+    scope = {
+        key: settings[key]
+        for key in (
+            "repository",
+            "target_ids",
+            "target_paths",
+            "matched_target_ids",
+        )
+        if key in settings
+    }
+    for _ in _active_findings(
+        connection,
+        read_coverage,
+        allowed_scan_ids=allowed_scan_ids,
+        include_resolved=True,
+        **scope,
+    ):
+        pass
+    if allowed_scan_ids and any(
+        settings.get(key) is not None for key in ("repository", "target_ids", "target_paths")
+    ):
+        history_targets: set[str] = set()
+        history_paths: set[str] = set()
+        visited_targets: set[str] = set()
+        for scan in connection.execute(
+            "SELECT * FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
+            (json.dumps(sorted(allowed_scan_ids)),),
+        ):
+            if scan["target_id"] is None:
+                history_paths.add(scan["target_path"])
+            elif scan["target_id"] not in visited_targets:
+                connected = scan_history.saved_repository_target_ids(connection, scan)
+                visited_targets.update(connected)
+                history_targets.update(connected)
+        for _ in _active_findings(
+            connection,
+            read_coverage,
+            allowed_scan_ids=allowed_scan_ids,
+            include_resolved=True,
+            target_ids=history_targets or None,
+            target_paths=history_paths or None,
+        ):
+            pass
+    matching_scan_ids = allowed_scan_ids.copy()
+    if settings.get("through_scan_sequence") is not None:
+        allowed_scan_ids = {
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM scans WHERE rowid <= ? AND id IN (SELECT value FROM json_each(?))",
+                (settings["through_scan_sequence"], json.dumps(sorted(allowed_scan_ids))),
+            )
+        }
+    query = settings.get("query", "")
+    indexed = list(
+        _indexed_findings(
+            connection,
+            allowed_scan_ids,
+            allow_cross_target_matches=True,
+            matching_scan_ids=matching_scan_ids,
+        )
+    )
+    active = {
+        row["occurrence_id"]: row
+        for row in _active_findings(
+            connection,
+            read_coverage,
+            allowed_scan_ids=allowed_scan_ids,
+            **settings,
+        )
+    }
+    coverage_by_scan_id: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
+    uncertain_occurrence_ids: set[str] | None = None
+
+    def superseded_for_verification(finding, later_scan, finding_group):
+        nonlocal uncertain_occurrence_ids
+        if (
+            finding["scan_sequence"] >= later_scan["scan_sequence"]
+            or finding["indexed_target_id"] != later_scan["indexed_target_id"]
+        ):
+            return False
+        if finding_group["decision_status"] == "open" and (
+            later_scan["admission_sequence"] <= finding_group["decision_admission_sequence"]
+            if finding_group["decision_admission_sequence"] is not None
+            else (
+                later_scan["scan_sequence"] <= finding_group["decision_scan_sequence"]
+                if finding_group["decision_scan_sequence"] is not None
+                else timestamp_key(later_scan["started_at"])
+                <= timestamp_key(finding_group["decision_updated_at"])
+            )
+        ):
+            return False
+        if uncertain_occurrence_ids is None:
+            admitted = json.dumps(sorted(allowed_scan_ids))
+            uncertain_occurrence_ids = {
+                match[f"{side}OccurrenceId"]
+                for comparison in connection.execute(
+                    "SELECT result_json FROM scan_comparisons "
+                    "WHERE before_scan_id IN (SELECT value FROM json_each(?)) "
+                    "AND after_scan_id IN (SELECT value FROM json_each(?))",
+                    (admitted, admitted),
+                )
+                for match in json.loads(comparison["result_json"]).get("uncertain", [])
+                for side in ("before", "after")
+            }
+        if finding_group["occurrence_ids"] & uncertain_occurrence_ids:
+            return False
+        scan_id = later_scan["id"]
+        if scan_id not in coverage_by_scan_id:
+            scan = later_scan
+            coverage = None
+            if (
+                scan["status"] == "complete"
+                and scan["mode"] != "diff"
+                and scan["seal_manifest_digest"] is not None
+            ):
+                try:
+                    coverage = read_coverage(scan)
+                except SystemExit as error:
+                    cause: BaseException | None = error
+                    while cause is not None and not isinstance(cause, FileNotFoundError):
+                        cause = cause.__cause__
+                    message = str(error)
+                    if isinstance(cause, FileNotFoundError):
+                        pass
+                    elif message == (
+                        "Scan directory must be an existing canonical non-symlink directory."
+                    ):
+                        try:
+                            Path(scan["scan_dir"]).lstat()
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            raise
+                    elif not (
+                        message.startswith("missing required contract artifact: ")
+                        or message.endswith(": expected a regular file inside the scan directory.")
+                    ):
+                        raise
+            coverage_by_scan_id[scan_id] = scan, coverage
+        scan, coverage = coverage_by_scan_id[scan_id]
+        return (
+            coverage is not None
+            and coverage.get("completeness", "complete") == "complete"
+            and not coverage.get("deferred")
+            and not any(
+                surface.get("disposition") == "needs_follow_up"
+                for surface in coverage.get("surfaces", [])
+            )
+            and scan_history.scan_covers_path(
+                {**dict(scan), "target_id": later_scan["indexed_target_id"]},
+                target_id=finding["indexed_target_id"],
+                path=finding["location_path"],
+                coverage=coverage,
+            )
+        )
+
+    combined = []
+    for row in indexed:
+        matched_by_target: dict[str, list[dict[str, Any]]] = {}
+        for occurrence_id in row["occurrence_ids"]:
+            finding = active.pop(occurrence_id, None)
+            if finding is not None:
+                matched_by_target.setdefault(
+                    "" if settings.get("repository") else finding["indexed_target_id"], []
+                ).append(finding)
+        representatives = [
+            (
+                matched,
+                max(
+                    matched,
+                    key=lambda finding: (
+                        finding["scan_sequence"],
+                        finding["created_at"],
+                        finding["occurrence_id"],
+                    ),
+                ),
+            )
+            for matched in matched_by_target.values()
+        ]
+        verification_scans = (
+            connection.execute(
+                "SELECT scans.*, rowid AS scan_sequence, "
+                "(SELECT sequence FROM scan_admissions WHERE scan_id = scans.id) AS admission_sequence, "
+                "COALESCE(target_id, target_path) AS indexed_target_id "
+                "FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
+                (json.dumps(row["known_scan_ids"]),),
+            ).fetchall()
+            if verification_occurrence_id in row["occurrence_ids"]
+            else ()
+        )
+        active_occurrence_ids = {
+            finding["occurrence_id"]
+            for finding in (
+                row["occurrences"]
+                if verification_occurrence_id in row["occurrence_ids"]
+                else (finding for matched, _ in representatives for finding in matched)
+            )
+            # Retained history is verified unless a later matched scan covers its location.
+            if verification_occurrence_id not in row["occurrence_ids"]
+            or not any(
+                superseded_for_verification(finding, later_scan, row)
+                for later_scan in verification_scans
+            )
+        }
+        for matched, representative in representatives:
+            combined.append(
+                {
+                    **row,
+                    **representative,
+                    "active_occurrence_ids": active_occurrence_ids,
+                    "status": row["status"],
+                    "updated_at": row["updated_at"],
+                    "occurrence_count": row["occurrence_count"],
+                    "active_query_match": any(
+                        query in finding["title"].casefold()
+                        or query in finding["summary"].casefold()
+                        for finding in matched
+                    ),
+                    "secondary_location_match": any(
+                        finding["secondary_location_match"] for finding in matched
+                    ),
+                }
+            )
+    combined.extend(active.values())
+    yield from _sorted_findings(combined)
+
+
+def _current_owner_scan_scope(
+    connection: sqlite3.Connection,
+    scope_clauses: str = "",
+    scope_values: Sequence[Any] = (),
+) -> tuple[str, list[Any]]:
+    connection.create_function(
+        "codex_security_path_contains",
+        2,
+        lambda root, path: Path(path).is_relative_to(root),
+        deterministic=True,
+    )
+    current_owner_only = (
+        "AND NOT (scans.target_id IS NULL AND EXISTS ("
+        "SELECT 1 FROM security_targets AS path_owner "
+        "WHERE codex_security_path_contains(path_owner.current_path, scans.target_path)))"
+    )
+    latest_identity = (
+        "FROM scans AS ownership_scan "
+        "WHERE ownership_scan.target_id = scans.target_id "
+        "AND ownership_scan.target_device IS NOT NULL "
+        "AND ownership_scan.target_inode IS NOT NULL "
+        "ORDER BY ownership_scan.rowid DESC LIMIT 1"
+    )
+    current_owner_only += (
+        " AND (scans.target_id IS NULL "
+        "OR (scans.target_device IS NULL AND scans.target_inode IS NULL) OR ("
+        f"scans.target_device IS (SELECT ownership_scan.target_device {latest_identity}) "
+        f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
+        "))"
+    )
+    replaced_targets = []
+    transitioned_targets = []
+    ownership_epochs = []
+    for target in connection.execute(
+        "SELECT DISTINCT targets.id, targets.current_path "
+        "FROM security_targets AS targets JOIN scans ON scans.target_id = targets.id "
+        f"WHERE 1 = 1 {scope_clauses}",
+        scope_values,
+    ):
+        checkout = Path(target["current_path"])
+        try:
+            checkout.stat()
+        except FileNotFoundError:
+            recorded_ownership = scan_history._recorded_target_ownership(connection, target["id"])
+            if recorded_ownership is not None and recorded_ownership[1] is not None:
+                transitioned_targets.append(target["id"])
+                ownership_epochs.append((target["id"], recorded_ownership[1]))
+            continue
+        except OSError:
+            replaced_targets.append(target["id"])
+            continue
+        verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
+        if verified is None:
+            replaced_targets.append(target["id"])
+        elif verified[0] is not None:
+            epoch_start = scan_history._ownership_epoch_start(connection, target["id"], verified[0])
+            if epoch_start is not None:
+                transitioned_targets.append(target["id"])
+                ownership_epochs.append((target["id"], epoch_start))
+    owner_values: list[Any] = []
+    if replaced_targets:
+        placeholders = ", ".join("?" for _ in replaced_targets)
+        current_owner_only += (
+            f" AND (scans.target_id IS NULL OR scans.target_id NOT IN ({placeholders}))"
+        )
+        owner_values.extend(replaced_targets)
+    if transitioned_targets:
+        placeholders = ", ".join("?" for _ in transitioned_targets)
+        current_owner_only += (
+            " AND (scans.target_id IS NULL "
+            f"OR scans.target_id NOT IN ({placeholders}) "
+            "OR scans.target_device IS NOT NULL OR scans.target_inode IS NOT NULL)"
+        )
+        owner_values.extend(transitioned_targets)
+    for target_id, epoch_start in ownership_epochs:
+        current_owner_only += " AND (scans.target_id IS NOT ? OR scans.rowid > ?)"
+        owner_values.extend((target_id, epoch_start))
+    return current_owner_only, owner_values
+
+
+def _active_findings(
+    connection: sqlite3.Connection,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    *,
+    allowed_scan_ids: set[str],
+    target_ids: set[str] | None = None,
+    target_paths: set[str] | None = None,
+    repository: str | None = None,
+    matched_target_ids: set[str] | None = None,
+    query: str = "",
+    include_resolved: bool = False,
+    through_scan_sequence: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    target_filters = []
+    target_values = []
+    if target_ids is not None:
+        placeholders = ", ".join("?" for _ in target_ids)
+        target_filters.append(f"targets.id IN ({placeholders})")
+        target_values.extend(target_ids)
+    if target_paths is not None:
+        placeholders = ", ".join("?" for _ in target_paths)
+        target_filters.append(f"scans.target_path IN ({placeholders})")
+        target_values.extend(target_paths)
+    target_filter = "" if not target_filters else "AND (" + " OR ".join(target_filters) + ")"
+    if through_scan_sequence is not None:
+        target_filter += " AND scans.rowid <= ?"
+        target_values.append(through_scan_sequence)
+    repository_clauses, repository_values, _, _ = (
+        scan_history.repository_scan_scope(connection, repository)
+        if repository is not None
+        else ([], [], [], [])
+    )
+    if matched_target_ids:
+        placeholders = ", ".join("?" for _ in matched_target_ids)
+        matched_filter = f"scans.target_id IN ({placeholders})"
+        repository_clauses = [
+            f"({' AND '.join(repository_clauses)}) OR {matched_filter}"
+            if repository_clauses
+            else matched_filter
+        ]
+        repository_values.extend(matched_target_ids)
+    repository_filter = (
+        "AND (" + " AND ".join(repository_clauses) + ")" if repository_clauses else ""
+    )
+    target_values.extend(repository_values)
+    current_owner_only, owner_values = _current_owner_scan_scope(
+        connection, f"{target_filter} {repository_filter}", target_values
+    )
+    target_values.extend(owner_values)
+    completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
+    for scan in connection.execute(
+        f"""
+        SELECT scans.*, scans.rowid AS scan_sequence,
+            COALESCE(targets.id, scans.target_path) AS indexed_target_id
+        FROM scans
+        LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
+        WHERE (scans.status = 'complete'
+                OR (scans.status = 'failed' AND scans.seal_manifest_digest IS NOT NULL))
+            {target_filter} {repository_filter} {current_owner_only}
+        ORDER BY scans.rowid DESC
+        """,
+        target_values,
+    ):
+        if scan["status"] == "complete":
+            completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
+        allowed_scan_ids.add(scan["id"])
+
+    if query:
+        connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
+    secondary_location_match = (
+        "EXISTS ("
+        "SELECT 1 FROM finding_locations AS searched_locations "
+        "WHERE searched_locations.occurrence_id = selected_findings.occurrence_id "
+        "AND instr(codex_security_casefold(searched_locations.relative_path), ?) > 0)"
+        if query
+        else "0"
+    )
+    rows = connection.execute(
+        f"""
+        WITH ranked_findings AS (
+            SELECT
+                occurrences.id AS occurrence_id,
+                occurrences.finding_id,
+                occurrences.severity,
+                occurrences.created_at,
+                scans.id AS scan_id,
+                scans.seal_manifest_digest,
+                scans.started_at AS scan_started_at,
+                scans.rowid AS scan_sequence,
+                targets.id AS target_id,
+                COALESCE(targets.id, scans.target_path) AS indexed_target_id,
+                COALESCE(targets.current_path, scans.target_path) AS target_path,
+                scans.scope,
+                MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
+                COALESCE(triage.status, 'open') AS status,
+                COUNT(*) OVER (
+                    PARTITION BY COALESCE(targets.id, scans.target_path),
+                        codex_security_finding_group(occurrences.id, occurrences.finding_id)
+                ) AS occurrence_count,
+                ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(targets.id, scans.target_path),
+                        codex_security_finding_group(occurrences.id, occurrences.finding_id)
+                    ORDER BY scans.rowid DESC,
+                        occurrences.created_at DESC, occurrences.id DESC
+                ) AS occurrence_rank
+            FROM finding_occurrences AS occurrences
+            JOIN scans ON scans.id = occurrences.scan_id
+            LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
+            LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+            WHERE 1 = 1 {target_filter} {repository_filter} {current_owner_only}
+        )
+        SELECT
+            selected_findings.*,
+            occurrences.title,
+            occurrences.summary,
+            {secondary_location_match} AS secondary_location_match,
+            (
+                SELECT locations.relative_path
+                FROM finding_locations AS locations
+                WHERE locations.occurrence_id = selected_findings.occurrence_id
+                ORDER BY
+                    CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
+                    locations.sort_order
+                LIMIT 1
+            ) AS location_path
+        FROM ranked_findings AS selected_findings
+        JOIN finding_occurrences AS occurrences
+            ON occurrences.id = selected_findings.occurrence_id
+        WHERE selected_findings.occurrence_rank = 1
+        ORDER BY
+            CASE selected_findings.status WHEN 'open' THEN 0 ELSE 1 END,
+            CASE selected_findings.severity
+                WHEN 'critical' THEN 0
+                WHEN 'high' THEN 1
+                WHEN 'medium' THEN 2
+                WHEN 'low' THEN 3
+                WHEN 'informational' THEN 4
+                ELSE 5
+            END,
+            selected_findings.created_at DESC,
+            selected_findings.occurrence_id
+        """,
+        [*target_values, *([query] if query else [])],
+    )
+    for row in rows:
+        completed_scans = completed_scans_by_target.get(row["indexed_target_id"], ())
+        finding = {
+            **dict(row),
+            "confirmed_in_latest_scan": (
+                completed_scans[0]["id"] == row["scan_id"] if completed_scans else True
+            ),
+        }
+        if row["seal_manifest_digest"] is not None:
+            allowed_scan_ids.add(row["scan_id"])
+        yield finding
 
 
 def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
+    *,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
+    current_owner_only, owner_values = _current_owner_scan_scope(connection)
     scan_count_by_target = Counter()
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for scan in (
         scan_history.scan_summary(row)
         for row in connection.execute(
             f"""{scan_history.SCAN_SUMMARY_QUERY}
-            ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
-            """
+            WHERE 1 = 1 {current_owner_only}
+            ORDER BY scans.rowid DESC
+            """,
+            owner_values,
         ).fetchall()
     ):
         scan_count_by_target[scan["targetId"]] += 1
         latest_scan_by_target.setdefault(scan["targetId"], scan)
 
-    open_findings_by_target = Counter(
-        row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
-    )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+    query = args.query.strip().casefold() if args is not None and args.query else ""
+    selected_targets = (
+        {
+            target_id
+            for target_id, target in targets.items()
+            if (args.target_id is None or target_id == args.target_id)
+            and args.status != "not_scanned"
+            and (
+                not query
+                or query in target["display_name"].casefold()
+                or query in target["current_path"].casefold()
+            )
+        }
+        if args is not None
+        else None
+    )
+    open_findings_by_target = Counter(
+        row["target_id"]
+        for row in _indexed_active_findings(
+            connection,
+            read_coverage,
+            target_ids=selected_targets,
+        )
+        if row["status"] == "open"
+    )
     repositories = [
         {
             "checkoutAvailable": Path(target["current_path"]).is_dir(),
@@ -236,7 +914,6 @@ def list_repositories(
     if args is None:
         return {"repositories": repositories}
 
-    query = args.query.strip().casefold() if args.query else ""
     repositories = [
         repository
         for repository in repositories
@@ -252,7 +929,7 @@ def list_repositories(
     if args.limit is None and args.offset == 0:
         return {"repositories": repositories}
 
-    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+    limit = args.limit or DEFAULT_PAGE_SIZE
     page = repositories[args.offset : args.offset + limit]
     next_offset = args.offset + len(page)
     return {

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import shutil
 import sqlite3
@@ -16,12 +15,13 @@ from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
+    create_cli_scan as create_cli_scan,
+)
+from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
     load_script,
-    mark_deep_coordinator_succeeded,
-    resume_deep_scan,
     run_workbench,
     scan_command,
     set_triage,
@@ -185,96 +185,48 @@ def confirmed_match(
     }
 
 
-def create_cli_scan(
-    state_dir: Path,
-    root: Path,
-    repository: Path,
+def insert_scan(
+    connection: sqlite3.Connection,
     *,
-    complete: bool = True,
-    follow_up: bool = False,
-    extra_anchors: tuple[str, ...] = (),
-    finding: bool = True,
-    identity_anchor: str = "archive-entry-write-without-containment",
-    mode: str = "standard",
-    parent_scan_id: str | None = None,
-    paths: list[str] | None = None,
-    cost: dict[str, Any] | None = None,
-    target: dict[str, Any] | None = None,
-    target_revision: str | None = None,
-) -> dict[str, Any]:
-    scan_dir = root / str(uuid.uuid4())
-    scan_dir.mkdir(mode=0o700, parents=True)
-    recipe = {
-        "config": {"model": "gpt-5.6-sol", "model_reasoning_effort": "high"},
-        "mode": mode,
-        "repository": str(repository.resolve()),
-        "target": target or {"kind": "paths" if paths else "repository", "paths": paths or []},
-    }
-    arguments = [
-        "register-cli-scan",
-        "--scan-dir",
-        str(scan_dir),
-        "--repository",
-        str(repository),
-        "--recipe-json",
-        json.dumps(recipe),
-    ]
-    if parent_scan_id is not None:
-        arguments.extend(("--parent-scan-id", parent_scan_id))
-    launched = run_workbench(state_dir, *arguments)
-    if not complete:
-        return launched
-    if mode == "deep":
-        resume_deep_scan(state_dir, launched["scanId"], "thread-scan-history")
-        mark_deep_coordinator_succeeded(state_dir, launched["scanId"], scan_dir)
-
-    coverage_mode = (
-        "scoped_path" if paths else "deep_repository" if mode == "deep" else "repository"
+    workspace_id: str,
+    scan_id: str,
+    mode: str,
+    status: str,
+    phase: str,
+    timestamp: str,
+    seal: str | None = None,
+    failure: str | None = None,
+    canceled: bool = False,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO scans (
+            id, workspace_id, target_path, target_revision, scope, mode,
+            scan_dir, status, phase, handoff_status, failure_message,
+            started_at, completed_at, created_at, updated_at, canceled_at,
+            seal_manifest_digest
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scan_id,
+            workspace_id,
+            "/tmp/target",
+            "fixture-revision",
+            ".",
+            mode,
+            f"/tmp/scans/{scan_id}",
+            status,
+            phase,
+            "delivered",
+            failure,
+            timestamp,
+            timestamp if status != "running" else None,
+            timestamp,
+            timestamp,
+            timestamp if canceled else None,
+            seal,
+        ),
     )
-    snapshot_digest = None
-    if target_revision is not None:
-        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-            snapshot_digest = connection.execute(
-                "SELECT target_snapshot_digest FROM scans WHERE id = ?", (launched["scanId"],)
-            ).fetchone()[0]
-    write_completed_contract(
-        scan_dir,
-        launched["scanId"],
-        repository,
-        identity_anchor=identity_anchor,
-        include_paths=paths,
-        coverage_mode=coverage_mode,
-        inventory_strategy="scoped_path" if paths else "repository",
-        target_kind="git_revision" if target_revision is not None else "directory_snapshot",
-        target_revision=target_revision,
-        snapshot_digest=snapshot_digest,
-    )
-    if not finding or extra_anchors:
-        findings_path = scan_dir / "findings.json"
-        findings = json.loads(findings_path.read_text())
-        if not finding:
-            findings["findings"] = []
-        else:
-            for index, anchor in enumerate(extra_anchors, start=1):
-                additional = copy.deepcopy(findings["findings"][0])
-                additional["identity"]["anchor"] = anchor
-                additional["title"] += f" ({index})"
-                findings["findings"].append(additional)
-        findings_path.write_text(json.dumps(findings))
-    if follow_up:
-        coverage_path = scan_dir / "coverage.json"
-        coverage = json.loads(coverage_path.read_text())
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        coverage["deferred"] = [
-            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
-        ]
-        coverage_path.write_text(json.dumps(coverage))
-    subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
-    completion = ["complete-scan", "--scan-id", launched["scanId"]]
-    if cost is not None:
-        completion.extend(("--cost-json", json.dumps(cost)))
-    run_workbench(state_dir, *completion)
-    return launched
 
 
 def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_path: Path) -> None:
@@ -748,7 +700,8 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
     assert get_scan(state_dir, scan["scanId"])["scan"]["scanId"] == scan["scanId"]
 
 
-def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> None:
+@pytest.mark.parametrize("host", ["github.com", "gitlab.com"])
+def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path, host: str) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     worktree = tmp_path / "worktree"
@@ -762,9 +715,9 @@ def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> 
         check=True,
     )
     for target, origin in (
-        (repository, "https://user:token@GITHUB.com/example/project.git"),
-        (clone, "git@github.com:example/project"),
-        (unrelated, "https://github.com/example/unrelated"),
+        (repository, f"https://user:token@{host.upper()}/example/project.git"),
+        (clone, f"git@{host}:example/project"),
+        (unrelated, f"https://{host}/example/unrelated"),
     ):
         subprocess.run(["git", "-C", str(target), "remote", "add", "origin", origin], check=True)
 
@@ -820,6 +773,19 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     repository.mkdir()
     root = tmp_path / "results"
     before = create_cli_scan(state_dir, root, repository)
+    occurrence = run_workbench(state_dir, "get-scan", "--scan-id", before["scanId"])["scan"][
+        "findings"
+    ][0]["occurrenceId"]
+    run_workbench(
+        state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+    )
     after = create_cli_scan(state_dir, root, repository, parent_scan_id=before["scanId"])
     fixed = create_cli_scan(state_dir, root, repository, finding=False)
 
@@ -832,9 +798,7 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         after,
         confirmed_match(inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]),
     )
-    assert persisted["summary"]["persisting"] == 1
-    occurrence = persisted["findings"][0]["beforeOccurrenceId"]
-    set_triage(state_dir, occurrence, "closed", "--close-reason", "already_fixed")
+    assert persisted["summary"]["reopened"] == 1
     reopened = compare_scan_pair(state_dir, before, after)
     assert reopened["summary"]["reopened"] == 1
     assert reopened["findings"][0]["triage"] == {"closeReason": None, "status": "open"}
@@ -850,7 +814,7 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("timestamps", "expected_order"),
+    ("timestamps", "expected_timestamp_order"),
     [
         (("2026-08-01T00:00:00Z", "2026-08-01T01:00:00+02:00"), (1, 0)),
         (("2026-08-01T00:00:00.000200Z", "2026-08-01T01:00:00.000100+01:00"), (1, 0)),
@@ -858,15 +822,17 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     ],
     ids=["mixed-offsets", "microseconds", "equal-instants"],
 )
-def test_finding_occurrence_history_uses_start_instants(
-    tmp_path: Path, timestamps: tuple[str, str], expected_order: tuple[int, int]
+def test_finding_occurrence_history_preserves_admission_order_across_start_instants(
+    tmp_path: Path, timestamps: tuple[str, str], expected_timestamp_order: tuple[int, int]
 ) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
-    scans = sorted(
-        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
-        key=lambda scan: scan["scanId"],
+    scans = [create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)]
+    timestamp_key = load_script("workbench_validation").timestamp_key
+    assert (
+        tuple(sorted(range(2), key=lambda index: timestamp_key(timestamps[index])))
+        == expected_timestamp_order
     )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
@@ -876,8 +842,8 @@ def test_finding_occurrence_history_uses_start_instants(
 
     for scan in scans:
         finding = get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
-        assert finding["knownSince"] == timestamps[expected_order[0]]
-        assert finding["knownScanIds"] == [scans[index]["scanId"] for index in expected_order]
+        assert finding["knownSince"] == timestamps[0]
+        assert finding["knownScanIds"] == [scan["scanId"] for scan in scans]
 
 
 def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: Path) -> None:
@@ -975,16 +941,13 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
         ("2026-01-01t02:00:00.000000+02:00", "2026-01-01T00:00:00Z"),
     ],
 )
-def test_automatic_matching_orders_instants_and_preserves_directed_cache(
+def test_automatic_matching_preserves_admission_order_and_directed_cache(
     tmp_path: Path, before_started: str, after_started: str
 ) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
-    before, after = sorted(
-        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
-        key=lambda scan: scan["scanId"],
-    )
+    before, after = (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2))
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
@@ -1182,9 +1145,14 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
         confirmed_match(current["occurrenceId"], latest_finding["occurrenceId"]),
     )
     for scan in (before, after, latest):
-        finding = get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
-        assert finding["knownScanIds"] == [before["scanId"], latest["scanId"]]
+        finding = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"][
+            "findings"
+        ][0]
+        assert finding["knownScanIds"] == [before["scanId"], after["scanId"], latest["scanId"]]
         assert finding["knownSince"] == known_since
+        assert {match["scanId"] for match in finding["matches"]} == {
+            other["scanId"] for other in (before, after, latest) if other != scan
+        }
 
     save_scan_matches(
         state_dir,
@@ -1192,8 +1160,10 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
         latest,
         confirmed_match(previous["occurrenceId"], latest_finding["occurrenceId"]),
     )
-    latest_finding = get_scan(state_dir, latest["scanId"])["scan"]["findings"][0]
-    assert latest_finding["knownScanIds"] == [before["scanId"], latest["scanId"]]
+    latest_finding = run_workbench(state_dir, "get-scan", "--scan-id", latest["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert latest_finding["knownScanIds"] == [before["scanId"], after["scanId"], latest["scanId"]]
     assert latest_finding["knownSince"] == known_since
 
 
@@ -1221,21 +1191,18 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     ],
     ids=["offsets", "microseconds", "equal-instants"],
 )
-def test_explicit_comparison_uses_chronological_matching_cutoff(
+def test_explicit_comparison_uses_admission_matching_cutoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
 ) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
-    scans = sorted(
-        (
-            create_cli_scan(
-                state_dir, tmp_path / "scans", repository, identity_anchor=f"synthetic-{index}"
-            )
-            for index in range(4)
-        ),
-        key=lambda scan: scan["scanId"],
-    )
+    scans = [
+        create_cli_scan(
+            state_dir, tmp_path / "scans", repository, identity_anchor=f"synthetic-{index}"
+        )
+        for index in range(4)
+    ]
     middle, after, future = scans[1:]
     findings = [get_scan(state_dir, scan["scanId"])["scan"]["findings"][0] for scan in scans]
     for left, right in ((0, 1), (1, 3)):
@@ -1283,6 +1250,12 @@ def test_explicit_comparison_uses_chronological_matching_cutoff(
                 "SELECT * FROM scans WHERE id = ?", (scan_id,)
             ).fetchone(),
             read_coverage=lambda _: {},
+            finding_triage=lambda db, scan, _through_scan: {
+                row["id"]: {"status": "open"}
+                for row in db.execute(
+                    "SELECT id FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
+                )
+            },
             include_matching_inputs=True,
         )
     assert compared["matchingInputs"]["knownFindingGroups"] == expected
@@ -1351,6 +1324,10 @@ def test_semantic_scan_comparison_supports_one_to_many_without_copying_triage(
         "--note",
         "The reported paths are already contained.",
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        triage_before_matching = connection.execute(
+            "SELECT * FROM finding_triage ORDER BY occurrence_id"
+        ).fetchall()
 
     saved = save_scan_matches(
         state_dir,
@@ -1364,6 +1341,10 @@ def test_semantic_scan_comparison_supports_one_to_many_without_copying_triage(
     )
     assert saved["summary"]["persisting"] == 1
     assert saved["summary"]["new"] == 0
+    assert saved["findings"][0]["triage"] == {
+        "status": "closed",
+        "closeReason": "false_positive",
+    }
     assert saved["findings"][0]["severity"] == "critical"
     assert saved["findings"][0]["title"] == current[1]["title"]
     assert saved["findings"][0]["beforeOccurrenceId"] == previous["occurrenceId"]
@@ -1374,8 +1355,13 @@ def test_semantic_scan_comparison_supports_one_to_many_without_copying_triage(
     assert len(prior["matches"]) == 2
     assert prior["triage"]["closeReason"] == "false_positive"
     assert prior["triage"]["status"] == "closed"
-    later = get_scan(state_dir, after["scanId"])["scan"]["findings"]
-    assert all(finding["triage"]["status"] == "open" for finding in later)
+    later = run_workbench(state_dir, "get-scan", "--scan-id", after["scanId"])["scan"]["findings"]
+    assert all(finding["triage"]["status"] == "closed" for finding in later)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT * FROM finding_triage ORDER BY occurrence_id").fetchall()
+            == triage_before_matching
+        )
 
 
 def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
@@ -1414,6 +1400,30 @@ def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
     assert "matches" not in shown
     assert "knownSince" not in shown
     assert "knownScanIds" not in shown
+    run_workbench(
+        state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        previous["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Only the earlier occurrence was dismissed.",
+    )
+    findings = run_workbench(state_dir, "list-global-findings")["findings"]
+    assert {finding["occurrenceId"]: finding["status"] for finding in findings} == {
+        previous["occurrenceId"]: "closed",
+        current["occurrenceId"]: "open",
+    }
+    create_cli_scan(state_dir, root, repository, finding=False)
+    findings = run_workbench(state_dir, "list-global-findings")["findings"]
+    assert {finding["occurrenceId"]: finding["status"] for finding in findings} == {
+        previous["occurrenceId"]: "closed",
+        current["occurrenceId"]: "open",
+    }
+    assert all(finding["confirmedInLatestScan"] is False for finding in findings)
 
 
 def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: Path) -> None:

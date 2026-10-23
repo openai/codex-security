@@ -85,11 +85,14 @@ def test_later_scans_preserve_global_findings_and_repository_counts(
     )
 
     findings = run_workbench(state_dir, "list-global-findings")["findings"]
-    assert len(findings) == 1
-    assert findings[0]["scanId"] == original["scanId"]
-    assert findings[0]["status"] == "open"
+    expected_count = 1
+    assert len(findings) == expected_count
+    if findings:
+        assert findings[0]["scanId"] == original["scanId"]
+        assert findings[0]["status"] == "open"
     assert (
-        run_workbench(state_dir, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
+        run_workbench(state_dir, "list-repositories")["repositories"][0]["openFindingsCount"]
+        == expected_count
     )
 
 
@@ -104,7 +107,13 @@ def test_global_findings_apply_pagination_to_historical_findings(
         target.mkdir()
 
     historical = complete_scan(state_dir, historical_target, identity_anchor="historical-finding")
-    complete_scan(state_dir, historical_target, identity_anchor="clean-scan", finding=False)
+    complete_scan(
+        state_dir,
+        historical_target,
+        identity_anchor="incomplete-follow-up",
+        finding=False,
+        follow_up=True,
+    )
     first_active = complete_scan(
         state_dir, first_active_target, identity_anchor="first-active-finding"
     )
@@ -141,6 +150,7 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
+    latest_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
     set_triage(
         state_dir,
         str(older_first["findings"][0]["occurrenceId"]),
@@ -150,7 +160,6 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
         "--note",
         "Fixture close decision.",
     )
-    latest_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
     distinct_first = complete_scan(
         state_dir,
         first_target,
@@ -264,12 +273,75 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     second = repositories_by_target[second_target_id]
     assert first["checkoutAvailable"] is True
     assert first["latestScan"]["scanId"] == distinct_first["scanId"]
-    assert first["openFindingsCount"] == 1
+    assert first["openFindingsCount"] == 2
     assert first["scanCount"] == 4
     assert second["checkoutAvailable"] is False
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_repository_index_excludes_previous_checkout_owner(tmp_path: Path, legacy: bool) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    original = complete_scan(state_dir, target, identity_anchor="original-finding")
+    if legacy:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET target_device = NULL, target_inode = NULL WHERE id = ?",
+                (original["scanId"],),
+            )
+    previous = complete_scan(state_dir, target, identity_anchor="previous-finding")
+    other_target = tmp_path / "other-repo"
+    other_target.mkdir()
+    other = complete_scan(state_dir, other_target, identity_anchor="other-finding")
+    before = run_workbench(state_dir, "list-repositories")["repositories"]
+    before_by_target = {repository["targetId"]: repository for repository in before}
+    assert before_by_target[stable_target_id(target)]["latestScan"]["scanId"] == previous["scanId"]
+    assert before_by_target[stable_target_id(target)]["scanCount"] == 2
+
+    target.rename(tmp_path / "previous-checkout")
+    target.mkdir()
+    remaining = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert len(remaining) == 1
+    assert remaining[0]["latestScan"]["scanId"] == other["scanId"]
+    assert remaining[0]["scanCount"] == 1
+    assert remaining[0]["openFindingsCount"] == 1
+
+    current = complete_scan(state_dir, target, identity_anchor="current-finding")
+    repositories = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert len(repositories) == 2
+    assert repositories[0]["latestScan"]["scanId"] == current["scanId"]
+    assert repositories[0]["scanCount"] == 1
+    assert repositories[0]["openFindingsCount"] == 1
+
+    target.rename(tmp_path / "unavailable-checkout")
+    offline = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert len(offline) == 2
+    assert offline[0]["checkoutAvailable"] is False
+    assert offline[0]["latestScan"]["scanId"] == current["scanId"]
+    assert offline[0]["scanCount"] == 1
+    assert offline[0]["openFindingsCount"] == 1
+
+
+def test_repository_index_preserves_unclaimed_legacy_scan(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    legacy = complete_scan(state_dir, target, identity_anchor="legacy-finding")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET target_device = NULL, target_inode = NULL")
+    for checkout_available in (True, False):
+        if not checkout_available:
+            target.rename(tmp_path / "unavailable-checkout")
+        repositories = run_workbench(state_dir, "list-repositories")["repositories"]
+        assert len(repositories) == 1
+        assert repositories[0]["checkoutAvailable"] is checkout_available
+        assert repositories[0]["latestScan"]["scanId"] == legacy["scanId"]
+        assert repositories[0]["scanCount"] == 1
+        assert repositories[0]["openFindingsCount"] == 1
 
 
 def test_overlapping_scans_mark_findings_present_in_latest_started_scan(tmp_path: Path) -> None:

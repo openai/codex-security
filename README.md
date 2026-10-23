@@ -141,6 +141,10 @@ try {
 The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
+Use `findings list` to browse saved findings across scans, `findings list --scan SCAN_ID`
+to inspect a previous scan, or `findings show OCCURRENCE_ID` for its details and history.
+See the [scan history guide](sdk/typescript/docs/cli.md#scan-history-and-reruns) for filters and pagination.
+
 ## Read existing Cloud findings
 
 When Codex Security Cloud is available to your account, the Security plugin's
