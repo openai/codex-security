@@ -41,6 +41,14 @@ async function fixture(git = false) {
   );
   if (git) {
     execFileSync("git", ["init", "-q", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "--local",
+      "core.autocrlf",
+      "false",
+    ]);
     execFileSync("git", ["-C", repository, "add", "."]);
     execFileSync("git", [
       "-C",

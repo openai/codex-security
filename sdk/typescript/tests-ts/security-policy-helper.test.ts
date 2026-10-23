@@ -917,33 +917,51 @@ binding.readdir = function (...args) {
     }
   });
 
-  test("rejects non-UTF-8 and oversized regular or linked policies", () => {
-    for (const kind of ["non-utf8", "oversized", "linked"]) {
+  test("rejects non-UTF-8 regular or linked policies", () => {
+    for (const kind of ["regular", "linked"]) {
       const { root } = fixture();
-      const content =
-        kind === "non-utf8"
-          ? Buffer.from([0xff])
-          : Buffer.alloc(1024 * 1024 + 1, "a");
-      write(root, kind === "linked" ? "large.md" : "SECURITY.md", content);
+      write(
+        root,
+        kind === "linked" ? "policy.md" : "SECURITY.md",
+        Buffer.from([0xff]),
+      );
       if (kind === "linked")
-        symlinkSync(join(root, "large.md"), join(root, "SECURITY.md"), "file");
+        symlinkSync(join(root, "policy.md"), join(root, "SECURITY.md"), "file");
       const result = resolve(root, ".");
       expect(result.status, result.stderr).toBe(2);
-      expect(result.stderr).toContain(
-        kind === "non-utf8" ? "not valid UTF-8" : "exceeds 1 MiB",
-      );
+      expect(result.stderr).toContain("not valid UTF-8");
       expect(result.stdout).toBe("");
     }
   });
 
-  test("accepts a policy exactly at the byte limit", () => {
-    const { root } = fixture();
-    const content = "a".repeat(1024 * 1024);
-    write(root, "SECURITY.md", content);
-    const result = resolve(root, ".");
-    expect(result.status, result.stderr).toBe(0);
-    expectGuidance(result.stdout, [["SECURITY.md", content]]);
-  });
+  test.each(["regular", "linked"])(
+    "resolves complete root and nested %s policies larger than 1 MiB",
+    (kind) => {
+      const { root } = fixture();
+      const rootContent = `${"root policy é\n".repeat(100_000)}root policy end\n`;
+      const nestedContent = `${"nested policy 文\n".repeat(100_000)}nested policy end\n`;
+      for (const [path, content, target] of [
+        ["SECURITY.md", rootContent, "policies/root.md"],
+        ["component/SECURITY.md", nestedContent, "policies/component.md"],
+      ] as const) {
+        expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(1024 * 1024);
+        write(root, kind === "linked" ? target : path, content);
+        if (kind === "linked") {
+          mkdirSync(dirname(join(root, path)), { recursive: true });
+          symlinkSync(join(root, target), join(root, path), "file");
+        }
+      }
+      const rootResult = resolve(root, ".");
+      expect(rootResult.status, rootResult.stderr).toBe(0);
+      expectGuidance(rootResult.stdout, [["SECURITY.md", rootContent]]);
+      const nestedResult = resolve(root, "component");
+      expect(nestedResult.status, nestedResult.stderr).toBe(0);
+      expectGuidance(nestedResult.stdout, [
+        ["SECURITY.md", rootContent],
+        ["component/SECURITY.md", nestedContent],
+      ]);
+    },
+  );
 
   test("preserves required and mutually exclusive helper arguments", () => {
     const { root } = fixture();

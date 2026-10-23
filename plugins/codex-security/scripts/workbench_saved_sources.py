@@ -97,6 +97,7 @@ def _capture_saved_source(
     kind: str | None = None,
     snapshot_head: bool = True,
     write: bool = True,
+    created_paths: set[str] | None = None,
 ) -> dict[str, tuple[str, int]]:
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
@@ -117,6 +118,8 @@ def _capture_saved_source(
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
     if write and not (scan_dir / snapshot).exists():
+        if created_paths is not None and not os.path.lexists(scan_dir / snapshot):
+            created_paths.add(snapshot)
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
     return {
         snapshot: (digest, int(observation["observedAtNs"])),
@@ -225,6 +228,8 @@ def _freeze_source_times(
     sources: dict[str, str],
     times: dict[str, int],
     parent_context: dict[str, str] | None = None,
+    *,
+    created_paths: set[str] | None = None,
 ) -> None:
     # Identical result rewrites must not change the order of frozen review evidence.
     observations = {
@@ -240,6 +245,8 @@ def _freeze_source_times(
     digest = _digest(record)
     path = f"source-order/{digest}.json"
     if not (scan_dir / path).exists():
+        if created_paths is not None and not os.path.lexists(scan_dir / path):
+            created_paths.add(path)
         write_scan_local_bytes(scan_dir, path, _encoded(record))
     if _read_saved_result(scan_dir, path, scan_id)[1] != digest:
         raise ContractError("saved source ordering does not match its digest")
@@ -312,7 +319,12 @@ def _admit_parent_checkpoint(
 
 
 def _capture_parent_observation(
-    scan_dir: Path, checkpoint: str, observed: int, legacy_head: bool = False
+    scan_dir: Path,
+    checkpoint: str,
+    observed: int,
+    legacy_head: bool = False,
+    *,
+    created_paths: set[str] | None = None,
 ) -> dict[str, tuple[str, int]]:
     """Freeze canonical input, preserving the legacy sealed-parent migration."""
     if legacy_head:
@@ -324,6 +336,8 @@ def _capture_parent_observation(
     digest = _digest(observation)
     snapshot = f"checkpoint-heads/{digest}.json"
     if not (scan_dir / snapshot).exists():
+        if created_paths is not None and not os.path.lexists(scan_dir / snapshot):
+            created_paths.add(snapshot)
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
     return {snapshot: (digest, observed)}
 

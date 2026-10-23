@@ -15,7 +15,7 @@ Confirm the repository or component the user wants to cover. Inventory policy pa
 <plugin_dir>/scripts/launch_codex_security_mcp --helper resolve-security-md --repo <repo_root> --list
 ```
 
-On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The launcher reuses the plugin's configured or bundled Node runtime. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. Resolve each candidate within the repository and check the resolved regular file's byte size. Do not pass policies larger than 1 MiB to the resolver; report them so the user can decide how to proceed. The resolver enforces the same limit for regular files and repository-local symbolic links.
+On Windows, use `launch_codex_security_mcp.cmd` with the same arguments. The launcher reuses the plugin's configured or bundled Node runtime. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. The resolver reads regular UTF-8 policy files, including symbolic links whose targets remain within the repository.
 
 Read `../../references/security-guidance.md`, then resolve the policy chain for the file or directory being reviewed:
 

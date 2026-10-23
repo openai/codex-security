@@ -64,7 +64,6 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         ORDER BY julianday(upper(updated_at)) DESC,
             julianday(upper(source_completed_at)) DESC,
             source_scan_id DESC, finding_id DESC
-        LIMIT 50
         """,
         (scan["target_id"], scan["id"]),
     )

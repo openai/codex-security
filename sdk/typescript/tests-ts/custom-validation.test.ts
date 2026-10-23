@@ -18,6 +18,7 @@ import {
   runCustomValidation,
   type CustomValidationResult,
 } from "../src/custom-validation.js";
+import { readScanFile } from "../src/contract.js";
 import {
   customDiscoveryPrompt,
   customValidationConfig,
@@ -237,6 +238,89 @@ describe("custom validation", () => {
     },
   );
 
+  test.each(["unchanged", "replaced"])(
+    "compares exact provisional file identity when numeric IDs collide: %s",
+    async (state) => {
+      const title = `compares exact provisional file identity when numeric IDs collide: ${state}`;
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const f = await fixture();
+      const path = join(f.scanDir, "coverage.json");
+      const before = 2n ** 60n;
+      const after = before + 1n;
+      expect(Number(before)).toBe(Number(after));
+      const files = await import("node:fs/promises");
+      const original = {
+        lstat: files.lstat,
+        open: files.open,
+        realpath: files.realpath,
+      };
+      let replaced = false;
+      const inspecting = spyOn(files, "lstat").mockImplementation((async (
+        ...args: Parameters<typeof original.lstat>
+      ) => {
+        const metadata = await original.lstat(...args);
+        if (args[0] === path) {
+          const identity = replaced ? after : before;
+          Object.defineProperty(metadata, "ino", {
+            value:
+              typeof metadata.ino === "bigint" ? identity : Number(identity),
+          });
+        }
+        return metadata;
+      }) as typeof original.lstat);
+      const opening = spyOn(files, "open").mockImplementation(
+        async (...args) => {
+          const file = await original.open(...args);
+          if (args[0] === path) {
+            const identity = replaced ? after : before;
+            const stat = file.stat.bind(file);
+            spyOn(file, "stat").mockImplementation((async (
+              ...options: Parameters<typeof stat>
+            ) => {
+              const metadata = await stat(...options);
+              Object.defineProperty(metadata, "ino", {
+                value:
+                  typeof metadata.ino === "bigint"
+                    ? identity
+                    : Number(identity),
+              });
+              return metadata;
+            }) as typeof stat);
+          }
+          return file;
+        },
+      );
+      const resolving = spyOn(files, "realpath").mockImplementation((async (
+        ...args: Parameters<typeof original.realpath>
+      ) => {
+        const canonical = await original.realpath(...args);
+        if (args[0] === path && state === "replaced" && !replaced) {
+          await rename(path, `${path}.original`);
+          await writeFile(path, await readFile(`${path}.original`));
+          replaced = true;
+        }
+        return canonical;
+      }) as typeof original.realpath);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      try {
+        if (state === "replaced") {
+          await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
+            "expected the checked regular file",
+          );
+          expect(replaced).toBe(true);
+          expect(run).not.toHaveBeenCalled();
+        } else {
+          await runCustomValidation({ ...f, run });
+          expect(run).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        resolving.mockRestore();
+        opening.mockRestore();
+        inspecting.mockRestore();
+      }
+    },
+  );
+
   test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
     "reads the checked %s descriptor after pathname replacement",
     async (name) => {
@@ -275,6 +359,53 @@ describe("custom validation", () => {
       }
     },
   );
+
+  test("rejects scan root replacement when numeric directory IDs collide", async () => {
+    const title =
+      "rejects scan root replacement when numeric directory IDs collide";
+    if (runTestInSubprocess(import.meta.path, title)) return;
+    const f = await fixture();
+    const before = 2n ** 60n;
+    const after = before + 1n;
+    expect(Number(before)).toBe(Number(after));
+    const files = await import("node:fs/promises");
+    const original = { lstat: files.lstat, realpath: files.realpath };
+    let replaced = false;
+    const inspecting = spyOn(files, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof original.lstat>
+    ) => {
+      const metadata = await original.lstat(...args);
+      if (args[0] === f.scanDir) {
+        const identity = replaced ? after : before;
+        Object.defineProperty(metadata, "ino", {
+          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
+        });
+      }
+      return metadata;
+    }) as typeof original.lstat);
+    const resolving = spyOn(files, "realpath").mockImplementation((async (
+      ...args: Parameters<typeof original.realpath>
+    ) => {
+      const canonical = await original.realpath(...args);
+      if (args[0] === f.scanDir && !replaced) {
+        replaced = true;
+        await rename(f.scanDir, `${f.scanDir}.original`);
+        await mkdir(f.scanDir, { mode: 0o700 });
+      }
+      return canonical;
+    }) as typeof original.realpath);
+    try {
+      await expect(
+        readScanFile(f.scanDir, "coverage.json", "coverage.json"),
+      ).rejects.toThrow(
+        "Scan directory must be an existing non-symlink directory",
+      );
+      expect(replaced).toBe(true);
+    } finally {
+      resolving.mockRestore();
+      inspecting.mockRestore();
+    }
+  });
 
   test.each(["malformed", "directory"])(
     "rejects a %s provisional document before invoking validation",
@@ -616,6 +747,7 @@ describe("custom validation", () => {
             ...args,
           ]);
         git("init", "-q");
+        git("config", "--local", "core.autocrlf", "false");
         git("add", ".");
         git("commit", "-qm", "base");
         await writeFile(

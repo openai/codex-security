@@ -57,6 +57,7 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
     if (process.platform !== "win32")
       await symlink("untracked.md", join(sdk, "linked.md"));
     gitText(["init", "--quiet"], { cwd: root });
+    gitText(["config", "--local", "core.autocrlf", "false"], { cwd: root });
     gitText(["add", "--", "."], { cwd: root });
     await rm(join(sdk, "deleted.md"));
     await writeFile(join(sdk, "untracked.md"), invalid);
