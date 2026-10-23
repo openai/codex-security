@@ -106,9 +106,10 @@ inference.
 
 The scan checks the PR's base and exact head through GitHub's API before queuing
 and again immediately before inference. Closed, retargeted, and superseded PR
-revisions are skipped. A new manual scan for the same PR cancels the older run,
-including a run waiting for environment approval, even when the requested head
-has changed. Manual and scheduled `main` baselines share one concurrency group.
+revisions are skipped. After target validation succeeds, a new scan job for the
+same PR cancels the older scan job, including one waiting for environment approval,
+even when the requested head has changed. Invalid or stale requests do not cancel
+an active scan. Manual and scheduled `main` baselines share one concurrency group.
 Updating a PR alone does not start a replacement scan; dispatch the new head when
 another evaluation is needed. Reports identify the source SHA that was scanned.
 
