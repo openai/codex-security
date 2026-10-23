@@ -27,6 +27,8 @@
 - recover checkpoints at discovery deadlines ([#1594](https://github.com/openai/codex-security/pull/1594))
 - validate findings after a scan ([#1007](https://github.com/openai/codex-security/pull/1007))
 - bump ruff from 0.17.0 to 0.17.1 in /plugins/codex-security ([#1878](https://github.com/openai/codex-security/pull/1878))
+- bump @linear/sdk from 97.2.0 to 98.0.0 in /sdk/typescript ([#1881](https://github.com/openai/codex-security/pull/1881))
+- bump ip-address from 10.7.2 to 10.7.4 in /plugins/codex-security/mcp-app ([#1876](https://github.com/openai/codex-security/pull/1876))
 
 <!-- release-section: highlights:end -->
 
