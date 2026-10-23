@@ -5,7 +5,12 @@ import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
-import { CodexSecurity, type ScanOptions } from "../src/api.js";
+import {
+  CodexSecurity,
+  type ScanOptions,
+  type ValidationOptions,
+} from "../src/api.js";
+import { ScanResult } from "../src/result.js";
 import { main } from "../src/cli.js";
 import {
   mergedCodexConfig,
@@ -265,12 +270,22 @@ test("an explicit config flag overrides the operator-selected environment file",
 });
 
 test.each([undefined, "standard", "daybreak_red"] as const)(
-  "scan resolves Cyber selection from project or CLI override: %s",
+  "scan and follow-up validation use Cyber selection from project or CLI override: %s",
   async (override) => {
     const input = await fixture({
       scan: { cyber_access_program: "daybreak_blue" },
     });
     const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+    const onValidate = mock(async (_options: ValidationOptions) => ({
+      disposition: "deferred" as const,
+      report: "Additional evidence is needed.",
+      outputDir: join(input.root, "evidence"),
+      threadId: "validation-thread",
+    }));
+    const result = new ScanResult({
+      ...fakeResult(["high"]),
+      scanDir: await temporaryDirectory(),
+    });
     expect(
       await runCapturedCli(
         main,
@@ -279,6 +294,7 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
           input.repository,
           "-c",
           input.config,
+          "--validate",
           "--json",
           ...(override === undefined
             ? []
@@ -287,11 +303,17 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
         dependencies({
           currentDirectory: input.repository,
           onTurn,
+          onValidate,
+          result,
         }),
       ),
     ).toBe(0);
     const selected = onTurn.mock.lastCall?.[1];
     expect(selected?.cyberAccessProgram).toBe(override ?? "daybreak_blue");
+    expect(onValidate).toHaveBeenCalledTimes(1);
+    expect(onValidate.mock.lastCall?.[0].cyberAccessProgram).toBe(
+      override ?? "daybreak_blue",
+    );
   },
 );
 

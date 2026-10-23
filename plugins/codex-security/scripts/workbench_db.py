@@ -122,6 +122,7 @@ from workbench_target import (
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
+    require_scan_target_unchanged,
     restore_directory_junctions,
     scan_target_warning,
     worktree_content_digest,
@@ -3505,6 +3506,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         elif args.command == "start-headless-standard-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "get-scan":
+            if args.check_target:
+                require_scan_target_unchanged(require_scan(connection, args.scan_id))
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "rename-scan":
             result = scan_history.rename_scan(
