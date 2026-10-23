@@ -24,6 +24,10 @@ import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
+import {
+  OperationTelemetry,
+  readOperationTelemetry,
+} from "../src/operation-telemetry.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
@@ -535,6 +539,9 @@ function resumeDependencies(
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
   >,
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
+  createOperationTelemetry?: ConstructorParameters<
+    typeof TestClient
+  >[1]["createOperationTelemetry"],
 ) {
   return {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
@@ -564,6 +571,9 @@ function resumeDependencies(
         resolvePluginPython: async () => f.python,
         runWorkbench,
         createCodex,
+        ...(createOperationTelemetry === undefined
+          ? {}
+          : { createOperationTelemetry }),
       }),
   };
 }
@@ -611,6 +621,137 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     join(f.scanDir, "scan-manifest.json"),
   ]);
 }
+
+test.each(["completed", "failed"] as const)(
+  "bulk recovery retains original correlation and unpriced usage after %s without a ledger",
+  async (outcome) => {
+    const f = await interruptedScan("deep", true, {
+      config: { model: "synthetic-unpriced-model", approval_policy: "never" },
+    });
+    await rm(join(f.root, "results.jsonl"));
+    const original = new OperationTelemetry({
+      directory: f.environment.CODEX_SECURITY_STATE_DIR,
+      protectedRepository: f.repository,
+      protectedOutput: f.scanDir,
+      command: "scan",
+      surface: "cli",
+      mode: "deep",
+    });
+    await original.start();
+    await original.bindScan(f.scanId);
+    const { stdout, stderr, runCli } = createCliTest(main);
+    let resumed = 0;
+    const code = await runCli(
+      ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+      resumeDependencies(
+        f,
+        () => ({
+          startThread: () => fail("Unexpected new session"),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            resumed++;
+            return {
+              id: threadId,
+              async runStreamed() {
+                await appendFile(
+                  f.sessionPath,
+                  JSON.stringify({
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: 10000,
+                          output_tokens: 2000,
+                        },
+                      },
+                    },
+                  }) + "\n",
+                );
+                if (outcome === "failed")
+                  throw new Error("Synthetic resumed failure");
+                await finishDiscovery(f);
+                return { events: completedEvents(threadId) };
+              },
+            };
+          },
+        }),
+        {},
+        (options) => new OperationTelemetry(options),
+      ),
+    );
+    expect(code, stderr.text()).toBe(outcome === "completed" ? 0 : 2);
+    expect(resumed).toBe(1);
+    const result = JSON.parse(stdout.text());
+    const receipts = await readJsonLines(result.resultsPath);
+    expect(receipts).toHaveLength(1);
+    const { events } = await readOperationTelemetry(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+    );
+    const starts = events.filter((event) => event.type === "attempt_started");
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map((event) => event.attemptId)).size).toBe(2);
+    expect(
+      starts.every((event) => event.operationId === original.operationId),
+    ).toBe(true);
+    const terminal = events.find((event) => event.type === "attempt_finished");
+    expect(terminal).toMatchObject({
+      operationId: original.operationId,
+      outcome,
+      resumed: true,
+      measurement: {
+        cost: null,
+        usage: {
+          input_tokens: 10000,
+          output_tokens: 2000,
+          total_tokens: 12000,
+        },
+      },
+    });
+    expect(receipts[0]).toMatchObject({
+      attempt: 1,
+      status: outcome,
+      operationId: original.operationId,
+      measurement: terminal!.measurement,
+    });
+    expect(receipts[0]).not.toHaveProperty("cost");
+    if (outcome === "completed") {
+      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      expect(saved["usage"]).toMatchObject({
+        coverage: "complete",
+        totalTokens: 12000,
+      });
+      expect(saved).not.toHaveProperty("cost");
+      await rm(result.resultsPath);
+      const recovered = createCliTest(main);
+      expect(
+        await recovered.runCli(
+          ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+          {
+            ...dependencies({
+              environment: f.environment,
+              currentDirectory: f.root,
+              onRun: () => fail("A sealed scan needs no Codex invocation"),
+            }),
+            runWorkbench: f.command,
+          },
+        ),
+        recovered.stderr.text(),
+      ).toBe(0);
+      const restored = await readJsonLines(result.resultsPath);
+      expect(restored).toHaveLength(1);
+      expect(restored[0]!["usage"]).toEqual(saved["usage"]);
+      for (const key of ["cost", "measurement", "operationId"])
+        expect(restored[0]).not.toHaveProperty(key);
+      expect(
+        (await readOperationTelemetry(f.environment.CODEX_SECURITY_STATE_DIR))
+          .events,
+      ).toEqual(events);
+    }
+  },
+);
 
 test.each([false, true])(
   "resumed CLI starts with terminal Deep progress (interactive=%p)",
@@ -743,6 +884,7 @@ test.each([
         attempt: 1,
         cost: { inputTokens: 10000, outputTokens: 2000 },
       });
+      expect(reconciled[1]).not.toHaveProperty("operationId");
       // A subsequent bulk recovery must skip the reconciled completion.
       const nextOutput = capture();
       expect(

@@ -1669,9 +1669,9 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    // OS argv cannot carry NUL, but workbench text fields can.
-    const framedArguments =
-      !native && arguments_.some((argument) => argument.includes("\0"));
+    // Usage scopes can exceed OS argv limits; text fields can also contain NUL.
+    // Keep Python arguments in the existing private stdin frame.
+    const framedArguments = !native;
     let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
     if (framedArguments)
       program =
@@ -1689,7 +1689,17 @@ export async function runWorkbench(
             script,
             ...(framedArguments ? [] : arguments_),
           ],
-      pluginHelperEnvironment(node?.environment ?? options.environment),
+      pluginHelperEnvironment({
+        ...(node?.environment ?? options.environment),
+        // Python's compressed-rollout reader needs the selected Node even when
+        // this SDK was launched by absolute path without Node on PATH.
+        ...(!native &&
+        !process.versions["bun"] &&
+        environmentValue(options.environment, "CODEX_MCP_NODE_PATH") ===
+          undefined
+          ? { CODEX_MCP_NODE_PATH: process.execPath }
+          : {}),
+      }),
       // The SDK owns configuration normalization; the helper receives its resolved location.
       native
         ? JSON.stringify(

@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
@@ -21,6 +22,10 @@ import {
   isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDedupPrompt, renderDiscoveryPrompt } from "./templates.js";
+import {
+  writeWorkerUsageReceipt,
+  type WorkerUsageReceipt,
+} from "./usage-receipt.js";
 import type {
   CodexWorkerArtifactContext,
   CodexWorkerExecutor,
@@ -32,6 +37,7 @@ import type {
   DeepScanStore,
   DeepScanWorkerMutation,
   PersistedDeepScanWorker,
+  WorkerAttribution,
 } from "./types.js";
 
 export interface AcceptedDiscovery {
@@ -381,15 +387,93 @@ export class DeepScanWorkerRunner {
         threadId: resumableThreadId,
       };
       await this.options.store.updateWorker(baseMutation);
-      this.options.log({
-        event: "worker_started",
+      const started = this.options.clock.now();
+      const attemptId = randomUUID();
+      let attribution: WorkerAttribution = { attemptId };
+      let startLogged = false;
+      let finishedAt: number | undefined;
+      let outcome: "succeeded" | "failed" | "canceled" = "failed";
+      const receipt: WorkerUsageReceipt = {
+        schemaVersion: 1,
+        source: "codex_sdk",
+        usageScope: "thread_cumulative",
         scanId: run.scanId,
         workerId: input.workerId,
         kind: input.kind,
+        attemptId,
         attempt,
-      });
+        resumed: resumableThreadId !== undefined,
+        ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
+        startedAt: new Date(started).toISOString(),
+        observedAt: new Date(started).toISOString(),
+        outcome: "running",
+        usage: null,
+      };
+      const logStarted = () => {
+        if (startLogged) return;
+        startLogged = true;
+        this.log({
+          event: "worker_started",
+          scanId: run.scanId,
+          workerId: input.workerId,
+          kind: input.kind,
+          attempt,
+          ...attribution,
+          timestamp: receipt.startedAt,
+          retry: attempt > 1,
+          resumed: receipt.resumed,
+          ...(resumableThreadId ? { threadId: resumableThreadId } : {}),
+        });
+      };
+      const persistUsage = async () => {
+        receipt.observedAt = new Date(this.options.clock.now()).toISOString();
+        try {
+          if (!run.workerUsageDirectory) {
+            throw new Error(
+              "The host did not provide a worker usage directory.",
+            );
+          }
+          await writeWorkerUsageReceipt(run.workerUsageDirectory, receipt);
+        } catch (error) {
+          this.log({
+            event: "worker_usage_unavailable",
+            scanId: run.scanId,
+            workerId: input.workerId,
+            kind: input.kind,
+            attempt,
+            ...attribution,
+            reason: `Could not retain worker usage: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      };
+      let finishRecorded = false;
+      const finishAttempt = async () => {
+        if (finishRecorded) return;
+        finishRecorded = true;
+        logStarted();
+        receipt.outcome = outcome;
+        await persistUsage();
+        const finished = finishedAt ?? this.options.clock.now();
+        this.log({
+          event: "worker_finished",
+          scanId: run.scanId,
+          workerId: input.workerId,
+          kind: input.kind,
+          attempt,
+          ...attribution,
+          ...(activeThreadId ? { threadId: activeThreadId } : {}),
+          timestamp: new Date(finished).toISOString(),
+          durationMs: finished - started,
+          outcome,
+          retry: attempt > 1,
+          resumed: receipt.resumed,
+        });
+      };
+      await persistUsage();
       try {
         const result = await this.options.executor.run({
+          attemptId,
+          workerUsageDirectory: run.workerUsageDirectory,
           kind: input.kind,
           promptPath: executionPromptPath,
           // Discovery workers write only to their isolated directory. Reducers
@@ -407,14 +491,26 @@ export class DeepScanWorkerRunner {
               transientExecutionContinuation(input.kind, attempt))
             : undefined,
           artifactContext: input.artifactContext,
+          onAttribution: (value) => {
+            attribution = value;
+            logStarted();
+          },
+          onUsage: async (usage, turnId) => {
+            receipt.usage = usage;
+            receipt.turnId = turnId;
+            await persistUsage();
+          },
           onThreadStarted: async (threadId) => {
+            logStarted();
             activeThreadId = threadId;
             lastThreadId = threadId;
+            receipt.threadId = threadId;
             await this.options.store.updateWorker({
               ...baseMutation,
               threadId,
             });
-            this.options.log({
+            await persistUsage();
+            this.log({
               event: "worker_thread_started",
               scanId: run.scanId,
               workerId: input.workerId,
@@ -424,9 +520,16 @@ export class DeepScanWorkerRunner {
             });
           },
         });
+        logStarted();
+        activeThreadId = result.threadId ?? activeThreadId;
+        receipt.threadId = activeThreadId;
+        receipt.turnId = result.turnId ?? receipt.turnId;
+        if (result.usage !== undefined) receipt.usage = result.usage;
         if (signal.aborted) {
+          outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
+        await persistUsage();
         validationStarted = true;
         try {
           await input.validate();
@@ -435,21 +538,25 @@ export class DeepScanWorkerRunner {
         }
         validationCompleted = true;
         if (signal.aborted) {
+          outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        this.options.log({
+        this.log({
           event: "worker_succeeded",
           scanId: run.scanId,
           workerId: input.workerId,
           kind: input.kind,
           attempt,
         });
+        outcome = "succeeded";
         return {
           status: "succeeded",
           attempt,
           threadId: result.threadId ?? activeThreadId,
         };
       } catch (error) {
+        finishedAt = this.options.clock.now();
+        if (signal.aborted) outcome = "canceled";
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
@@ -528,11 +635,12 @@ export class DeepScanWorkerRunner {
             });
           }
         }
+        await finishAttempt();
         const delayMs = Math.ceil(
           this.options.retryDelaysMs[attempt - 1] *
             (1 + 0.3 * this.options.random()),
         );
-        this.options.log({
+        this.log({
           event: "worker_retry_scheduled",
           scanId: run.scanId,
           workerId: input.workerId,
@@ -548,7 +656,17 @@ export class DeepScanWorkerRunner {
           }
           throw sleepError;
         }
+      } finally {
+        await finishAttempt();
       }
+    }
+  }
+
+  private log(event: Parameters<DeepScanLogger>[0]): void {
+    try {
+      this.options.log(event);
+    } catch {
+      // Optional progress logging must not stop worker execution.
     }
   }
 

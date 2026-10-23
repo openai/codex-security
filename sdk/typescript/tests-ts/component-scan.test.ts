@@ -347,6 +347,98 @@ test("links independently scoped saved models including a failed component", asy
   expect(summary).toMatchObject({ completed: 1, failed: 1 });
 });
 
+test("retains unpriced partial usage for failed components without a progress observer", async () => {
+  const paths = await fixture();
+  const measurement = {
+    coverage: "partial" as const,
+    cost: null,
+    observedAt: "2026-10-01T00:00:00.000Z",
+    threadCount: 1,
+    missingThreadCount: 1,
+    usage: {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      cache_write_input_tokens_reported: false,
+      output_tokens: 5,
+      reasoning_output_tokens: 0,
+      total_tokens: 105,
+    },
+  };
+  const result = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: client(async (_repository, options) => {
+      options.onMeasurement?.(measurement);
+      throw new Error("Synthetic component failure");
+    }),
+  });
+  expect(await json(result.summaryPath!)).toMatchObject({
+    components: [{ status: "failed", outcome: "failed", measurement }],
+  });
+});
+
+test.each([
+  ["caller only", false, "observe", "observe"],
+  ["both observers", true, "observe", "observe"],
+  ["throwing caller", true, "throw", "observe"],
+  ["rejecting caller", true, "reject", "observe"],
+  ["throwing component observer", true, "observe", "throw"],
+  ["rejecting component observer", true, "observe", "reject"],
+] as const)(
+  "preserves the caller measurement observer with %s",
+  async (_label, withEvents, callerBehavior, eventBehavior) => {
+    const paths = await fixture();
+    const measurement = {
+      coverage: "unavailable" as const,
+      cost: null,
+      observedAt: "2026-10-01T00:00:00.000Z",
+      threadCount: 0,
+      missingThreadCount: 1,
+      usage: null,
+    };
+    const callerMeasurements: unknown[] = [];
+    const componentMeasurements: unknown[] = [];
+    const result = await scan(paths, {
+      components: components.slice(0, 1),
+      scanOptions: {
+        onMeasurement: (value) => {
+          callerMeasurements.push(value);
+          if (callerBehavior === "throw")
+            throw new Error("Synthetic caller observer failure.");
+          if (callerBehavior === "reject")
+            return Promise.reject(
+              new Error("Synthetic caller observer rejection."),
+            );
+        },
+      },
+      ...(withEvents
+        ? {
+            onScanEvent: (event: ComponentScanEvent) => {
+              if (event.type !== "measurement") return;
+              componentMeasurements.push(event.value);
+              if (eventBehavior === "throw")
+                throw new Error("Synthetic component observer failure.");
+              if (eventBehavior === "reject")
+                return Promise.reject(
+                  new Error("Synthetic component observer rejection."),
+                );
+            },
+          }
+        : {}),
+      createSecurity: client(async (repository, options) => {
+        options.onMeasurement?.(measurement);
+        return completed(repository, options, []);
+      }),
+    });
+    expect(result).toMatchObject({ completed: 1, failed: 0 });
+    expect(callerMeasurements).toEqual([measurement]);
+    expect(componentMeasurements).toEqual(withEvents ? [measurement] : []);
+    expect(await json(result.summaryPath!)).toMatchObject({
+      components: [{ status: "completed", outcome: "completed", measurement }],
+    });
+  },
+);
+
 test("omits a failed component's stale model link while retaining its model", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);

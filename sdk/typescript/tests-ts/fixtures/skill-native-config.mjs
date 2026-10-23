@@ -1,5 +1,6 @@
 import { send, completeTurn } from "./app-server-messages.mjs";
 import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const methods = new Map();
@@ -62,6 +63,23 @@ await Promise.all([
     let preflightResponse;
     for await (const line of createInterface({ input: child.stdout })) {
       const response = JSON.parse(line);
+      if (methods.get(response.id) === "thread/start")
+        modelProvider = response.result?.modelProvider;
+      if (methods.get(response.id) === "config/read") {
+        initialConfig = response.result?.config;
+        if (process.env.SYNTHETIC_CONFIG_OBSERVATIONS && initialConfig) {
+          appendFileSync(
+            process.env.SYNTHETIC_CONFIG_OBSERVATIONS,
+            JSON.stringify({
+              args: process.argv.slice(2),
+              home: process.env.CODEX_HOME,
+              analytics: initialConfig.analytics,
+              otel: initialConfig.otel,
+              metadata: initialConfig.responses_api_metadata,
+            }) + "\n",
+          );
+        }
+      }
       if (
         preflightConfigId !== undefined &&
         response.id === preflightConfigId
@@ -72,10 +90,6 @@ await Promise.all([
         child.stdin.end();
         continue;
       }
-      if (methods.get(response.id) === "thread/start")
-        modelProvider = response.result?.modelProvider;
-      if (methods.get(response.id) === "config/read")
-        initialConfig = response.result?.config;
       if (response.id !== "inspect-config") {
         process.stdout.write(line + "\n");
         continue;
@@ -91,6 +105,9 @@ await Promise.all([
               config.mcp_servers?.synthetic !== undefined,
             daybreak: initialConfig?.daybreak ?? null,
             daybreakEnabled,
+            analytics: initialConfig?.analytics ?? null,
+            otel: initialConfig?.otel ?? null,
+            requestMetadata: initialConfig?.responses_api_metadata ?? null,
             daybreakFeatures: Object.fromEntries(
               [
                 "cli_daybreak",

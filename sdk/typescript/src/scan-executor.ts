@@ -22,6 +22,8 @@ export interface ScanExecutionRequest {
     outputDirectory: string;
     /** Runtime context only. Credentials belong to the host executor. */
     environment: Record<string, string>;
+    /** Per-attempt attribution; IDs are for correlation, not metric labels. */
+    requestMetadata?: Readonly<Record<string, string>>;
   };
 }
 
@@ -95,9 +97,13 @@ export interface ScanExecutor {
 
 /** Carries the exact execution outcome even when finalization cannot complete. */
 export class ScanExecutionError extends CodexSecurityError {
+  /** Foreign receipts remain available for reconciliation, not accounting. */
+  readonly receiptMatchesRequest: boolean;
+
   constructor(
     public readonly result: ScanExecutionResult,
     message?: string,
+    options: { receiptMatchesRequest?: boolean } = {},
   ) {
     super(
       message ??
@@ -105,5 +111,6 @@ export class ScanExecutionError extends CodexSecurityError {
         result.error?.message ??
         `Hosted execution ${result.status}.`,
     );
+    this.receiptMatchesRequest = options.receiptMatchesRequest ?? true;
   }
 }

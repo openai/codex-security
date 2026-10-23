@@ -221,6 +221,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     cancel_scan = add_command("cancel-scan", "--scan-id")
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--cost-json")
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")

@@ -552,9 +552,16 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
                 json.dumps(
                     {
                         "usage": {
-                            "status": "complete",
+                            "source": "codex_runtime",
+                            "coverage": "complete",
+                            "threadCount": 1,
+                            "missingThreadCount": 0,
                             "inputTokens": 5_000,
+                            "cachedInputTokens": 0,
+                            "cacheWriteInputTokens": 0,
                             "outputTokens": 120,
+                            "reasoningOutputTokens": 0,
+                            "totalTokens": 5_120,
                         }
                     }
                 ),

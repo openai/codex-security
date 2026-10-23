@@ -239,6 +239,8 @@ describe("delegated scan attribution", () => {
                         codex_security_package_version: VERSION,
                         codex_security_provider: "openai",
                         codex_security_scan_mode: mode,
+                        codex_security_operation_id: expect.any(String),
+                        codex_security_attempt_id: expect.any(String),
                       });
                       const deepConfigPath =
                         options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];

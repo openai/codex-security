@@ -3,13 +3,14 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { join, posix, resolve, win32 } from "node:path";
+import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { describe, expect, spyOn, test, mock } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   main,
   readSkillCommandOutput,
-  runCodexSkillCommand,
+  runCodexSkillCommand as runNativeSkillCommand,
   skillCommandFailure,
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -18,13 +19,38 @@ import { VERSION } from "../src/version.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import {
+  createApiTestFixtures,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import {
   createCliTest,
   captureCli,
   runCapturedCli,
 } from "./support/cli-run.js";
+
+const skillState = createApiTestFixtures("cli-skill-process-state-");
+afterEach(skillState.cleanup);
+
+async function runCodexSkillCommand(
+  ...[args, output, command, environment, input]: Parameters<
+    typeof runNativeSkillCommand
+  >
+): Promise<number> {
+  return await runNativeSkillCommand(
+    args,
+    output,
+    command,
+    {
+      ...(environment ?? process.env),
+      CODEX_SECURITY_STATE_DIR:
+        environment?.["CODEX_SECURITY_STATE_DIR"] ??
+        (await skillState.temporaryDirectory()),
+    },
+    input,
+  );
+}
 
 function linearIssue(identifier: string, comments: string[] = []) {
   const nodes = comments.map((body, index) => ({
@@ -1343,13 +1369,58 @@ describe("CLI skill commands", () => {
         ["-e", source],
         { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
         { command: process.execPath },
-        process.env,
+        undefined,
         input,
       ),
     ).resolves.toBe(0);
     expect(stdout.text()).toBe(`${input}\n`);
     expect(stderr.text()).toBe("");
   });
+
+  test.each(["save", "start"] as const)(
+    "ignores asynchronous stderr failures while reporting telemetry %s errors",
+    async (phase) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `ignores asynchronous stderr failures while reporting telemetry ${phase} errors`,
+        )
+      ) {
+        return;
+      }
+      const directory = await temporaryDirectory("telemetry-warning-");
+      const stdout = capture();
+      let diagnostic = "";
+      const stderr = new Writable({
+        write(chunk, _encoding, callback) {
+          diagnostic += chunk.toString();
+          callback(new Error("Synthetic broken diagnostic stream"));
+        },
+      });
+      try {
+        await writeFile(join(directory, "telemetry"), "occupied");
+        const environment = {
+          CODEX_SECURITY_STATE_DIR:
+            phase === "save" ? directory : join(directory, "invalid\nstate"),
+        };
+        const source =
+          'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Synthetic command result"}})+"\\n")';
+        await expect(
+          runCodexSkillCommand(
+            ["-e", source],
+            { command: "validate", stdout: stdout.stream, stderr },
+            { command: process.execPath },
+            environment,
+          ),
+        ).resolves.toBe(0);
+        expect(stdout.text()).toBe("Synthetic command result\n");
+        expect(diagnostic).toContain(`Could not ${phase} operation telemetry:`);
+      } finally {
+        stderr.destroy();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("preserves the selected Codex home from copied Windows environments", async () => {
     const configuredHome = "./synthetic home with spaces";
@@ -1966,6 +2037,7 @@ const status = await runCodexSkillCommand(
   [${JSON.stringify(child)}],
   { command: "validate", stdout: process.stdout, stderr: process.stderr },
   { command: process.execPath },
+  { ...process.env, CODEX_SECURITY_STATE_DIR: ${JSON.stringify(join(directory, "state"))} },
 );
 process.exit(status);
 `,

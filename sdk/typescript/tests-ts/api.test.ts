@@ -52,6 +52,12 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  OperationTelemetry,
+  type OperationTelemetryEvent,
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "../src/operation-telemetry.js";
+import {
   CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -192,6 +198,7 @@ test.each([
       return TestClient.withDependencies({
         environment,
         ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) => new OperationTelemetry(options),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "finding-workflow") {
             const payload = JSON.parse(input!);
@@ -283,6 +290,35 @@ test.each([
           expect(await readFile(ownerPath, "utf8")).toBe("{}\n");
       }
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
+      const { events } = await readOperationTelemetry(
+        environment.CODEX_SECURITY_STATE_DIR,
+      );
+      const starts = events.filter((event) => event.type === "attempt_started");
+      expect(starts).toHaveLength(2);
+      const terminal = events.filter(
+        (event) => event.type === "attempt_finished",
+      );
+      expect(terminal).toHaveLength(2);
+      for (const start of starts) {
+        expect(
+          terminal.find((event) => event.attemptId === start.attemptId),
+        ).toMatchObject({ operationId: start.operationId });
+      }
+      expect(summarizeOperationTelemetry(events).reusedAttempts).toBe(
+        scenario === "scan-interrupted" ? 0 : 1,
+      );
+      const reused = terminal.find((event) => event.reusedResult === true);
+      if (scenario === "scan-interrupted") {
+        expect(terminal.every((event) => event.reusedResult === false)).toBe(
+          true,
+        );
+      } else {
+        expect(reused).toMatchObject({
+          outcome: "completed",
+          findingCount: result.findings.findings.length,
+        });
+        expect(reused?.measurement).toBeUndefined();
+      }
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
           .status,
@@ -2056,14 +2092,32 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           analytics: { enabled: true },
-          otel: { environment: "synthetic-root" },
+          otel: {
+            environment: "synthetic-root",
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://otel.example.test/v1/logs",
+                headers: { Authorization: "Bearer synthetic-otel-root" },
+              },
+            },
+          },
           responses_api_metadata: { custom_attribution: "root" },
           model_context_window: 64_000,
           model_auto_compact_token_limit: 48_000,
           profiles: {
             cloud: {
               analytics: { enabled: false },
-              otel: { environment: "synthetic-selected" },
+              otel: {
+                environment: "synthetic-selected",
+                exporter: {
+                  "otlp-http": {
+                    endpoint: "https://otel.example.test/v1/logs",
+                    headers: {
+                      Authorization: "Bearer synthetic-otel-selected",
+                    },
+                  },
+                },
+              },
               responses_api_metadata: {
                 custom_attribution: "selected",
                 codex_security_integration: "github_action",
@@ -2153,6 +2207,11 @@ describe("CodexSecurity orchestration", () => {
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
+            runWorkbench: async (_options, args, input) => {
+              if (args[0] === "register-cli-scan")
+                expect(input).not.toContain("synthetic-otel-");
+              return mockWorkbench(args, input);
+            },
             createCodex: (options: CodexOptions) => ({
               startThread: (threadOptions: ThreadOptions) => ({
                 id: null,
@@ -2188,6 +2247,9 @@ describe("CodexSecurity orchestration", () => {
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
                   const selected = resolveCodexProfile(overrides);
+                  expect((options.config as JsonObject)["otel"]).toEqual(
+                    selected["otel"],
+                  );
                   expect(workerConfig["analytics"]).toEqual(
                     selected["analytics"],
                   );
@@ -2245,6 +2307,9 @@ describe("CodexSecurity orchestration", () => {
                   const config = parseToml(
                     await readFile(configPath!, "utf8"),
                   ) as JsonObject;
+                  expect(JSON.stringify(config)).not.toContain(
+                    "synthetic-otel-",
+                  );
                   expect(resolveCodexProfile(config)).toMatchObject({
                     ...expectedModel,
                     model_reasoning_summary: expected,
@@ -3433,7 +3498,27 @@ describe("CodexSecurity orchestration", () => {
       "complete-scan",
       "--scan-id",
       "scan_example_001",
+      "--cost-json",
+      expect.any(String),
     ]);
+    const completionReceipt = JSON.parse(commands[4]![4]!);
+    expect(completionReceipt).toMatchObject({
+      usage: {
+        source: "codex_runtime",
+        coverage: "complete",
+        observedAt: expect.any(String),
+        threadCount: 1,
+        missingThreadCount: 0,
+        coverageScope: ["thread:thread-1"],
+        inputTokens: 10,
+        cachedInputTokens: 2,
+        cacheWriteInputTokens: 0,
+        outputTokens: 3,
+        reasoningOutputTokens: 1,
+        totalTokens: 13,
+      },
+    });
+    expect(completionReceipt).not.toHaveProperty("cost");
     await client.close();
   });
 
@@ -4251,15 +4336,23 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(codexHome, "sessions"), "not a directory");
       const commands: string[] = [];
+      let failureArguments: readonly string[] | undefined;
       const warnings: string[] = [];
+      const telemetry: Readonly<OperationTelemetryEvent>[] = [];
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) =>
+          new OperationTelemetry({
+            ...options,
+            directory: join(root, "telemetry-state"),
+          }),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args[0]!);
+          if (args[0] === "fail-scan") failureArguments = args;
           return mockWorkbench(args, input);
         },
         createCodex: completedCodex(root),
@@ -4268,11 +4361,16 @@ describe("CodexSecurity orchestration", () => {
       const scan = client.run(repository, {
         ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
         onActivity: () => {},
+        onTelemetry: (event) => telemetry.push(event),
         onWarning: (warning) => warnings.push(warning),
       });
       if (enforceCostLimit) {
         await expect(scan).rejects.toThrow("interrupted");
         expect(commands).toContain("fail-scan");
+        expect(commands).not.toContain("cancel-scan");
+        expect(failureArguments).toContainEqual(
+          expect.stringMatching(/^--message=.+/),
+        );
       } else {
         await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
         expect(warnings).toContainEqual(
@@ -4280,6 +4378,14 @@ describe("CodexSecurity orchestration", () => {
         );
         expect(commands).toContain("complete-scan");
       }
+      expect(
+        telemetry.filter((event) => event.type === "attempt_finished"),
+      ).toMatchObject([
+        {
+          outcome: enforceCostLimit ? "failed" : "completed",
+          ...(enforceCostLimit ? { failureCategory: "execution" } : {}),
+        },
+      ]);
       await client.close();
     },
   );
@@ -5426,11 +5532,12 @@ describe("CodexSecurity orchestration", () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
     const observerErrors: string[] = [];
+    const commands: Array<readonly string[]> = [];
     const client = new TestClient(
       { codexOverrides: { model: "synthetic-unpriced-model" } },
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: recordingWorkbench([]),
+        runWorkbench: recordingWorkbench(commands),
         createCodex: completedCodex(root),
       },
     );
@@ -5448,6 +5555,20 @@ describe("CodexSecurity orchestration", () => {
         expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
       ]);
       expect(observerErrors).toEqual(["onUsage"]);
+      const completion = commands.find((args) => args[0] === "complete-scan");
+      const costIndex = completion?.indexOf("--cost-json") ?? -1;
+      expect(costIndex).toBeGreaterThan(0);
+      const receipt = JSON.parse(completion![costIndex + 1]!);
+      expect(receipt).toMatchObject({
+        usage: {
+          coverage: "complete",
+          threadCount: 1,
+          inputTokens: 10,
+          outputTokens: 3,
+          totalTokens: 13,
+        },
+      });
+      expect(receipt.cost).toBeUndefined();
     } finally {
       await client.close();
     }
@@ -5502,9 +5623,16 @@ describe("CodexSecurity orchestration", () => {
     expect(completion).toBeDefined();
     const costIndex = completion?.indexOf("--cost-json") ?? -1;
     expect(costIndex).toBeGreaterThan(0);
-    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toEqual(
-      expectedCost,
-    );
+    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toMatchObject({
+      cost: expectedCost,
+      usage: {
+        coverage: "complete",
+        threadCount: 1,
+        inputTokens: 10,
+        outputTokens: 3,
+        totalTokens: 13,
+      },
+    });
 
     await client.close();
   });
@@ -6164,16 +6292,34 @@ describe("CodexSecurity orchestration", () => {
       "scan_example_001",
       `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
       "--cost-json",
-      JSON.stringify(cost),
+      expect.any(String),
     ]);
+    expect(JSON.parse(commands[4]![5]!)).toMatchObject({
+      usage: {
+        source: "codex_runtime",
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        outputTokens: 30,
+        totalTokens: 1_280,
+      },
+      cost,
+    });
     expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
     await expect(stat(scanDir)).resolves.toBeDefined();
     await client.close();
   });
 
-  test.each(["completed", "failed", "unavailable"] as const)(
-    "recovers exhausted deep-scan budget when completion is %s",
-    async (completion) => {
+  test.each([
+    ["completed", false],
+    ["failed", false],
+    ["unavailable", false],
+    ["completed", true],
+  ] as const)(
+    "recovers exhausted deep-scan budget when completion is %s (missing worker=%p)",
+    async (completion, missingWorker) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
@@ -6186,6 +6332,13 @@ describe("CodexSecurity orchestration", () => {
               cached_input_tokens: 200,
               output_tokens: 30,
             });
+            if (missingWorker)
+              await writeUsageSession(
+                codexHome,
+                "missing-worker",
+                {},
+                { parent: "scan-thread" },
+              );
             await (options.signal.aborted
               ? undefined
               : once(options.signal, "abort"));
@@ -6277,7 +6430,8 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.coverage).not.toHaveProperty("completeness");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
-          expect(recovered.cost?.estimatedUsd).toBe(0.00488);
+          if (missingWorker) expect(recovered.cost).toBeNull();
+          else expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
             `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
           ]);
@@ -6301,6 +6455,19 @@ describe("CodexSecurity orchestration", () => {
           (args) => args[0] === "complete-budget-exhausted-scan",
         );
         expect(recovery?.includes("--cost-json")).toBe(true);
+        const costIndex = recovery!.indexOf("--cost-json");
+        expect(JSON.parse(recovery![costIndex + 1]!)).toMatchObject({
+          usage: {
+            coverage: missingWorker ? "partial" : "complete",
+            threadCount: 1,
+            missingThreadCount: missingWorker ? 1 : 0,
+            inputTokens: 1_250,
+            cachedInputTokens: 200,
+            outputTokens: 30,
+            totalTokens: 1_280,
+          },
+          cost: { estimatedUsd: 0.00488 },
+        });
         expect(recovery?.some((value) => value.startsWith("--message="))).toBe(
           true,
         );

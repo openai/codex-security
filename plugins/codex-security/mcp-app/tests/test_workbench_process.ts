@@ -139,6 +139,59 @@ async function fixtureWorkbench(root: string, source: string) {
   return executeWorkbench as WorkbenchModule["executeWorkbench"];
 }
 
+await test("Python compressed-rollout reads inherit the plugin Node without Node on PATH", async () => {
+  const root = await temporaryDirectory("workbench-node-runtime-");
+  const python = await userSitePython();
+  const original = {
+    PATH: process.env.PATH,
+    CODEX_MCP_NODE_PATH: process.env.CODEX_MCP_NODE_PATH,
+  };
+  try {
+    const rollout = path.join(root, "rollout.jsonl.zst");
+    await writeFile(
+      rollout,
+      Buffer.from(
+        "KLUv/SA2sQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImNvbXByZXNzZWQifX0K",
+        "base64",
+      ),
+    );
+    const scripts = path.resolve(
+      import.meta.dirname,
+      "../../../../sdk/typescript/_bundled_plugin/scripts",
+    );
+    const execute = await fixtureWorkbench(
+      root,
+      `import json, os, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(scripts)})
+from workbench_scan_usage import _rollout_lines
+def main():
+    with _rollout_lines(Path(sys.argv[1])) as source:
+        contents = b"".join(source).decode("utf-8")
+    print(json.dumps({"contents": contents, "node": os.environ["CODEX_MCP_NODE_PATH"]}))
+`,
+    );
+    process.env.PATH = "";
+    for (const configured of [undefined, ""]) {
+      if (configured === undefined) delete process.env.CODEX_MCP_NODE_PATH;
+      else process.env.CODEX_MCP_NODE_PATH = configured;
+      const result = await execute(python, [rollout]);
+      assert.equal(result.node, process.execPath);
+      assert.equal(
+        result.contents,
+        '{"type":"session_meta","payload":{"id":"compressed"}}\n',
+      );
+      assert.equal(process.env.CODEX_MCP_NODE_PATH, configured);
+    }
+  } finally {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 await test("workbench scalar arguments reach the Python parser literally", async () => {
   const root = await temporaryDirectory("workbench-literal-arguments-");
   try {

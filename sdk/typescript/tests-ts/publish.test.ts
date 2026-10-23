@@ -42,11 +42,55 @@ import type {
 } from "../src/publication.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
+import type { PublicationTelemetry } from "../src/publication-telemetry.js";
 
 const copyPublishedIssues: PublishScanDependencies["recordPublishedIssues"] =
   async (_prepared, issues) => {
     return [...issues];
   };
+
+test.each(["failed", "canceled"] as const)(
+  "observes publication %s before preparation and preserves the original error",
+  async (outcome) => {
+    const controller = new AbortController();
+    const reason = new Error("Synthetic preparation failure");
+    if (outcome === "canceled") controller.abort(reason);
+    const observations: PublicationTelemetry[] = [];
+    await expect(
+      publishScanInternal(
+        "scan",
+        {
+          ...OPTIONS,
+          signal: controller.signal,
+          onTelemetry: (event) => {
+            observations.push(event);
+            throw new Error("Synthetic observer failure");
+          },
+        },
+        dependencies(preparedPublication(), {
+          prepare: async () => {
+            throw reason;
+          },
+        }),
+      ),
+    ).rejects.toBe(reason);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        destination: "linear",
+        outcome,
+        attempted: false,
+        counts: {
+          selected: null,
+          submitted: 0,
+          created: 0,
+          reused: 0,
+          acknowledged: 0,
+          failed: 0,
+        },
+      }),
+    ]);
+  },
+);
 
 for (const [fileName, partialWrite, cleanupFails] of [
   ["issues.jsonl", false, false],
@@ -570,6 +614,10 @@ describe("skip-recorded publication", () => {
       counts: { findings: 2, created: 0, failed: 0 },
       dryRun: true,
       issues: publication.issues,
+      telemetry: expect.objectContaining({
+        outcome: "preview",
+        attempted: false,
+      }),
     });
     expect(ordinary).not.toHaveProperty("skipped");
     const preview = await publishScanInternal(
@@ -613,6 +661,18 @@ describe("skip-recorded publication", () => {
       created: 0,
       failed: 0,
       skipped: 1,
+    });
+    expect(result.telemetry).toMatchObject({
+      outcome: "completed",
+      attempted: false,
+      counts: {
+        selected: 1,
+        submitted: 0,
+        reused: 1,
+        created: 0,
+        acknowledged: 0,
+        failed: 0,
+      },
     });
   });
 
@@ -679,6 +739,19 @@ describe("skip-recorded publication", () => {
         created: 1,
         failed: 0,
         skipped: 1,
+      });
+      expect(result.telemetry).toMatchObject({
+        destination: "linear",
+        outcome: "completed",
+        attempted: true,
+        counts: {
+          selected: 2,
+          submitted: 1,
+          reused: 1,
+          created: 1,
+          acknowledged: 1,
+          failed: 0,
+        },
       });
       expect(progress[0]).toEqual({
         type: "started",
@@ -1488,6 +1561,7 @@ describe("connected Linear publication", () => {
       codex_security_surface: "sdk",
       codex_security_command: "publish",
       codex_security_package_version: VERSION,
+      codex_security_attempt_id: result.telemetry!.attemptId,
     });
     expect(inheritedEnvironment).toBe(environment);
     expect(input).toContain("already-connected hosted Linear application");
@@ -1559,6 +1633,10 @@ describe("connected Linear publication", () => {
       ],
       failed: [],
       counts: { findings: 1, created: 1, failed: 0 },
+      telemetry: expect.objectContaining({
+        destination: "linear",
+        outcome: "completed",
+      }),
     });
     expect(receiptScanId).toBe("scan-example");
   });
@@ -2559,6 +2637,7 @@ describe("connected Linear publication", () => {
     const publication = preparedPublication(3);
     const controller = new AbortController();
     const updates: PublishScanProgress[] = [];
+    const observations: PublicationTelemetry[] = [];
     let handoffFile: string | undefined;
     let publicationFile: string | undefined;
     let childStopped = false;
@@ -2572,6 +2651,7 @@ describe("connected Linear publication", () => {
           ...OPTIONS,
           signal: controller.signal,
           onProgress: (event) => updates.push(event),
+          onTelemetry: (event) => observations.push(event),
         },
         dependencies(publication, {
           runCodex: async (
@@ -2632,7 +2712,19 @@ describe("connected Linear publication", () => {
       ],
       failed: [{ findingId: "finding-3" }],
       counts: { findings: 3, created: 2, failed: 1 },
+      telemetry: {
+        outcome: "indeterminate",
+        attempted: true,
+        counts: { created: 2, acknowledged: 2, failed: null },
+      },
     });
+    expect(observations).toMatchObject([
+      {
+        outcome: "indeterminate",
+        attempted: true,
+        counts: { created: 2, acknowledged: 2, failed: null },
+      },
+    ]);
     expect(JSON.stringify(receipt)).not.toContain("SEC-UNVERIFIED");
     expect(updates.some((event) => event.type === "completed")).toBe(false);
 

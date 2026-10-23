@@ -83,6 +83,7 @@ export const runSchema = z
       scope: requiredString,
       userContext: optionalString,
       scanDir: requiredString,
+      workerUsageDirectory: optionalString,
       dispatchedCount: nonNegativeInteger,
       noNewStreak: nonNegativeInteger,
       consecutiveErrors: nonNegativeInteger

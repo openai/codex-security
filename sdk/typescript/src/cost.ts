@@ -1,8 +1,17 @@
 import { parseJson } from "./value.js";
-import { open, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  lstat,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+} from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isRecord } from "./record.js";
+import { errorMessage } from "./errors.js";
+import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
   tokenUsage,
@@ -47,20 +56,37 @@ function createSessionReasoning(id: string, text = "") {
   return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
+type SessionObservation<T> = { position: number; value: T };
+
 type SessionUsage = ReturnType<typeof createSessionUsage> & {
-  events?: Record<string, unknown>[];
+  events?: SessionObservation<Record<string, unknown>>[];
 };
+
+type WorkerReceipt = {
+  threadId: string | null;
+  usage: ScanTokenUsage | null;
+};
+
+function sessionObservation<T>(
+  session: SessionUsage,
+  value: T,
+): SessionObservation<T> {
+  return { position: session.eventPosition, value };
+}
 
 interface ScanCostTrackerOptions {
   codexHome: string;
   model: string;
   repository?: string;
   scanDirectory?: string;
+  /** Host-bound store outside model-writable scan artifacts, for Deep scans only. */
+  workerReceipts?: { directory: string; scanId: string };
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   /** Incomplete costs are measured subtotals, usable for spending limits only. */
   onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
+  onMeasurement?: (measurement: Readonly<ScanUsageMeasurement>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -68,9 +94,21 @@ interface ScanCostTrackerOptions {
   onError?: (error: unknown) => void;
 }
 
-interface ScanCostSnapshot {
+export interface ScanUsageMeasurement {
+  usage: Readonly<ScanTokenUsage> | null;
+  cost: Readonly<ScanCost> | null;
+  coverage: "complete" | "partial" | "unavailable";
+  observedAt: string;
+  threadCount: number;
+  missingThreadCount: number;
+  /** Known thread/attempt identities for reconciling coverage, not metric labels. */
+  coverageScope?: string[];
+}
+
+export interface ScanCostSnapshot {
   usage: unknown;
   cost: ScanCost | null;
+  measurement: ScanUsageMeasurement;
 }
 
 const COST_POLL_INTERVAL_MS = 100;
@@ -82,6 +120,7 @@ function createSessionUsage() {
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
     unreadable: false,
+    compressedRead: false,
     threadId: null as string | null,
     parentThreadId: null as string | null,
     workingDirectory: null as string | null,
@@ -91,9 +130,10 @@ function createSessionUsage() {
     usage: null as ScanTokenUsage | null,
     responseUsage: null as ScanTokenUsage | null,
     responseIds: new Set<string>(),
+    eventPosition: 0,
     calls: new Map<string, ScanActivity>(),
-    activities: [] as ScanActivity[],
-    progress: [] as ScanProgress[],
+    activities: [] as SessionObservation<ScanActivity>[],
+    progress: [] as SessionObservation<ScanProgress>[],
     filesCompleted: 0,
     filesTotal: null as number | null,
     prose: new Set<string>(),
@@ -106,16 +146,33 @@ export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
   readonly #sessions = new Map<string, SessionUsage>();
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
+  readonly #workerReceipts = new Map<string, WorkerReceipt>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  readonly #reportedSessionPositions = new Map<
+    string,
+    { events: number; activities: number; progress: number }
+  >();
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
-  #snapshot: ScanCostSnapshot = { usage: null, cost: null };
+  #snapshot: ScanCostSnapshot = {
+    usage: null,
+    cost: null,
+    measurement: {
+      usage: null,
+      cost: null,
+      coverage: "unavailable",
+      observedAt: new Date().toISOString(),
+      threadCount: 0,
+      missingThreadCount: 0,
+    },
+  };
   #lastCost: string | null = null;
   #lastUsage: string | null = null;
+  #lastMeasurement: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -142,6 +199,7 @@ export class ScanCostTracker {
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
       this.#options.onUsage === undefined &&
+      this.#options.onMeasurement === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
@@ -176,7 +234,20 @@ export class ScanCostTracker {
 
   public async refresh(): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions();
+      try {
+        await this.#readSessions();
+      } catch (error) {
+        const previous = this.#snapshot.measurement;
+        this.#setSnapshot(
+          previous.usage,
+          previous.cost,
+          false,
+          previous.threadCount,
+          Math.max(1, previous.missingThreadCount),
+          previous.coverageScope,
+        );
+        throw error;
+      }
     });
     this.#pending = update.catch(() => {});
     await update;
@@ -192,11 +263,16 @@ export class ScanCostTracker {
     } finally {
       this.#observingWorkers = false;
     }
-    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
+    if (
+      this.#receipts.size > 0 ||
+      this.#snapshot.measurement.usage !== null ||
+      this.#snapshot.measurement.missingThreadCount > 0
+    )
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
-    this.#snapshot = { usage: fallbackUsage ?? null, cost };
-    this.#reportUsage(tokenUsage(fallbackUsage));
+    const usage = tokenUsage(fallbackUsage);
+    this.#setSnapshot(usage, cost, usage !== null, usage === null ? 0 : 1, 0);
+    this.#reportUsage(usage);
     this.#reportCost(cost);
     return this.#snapshot;
   }
@@ -207,24 +283,46 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
+    const collectionErrors: unknown[] = [];
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage();
-        this.#sessions.set(path, session);
-      }
+    for (const directory of ["sessions", "archived_sessions"]) {
       try {
-        await readSessionUsage(path, session, repository);
+        for await (const path of sessionFiles(
+          join(this.#options.codexHome, directory),
+          true,
+        )) {
+          let session = this.#sessions.get(path);
+          if (session === undefined) {
+            session = createSessionUsage();
+            this.#sessions.set(path, session);
+          }
+          try {
+            await readSessionUsage(
+              path,
+              session,
+              repository,
+              path.endsWith(".zst"),
+            );
+          } catch (error) {
+            if (session.threadId === null) collectionErrors.push(error);
+            else unreadable.push({ session, error });
+          }
+        }
       } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+        collectionErrors.push(error);
       }
     }
 
-    const included = new Set([this.#threadId, ...this.#receipts.keys()]);
+    const workerReceipts = await readWorkerReceipts(
+      this.#options.workerReceipts,
+      this.#workerReceipts,
+    );
+    collectionErrors.push(...workerReceipts.errors);
+    const included = new Set([
+      this.#threadId,
+      ...this.#receipts.keys(),
+      ...workerReceipts.usages.keys(),
+    ]);
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
@@ -265,10 +363,26 @@ export class ScanCostTracker {
       }
     } while (included.size !== previousSize);
     for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
+      if (included.has(session.threadId!)) collectionErrors.push(error);
     }
 
-    const usages = new Map(this.#receipts);
+    const usages = new Map<string, ScanTokenUsage | null>(
+      [...included].map((threadId) => [
+        threadId,
+        this.#receipts.get(threadId) ?? null,
+      ]),
+    );
+    for (const [threadId, receipt] of workerReceipts.usages) {
+      const current = usages.get(threadId);
+      if (
+        receipt !== null &&
+        receipt.total_tokens > (current?.total_tokens ?? -1)
+      )
+        usages.set(threadId, receipt);
+    }
+    // SDK totals retain measured usage when a rollout is unavailable.
+    // Native rollouts also establish descendant coverage.
+    const incomplete = new Set(workerReceipts.usages.keys());
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -280,8 +394,26 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(path, session, repository);
-        this.#sessions.set(path, session);
+        try {
+          await readSessionUsage(path, session, repository);
+          this.#sessions.set(path, session);
+        } catch (error) {
+          collectionErrors.push(error);
+          if (
+            session.usage !== null &&
+            session.usage.total_tokens >= (tracked.usage?.total_tokens ?? -1)
+          )
+            tracked.usage = session.usage;
+          session = tracked;
+        }
+      } else if (path.endsWith(".zst") && !session.compressedRead) {
+        // Cold history is immutable. Decode its body only after metadata has
+        // associated the thread with this scan.
+        try {
+          await readSessionUsage(path, session, repository);
+        } catch (error) {
+          collectionErrors.push(error);
+        }
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -293,7 +425,17 @@ export class ScanCostTracker {
             this.#options.onWorkerEvent?.({ kind: "observed", worker });
         }
       }
-      for (const event of session.events?.splice(0) ?? []) {
+      // Archives and compressed copies retain the same append-only event order.
+      // A new rollout for the same thread has a new initial metadata timestamp.
+      const eventStream = JSON.stringify([threadId, session.startedAt]);
+      const reported = this.#reportedSessionPositions.get(eventStream) ?? {
+        events: 0,
+        activities: 0,
+        progress: 0,
+      };
+      for (const { position, value: event } of session.events?.splice(0) ??
+        []) {
+        if (position <= reported.events) continue;
         this.#options.onSessionEvent?.({
           threadId,
           parentThreadId: session.parentThreadId,
@@ -301,54 +443,128 @@ export class ScanCostTracker {
           event,
         });
       }
+      // A failed replay can leave activity/progress available without raw events.
+      if (session.events !== undefined)
+        reported.events = Math.max(reported.events, session.eventPosition);
       if (worker !== undefined) {
-        for (const activity of session.activities.splice(0)) {
+        for (const { position, value: activity } of session.activities.splice(
+          0,
+        )) {
+          if (position <= reported.activities) continue;
           this.#options.onActivity?.({
             ...activity,
             id: `${threadId}:${activity.id}`,
             worker,
           });
         }
-        this.#reportWorkerProgress(session);
+        reported.activities = Math.max(
+          reported.activities,
+          session.eventPosition,
+        );
+        this.#reportWorkerProgress(session, reported.progress);
+        reported.progress = Math.max(reported.progress, session.eventPosition);
       }
+      this.#reportedSessionPositions.set(eventStream, reported);
       const receipt = usages.get(threadId);
+      if (
+        session.usage !== null &&
+        session.usage.total_tokens >=
+          (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
+      )
+        incomplete.delete(threadId);
       // A discovered thread without a receipt has unknown usage, not zero.
       // Retain it so a parent-only subtotal cannot appear to be complete.
       if (receipt === undefined) usages.set(threadId, null);
       if (
         session.usage !== null &&
         (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
-          // The SDK inserts zero when the final receipt omits cache writes.
+          // Worker receipts retain field presence; the SDK may default to zero.
           (session.usage.total_tokens === receipt?.total_tokens &&
-            receipt.cache_write_input_tokens === 0))
+            (receipt.cache_write_input_tokens_reported === false ||
+              (receipt === this.#receipts.get(threadId) &&
+                receipt.cache_write_input_tokens === 0))))
       ) {
         usages.set(threadId, session.usage);
       }
     }
     let usage: ScanTokenUsage | null = null;
-    let complete = true;
-    for (const value of usages.values()) {
+    let missingThreadCount = workerReceipts.unknownAttempts;
+    let threadCount = 0;
+    for (const [threadId, value] of usages) {
       if (value === null) {
-        complete = false;
+        missingThreadCount += 1;
         continue;
       }
+      threadCount += 1;
+      if (incomplete.has(threadId)) missingThreadCount += 1;
       usage = addTokenUsage(usage, value);
     }
-    if (!complete) this.#snapshot = { usage: null, cost: null };
-    if (usage === null) return;
+    if (collectionErrors.length > 0)
+      missingThreadCount = Math.max(1, missingThreadCount);
+    const complete = missingThreadCount === 0 && usage !== null;
     const cost = estimateScanCost(this.#options.model, usage);
+    this.#setSnapshot(
+      usage,
+      cost,
+      complete,
+      threadCount,
+      missingThreadCount,
+      collectionErrors.length === 0
+        ? [
+            ...[...included].map((id) => `thread:${id}`),
+            ...[...workerReceipts.attemptIds].map(
+              (id) => `worker-attempt:${id}`,
+            ),
+          ].sort()
+        : undefined,
+    );
     if (complete) {
-      this.#snapshot = { usage, cost };
       this.#reportUsage(usage);
     }
     this.#reportCost(cost, complete);
+    // Preserve measured usage and every diagnostic when several logs fail together.
+    if (collectionErrors.length === 1) throw collectionErrors[0];
+    if (collectionErrors.length > 1)
+      throw new AggregateError(
+        collectionErrors,
+        collectionErrors.map(errorMessage).join("\n"),
+      );
   }
 
-  #reportWorkerProgress(session: SessionUsage): void {
+  #setSnapshot(
+    usage: ScanTokenUsage | null,
+    cost: ScanCost | null,
+    complete: boolean,
+    threadCount: number,
+    missingThreadCount: number,
+    coverageScope?: string[],
+  ): void {
+    const data = {
+      usage,
+      cost,
+      coverage:
+        usage === null ? "unavailable" : complete ? "complete" : "partial",
+      threadCount,
+      missingThreadCount,
+      ...(coverageScope === undefined ? {} : { coverageScope }),
+    } as const;
+    const measurement = { ...data, observedAt: new Date().toISOString() };
+    this.#snapshot = {
+      usage: complete ? usage : null,
+      cost: complete ? cost : null,
+      measurement,
+    };
+    const signature = JSON.stringify(data);
+    if (signature === this.#lastMeasurement) return;
+    this.#lastMeasurement = signature;
+    this.#options.onMeasurement?.(measurement);
+  }
+
+  #reportWorkerProgress(session: SessionUsage, reported: number): void {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
-    for (const progress of session.progress.splice(0)) {
+    for (const { position, value: progress } of session.progress.splice(0)) {
       const expectedFilesTotal = this.#expectedFilesTotal;
       if (
         (expectedFilesTotal !== undefined &&
@@ -361,6 +577,7 @@ export class ScanCostTracker {
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
+      if (position <= reported) continue;
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
@@ -400,6 +617,91 @@ export class ScanCostTracker {
   }
 }
 
+async function readWorkerReceipts(
+  store: ScanCostTrackerOptions["workerReceipts"],
+  retained: Map<string, WorkerReceipt>,
+): Promise<{
+  usages: Map<string, ScanTokenUsage | null>;
+  unknownAttempts: number;
+  attemptIds: Set<string>;
+  errors: unknown[];
+}> {
+  const usages = new Map<string, ScanTokenUsage | null>();
+  const attempts = new Set<string>();
+  const result = {
+    usages,
+    unknownAttempts: 0,
+    attemptIds: attempts,
+    errors: [] as unknown[],
+  };
+  if (store === undefined) return result;
+  const { directory, scanId } = store;
+  try {
+    const directoryInfo = await lstat(directory);
+    if (
+      !directoryInfo.isDirectory() ||
+      relative(resolve(directory), await realpath(directory)) !== ""
+    )
+      throw new Error(
+        `Worker usage directory must use a canonical directory: ${directory}`,
+      );
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      let receipt: unknown;
+      try {
+        receipt = JSON.parse(
+          await readFile(join(directory, entry.name), "utf8"),
+        );
+      } catch (error) {
+        if (isMissingFile(error)) continue;
+        throw error;
+      }
+      if (
+        !isRecord(receipt) ||
+        receipt["schemaVersion"] !== 1 ||
+        receipt["source"] !== "codex_sdk" ||
+        receipt["usageScope"] !== "thread_cumulative" ||
+        receipt["scanId"] !== scanId ||
+        typeof receipt["attemptId"] !== "string" ||
+        entry.name !== `${receipt["attemptId"]}.json` ||
+        attempts.has(receipt["attemptId"])
+      )
+        continue;
+      attempts.add(receipt["attemptId"]);
+      retained.set(receipt["attemptId"], {
+        threadId:
+          typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
+        usage: tokenUsage(receipt["usage"]),
+      });
+    }
+  } catch (error) {
+    if (!isMissingFile(error)) result.errors.push(error);
+  }
+  // As with native sessions, a later read failure cannot erase observed usage.
+  // Keep attempts separate so a worker's initial unknown identity can resolve.
+  for (const [attemptId, { threadId, usage }] of retained) {
+    attempts.add(attemptId);
+    if (threadId === null) {
+      result.unknownAttempts += 1;
+      continue;
+    }
+    const existing = usages.get(threadId) ?? null;
+    // Native SDK completions include earlier turns of a resumed thread.
+    usages.set(
+      threadId,
+      usage !== null &&
+        (existing === null ||
+          usage.total_tokens > existing.total_tokens ||
+          (usage.total_tokens === existing.total_tokens &&
+            existing.cache_write_input_tokens_reported === false &&
+            usage.cache_write_input_tokens_reported !== false))
+        ? usage
+        : existing,
+    );
+  }
+  return result;
+}
+
 export async function* sessionFiles(
   directory: string,
   compressed = false,
@@ -429,11 +731,30 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
+  if (path.endsWith(".zst")) {
+    if (session.compressedRead) return;
+    if (metadataOnly && session.threadId !== null) return;
+    // The full decode starts at the beginning, including metadata read earlier.
+    session.eventPosition = 0;
+    try {
+      for await (const line of sessionLines(path)) {
+        readSessionEvent(line, session, repository);
+        if (metadataOnly && session.threadId !== null) return;
+      }
+    } catch (error) {
+      if (isMissingFile(error)) return;
+      throw error;
+    }
+    session.compressedRead = true;
+    return;
+  }
   let file;
   try {
-    if ((await stat(path)).size === session.offset) return;
+    const metadata = await stat(path);
+    if (metadata.isFile() && metadata.size === session.offset) return;
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
@@ -478,11 +799,13 @@ function readSessionEvent(
   if (line.length === 0) return;
   const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
+  session.eventPosition += 1;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
-      if (!session.replaying) session.events?.push(event);
+      if (!session.replaying)
+        session.events?.push(sessionObservation(session, event));
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -493,7 +816,7 @@ function readSessionEvent(
     }
     session.startedAt = sessionStartedAt(payload["timestamp"]);
     session.parentThreadId = sessionParentThreadId(payload);
-    session.events?.push(event);
+    session.events?.push(sessionObservation(session, event));
     return;
   }
   if (session.replaying) {
@@ -507,11 +830,11 @@ function readSessionEvent(
       sessionOwnsTurn(session, payload)
     ) {
       session.replaying = false;
-      session.events?.push(event);
+      session.events?.push(sessionObservation(session, event));
     }
     return;
   }
-  session.events?.push(event);
+  session.events?.push(sessionObservation(session, event));
   if (event["type"] === "token_usage_record") {
     const responseId = payload["response_id"];
     if (
@@ -541,7 +864,11 @@ function readSessionEvent(
     return;
   }
   if (event["type"] === "response_item") {
-    session.progress.push(...sessionProgressUpdates(payload));
+    session.progress.push(
+      ...sessionProgressUpdates(payload).map((progress) =>
+        sessionObservation(session, progress),
+      ),
+    );
     if (repository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
@@ -606,7 +933,7 @@ function readSessionEvent(
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
       }
-      session.activities.push(activity);
+      session.activities.push(sessionObservation(session, activity));
       return;
     }
     if (
@@ -616,10 +943,12 @@ function readSessionEvent(
     ) {
       const call = session.calls.get(payload["call_id"]);
       if (call !== undefined) {
-        session.activities.push({
-          ...call,
-          status: payload["status"] === "failed" ? "failed" : "completed",
-        });
+        session.activities.push(
+          sessionObservation(session, {
+            ...call,
+            status: payload["status"] === "failed" ? "failed" : "completed",
+          }),
+        );
         session.calls.delete(call.id);
       }
     }
@@ -637,7 +966,11 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
+      session.progress.push(
+        ...scanProgressUpdatesFromText(payload["message"]).map((progress) =>
+          sessionObservation(session, progress),
+        ),
+      );
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -651,7 +984,7 @@ function readSessionEvent(
       !session.prose.has(`${activity.kind}:${activity.description}`)
     ) {
       session.prose.add(`${activity.kind}:${activity.description}`);
-      session.activities.push(activity);
+      session.activities.push(sessionObservation(session, activity));
     }
     return;
   }
@@ -743,7 +1076,7 @@ function recordReasoningActivity(
   }
   reasoning.activity = activity;
   session.prose.add(`${activity.kind}:${activity.description}`);
-  session.activities.push(activity);
+  session.activities.push(sessionObservation(session, activity));
 }
 
 function sessionProgressUpdates(
@@ -770,7 +1103,7 @@ function sessionProgressUpdates(
   return scanProgressUpdatesFromText(output);
 }
 
-function addTokenUsage(
+export function addTokenUsage(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
 ): ScanTokenUsage {

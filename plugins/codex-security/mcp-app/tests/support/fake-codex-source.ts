@@ -10,7 +10,11 @@ export function fakeCodexSource(
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
+const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${
+    preflightProfile === null
+      ? `(await import(${JSON.stringify(import.meta.resolve("smol-toml"))})).parse(process.argv.find(arg => arg.startsWith('permissions.codex_security_deep_scan_worker=')) ?? '').permissions?.codex_security_deep_scan_worker`
+      : JSON.stringify(preflightProfile)
+  };
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
@@ -125,7 +129,8 @@ if (stdin.includes('ARTIFACT_TOOL_')) {
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
-console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+const completedTurns = stdin.includes('COMPLETE_THEN_HANG') && process.argv.includes('resume') ? 2 : 1;
+console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: completedTurns, cached_input_tokens: 0, output_tokens: completedTurns } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
 `;

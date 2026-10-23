@@ -249,7 +249,16 @@ test("preserves complete worker usage and cost after direct engine completion", 
       parent: "engine-session",
     },
   );
-  assert.deepEqual(await tracker.refresh(), { usage: null, cost: null });
+  const partial = await tracker.refresh();
+  assert.equal(partial.usage, null);
+  assert.equal(partial.cost, null);
+  assert.partialDeepStrictEqual(partial.measurement, {
+    usage: running.usage,
+    cost: running.cost,
+    coverage: "partial",
+    threadCount: 3,
+    missingThreadCount: 1,
+  });
   tracker.recordUsage(
     {
       input_tokens: 0,
@@ -271,7 +280,15 @@ test("preserves complete worker usage and cost after direct engine completion", 
     total_tokens: 1_660,
   });
   assert.notEqual(running.cost, null);
-  assert.deepEqual(final, running);
+  assert.deepEqual(final.usage, running.usage);
+  assert.deepEqual(final.cost, running.cost);
+  assert.partialDeepStrictEqual(final.measurement, {
+    usage: running.usage,
+    cost: running.cost,
+    coverage: "complete",
+    threadCount: 4,
+    missingThreadCount: 0,
+  });
   assert.equal(final.cost?.cacheWriteInputTokensReported, undefined);
   assert.equal((await events.next()).done, true);
 });

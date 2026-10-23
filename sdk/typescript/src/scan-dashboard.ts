@@ -12,7 +12,12 @@ import type {
   ComponentScanEvent,
   ComponentScanResult,
 } from "./component-scan.js";
-import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
+import {
+  formatUsd,
+  type ScanCost,
+  type ScanSessionEvent,
+  type ScanUsageMeasurement,
+} from "./cost.js";
 import {
   estimateScanCost,
   formatScanCost,
@@ -152,6 +157,7 @@ export class ScanDashboard {
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #tokens: string | null = null;
+  #usageCoverage: ScanUsageMeasurement["coverage"] | null = null;
   #budget: {
     request: ScanBudget;
     input: string;
@@ -486,7 +492,9 @@ export class ScanDashboard {
         );
       }
     }
-    if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
+    if (receipt.measurement !== undefined)
+      dashboard.setMeasurement(receipt.measurement);
+    else if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
     component.receipt = { ...receipt };
     this.#refresh();
   }
@@ -512,6 +520,9 @@ export class ScanDashboard {
         break;
       case "usage":
         dashboard.setUsage(event.value);
+        break;
+      case "measurement":
+        dashboard.setMeasurement(event.value);
         break;
       case "workers":
         if (event.value.kind === "dispatch")
@@ -552,13 +563,23 @@ export class ScanDashboard {
     cost: Readonly<ScanCost>,
     maxCostUsd = this.#options.maxCostUsd,
   ): void {
+    this.#usageCoverage = "complete";
     this.#cost = cost;
     this.#tokens = formatScanCostTokens(cost);
     this.#options.maxCostUsd = maxCostUsd;
     this.#refresh();
   }
 
+  public setMeasurement(measurement: Readonly<ScanUsageMeasurement>): void {
+    this.#usageCoverage = measurement.coverage;
+    this.#cost = measurement.cost;
+    this.#tokens =
+      measurement.usage === null ? null : formatTokenUsage(measurement.usage);
+    this.#refresh();
+  }
+
   public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#usageCoverage = "complete";
     this.#tokens = formatTokenUsage(usage);
     this.#refresh();
   }
@@ -880,8 +901,8 @@ export class ScanDashboard {
     );
     const costWidth = Math.max(
       8,
-      ...this.#components.map(({ dashboard }) =>
-        dashboard.#cost === null ? 1 : formatScanCost(dashboard.#cost).length,
+      ...this.#components.map(
+        ({ dashboard }) => dashboard.#componentCostLabel().length,
       ),
     );
     const nameWidth = Math.max(
@@ -917,7 +938,7 @@ export class ScanDashboard {
           receipt.findingCount === undefined
             ? "—"
             : formatCount(receipt.findingCount),
-          dashboard.#cost === null ? "—" : formatScanCost(dashboard.#cost),
+          dashboard.#componentCostLabel(),
         );
       });
     if (table.length === 0) table.push(`  ${this.#stage}…`);
@@ -957,6 +978,12 @@ export class ScanDashboard {
     );
   }
 
+  #componentCostLabel(): string {
+    return this.#cost === null
+      ? "—"
+      : `${formatScanCost(this.#cost)}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
+  }
+
   #componentCostLines(): string[] {
     if (!this.#showCost) return [];
     const costs = this.#components.flatMap(({ dashboard }) =>
@@ -964,7 +991,7 @@ export class ScanDashboard {
     );
     return wrapActivity(
       "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)} · component scans only`,
+      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)}${this.#components.some(({ dashboard }) => dashboard.#usageCoverage !== "complete") ? " (partial)" : ""} · component scans only`,
       this.#width(),
     );
   }
@@ -993,7 +1020,10 @@ export class ScanDashboard {
   }
 
   #tokenLines(): string[] {
-    const tokens = this.#tokens ?? "waiting for usage";
+    const tokens =
+      this.#usageCoverage === "unavailable"
+        ? "usage unavailable"
+        : `${this.#tokens ?? "waiting for usage"}${this.#usageCoverage === "partial" ? " (partial)" : ""}`;
     return wrapActivity("  TOKENS   ", tokens, this.#width());
   }
 
@@ -1015,7 +1045,11 @@ export class ScanDashboard {
           ? "waiting for usage"
           : `— / ${formatUsd(this.#options.maxCostUsd)}`
         : `${formatScanCost(this.#cost)}${this.#options.maxCostUsd === undefined ? "" : `; short-context budget baseline: ${formatUsd(this.#cost.estimatedUsd)} / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
-    return wrapActivity("  COST     ", cost, this.#width());
+    return wrapActivity(
+      "  COST     ",
+      `${cost}${this.#usageCoverage === "partial" ? " (partial)" : this.#usageCoverage === "unavailable" ? " (usage unavailable)" : ""}`,
+      this.#width(),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {

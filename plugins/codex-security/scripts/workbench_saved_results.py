@@ -3056,6 +3056,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         scan = db.require_scan(connection, scan_id)
         if scan["status"] == "failed":
             connection.commit()
+            record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return db.scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
@@ -3068,11 +3069,10 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
-                cost_json = ?
+            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (message, timestamp, timestamp, cost_json, scan["id"]),
+            (message, timestamp, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
@@ -3083,6 +3083,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
+    record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.scan_context(connection, scan["id"])
 
@@ -3095,6 +3096,7 @@ def cancel_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
+    cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
@@ -3105,6 +3107,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
+            record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return db.workspace_state(connection, scan["workspace_id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be canceled.")
@@ -3125,8 +3128,39 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
+    record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.workspace_state(connection, scan["workspace_id"])
+
+
+def record_stopped_scan_usage(
+    db: Any, connection: Any, scan_id: str, cost_json: str | None = None
+) -> None:
+    """Keep optional accounting independent of the already-persisted scan outcome."""
+
+    try:
+        scan = db.require_scan(connection, scan_id)
+        fields = db.scan_usage.merge_scan_usage_fields(
+            db.scan_usage.stored_scan_cost_fields(scan["cost_json"]),
+            db.scan_usage.stored_scan_cost_fields(cost_json),
+        )
+        fields = db.scan_usage.merge_scan_usage_fields(
+            fields,
+            {"usage": db.scan_usage.collect_scan_usage_safely(connection, scan)},
+        )
+        if fields:
+            encoded = db.parse_scan_cost(json.dumps(fields))
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'failed'",
+                    (encoded, scan_id),
+                )
+    except (Exception, SystemExit) as exc:
+        try:
+            print(f"Could not save stopped scan token usage: {exc}", file=sys.stderr)
+        except OSError:
+            # A closed diagnostic stream must not alter the persisted scan outcome.
+            pass
 
 
 def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:
