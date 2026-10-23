@@ -3064,7 +3064,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
-        message = db.optional_text(args.message, maximum=2400)
+        message = db.optional_text(args.message)
         updated = connection.execute(
             """
             UPDATE scans

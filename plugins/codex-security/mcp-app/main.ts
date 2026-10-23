@@ -12,7 +12,12 @@ async function main(): Promise<void> {
   const server = artifactWriter
     ? await createCodexSecurityArtifactWriterServer()
     : createCodexSecurityServer();
-  await server.connect(new StdioServerTransport());
+  await server.connect(
+    new StdioServerTransport(process.stdin, process.stdout, {
+      // Local scan checkpoints can exceed the SDK's default 10 MiB buffer.
+      maxBufferSize: Infinity,
+    }),
+  );
   let closing = false;
   const close = async (exitCode?: number): Promise<void> => {
     if (closing) return;

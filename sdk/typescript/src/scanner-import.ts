@@ -176,6 +176,7 @@ export function normalizeRecords<T>(
   records: T[],
   normalize: (record: T, id: string) => ExternalFinding,
   identify: (record: T) => string,
+  target: "local" | "cloud" = "cloud",
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -187,9 +188,15 @@ export function normalizeRecords<T>(
   for (const [index, value] of records.entries()) {
     try {
       const id = identify(value);
-      if (!id.trim() || id.includes("\0") || Buffer.byteLength(id) > 512)
+      if (
+        !id.trim() ||
+        id.includes("\0") ||
+        (target === "cloud" && Buffer.byteLength(id) > 512)
+      )
         throw new Error(
-          "Source finding ID must contain 1–512 UTF-8 bytes and no NUL characters.",
+          target === "cloud"
+            ? "Source finding ID must contain 1–512 UTF-8 bytes and no NUL characters."
+            : "Source finding ID must be nonempty and contain no NUL characters.",
         );
       identified.push({ position: index + 1, value, id });
       counts.set(id, (counts.get(id) ?? 0) + 1);

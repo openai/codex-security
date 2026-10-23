@@ -1,3 +1,4 @@
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import { isRecord } from "./record.js";
@@ -31,10 +32,13 @@ export function endorRepositoryUrls(sourceData: unknown): string[] {
 }
 
 /** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
-export function normalizeEndorFindings(input: unknown): ExternalFindings {
+export function normalizeEndorFindings(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
   const root = Array.isArray(input) ? null : record(input, "Endor report");
   if (root?.["version"] === "2.1.0" && root["runs"] !== undefined)
-    return normalizeEndorSarif(root);
+    return normalizeEndorSarif(root, target);
   const list =
     root?.["list"] === undefined ? null : record(root["list"], "Endor list");
   if (list) {
@@ -136,34 +140,39 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
       const updated = text(meta["update_time"]);
       return {
         source_finding_id: id,
-        evidence: validateExternalEvidence({
-          title: requiredText(meta["name"], "Endor finding title"),
-          description:
-            [
-              text(spec["summary"]),
-              text(spec["explanation"]),
-              text(spec["remediation"]),
-            ]
-              .filter(Boolean)
-              .join("\n\n") || text(meta["description"]),
-          severity,
-          branch:
-            context["type"] === "CONTEXT_TYPE_REF" ? text(context["id"]) : null,
-          code_revision: text(
-            record(
-              spec["source_code_version"] ?? {},
-              "Endor source code version",
-            )["sha"],
-          ),
-          source_updated_at:
-            updated === null ? null : Math.floor(Date.parse(updated) / 1000),
-          advisory_ids: [
-            ...new Set([...(advisory ? [advisory] : []), ...aliases]),
-          ],
-          packages,
-          locations,
-          source_data: structuredClone(finding),
-        }),
+        evidence: validateExternalEvidence(
+          {
+            title: requiredText(meta["name"], "Endor finding title"),
+            description:
+              [
+                text(spec["summary"]),
+                text(spec["explanation"]),
+                text(spec["remediation"]),
+              ]
+                .filter(Boolean)
+                .join("\n\n") || text(meta["description"]),
+            severity,
+            branch:
+              context["type"] === "CONTEXT_TYPE_REF"
+                ? text(context["id"])
+                : null,
+            code_revision: text(
+              record(
+                spec["source_code_version"] ?? {},
+                "Endor source code version",
+              )["sha"],
+            ),
+            source_updated_at:
+              updated === null ? null : Math.floor(Date.parse(updated) / 1000),
+            advisory_ids: [
+              ...new Set([...(advisory ? [advisory] : []), ...aliases]),
+            ],
+            packages,
+            locations,
+            source_data: structuredClone(finding),
+          },
+          target,
+        ),
       };
     },
     (value) =>
@@ -171,11 +180,15 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
         record(value, "Endor finding")["uuid"],
         "Endor finding uuid",
       ),
+    target,
   );
 }
 
 /** Endor's documented SARIF producer uses properties.finding-uuid, not its rule name. */
-export function normalizeEndorSarif(input: unknown): ExternalFindings {
+export function normalizeEndorSarif(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
   const document = record(input, "Endor SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Endor SARIF 2.1.0.");
@@ -300,37 +313,43 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
       });
       return {
         source_finding_id: id,
-        evidence: validateExternalEvidence({
-          title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
-          url: text(properties["finding-url"]),
-          description: [
-            text(message["markdown"]) ?? text(message["text"]),
-            text(full["text"]),
-            text(help["markdown"]) ?? text(help["text"]),
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-          // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
-          severity: "unknown",
-          locations: [
-            ...new Map(
-              locations.map((location) => [JSON.stringify(location), location]),
-            ).values(),
-          ],
-          source_data: structuredClone({
-            ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
-              result,
+        evidence: validateExternalEvidence(
+          {
+            title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
+            url: text(properties["finding-url"]),
+            description: [
+              text(message["markdown"]) ?? text(message["text"]),
+              text(full["text"]),
+              text(help["markdown"]) ?? text(help["text"]),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+            // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
+            severity: "unknown",
+            locations: [
+              ...new Map(
+                locations.map((location) => [
+                  JSON.stringify(location),
+                  location,
+                ]),
+              ).values(),
+            ],
+            source_data: structuredClone({
+              ...context,
+              runContext: sarifRunContextForResult(
+                context.runContext,
+                result,
+                rule,
+                context.documentContext,
+                context.driverContext,
+                context.toolContext,
+              ),
               rule,
-              context.documentContext,
-              context.driverContext,
-              context.toolContext,
-            ),
-            rule,
-            result,
-          }),
-        }),
+              result,
+            }),
+          },
+          target,
+        ),
       };
     },
     ({ result }) =>
@@ -341,11 +360,13 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
         )["finding-uuid"],
         "Endor finding-uuid",
       ),
+    target,
   );
 }
 
 export async function readEndorFindings(
   path: string,
+  target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
-  return normalizeEndorFindings(await readScannerJson(path));
+  return normalizeEndorFindings(await readScannerJson(path), target);
 }
