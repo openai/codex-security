@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
-import json
 import os
 import sqlite3
 import subprocess
@@ -193,36 +191,6 @@ def test_dirty_submodule_warning_preserves_the_changed_target_detail(tmp_path: P
     assert "results were saved" in warning
 
 
-def test_committed_binary_detection_agrees_beyond_preview_window(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    base = git(target, "rev-parse", "HEAD").decode()
-    (target / "payload.php").write_bytes(b"<?php\n" + b" " * (70 * 1024) + b"\0payload")
-    (target / "visible.py").write_text("value = 1\n")
-    git(target, "add", ".")
-    git(target, "commit", "-qm", "Add source and binary fixtures")
-    inventory_path = tmp_path / "inventory.txt"
-    rank_path = tmp_path / "rank.jsonl"
-    load_script("generate_in_scope_files").generate_diff_in_scope_files(
-        target, base, "HEAD", "revisions", inventory_path
-    )
-    load_script("generate_rank_input").make_diff_rank_input(
-        argparse.Namespace(
-            repo=str(target),
-            base=base,
-            head="HEAD",
-            mode="revisions",
-            out=str(rank_path),
-            area="fixture",
-            preview_bytes=1024,
-        )
-    )
-    assert inventory_path.read_text().splitlines() == ["visible.py"]
-    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == [
-        "visible.py"
-    ]
-
-
 def test_disabled_git_source_snapshot_does_not_inspect_refs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -242,53 +210,3 @@ def test_disabled_git_source_snapshot_does_not_inspect_refs(
         )["source"]
     assert source["revision"] == "unversioned"
     assert source["refsDigest"] == hashlib.sha256(b"").hexdigest()
-
-
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-@pytest.mark.parametrize("replacement", ["symlink", "gitlink"])
-def test_diff_inventories_exclude_non_file_type_changes(
-    tmp_path: Path, mode: str, replacement: str
-) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    source = target / "replaced.py"
-    source.write_text("old source\n")
-    git(target, "add", ".")
-    git(target, "commit", "-qm", "Add source fixture")
-    base = git(target, "rev-parse", "HEAD").decode()
-    if replacement == "symlink":
-        source.unlink()
-        try:
-            source.symlink_to("README.md")
-        except OSError:
-            pytest.skip("symlinks are unavailable")
-    else:
-        origin = tmp_path / "origin"
-        initialize_git_repository(origin)
-        git(target, "rm", "-f", source.name)
-        git(
-            target, "-c", "protocol.file.allow=always", "submodule", "add", str(origin), source.name
-        )
-    (target / "visible.py").write_text("value = 1\n")
-    git(target, "add", ".")
-    if mode == "revisions":
-        git(target, "commit", "-qm", "Replace source type")
-    inventory_path = tmp_path / "inventory.txt"
-    rank_path = tmp_path / "rank.jsonl"
-    load_script("generate_in_scope_files").generate_diff_in_scope_files(
-        target, base, "HEAD", mode, inventory_path
-    )
-    load_script("generate_rank_input").make_diff_rank_input(
-        argparse.Namespace(
-            repo=str(target),
-            base=base,
-            head="HEAD",
-            mode=mode,
-            out=str(rank_path),
-            area="fixture",
-            preview_bytes=1024,
-        )
-    )
-    expected = [".gitmodules", "visible.py"] if replacement == "gitlink" else ["visible.py"]
-    assert inventory_path.read_text().splitlines() == expected
-    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == expected

@@ -1,3 +1,8 @@
+import {
+  workerGitEnvironment,
+  expectedGitEnvironment,
+  restoreEnv,
+} from "./support/fake-codex-source.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   createFakeCodexFixture,
@@ -38,6 +43,7 @@ import {
 } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { rootCertificates } from "node:tls";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
 
@@ -1379,6 +1385,11 @@ async function testWorkerRuntimeSettings() {
     "PYTHON",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "HOME",
+    "NODE_OPTIONS",
+    "NODE_DEBUG",
+    "NODE_EXTRA_CA_CERTS",
+    "CODEX_MCP_NODE_PATH",
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
@@ -1428,16 +1439,8 @@ async function testWorkerRuntimeSettings() {
         "python",
       );
       process.env.PYTHON = python;
-      const gitEnvironment = {
-        PATH: [
-          path.join(fixture.root, "selected tools"),
-          "../selected tools",
-          "",
-        ].join(path.delimiter),
-        CODEX_SECURITY_GIT: path.join(fixture.root, "selected tools", "git"),
-        GIT_SSH_COMMAND: "synthetic-ssh --fixture",
-        GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
-      };
+      const gitEnvironment = workerGitEnvironment(fixture.root);
+      await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
       const codexHome = path.join(
@@ -1642,6 +1645,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               index === 0
                 ? undefined
                 : {
+                    HOME: path.join(fixture.root, `scan home ${index}`),
+                    PATH: path.join(fixture.root, `scan tools ${index}`),
+                    NODE_OPTIONS: `--stack-trace-limit=${20 + index}`,
+                    NODE_DEBUG: `synthetic-scan-debug-${index}`,
+                    NODE_EXTRA_CA_CERTS: path.join(
+                      fixture.root,
+                      `scan-ca-${index}.pem`,
+                    ),
+                    CODEX_MCP_NODE_PATH: path.join(
+                      fixture.root,
+                      `scan node ${index}`,
+                    ),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     CODEX_SQLITE_HOME: path.join(
@@ -1770,6 +1785,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
             ),
             writeFile(entry.path, stringifyToml(entry.configuration)),
+            ...(entry.environment === undefined
+              ? []
+              : [
+                  writeFile(
+                    entry.environment.NODE_EXTRA_CA_CERTS,
+                    rootCertificates[0]!,
+                  ),
+                ]),
             writeFile(
               entry.deepPath,
               stringifyToml({
@@ -1960,6 +1983,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
+            const selectedProvider = workerConfigurations[index];
             const workerLaunch = workerLaunches.find(({ args }) =>
               model === undefined
                 ? !args.includes("--model")
@@ -2068,7 +2092,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               path.join(fixture.root, `state-${index}`),
             );
             assert.equal(invocation.providerKey, providerKeys[index]);
-            assert.equal(invocation.mcpNodePath, nodePaths[index]);
+            assert.equal(
+              invocation.mcpNodePath,
+              selectedProvider.environment?.CODEX_MCP_NODE_PATH ??
+                nodePaths[index],
+            );
             assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
             assert.equal(invocation.providerHeader, providerHeaders[index]);
 
@@ -2165,7 +2193,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.configPath,
               workerConfigurations[index].path,
             );
-            const selectedProvider = workerConfigurations[index];
             if (selectedProvider.provider === undefined) {
               assert.equal(
                 invocation.argv.some(
@@ -2236,8 +2263,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
               false,
             );
-            assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
-            for (const [name, value] of Object.entries(gitEnvironment)) {
+            assert.deepEqual(
+              invocation.gitEnvironment,
+              expectedGitEnvironment(
+                gitEnvironment,
+                nodePaths[index],
+                selectedProvider.environment,
+              ),
+            );
+            for (const [name, value] of Object.entries({
+              ...gitEnvironment,
+              CODEX_MCP_NODE_PATH: nodePaths.at(-1),
+            })) {
               assert.equal(process.env[name], value);
             }
             assert.equal(invocation.python, python);
@@ -2320,13 +2357,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             args.includes("app-server"),
           )) {
             const preflight = await readJson(launch.markerPath);
-            assert.deepEqual(preflight.gitEnvironment, gitEnvironment);
             const selectedProvider = workerConfigurations.find(
               (entry) => preflight.configPath === entry.path,
             );
             assert.ok(
               selectedProvider,
               "worker preflight must use the same scan environment",
+            );
+            assert.deepEqual(
+              preflight.gitEnvironment,
+              expectedGitEnvironment(
+                gitEnvironment,
+                nodePaths[workerConfigurations.indexOf(selectedProvider)],
+                selectedProvider.environment,
+              ),
             );
             const index = workerConfigurations.indexOf(selectedProvider);
             assert.equal(preflight.codexHome, await realpath(codexHome));
@@ -3747,11 +3791,6 @@ function assertWorkerSubagentPolicy(
         }),
   });
   assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
-}
-
-function restoreEnv(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
 }
 
 async function withWorkerFixture<Result>(
