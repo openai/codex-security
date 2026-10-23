@@ -5,6 +5,7 @@ import { parse } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { FIREWORKS_CODEX_PROVIDER, inlineToml } from "../src/config.js";
 import { dependencies, fakePreflight, fakeResult } from "./cli-fixtures.js";
+import { runGitRepositoryCommand } from "./cli-patch-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
@@ -126,7 +127,7 @@ async function patchSettings(
         options.homeConfig,
       );
     }
-    const { stderr, runCli } = createCliTest(main);
+    const { stdout, stderr, runCli } = createCliTest(main);
     const status = await runCli(
       [
         ...(options.standalone
@@ -150,6 +151,8 @@ async function patchSettings(
           model: "gpt-6.1-sol",
           reasoningEffort: "low",
         },
+        manualCodexPreparation: true,
+        onRepositoryCommand: runGitRepositoryCommand,
         onCodex: async (args, output, selectedEnvironment) => {
           await options.beforeChild?.();
           return runCodexSkillCommand(
@@ -161,7 +164,14 @@ async function patchSettings(
         },
       }),
     );
-    expect(status, stderr.text()).toBe(0);
+    expect(status, stderr.text()).toBe(options.standalone ? 2 : 0);
+    if (options.standalone)
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        applied: false,
+        filesChanged: 0,
+        files: [],
+        error: { code: "NO_PATCH_APPLIED" },
+      });
     expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
       "const value = 1;\n",
     );

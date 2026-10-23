@@ -382,6 +382,78 @@ export async function requirePrivateCredentialHome(
   await requirePrivateDirectory(metadata, path, "credential home", options);
 }
 
+/** Snapshot profiles share a home with native sandbox state that owns its ACLs. */
+export async function requirePrivateSnapshotProfileHome(
+  path: string,
+): Promise<void> {
+  const metadata = await lstat(path);
+  await requirePrivateDirectory(metadata, path, "snapshot profile home", {
+    secureWindowsHome: (directory) =>
+      secureWindowsCredentialHome(directory, false),
+  });
+}
+
+/** Protect an exclusively created, still-empty profile before writing its configuration. */
+export async function requirePrivateSnapshotProfileFile(
+  path: string,
+): Promise<void> {
+  if (process.platform !== "win32") return;
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error("Snapshot profile is not a regular file");
+    }
+    const {
+      powershell,
+      processOptions,
+      sid,
+      icacls,
+      resolvedAliases,
+      resolveDescriptorAliases,
+    } = await windowsPrivateAclContext(path);
+    await execFile(
+      icacls,
+      [
+        path,
+        "/inheritance:r",
+        "/grant:r",
+        `*${sid}:F`,
+        `*${WINDOWS_SYSTEM_SID}:F`,
+        `*${WINDOWS_ADMINISTRATORS_SID}:F`,
+      ],
+      processOptions,
+    );
+    const inspected = await execFile(
+      powershell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$ErrorActionPreference = 'Stop'; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+      ],
+      processOptions,
+    );
+    await resolveDescriptorAliases(inspected.stdout);
+    const acl = inspectWindowsCredentialAcl(inspected.stdout, sid, {
+      scope: "file",
+      resolvedAliases,
+    });
+    if (
+      !acl.protected ||
+      !acl.grantsCurrentUserAccess ||
+      acl.untrustedPrincipals.length !== 0
+    ) {
+      throw new Error("Windows snapshot profile ACL is not private");
+    }
+  } catch (error) {
+    throw new OutputDirectoryError(
+      `Unable to create a private Windows snapshot profile: ${path}${windowsCredentialAclFailure(error)}`,
+      { cause: error },
+    );
+  }
+}
+
 export async function requirePrivatePolicyOutputDirectory(
   path: string,
   options: Parameters<typeof requirePrivateDirectory>[3] = {},
@@ -917,7 +989,7 @@ export async function inspectWindowsCredentialAclSnapshot(
   throw new Error("Windows credential descendants could not be verified");
 }
 
-async function secureWindowsCredentialHome(path: string): Promise<void> {
+async function windowsPrivateAclContext(path: string) {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
@@ -957,41 +1029,6 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   if (sid === undefined) {
     throw new Error("Unable to identify the current Windows user SID");
   }
-
-  // Signed built-in cmdlets remain available under ConstrainedLanguage;
-  // arbitrary .NET constructors, static methods, and SID translation do not.
-  // Enumerate and count ACLs in the same process: parallel startup can create
-  // or remove private cache and lock files while this traversal is running.
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    "$script:descriptorCount = 0",
-    "function Write-CredentialAcl($path) { $descriptor = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
-    "function Read-CredentialDescendants($path) {",
-    "  try { $entries = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $path -Force) } catch {",
-    // A child can disappear while an existing directory is being enumerated.
-    // Retry that incomplete listing before accepting a vanished descendant.
-    `    if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetChildItemCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
-    "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
-    "    throw",
-    "  }",
-    "  foreach ($entry in $entries) {",
-    "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
-    "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
-    "    try { Write-CredentialAcl $entry.FullName } catch {",
-    // A descendant can disappear inside Get-Acl after it was enumerated.
-    `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
-    "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
-    "      throw",
-    "    }",
-    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
-    "  }",
-    "}",
-    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
-    "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
-  ].join("\n");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
     "$descriptor = 'O:' + $env:CODEX_SECURITY_CREDENTIAL_PRINCIPAL + 'G:SYD:(A;;GA;;;SY)'",
@@ -1045,6 +1082,65 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       remaining = rest;
     }
   };
+  return {
+    powershell,
+    processOptions,
+    sid,
+    icacls: join(systemDirectory, "icacls.exe"),
+    resolvedAliases,
+    resolveDescriptorAliases,
+  };
+}
+
+async function secureWindowsCredentialHome(
+  path: string,
+  includeDescendants = true,
+): Promise<void> {
+  const {
+    powershell,
+    processOptions,
+    sid,
+    icacls,
+    resolvedAliases,
+    resolveDescriptorAliases,
+  } = await windowsPrivateAclContext(path);
+
+  // Signed built-in cmdlets remain available under ConstrainedLanguage;
+  // arbitrary .NET constructors, static methods, and SID translation do not.
+  // Enumerate and count ACLs in the same process: parallel startup can create
+  // or remove private cache and lock files while this traversal is running.
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$script:descriptorCount = 0",
+    "function Write-CredentialAcl($path) { $descriptor = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
+    "function Read-CredentialDescendants($path) {",
+    "  try { $entries = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $path -Force) } catch {",
+    // A child can disappear while an existing directory is being enumerated.
+    // Retry that incomplete listing before accepting a vanished descendant.
+    `    if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetChildItemCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
+    "    throw",
+    "  }",
+    "  foreach ($entry in $entries) {",
+    "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
+    "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
+    "    try { Write-CredentialAcl $entry.FullName } catch {",
+    // A descendant can disappear inside Get-Acl after it was enumerated.
+    `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
+    "      throw",
+    "    }",
+    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
+    "  }",
+    "}",
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
+    "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    ...(includeDescendants
+      ? ["Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH"]
+      : []),
+    `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
+  ].join("\n");
   let descendantsArePrivate = true;
   const readAcl = async (): Promise<WindowsCredentialAcl> => {
     const snapshot = await inspectWindowsCredentialAclSnapshot(path, sid, {
@@ -1058,7 +1154,6 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     return snapshot.home;
   };
 
-  const icacls = join(systemDirectory, "icacls.exe");
   const installTrustedAcl = async (target = path): Promise<void> => {
     await execFile(
       icacls,

@@ -41,12 +41,12 @@ const PRODUCER_NAME = "codex-security-plugin";
 interface CheckedScanFile {
   path: string;
   metadata: BigIntStats;
-  parents: Array<{ path: string; metadata: Stats }>;
+  parents: Array<{ path: string; metadata: BigIntStats }>;
 }
 
 interface ScanRoot {
   path: string;
-  metadata: Stats;
+  metadata: BigIntStats;
 }
 
 export interface ScanExpectation {
@@ -411,7 +411,7 @@ async function requireCheckedScanFile(
     throwIfAborted(signal);
     for (const part of parts.slice(0, -1)) {
       current = join(current, part);
-      const metadata = await lstat(current);
+      const metadata = await lstat(current, { bigint: true });
       throwIfAborted(signal);
       if (!metadata.isDirectory()) {
         throw new Error("unsafe parent");
@@ -637,13 +637,13 @@ async function requireScanRoot(
   throwIfAborted(signal);
   const absolute = resolve(scanDirectory);
   try {
-    const metadata = await lstat(absolute);
+    const metadata = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
     const canonical = await realpath(absolute);
     throwIfAborted(signal);
-    const current = await lstat(absolute);
+    const current = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
-    const returned = await lstat(canonical);
+    const returned = await lstat(canonical, { bigint: true });
     throwIfAborted(signal);
     if (
       !metadata.isDirectory() ||
@@ -657,7 +657,10 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(returned, canonical);
+      requirePrivateOutputDirectory(
+        { mode: Number(returned.mode), uid: Number(returned.uid) },
+        canonical,
+      );
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
@@ -683,7 +686,7 @@ async function verifyScanRoot(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    const current = await lstat(root.path);
+    const current = await lstat(root.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isDirectory() ||
@@ -692,7 +695,10 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(current, root.path);
+    requirePrivateOutputDirectory(
+      { mode: Number(current.mode), uid: Number(current.uid) },
+      root.path,
+    );
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
@@ -968,7 +974,7 @@ async function openCheckedScanFile(
       );
     }
     for (const parent of checked.parents) {
-      const current = await lstat(parent.path);
+      const current = await lstat(parent.path, { bigint: true });
       throwIfAborted(signal);
       if (
         !current.isDirectory() ||
@@ -1005,10 +1011,16 @@ async function openCheckedScanFile(
 
 export async function sameCheckedFileDevice(
   file: FileHandle,
-  checked: { path: string; metadata: Pick<Stats | BigIntStats, "dev" | "ino"> },
+  checked: {
+    path: string | Buffer;
+    metadata: Pick<Stats | BigIntStats, "dev" | "ino">;
+  },
   opened: Pick<Stats | BigIntStats, "dev" | "ino">,
   platform: NodeJS.Platform = process.platform,
-  openReference: (path: string, flags: number) => Promise<FileHandle> = open,
+  openReference: (
+    path: string | Buffer,
+    flags: number,
+  ) => Promise<FileHandle> = open,
 ): Promise<boolean> {
   if (opened.ino !== checked.metadata.ino) return false;
   if (opened.dev === checked.metadata.dev) return true;

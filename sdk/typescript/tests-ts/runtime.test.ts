@@ -86,6 +86,8 @@ import {
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
+  requirePrivateSnapshotProfileHome,
+  requirePrivateSnapshotProfileFile,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
   requirePrivatePolicyOutputDirectory,
@@ -4662,6 +4664,180 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("private Windows credential home");
   });
+
+  for (const fixture of [
+    {
+      label: "Administrator",
+      alias: "LA",
+      rid: 500,
+      mapped: "S-1-5-21-111-222-333-500",
+      accepted: true,
+    },
+    {
+      label: "Guest",
+      alias: "LG",
+      rid: 501,
+      mapped: "S-1-5-21-111-222-333-501",
+      accepted: true,
+    },
+    {
+      label: "another account",
+      alias: "LG",
+      rid: 500,
+      mapped: "S-1-5-21-111-222-333-501",
+      accepted: false,
+    },
+    {
+      label: "invalid SID",
+      alias: "LA",
+      rid: 500,
+      mapped: "not-a-sid",
+      accepted: false,
+    },
+  ]) {
+    test(`snapshot file ACL verifies ${fixture.label} alias mapping`, async () => {
+      const root = await temporaryDirectory();
+      const profile = join(root, "synthetic.config.toml");
+      await writeFile(profile, "", { flag: "wx" });
+      const result = await promisify(execFile)(
+        process.execPath,
+        [
+          "--eval",
+          `import { mock } from "bun:test";
+import * as childProcess from "node:child_process";
+import { promisify } from "node:util";
+const fixture=JSON.parse(process.argv[3]);
+const sid="S-1-5-21-111-222-333-"+fixture.rid;
+const aliases=[];
+const probe=()=>{};
+probe[promisify.custom]=async(command,args,options)=>{
+  if(command.endsWith("whoami.exe"))return {stdout:'"Synthetic User","'+sid+'"\\n',stderr:""};
+  if(command.endsWith("icacls.exe"))return {stdout:"",stderr:""};
+  const alias=options.env.CODEX_SECURITY_CREDENTIAL_PRINCIPAL;
+  if(alias){aliases.push(alias);return {stdout:fixture.mapped,stderr:""};}
+  return {stdout:"O:"+fixture.alias+"G:SYD:P(A;;FA;;;"+fixture.alias+")(A;;FA;;;SY)(A;;FA;;;BA)",stderr:""};
+};
+mock.module("node:child_process",()=>({...childProcess,execFile:probe}));
+const {requirePrivateSnapshotProfileFile}=await import(process.argv[1]);
+Object.defineProperty(process,"platform",{value:"win32"});
+let accepted=false,error;
+try {await requirePrivateSnapshotProfileFile(process.argv[2]);accepted=true;}catch(cause){error=cause.message;}
+process.stdout.write(JSON.stringify({accepted,aliases,error}));`,
+          fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
+          profile,
+          JSON.stringify(fixture),
+        ],
+        { encoding: "utf8" },
+      );
+      const observed = JSON.parse(result.stdout) as {
+        accepted: boolean;
+        aliases: string[];
+        error?: string;
+      };
+      expect(observed.accepted, observed.error).toBe(fixture.accepted);
+      expect(observed.aliases).toEqual([fixture.alias]);
+      expect(await readFile(profile)).toHaveLength(0);
+    });
+  }
+
+  test.skipIf(process.platform !== "win32")(
+    "snapshot profile privacy preserves native state while credential preparation still repairs descendants",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      await mkdir(home);
+      await requirePrivateCredentialHome(await lstat(home), home);
+      const cache = join(home, ".sandbox-bin");
+      const auth = join(home, "auth.json");
+      await mkdir(cache);
+      await writeFile(auth, "Synthetic credentials\n");
+      for (const [path, rights] of [
+        [cache, "(OI)(CI)R"],
+        [auth, "R"],
+      ]) {
+        const granted = windowsTestCommand("icacls.exe", [
+          path!,
+          "/grant",
+          `*S-1-1-0:${rights}`,
+        ]);
+        expect(granted.status, granted.stderr).toBe(0);
+      }
+      const resolvedAliases: Record<string, string> = {};
+      const descriptor = (path: string) => {
+        const inspected = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            "$sddl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+            "$localAdministrator = Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+            "Microsoft.PowerShell.Utility\\ConvertTo-Json -InputObject @($sddl, $localAdministrator) -Compress",
+          ],
+          {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            CODEX_SECURITY_TEST_ACL_PATH: path,
+            PSModulePath: join(
+              process.env["SystemRoot"] ?? "C:\\Windows",
+              "System32",
+              "WindowsPowerShell",
+              "v1.0",
+              "Modules",
+            ),
+          },
+        );
+        expect(inspected.status, inspected.stderr).toBe(0);
+        const [sddl, localAdministrator] = JSON.parse(inspected.stdout) as [
+          string,
+          string,
+        ];
+        resolvedAliases["LA"] = localAdministrator;
+        return sddl;
+      };
+      const nativeAcl = descriptor(cache);
+      await requirePrivateSnapshotProfileHome(home);
+      expect(descriptor(cache)).toBe(nativeAcl);
+
+      const profile = join(home, "synthetic.config.toml");
+      await writeFile(profile, "", { flag: "wx" });
+      await requirePrivateSnapshotProfileFile(profile);
+      const sid = windowsUserSid()!;
+      expect(
+        inspectWindowsCredentialAcl(descriptor(profile), sid, {
+          scope: "file",
+          resolvedAliases,
+        }),
+      ).toMatchObject({
+        protected: true,
+        grantsCurrentUserAccess: true,
+        untrustedPrincipals: [],
+      });
+      await writeFile(profile, "synthetic_secret = 'fixture-only'\n");
+      const nativeRead = windowsTestCommand("icacls.exe", [
+        home,
+        "/grant",
+        "*S-1-1-0:(OI)(CI)R",
+      ]);
+      expect(nativeRead.status, nativeRead.stderr).toBe(0);
+      expect(
+        inspectWindowsCredentialAcl(descriptor(profile), sid, {
+          scope: "file",
+          resolvedAliases,
+        }).untrustedPrincipals,
+      ).toEqual([]);
+
+      await requirePrivateCredentialHome(await lstat(home), home);
+      for (const path of [cache, auth]) {
+        expect(
+          inspectWindowsCredentialAcl(descriptor(path), sid, {
+            scope: "file",
+            resolvedAliases,
+          }).untrustedPrincipals,
+        ).toEqual([]);
+      }
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "makes policy output private before files inherit its Windows ACL",

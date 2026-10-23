@@ -13,6 +13,8 @@ const distModules = [
   "cli-daybreak",
   "cli-help",
   "cli-scan-logs-json",
+  "patch-byte-path",
+  "patch-git-controls",
   "cli-signals",
   "classify-severity",
   "classify-severity-records",

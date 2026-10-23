@@ -2679,10 +2679,17 @@ output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
 The assessment does not change the patch or merge state.
 
+Post-patch Git snapshots, including initialized submodules, use the patch's
+workspace permissions and configured Git filters.
+
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
 File changes alone do not prove a fix; saved findings require a verified result.
+Errors from interrupted patches or unfinished preparation retain completed
+finding results and known file lists. When the final inspection is incomplete,
+they omit `applied` and `filesChanged` and
+explain that limitation in the error message; local edits remain in place.
 
 For a controlled container providing its own isolation:
 
@@ -2706,19 +2713,62 @@ or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.
-GitLab merge requests stay within the origin project; a fork merge request with
-the same branch name is not reused. GitLab descriptions display the report in a
-blockquote so report text cannot execute quick actions. The report contents,
-including code, HTML, and math, retain their original text.
+For GitLab, the first network `origin` push URL selects the source project. A
+network `origin` fetch URL on the same host selects the target project.
+SSH and `git+ssh` transport ports are ignored in that comparison, matching `glab`
+project selectors; ports on other URL schemes remain significant. Git still uses
+the original URLs and SSH configuration. If the fetch URL is a local path, a
+`file://` URL, or uses another host or retained port, the target is the push
+project too. On resume, an existing merge request for the patch branch is reused
+only when its source project is the selected push project and its head matches
+the saved patch commit. A request from another project with the same branch name
+is not reused.
+
+GitLab descriptions display the report in a blockquote so report text cannot
+execute quick actions. The report contents, including code, HTML, and math,
+retain their original text.
 
 ```bash
 GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
 Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
-requires a clean tree. If publication fails, run the printed
+requires a clean tree. Saved-scan publication also refuses patched files that had
+staged, unstaged, or untracked changes before patching; local edits and generated
+patches remain available for review. Existing patch branches and pull requests
+are checked before patching, including closed or merged requests. Review and
+publish further patches from the same scan separately.
+
+Automatic publication also compares changed files with in-memory digests of
+nonempty, ignored regular files enumerated by Git before patching. An exact
+content match is refused, including a move or copy into a new publishable path;
+the edits remain available for manual review and publication. This can also
+refuse independently generated content identical to an ignored template or build
+output. Empty files and external link targets are not fingerprinted. Files that
+disappear during preflight (`ENOENT`) are skipped. Other read errors for eligible
+ignored files stop the command before patching and report the original error.
+File permissions are left unchanged. This adds reads proportional to the ignored
+data and does not detect arbitrary transformed or partial copies. Existing tracked
+edits are protected by path overlap and Git's rename/copy recognition.
+
+All configured push destinations are checked for existing branch namespace
+collisions before patching. Separate remote servers cannot be updated atomically:
+a remote can change or fail after that check, leaving an earlier push complete.
+
+Publication uses Git's submodule availability check by default. Existing
+`push.recurseSubmodules` and `submodule.recurse` settings pass through to Git
+unchanged. When recursion is enabled, publication also checks retained local
+metadata for changed, deinitialized submodules. This supplemental check uses
+remote-tracking refs; it does not fetch or publish child commits. Initialized
+submodules retain Git's configured recursive push behavior, and explicit settings
+that disable recursion skip the supplemental check. If publication reports an
+unpublished submodule commit, publish that commit from the submodule first, then
+resume the saved parent commit.
+
+If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
-commit and refuses changed branches. Retain the GitLab host setting on resume.
+commit without rerunning Codex, but refuses changed branches or an existing
+request pointing to a different commit. Retain the GitLab host setting on resume.
 
 ### Patch Linear issues
 

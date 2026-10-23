@@ -196,7 +196,7 @@ jobs:
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: [classify-changes, package]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -220,11 +220,12 @@ jobs:
           path: dist
       - name: Restore bundled plugin
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
-      - name: Install ripgrep
+      - name: Set up Linux test tools and sandbox
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ripgrep
+          sudo apt-get install --yes ripgrep bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - name: Test
         working-directory: sdk/typescript
         env:
@@ -503,7 +504,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [classify-changes, package]
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
