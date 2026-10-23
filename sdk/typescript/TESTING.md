@@ -131,23 +131,29 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ## GitHub Actions
 
-`node-ci` retains the required `ubuntu-latest / node-22`,
-`macos-latest / node-22`, and `windows-latest / node-22` checks. It builds and
-inspects one package archive, then passes that archive to jobs in the same
-workflow run, using the commit SHA in the artifact name. Every supported Node
-runtime still installs and inspects the package, including a strict NodeNext
-TypeScript consumer, the actual CLI, credential locking, and
-a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+`node-ci` reports one `ci` gate for all selected required checks. The existing
+`ubuntu-latest / node-22`, `macos-latest / node-22`, and
+`windows-latest / node-22` check names forward that result while repository
+branch rules migrate. The [CI guide](../../docs/ci.md) describes documentation-only
+routing, platform/version selection, full scheduled qualification, and the gate
+migration.
+
+For source qualification, CI builds and inspects one package archive, then passes
+that archive to jobs in the same workflow run, using the commit SHA in the
+artifact name. Selected Node runtimes install and inspect the package, including
+a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
+nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
-The full Bun suite runs once per OS under Node 22: six file shards on Linux
-and macOS, and fourteen on Windows. GitHub runs the shards as separate jobs;
-each job uses Bun's default serial runner. The other Node versions run the
-installed-package checks instead of repeating the same Bun suite. MCP and
-Python tests run in separate required jobs. Python uses four isolated
-pytest-xdist workers with work stealing; worker crashes fail the run without automatic restarts.
+Source qualification runs the full Bun suite once per OS under Node 22: six
+file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
+as separate jobs; each job uses Bun's default serial runner. The other selected
+Node versions run the installed-package checks instead of repeating the same
+Bun suite. MCP and Python tests run in separate required jobs. Python uses four
+isolated pytest-xdist workers with work stealing; worker crashes fail the run
+without automatic restarts.
 
 `scripts/run-ci-tests.mts` discovers every shared test file and balances whole
 files using the platform's recorded durations in `scripts/test-timings.json`.
@@ -203,8 +209,10 @@ before promotion.
 Both layouts use the same property seed and coverage settings. Required CI uses
 the default property seed and collects Linux coverage; diagnostics use the seed
 above and the same Linux LCOV instrumentation. Artifacts include JUnit and
-coverage in separate OS/layout/shard paths. Compare inventories across required
-CI and diagnostics, but measure scheduling changes between diagnostic layouts.
+coverage in separate OS/layout/shard paths. The automated comparison checks JUnit
+inventories, outcomes, and assertion counts; LCOV remains available for covered-line
+comparison during qualification. Compare inventories across required CI and
+diagnostics, but measure scheduling changes between diagnostic layouts.
 Both workflows install ripgrep on Linux so the inventory-path test executes.
 
 Keep the machine-policy test serial. Do not replace the full required suite
