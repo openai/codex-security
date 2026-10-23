@@ -5322,6 +5322,7 @@ export async function main(
           const result = await runMultiscan({
             inputPath,
             outputDir,
+            environment: dependencies.environment,
             ...(githubHost === undefined ? {} : { githubHost }),
             workers: options.workers,
             mode: settings.mode,

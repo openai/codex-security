@@ -140,7 +140,7 @@ describe("JUnit inventory comparison", () => {
       missing: 3,
       extra: 4,
     },
-    { name: "extra shard", os: "windows-latest", extra: 8 },
+    { name: "extra shard", os: "windows-latest", extra: 12 },
   ]) {
     test(`rejects identically incomplete workflow groups: ${scenario.name}`, async () => {
       const fixture = await workflowFixtures();
@@ -184,7 +184,7 @@ describe("JUnit inventory comparison", () => {
         );
       } else {
         expect(stderr).toContain(
-          `Expected 7 reports for ${scenario.os}/baseline, found 8`,
+          `Expected 11 reports for ${scenario.os}/baseline, found 12`,
         );
       }
       // Missing artifacts must not prevent the other OS/mode diagnostics.
