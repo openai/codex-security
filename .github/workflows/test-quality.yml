@@ -32,7 +32,7 @@ jobs:
     if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.target.os }} / ${{ matrix.mode.name }} / shard-${{ matrix.target.shard }}
     runs-on: ${{ matrix.target.os }}
-    timeout-minutes: ${{ matrix.target.os == 'windows-latest' && (matrix.mode.name == 'baseline' || matrix.mode.name == 'parallel') && 90 || 30 }}
+    timeout-minutes: ${{ matrix.target.os == 'windows-latest' && 90 || 30 }}
     env:
       CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
     strategy:

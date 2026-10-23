@@ -140,6 +140,8 @@ jobs:
         run: pnpm --dir sdk/typescript run format
       - name: Check MCP formatting
         run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
+      - name: Audit production dependencies
+        run: pnpm --dir sdk/typescript run audit:prod
 
   native:
     needs: classify-changes
@@ -175,8 +177,6 @@ jobs:
         uses: ./.github/actions/download-native
       - *set-up-typescript-tools
       - *install-dependencies
-      - name: Audit production dependencies
-        run: pnpm --dir sdk/typescript run audit:prod
       - name: Pack
         working-directory: sdk/typescript
         run: pnpm pack --pack-destination ../../dist

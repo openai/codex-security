@@ -40,7 +40,7 @@ const DOCUMENTS = {
 const PRODUCER_NAME = "codex-security-plugin";
 interface CheckedScanFile {
   path: string;
-  metadata: Stats;
+  metadata: BigIntStats;
   parents: Array<{ path: string; metadata: Stats }>;
 }
 
@@ -419,7 +419,7 @@ async function requireCheckedScanFile(
       parents.push({ path: current, metadata });
     }
     const path = join(scanDir, ...parts);
-    const metadata = await lstat(path);
+    const metadata = await lstat(path, { bigint: true });
     throwIfAborted(signal);
     if (!metadata.isFile()) {
       throw new ContractValidationError(
@@ -956,7 +956,7 @@ async function openCheckedScanFile(
       checked.path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
@@ -980,7 +980,7 @@ async function openCheckedScanFile(
         );
       }
     }
-    const current = await lstat(checked.path);
+    const current = await lstat(checked.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isFile() ||
