@@ -40,6 +40,8 @@ export async function testDeepScanLifecycle({
   };
   const errors = [];
   for (const test of [
+    resumedSelectedCancellationWaitsForCleanup,
+    resumedSelectedFailureWaitsForCleanup,
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
@@ -62,6 +64,109 @@ export async function testDeepScanLifecycle({
   }
   if (errors.length)
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
+
+  async function resumedSelectedCancellationWaitsForCleanup(
+    failPublication = false,
+  ) {
+    const fixture = await fixtureRun(config);
+    fixture.run.workflowVersion = "deep-security-scan/v2";
+    fixture.run.finalizationInput = {
+      version: 1,
+      resultPath: null,
+      resultSha256: null,
+      terminalReason: "capped",
+      omittedWorkerIds: [],
+      selectedAt: "2026-01-01T00:00:00Z",
+    };
+    const store = new FakeStore(fixture.run);
+    const publishing = Promise.withResolvers<void>();
+    const publishRelease = Promise.withResolvers<void>();
+    const admission = Promise.withResolvers<void>();
+    const admissionRelease = Promise.withResolvers<void>();
+    const publicationReturned = Promise.withResolvers<void>();
+    const preserving = Promise.withResolvers<void>();
+    const preserveRelease = Promise.withResolvers<void>();
+    store.finish = async () => {
+      store.run.status = "succeeded";
+      return structuredClone(store.run);
+    };
+    const coordinator = createCoordinator(fixture, store, new FakeExecutor(), {
+      threadId: "fixture-owner",
+      onComplete: async (_draft: unknown, signal: AbortSignal) => {
+        publishing.resolve();
+        await publishRelease.promise;
+        signal.throwIfAborted();
+        publicationReturned.resolve();
+        if (failPublication)
+          throw new Error("synthetic selected publication failure");
+      },
+      onStopped: async () => {
+        preserving.resolve();
+        await preserveRelease.promise;
+      },
+    });
+    let settledStatus: string | undefined;
+    let cancellationSettled = false;
+    const settled = coordinator.settled().then(
+      (result: DeepScanRunState) => {
+        settledStatus = result.status;
+        return result;
+      },
+      (error: unknown) => {
+        settledStatus = "rejected";
+        throw error;
+      },
+    );
+    void settled.catch(() => {});
+    coordinator.start();
+    await publishing.promise;
+    const cancellation = coordinator
+      .cancelAfterPersistence(
+        "cancel resumed selection",
+        async () => {
+          store.run.status = "canceled";
+        },
+        async () => {
+          admission.resolve();
+          await admissionRelease.promise;
+          return { status: "running" };
+        },
+      )
+      .then((result: DeepScanRunState) => {
+        cancellationSettled = true;
+        return result;
+      });
+    void cancellation.catch(() => {});
+    try {
+      await admission.promise;
+      publishRelease.resolve();
+      await publicationReturned.promise;
+      await new Promise(setImmediate);
+      admissionRelease.resolve();
+      await preserving.promise;
+      assert.equal(
+        settledStatus,
+        undefined,
+        "terminal waiters include stopped-result publication",
+      );
+      assert.equal(
+        cancellationSettled,
+        false,
+        "cancellation joins common cleanup",
+      );
+    } finally {
+      publishRelease.resolve();
+      admissionRelease.resolve();
+      preserveRelease.resolve();
+      await Promise.allSettled([settled, cancellation]);
+    }
+    assert.equal((await settled).status, "canceled");
+    assert.equal((await cancellation).status, "canceled");
+  }
+
+  async function resumedSelectedFailureWaitsForCleanup() {
+    await resumedSelectedCancellationWaitsForCleanup(true);
+  }
 
   async function failedParentCancellationStopsActiveWorker() {
     for (const terminalReadFails of [false, true]) {
@@ -231,6 +336,9 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         ),
       },
       loader: { ".md": "text" },
+      banner: {
+        js: `import { createRequire as fixtureCreateRequire } from "node:module"; const require = fixtureCreateRequire(${JSON.stringify(new URL("../server.ts", import.meta.url).href)});`,
+      },
     });
     const server = createCodexSecurityServer();
     const cancel =

@@ -98,6 +98,7 @@ def _prepare_worker_coverage_recovery(
     source_order: dict[str, tuple[int, int]],
     *,
     enabled: bool,
+    preserve_workers: set[str] | None = None,
 ) -> tuple[
     bool, list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], dict[str, Any] | None]]
 ]:
@@ -173,6 +174,10 @@ def _prepare_worker_coverage_recovery(
                     row["receiptRefs"] = refs
                 if field == "surfaces":
                     row.setdefault("receiptRefs", [])
+            # Accepted reviews keep their host projection while historical
+            # worker paths remain available for receipt repair.
+            if preserve_workers and owner in preserve_workers:
+                continue
             aggregate_rows = _aggregate_worker_coverage_rows(rows, owner, field)
             projected[field].extend(aggregate_rows)
             if field in {"surfaces", "deferred"}:
@@ -232,3 +237,56 @@ def _prepare_worker_coverage_recovery(
                     if _coverage_comparison_row(row, field) not in projected[field]
                 ]
     return True, surface_links
+
+
+def _merge_reviewed_surface_receipts(
+    coverage: dict[str, Any],
+    worker_row_owners: dict[int, str],
+    reviewed_workers: set[str],
+    reviewed_attempts: set[tuple[Any, Any]],
+) -> None:
+    # Receipt recovery may run before the accepted reducer copy is emitted.
+    # Combine its repaired evidence after every source has been accumulated.
+    surfaces = coverage.get("surfaces", [])
+    merged_surfaces: set[int] = set()
+    for retained in surfaces if isinstance(surfaces, list) else []:
+        if not isinstance(retained, dict):
+            continue
+        owner = worker_row_owners.get(id(retained))
+        if owner not in reviewed_workers:
+            continue
+        for existing in surfaces:
+            provenance = existing.get("provenance") if isinstance(existing, dict) else None
+            if not (
+                id(existing) not in worker_row_owners
+                and isinstance(provenance, dict)
+                and provenance.get("workerId") == owner
+                and (owner, provenance.get("attempt")) in reviewed_attempts
+                and isinstance(provenance.get("sourceId"), str)
+                and retained.get("id") == f"{owner}/{provenance['sourceId']}"
+                and isinstance(existing.get("receiptRefs"), list)
+                and isinstance(retained.get("receiptRefs"), list)
+            ):
+                continue
+            source_provenance = retained.get("provenance")
+            projected_provenance = (
+                dict(source_provenance) if isinstance(source_provenance, dict) else {}
+            )
+            for key in ("workerId", "attempt", "sourceId", "candidateId"):
+                projected_provenance.pop(key, None)
+                if key in provenance:
+                    projected_provenance[key] = provenance[key]
+            projected = {
+                **retained,
+                "id": existing.get("id"),
+                "provenance": projected_provenance,
+                "receiptRefs": existing["receiptRefs"],
+            }
+            if projected == existing:
+                for ref in retained["receiptRefs"]:
+                    if ref not in existing["receiptRefs"]:
+                        existing["receiptRefs"].append(ref)
+                merged_surfaces.add(id(retained))
+                break
+    if merged_surfaces:
+        coverage["surfaces"] = [row for row in surfaces if id(row) not in merged_surfaces]

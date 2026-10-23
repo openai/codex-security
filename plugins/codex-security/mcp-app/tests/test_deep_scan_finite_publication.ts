@@ -18,6 +18,9 @@ import { finding, workerDraft } from "./scan-draft-fixture.ts";
 
 const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },
+  banner: {
+    js: `import { createRequire as fixtureRequire } from "node:module"; const require = fixtureRequire(${JSON.stringify(import.meta.url)});`,
+  },
   define: {
     "import.meta.url": JSON.stringify(
       new URL("../src/deep-scan/engine.ts", import.meta.url).href,
@@ -31,6 +34,13 @@ after(() => temporaryDirectories.cleanup());
 
 test("Deep engine preserves stopped results for an option-shaped thread ID", async () => {
   const fixture = await fixtureRun();
+  fixture.run.executionSettings = {
+    version: 1,
+    settings: {
+      codexPath: process.execPath,
+      codexHome: join(fixture.pluginRoot, "codex-home"),
+    },
+  };
   const store = new FakeStore(fixture.run);
   store.run.coordinatorGeneration = 7;
   const handoffClaimToken = randomUUID();
@@ -76,6 +86,13 @@ test("Deep engine preserves stopped results for an option-shaped thread ID", asy
 for (const route of ["mcp", "file"] as const) {
   test(`Deep engine publishes historical metadata inherited by a ${route} reducer`, async () => {
     const fixture = await fixtureRun({ maxDiscoveryRuns: 1 });
+    fixture.run.executionSettings = {
+      version: 1,
+      settings: {
+        codexPath: process.execPath,
+        codexHome: join(fixture.pluginRoot, "codex-home"),
+      },
+    };
     const store = new FakeStore(fixture.run);
     const registry = new DeepScanCoordinatorRegistry();
     const run = store.run;

@@ -101,6 +101,9 @@ try {
         new URL("../server.ts", import.meta.url).href,
       ),
     },
+    banner: {
+      js: `import { createRequire as fixtureCreateRequire } from "node:module"; const require = fixtureCreateRequire(${JSON.stringify(new URL("../server.ts", import.meta.url).href)});`,
+    },
     loader: { ".md": "text" },
   })) as CancelResponseModule;
   const server = createCodexSecurityServer();

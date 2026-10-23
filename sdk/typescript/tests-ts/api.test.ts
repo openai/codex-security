@@ -1908,7 +1908,7 @@ describe("CodexSecurity orchestration", () => {
     expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
     expect(savedRecipe).toMatchObject({
       config: {
-        model_provider: "openai",
+        model_provider: "amazon-bedrock",
         profile: "bedrock",
         profiles: {
           bedrock: {
@@ -3356,7 +3356,7 @@ describe("CodexSecurity orchestration", () => {
     ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
-    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).toContain("leave finalization to the SDK");
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
@@ -6079,6 +6079,252 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([
+    ["standard", false],
+    ["deep", false],
+    ["standard", true],
+    ["deep", true],
+  ] as const)(
+    "enforces priced usage with an unpriced remainder (%s, raised limit: %p)",
+    async (mode, raised) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      const commands: Array<readonly string[]> = [];
+      const costs: number[] = [];
+      let turns = 0;
+      let releaseIncrease!: () => void;
+      const increased = new Promise<void>((resolve) => {
+        releaseIncrease = resolve;
+      });
+      const knownUsage = {
+        input_tokens: raised ? 2_500 : 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      };
+      const expectedCost = estimateScanCost("gpt-5.6-sol", knownUsage)!;
+      const writePricedUsage = async (usage: Record<string, number>) => {
+        const path = await writeUsageSession(codexHome, "scan-thread", usage);
+        const lines = (await readFile(path, "utf8")).split("\n");
+        lines.splice(
+          1,
+          0,
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "gpt-5.6-sol" },
+          }),
+        );
+        await writeFile(path, lines.join("\n"));
+      };
+      const writeUnpricedUsage = async () => {
+        const path = await writeUsageSession(
+          codexHome,
+          "unpriced-worker",
+          { input_tokens: 100, output_tokens: 10 },
+          { parent: "scan-thread" },
+        );
+        const lines = (await readFile(path, "utf8")).split("\n");
+        lines.splice(
+          1,
+          0,
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "synthetic-unpriced-model" },
+          }),
+        );
+        await writeFile(path, lines.join("\n"));
+      };
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options, args, input) => {
+            commands.push(args);
+            if (args[0] === "get-scan")
+              return { scan: { id: "scan_example_001" } };
+            if (args[0] === "complete-budget-exhausted-scan")
+              throw new Error("Synthetic canonical output is not ready");
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(
+                _input: string,
+                options: { signal: AbortSignal },
+              ) {
+                turns++;
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  if (raised) {
+                    await writePricedUsage({
+                      input_tokens: 800,
+                      output_tokens: 0,
+                    });
+                  } else {
+                    await writePricedUsage(knownUsage);
+                    await writeUnpricedUsage();
+                  }
+                  yield { type: "thread.started", thread_id: "scan-thread" };
+                  if (raised) {
+                    await increased;
+                    await writeUnpricedUsage();
+                    const path = join(
+                      codexHome,
+                      "sessions",
+                      "2026",
+                      "07",
+                      "26",
+                      "rollout-scan-thread.jsonl",
+                    );
+                    await appendFile(
+                      path,
+                      JSON.stringify({
+                        type: "event_msg",
+                        payload: {
+                          type: "token_count",
+                          info: { total_token_usage: knownUsage },
+                        },
+                      }) + "\n",
+                    );
+                  }
+                  await new Promise<void>((resolve) => {
+                    if (options.signal.aborted) resolve();
+                    else
+                      options.signal.addEventListener(
+                        "abort",
+                        () => resolve(),
+                        { once: true },
+                      );
+                  });
+                  throw new DOMException("aborted", "AbortError");
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        const failure = await client
+          .run(repository, {
+            mode,
+            maxCostUsd: 0.004,
+            signal: AbortSignal.timeout(5_000),
+            postScanPrompt: "No model work after the budget stop.",
+            ...(raised ? { onBudgetApproaching: () => 0.008 } : {}),
+            onCost: (cost, limit) => {
+              costs.push(cost.estimatedUsd);
+              if (limit === 0.008) releaseIncrease();
+            },
+          })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(ScanCostLimitExceededError);
+        expect(failure).toMatchObject({
+          maxCostUsd: raised ? 0.008 : 0.004,
+          cost: {
+            estimatedUsd: expectedCost.estimatedUsd,
+            inputTokens: knownUsage.input_tokens,
+            coverage: "partial",
+          },
+        });
+        expect(costs.every((cost) => raised && cost === 0.0032)).toBe(true);
+        expect(turns).toBe(1);
+        expect(
+          commands.some((args) => args[0] === "complete-budget-exhausted-scan"),
+        ).toBe(mode === "deep");
+        if (raised)
+          expect(
+            commands
+              .filter((args) => args[0] === "set-scan-cost-limit")
+              .map((args) => args.at(-1)),
+          ).toEqual(["0.008"]);
+      } finally {
+        clearTimeout(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test("enforces known Standard cost while a delegated child has only metadata", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+    ]);
+    const commands: string[] = [];
+    const runStreamed = mock(
+      async (_input: string, options: { signal: AbortSignal }) => {
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await writeUsageSession(codexHome, "scan-thread", {
+            input_tokens: 1_250,
+            cached_input_tokens: 200,
+            output_tokens: 30,
+          });
+          const child = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            {
+              parent: "scan-thread",
+              parentField: "source",
+            },
+          );
+          // Native session metadata is persisted before the first usage record.
+          const metadata = (await readFile(child, "utf8")).split("\n")[0]!;
+          await writeFile(child, metadata + "\n");
+          yield { type: "thread.started", thread_id: "scan-thread" };
+          await (options.signal.aborted
+            ? undefined
+            : once(options.signal, "abort"));
+          throw new DOMException("aborted", "AbortError");
+        }
+        return { events: events() };
+      },
+    );
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (_options, args, input) => {
+        commands.push(args[0]!);
+        return mockWorkbench(args, input);
+      },
+      createCodex: codexFactory(runStreamed),
+    });
+    const keepEventLoopAlive = setTimeout(() => {}, 10_000);
+    try {
+      const failure = await client
+        .run(repository, {
+          mode: "standard",
+          maxCostUsd: 0.004,
+          signal: AbortSignal.timeout(5_000),
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ScanCostLimitExceededError);
+      expect(failure).toMatchObject({
+        cost: { estimatedUsd: 0.00488, coverage: "partial" },
+      });
+      expect(commands).not.toContain("complete-scan");
+      expect(runStreamed).toHaveBeenCalledTimes(1);
+    } finally {
+      clearTimeout(keepEventLoopAlive);
+      await client.close();
+    }
+  });
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const commands: Array<readonly string[]> = [];
@@ -6171,6 +6417,86 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each(["cancel", "close"] as const)(
+    "interrupts a pending Deep attribution subprocess on %s",
+    async (action) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const controller = new AbortController();
+      const ready = Promise.withResolvers<void>();
+      let child: childProcess.ChildProcess | undefined;
+      let childClosed: Promise<void> | undefined;
+      let attributionStarted = false;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] !== "get-scan" || attributionStarted)
+            return mockWorkbench(args, input);
+          attributionStarted = true;
+          return await new Promise<JsonObject>((resolve, reject) => {
+            child = childProcess.spawn(
+              nodeCommand().command,
+              [
+                "-e",
+                "process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
+              ],
+              { signal: options.signal, stdio: ["ignore", "pipe", "ignore"] },
+            );
+            child.stdout!.once("data", () => ready.resolve());
+            child.once("error", reject);
+            childClosed = new Promise((closed) =>
+              child!.once("close", () => {
+                closed();
+                resolve({ scan: {} });
+              }),
+            );
+          });
+        },
+        createCodex: codexFactory(
+          async (_input: string, options: { signal: AbortSignal }) => ({
+            events: (async function* (): AsyncGenerator<ThreadEvent> {
+              yield { type: "thread.started", thread_id: "scan-thread" };
+              if (!options.signal.aborted) await once(options.signal, "abort");
+              throw new DOMException("aborted", "AbortError");
+            })(),
+          }),
+        ),
+      });
+      const operation = client.run(repository, {
+        mode: "deep",
+        onCost: () => {},
+        signal: controller.signal,
+      });
+      void operation.catch(() => {});
+      let close: Promise<void> | undefined;
+      try {
+        await ready.promise;
+        if (action === "close") close = client.close();
+        else controller.abort();
+        await Promise.race([
+          Promise.all([childClosed, operation.catch(() => {})]),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Attribution subprocess did not stop")),
+              5000,
+            ).unref(),
+          ),
+        ]);
+        expect(child!.exitCode !== null || child!.signalCode !== null).toBe(
+          true,
+        );
+        if (action === "close")
+          await expect(operation).rejects.toThrow("CodexSecurity is closed.");
+        else
+          await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
+      } finally {
+        controller.abort();
+        child?.kill();
+        await operation.catch(() => {});
+        await (close ?? client.close());
+      }
+    },
+  );
+
   test.each(["completed", "failed", "unavailable"] as const)(
     "recovers exhausted deep-scan budget when completion is %s",
     async (completion) => {
@@ -6202,6 +6528,10 @@ describe("CodexSecurity orchestration", () => {
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
+          if (args[0] === "get-scan") {
+            // Older workbench readers return a scan without execution attribution.
+            return { scan: { id: "scan_example_001" } };
+          }
           if (args[0] !== "complete-budget-exhausted-scan") {
             return mockWorkbench(args, input);
           }
@@ -6562,7 +6892,7 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       expect.any(String),
     ]);
-    expect(commands[2]).toMatchObject([
+    expect(commands.find((args) => args[0] === "fail-scan")).toMatchObject([
       "fail-scan",
       "--scan-id",
       expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -7788,7 +8118,8 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt()).not.toContain("$codex-security:");
     expect(prompt()).not.toContain("record_codex_security_scan_draft");
-    expect(prompt()).toContain("complete_codex_security_scan");
+    expect(prompt()).not.toContain("complete_codex_security_scan");
+    expect(prompt()).toContain("Leave finalization to the SDK after this turn");
     expect(prompt()).not.toContain("do not finalize or seal them");
     expect(prompt()).toContain(
       'start_codex_security_deep_scan with {"scanId":"scan_example_001"}',
@@ -8661,9 +8992,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     expect(scanSignal?.aborted).toBe(false);
   });
 
-  test.each(["standard", "deep"] as const)(
-    "isolates concurrent managed %s sessions at the Codex child boundary",
-    async (mode) => {
+  test.each([
+    ["standard", false, false],
+    ["deep", false, false],
+    ["deep", false, true],
+    ["deep", true, true],
+  ] as const)(
+    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%p, program=%p)",
+    async (mode, captureSummary, selectedProgram) => {
       const clients: TestClient[] = [];
       try {
         const outcomes = await Promise.allSettled(
@@ -8679,12 +9015,17 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               mkdir(codexHome),
               mkdir(scanDir, { mode: 0o700 }),
             ]);
+            const model = `fixture-${name}-model`;
+            const summary = name === "first" ? "none" : "concise";
+            const configPath = join(codexHome, "config-preflight.toml");
+            let recipeConfig: JsonObject | undefined;
             await writeFile(
               preload,
               [
                 'import { appendFileSync } from "node:fs";',
                 'let prompt = ""; for await (const chunk of process.stdin) prompt += chunk;',
-                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `appendFileSync(${JSON.stringify(marker)}, JSON.stringify({args:process.argv, executable:process.execPath, cwd:process.cwd(), home:process.env.CODEX_HOME, key:process.env.CODEX_API_KEY, value:process.env.FIXTURE_SCAN_VALUE, prompt}) + "\\n");`,
+                `if (process.argv.includes("models")) { console.log(JSON.stringify({models:[{slug:${JSON.stringify(model)},default_reasoning_summary:${JSON.stringify(summary)}}]})); process.exit(0); }`,
                 `console.log(JSON.stringify({type:"thread.started",thread_id:${JSON.stringify(`fixture-${name}-thread`)}}));`,
                 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"scan complete"}}));',
                 'console.log(JSON.stringify({type:"turn.completed",usage:null}));',
@@ -8692,7 +9033,6 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               ].join("\n"),
             );
             const fake = nodeCodex(preload);
-            const model = `fixture-${name}-model`;
             const provider = `fixture-${name}-provider`;
             const client = new TestClient(
               {
@@ -8700,8 +9040,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                   model,
                   model_provider: provider,
                   model_reasoning_effort: "ultra",
-                  model_reasoning_summary:
-                    name === "first" ? "none" : "concise",
+                  // JavaScript callers can omit the merged default with undefined.
+                  model_reasoning_summary: captureSummary
+                    ? (undefined as unknown as string)
+                    : summary,
+                  service_tier: name === "first" ? "flex" : "fast",
                   features: {
                     multi_agent_v2: { max_concurrent_threads_per_session: 4 },
                   },
@@ -8714,8 +9057,8 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 },
                 prepareRuntime: async () => ({
                   ...preparedRuntime(codexHome),
-                  configPath: join(codexHome, "preflight.toml"),
-                  deepScanConfigPath: join(codexHome, "deep.toml"),
+                  configPath,
+                  deepScanConfigPath: join(codexHome, "deep-scan.toml"),
                   environment: {
                     ...fake.environment,
                     FIXTURE_SCAN_VALUE: name,
@@ -8724,6 +9067,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 resolvePluginPython: async () => "/managed/python",
                 prepareOutputDir: async () => scanDir,
                 repositoryRevision: async () => "deadbeef",
+                runWorkbench: async (_options, args, input) => {
+                  if (args[0] === "register-cli-scan")
+                    recipeConfig = JSON.parse(input!).recipe.config;
+                  return mockWorkbench(args, input);
+                },
                 createCodex: (options: CodexOptions) => {
                   const codex = new Codex(options);
                   return {
@@ -8776,16 +9124,43 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             );
             clients.push(client);
             const postScanPrompt = "Summarize the completed synthetic scan.";
+            const program = name === "first" ? "daybreak_blue" : "daybreak_red";
             const result = await client.run(repository, {
               mode,
               postScanPrompt,
+              ...(selectedProgram ? { cyberAccessProgram: program } : {}),
             });
             expect(result.threadId).toBe(`fixture-${name}-thread`);
             expect(result.turnResult.usage).toBeNull();
-            const children = (await readFile(marker, "utf8"))
+            const invocations = (await readFile(marker, "utf8"))
               .trim()
               .split("\n")
               .map((line) => JSON.parse(line));
+            const lookups = invocations.filter((child) =>
+              child.args.includes("models"),
+            );
+            const children = invocations.filter(
+              (child) => !child.args.includes("models"),
+            );
+            expect(recipeConfig?.["model_reasoning_summary"]).toBe(summary);
+            expect(lookups).toHaveLength(captureSummary ? 1 : 0);
+            for (const lookup of lookups) {
+              expect(await realpath(lookup.cwd)).toBe(await realpath(scanDir));
+              expect(lookup.home).toBe(codexHome);
+              expect(lookup.key).toBe(`synthetic-${name}-key`);
+              expect(lookup.value).toBe(name);
+              expect(lookup.args).toContain(`model=${JSON.stringify(model)}`);
+            }
+            const preflight = await readFile(configPath, "utf8");
+            expect(parseToml(preflight)["model_reasoning_summary"]).toBe(
+              summary,
+            );
+            expect(preflight).not.toContain(`synthetic-${name}-key`);
+            if (selectedProgram)
+              expect(parseToml(preflight)).toMatchObject({
+                codex_security: { cyber_access_program: program },
+              });
+            else expect(parseToml(preflight)["codex_security"]).toBeUndefined();
             expect(children).toHaveLength(2);
             expect(children[1].prompt).toBe(postScanPrompt);
             expect(children[1].args).toContain("resume");
@@ -8799,6 +9174,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               expect(child.home).toBe(codexHome);
               expect(child.key).toBe(`synthetic-${name}-key`);
               expect(child.value).toBe(name);
+              if (selectedProgram) {
+                const programIndex = child.args.indexOf(
+                  "--cyber-access-program",
+                );
+                expect(
+                  child.args.slice(programIndex, programIndex + 2),
+                ).toEqual(["--cyber-access-program", program]);
+              } else expect(child.args).not.toContain("--cyber-access-program");
               expect(child.args).toContain(`model=${JSON.stringify(model)}`);
               expect(child.args).toContain(
                 `model_provider=${JSON.stringify(provider)}`,
@@ -8806,6 +9189,9 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               expect(child.args).toContain('model_reasoning_effort="ultra"');
               expect(child.args).toContain(
                 `model_reasoning_summary=${JSON.stringify(name === "first" ? "none" : "concise")}`,
+              );
+              expect(child.args).toContain(
+                `service_tier=${JSON.stringify(name === "first" ? "flex" : "fast")}`,
               );
               expect(child.args).toContain(
                 "features.multi_agent_v2.max_concurrent_threads_per_session=4",

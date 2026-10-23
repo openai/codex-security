@@ -1,9 +1,13 @@
+import {
+  auditEvidence,
+  runAcceptedAudit,
+} from "../../../../../sdk/typescript/src/accepted-audit.js";
 import { promises as fs } from "node:fs";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
-import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
-  validateDiscoveryArtifacts,
+  readDiscoveryAuditDraft,
   validateReducerArtifacts,
 } from "./artifact-validation.js";
 import type {
@@ -14,6 +18,7 @@ import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   abortError,
+  errorNameWithCode,
   boundedDeepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
@@ -36,9 +41,14 @@ import type {
 
 export interface AcceptedDiscovery {
   id: string;
+  label: string;
+  artifactDir: string;
   resultPath: string;
+  resultSha256?: string;
   result: ScanDraftInput;
   completionSequence: number;
+  attempt: number;
+  threadId?: string;
 }
 
 export type DiscoveryOutcome =
@@ -51,8 +61,13 @@ export type DiscoveryOutcome =
 
 export interface SuccessfulDedupOutcome {
   type: "dedup";
+  id: string;
+  consumed: AcceptedDiscovery[];
   resultPath: string;
   result: DeepReductionInput;
+  newFindings: number;
+  attempt: number;
+  threadId?: string;
   run: DeepScanRunState;
 }
 
@@ -71,6 +86,7 @@ export interface ReducerRequest {
   label: string;
   consumed: AcceptedDiscovery[];
   previousReducerResultPath?: string;
+  previousSourceCoverage?: DeepReductionInput["sourceCoverage"];
 }
 
 export interface DeepScanWorkerRunnerOptions {
@@ -87,15 +103,22 @@ export interface DeepScanWorkerRunnerOptions {
   onNonRetryableError?: (error: Error) => void;
 }
 
+interface WorkerAttemptEvidence {
+  attempt: number;
+  threadId?: string;
+}
+
 type WorkerAttemptOutcome =
   | { status: "succeeded"; attempt: number; threadId?: string }
   | {
       status: "failed";
       error: Error;
+      attempt?: number;
+      threadId?: string;
       replaceableFailureKind?: DeepScanReplaceableFailureKind;
       consecutiveErrors?: number;
     }
-  | { status: "canceled" };
+  | { status: "canceled"; attempt?: number; threadId?: string };
 
 /** Owns prompt rendering, retries, validation, and persistence for each worker. */
 export class DeepScanWorkerRunner {
@@ -155,11 +178,13 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(
+        const draft = await readDiscoveryAuditDraft(
           artifacts,
           resultPath,
           run.scanId,
         );
+        discoveryResult = draft.complete !== false ? draft : undefined;
+        return draft;
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -222,9 +247,13 @@ export class DeepScanWorkerRunner {
       status: "succeeded",
       worker: {
         id: workerId,
-        resultPath,
+        label: workerLabel,
+        artifactDir,
+        resultPath: persisted.acceptedResultPath ?? resultPath,
         result: discoveryResult!,
         completionSequence: persisted.completionSequence,
+        attempt: outcome.attempt,
+        threadId: outcome.threadId,
       },
     };
   }
@@ -233,9 +262,10 @@ export class DeepScanWorkerRunner {
     const {
       id: reducerId,
       label: reducerLabel,
-      consumed,
-      previousReducerResultPath,
+      previousSourceCoverage,
     } = request;
+    let { consumed, previousReducerResultPath } = request;
+    let previousReducerResultSha256: string | undefined;
     const { artifacts, run } = this.options;
     const reducerRoot = join(artifacts.dedupRoot, reducerLabel);
     const artifactDir = join(reducerRoot, "output");
@@ -246,13 +276,39 @@ export class DeepScanWorkerRunner {
     const workerIds = consumed.map((worker) => worker.id);
     const basePrompt = renderDedupPrompt(reducerLabel, workerIds);
     await writePrivateFile(promptPath, basePrompt);
-    await this.options.store.claimDedup({
+    const claimed = await this.options.store.claimDedup({
       id: reducerId,
       scanId: run.scanId,
       workerIds,
       promptPath,
       artifactDir,
     });
+    const claim = claimed?.persistedMergeClaims?.find(
+      (item) => item.workerId === reducerId,
+    );
+    if (claim) {
+      previousReducerResultPath = claim.previousResultPath;
+      previousReducerResultSha256 = claim.previousResultSha256;
+      const inputs =
+        claimed?.persistedDedupInputs?.filter(
+          (item) => item.dedupWorkerId === reducerId,
+        ) ?? [];
+      consumed = inputs
+        .sort((a, b) => a.inputOrder - b.inputOrder)
+        .map((item) => {
+          const discovery = consumed.find(
+            (worker) => worker.id === item.discoveryWorkerId,
+          );
+          if (!discovery || !item.resultManifestPath)
+            throw new Error("The reducer claim is missing an accepted input.");
+          return {
+            ...discovery,
+            resultPath: item.resultManifestPath,
+            resultSha256: item.resultManifestSha256,
+            attempt: item.attempt ?? discovery.attempt,
+          };
+        });
+    }
     this.options.log({
       event: "dedup_claimed",
       scanId: run.scanId,
@@ -260,6 +316,9 @@ export class DeepScanWorkerRunner {
       count: consumed.length,
     });
 
+    const persistSourceCoverage =
+      "workflowVersion" in run &&
+      run.workflowVersion === "deep-security-scan/v2";
     const artifactContext = {
       root: artifactDir,
       repoRoot: run.targetPath,
@@ -267,17 +326,25 @@ export class DeepScanWorkerRunner {
       layout: "reducer" as const,
       deepReducer: {
         scanRoot: artifacts.scanDir,
+        persistSourceCoverage,
         claimedWorkers: consumed.map((worker) => ({
           id: worker.id,
           resultPath: worker.resultPath,
+          resultSha256: worker.resultSha256,
+          artifactDir: worker.artifactDir,
+          attempt: worker.attempt,
         })),
         previousReducerResultPath,
+        previousReducerResultSha256,
       },
     };
     // Snapshot inputs before execution: direct file output has the same
     // conservation checks as the MCP writer without rereading consumed sources.
-    const sources = await getCodexSecurityDeepReducerInputs(artifactContext);
-    let reducerValidation!: ReducerArtifactValidation;
+    const sources = await readDeepReductionSources(artifactContext);
+    if (sources.previous && previousSourceCoverage !== undefined) {
+      sources.previous.sourceCoverage = structuredClone(previousSourceCoverage);
+    }
+    let reducerValidation: ReducerArtifactValidation | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId: reducerId,
       kind: "dedup",
@@ -295,6 +362,7 @@ export class DeepScanWorkerRunner {
             reducerId,
             previousReducerResultPath,
             sources,
+            persistSourceCoverage,
           },
           run.scanId,
         );
@@ -324,25 +392,43 @@ export class DeepScanWorkerRunner {
       };
     }
     if (outcome.status === "canceled") throw abortError();
-
+    if (!reducerValidation) {
+      throw new Error(
+        `${reducerId} completed without validated reducer artifacts.`,
+      );
+    }
     const commit = {
       id: reducerId,
       scanId: run.scanId,
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath,
     };
-    const committed = await this.options.store.commitDedup(commit);
+    const committed = await this.replayStoreMutation(
+      "dedup_commit_replay",
+      reducerId,
+      async () => await this.options.store.commitDedup(commit),
+    );
+    const accepted = committed.committedMerge;
+    const acceptedPath = accepted?.resultManifestPath ?? resultPath;
+    // V1 checkpoints omit host-only coverage; retain the validated projection.
+    const acceptedResult = reducerValidation.result;
+    const newFindings = accepted?.newFindings ?? reducerValidation.newFindings;
     this.options.log({
       event: "dedup_committed",
       scanId: run.scanId,
       workerId: reducerId,
       count: consumed.length,
-      newFindings: reducerValidation.newFindings,
+      newFindings,
     });
     return {
       type: "dedup",
-      resultPath,
-      result: reducerValidation.result,
+      id: reducerId,
+      consumed,
+      resultPath: acceptedPath,
+      result: acceptedResult,
+      newFindings,
+      attempt: outcome.attempt,
+      threadId: outcome.threadId,
       run: committed,
     };
   }
@@ -355,7 +441,7 @@ export class DeepScanWorkerRunner {
     artifactDir: string;
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
-    validate: () => Promise<void>;
+    validate: () => Promise<ScanDraftInput | void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -389,54 +475,77 @@ export class DeepScanWorkerRunner {
         attempt,
       });
       try {
-        const result = await this.options.executor.run({
-          kind: input.kind,
-          promptPath: executionPromptPath,
-          // Discovery workers write only to their isolated directory. Reducers
-          // own shared scan artifacts; the target remains read-only.
-          workingDirectory:
-            input.kind === "discovery"
-              ? input.artifactDir
-              : join(run.scanDir, "artifacts"),
-          subagents: input.subagents,
-          signal,
-          onNonRetryableError: this.options.onNonRetryableError,
-          resumeThreadId: resumableThreadId,
-          continuationPrompt: resumableThreadId
-            ? (continuationPrompt ??
-              transientExecutionContinuation(input.kind, attempt))
-            : undefined,
-          artifactContext: input.artifactContext,
-          onThreadStarted: async (threadId) => {
-            activeThreadId = threadId;
-            lastThreadId = threadId;
-            await this.options.store.updateWorker({
-              ...baseMutation,
-              threadId,
-            });
-            this.options.log({
-              event: "worker_thread_started",
-              scanId: run.scanId,
-              workerId: input.workerId,
-              kind: input.kind,
-              attempt,
-              threadId,
-            });
-          },
-        });
-        if (signal.aborted) {
+        const execute = () =>
+          this.options.executor.run({
+            kind: input.kind,
+            promptPath: executionPromptPath,
+            // Discovery workers write only to their isolated directory. Reducers
+            // own shared scan artifacts; the target remains read-only.
+            workingDirectory:
+              input.kind === "discovery"
+                ? input.artifactDir
+                : join(run.scanDir, "artifacts"),
+            subagents: input.subagents,
+            signal,
+            onNonRetryableError: this.options.onNonRetryableError,
+            resumeThreadId: resumableThreadId,
+            continuationPrompt: resumableThreadId
+              ? (continuationPrompt ??
+                transientExecutionContinuation(input.kind, attempt))
+              : undefined,
+            artifactContext: input.artifactContext,
+            onThreadStarted: async (threadId) => {
+              activeThreadId = threadId;
+              lastThreadId = threadId;
+              await this.options.store.updateWorker({
+                ...baseMutation,
+                threadId,
+              });
+              this.options.log({
+                event: "worker_thread_started",
+                scanId: run.scanId,
+                workerId: input.workerId,
+                kind: input.kind,
+                attempt,
+                threadId,
+              });
+            },
+          });
+        const accept = async (result: Awaited<ReturnType<typeof execute>>) => {
+          validationStarted = true;
+          let accepted: ScanDraftInput | void;
+          try {
+            accepted = await input.validate();
+          } catch (validationError) {
+            throw withWorkerDiagnostics(validationError, result.diagnostics);
+          }
+          validationCompleted = accepted?.complete !== false;
+          return accepted === undefined ? {} : auditEvidence(accepted);
+        };
+        // Reducers keep their aggregate contract; discovery uses the shared audit.
+        const audit =
+          input.kind === "discovery"
+            ? await runAcceptedAudit({ signal, execute, accept })
+            : undefined;
+        let result: Awaited<ReturnType<typeof execute>>;
+        if (audit) {
+          if (audit.status === "checkpoint") {
+            throw withWorkerDiagnostics(
+              new Error(
+                "Standard scan worker wrote only a checkpoint; its audit is not complete.",
+              ),
+              audit.execution.diagnostics,
+            );
+          }
+          result = audit.execution;
+        } else {
+          result = await execute();
+          if (signal.aborted)
+            return await this.cancelAttempt(input, attempt, activeThreadId);
+          await accept(result);
+        }
+        if (signal.aborted)
           return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
-        validationStarted = true;
-        try {
-          await input.validate();
-        } catch (validationError) {
-          throw withWorkerDiagnostics(validationError, result.diagnostics);
-        }
-        validationCompleted = true;
-        if (signal.aborted) {
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
         this.options.log({
           event: "worker_succeeded",
           scanId: run.scanId,
@@ -489,6 +598,8 @@ export class DeepScanWorkerRunner {
             ...(persistedFailure.consecutiveErrors === undefined
               ? {}
               : { consecutiveErrors: persistedFailure.consecutiveErrors }),
+            attempt,
+            threadId: activeThreadId,
           };
         }
         await this.options.store.updateWorker({
@@ -563,14 +674,14 @@ export class DeepScanWorkerRunner {
     );
   }
 
-  private async cancelAttempt(
+  private async persistWorkerCancellation(
     input: Pick<
       Parameters<DeepScanWorkerRunner["runWorkerWithRetries"]>[0],
       "workerId" | "kind" | "promptPath" | "artifactDir"
     >,
     attempt: number,
     threadId: string | undefined,
-  ): Promise<WorkerAttemptOutcome> {
+  ): Promise<void> {
     const coordinatorShutdown =
       this.options.signal.reason === "mcp_transport_closed";
     await this.options.store.updateWorker({
@@ -586,7 +697,56 @@ export class DeepScanWorkerRunner {
         ? { error: "coordinator_shutdown: mcp_transport_closed" }
         : {}),
     });
-    return { status: "canceled" };
+  }
+
+  /** Replay idempotent SQLite commits when their process response is ambiguous. */
+  private async replayStoreMutation<T>(
+    event: string,
+    workerId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (firstError) {
+      // The workbench store already replays these writes before reporting exhaustion.
+      if (
+        firstError instanceof Error &&
+        firstError.name === "DeepScanPersistenceError"
+      )
+        throw firstError;
+      this.options.log({
+        event,
+        scanId: this.options.run.scanId,
+        workerId,
+        reason: errorNameWithCode(asError(firstError)),
+      });
+      try {
+        return await operation();
+      } catch (replayError) {
+        throw new Error(
+          `Deep Scan persistence replay failed: ${asError(replayError).message}`,
+          { cause: firstError },
+        );
+      }
+    }
+  }
+
+  private async cancelAttempt(
+    input: {
+      workerId: string;
+      kind: "discovery" | "dedup";
+      promptPath: string;
+      artifactDir: string;
+    },
+    attempt: number,
+    threadId: string | undefined,
+  ): Promise<WorkerAttemptOutcome> {
+    await this.persistWorkerCancellation(input, attempt, threadId);
+    return {
+      status: "canceled",
+      attempt,
+      threadId,
+    };
   }
 }
 

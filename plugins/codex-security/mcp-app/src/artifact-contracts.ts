@@ -387,6 +387,74 @@ const draft_scanDraftInput = z.strictObject({
   coverage: draft_coverage,
 });
 
+// Immutable Deep results can predate the current producer contract. Preserve
+// their finding fields when reading already accepted worker history.
+const acceptedTextOrSummary = z.union([
+  nonEmptyText,
+  draft_textOrSummary.options[1].extend({
+    evidence_refs: draft_textList.optional(),
+  }),
+]);
+const acceptedReachability = z.union([
+  nonEmptyText,
+  draft_findingReachability.options[1].extend({
+    evidence_refs: draft_textList.optional(),
+  }),
+]);
+export const acceptedDeepScanDraftInputSchema = draft_scanDraftInput.extend({
+  findings: z.array(
+    draft_finding.extend({
+      code_evidence: z
+        .array(z.looseObject({ id: nonEmptyText, code: nonEmptyText }))
+        .optional(),
+      rootCause: z
+        .union([
+          nonEmptyText,
+          z.looseObject({
+            summary: nonEmptyText,
+            code: nonEmptyText.optional(),
+            language: nonEmptyText.optional(),
+            evidenceRefs: draft_textList.optional(),
+            evidence_refs: draft_textList.optional(),
+          }),
+        ])
+        .optional(),
+      root_cause: z
+        .union([
+          nonEmptyText,
+          z.looseObject({
+            summary: nonEmptyText.optional(),
+            code: nonEmptyText.optional(),
+            language: nonEmptyText.optional(),
+            evidenceRefs: draft_textList.optional(),
+            evidence_refs: draft_textList.optional(),
+          }),
+        ])
+        .optional(),
+      validation: z
+        .union([
+          draft_findingValidation.extend({
+            evidence_refs: draft_textList.optional(),
+          }),
+          z.null(),
+        ])
+        .optional(),
+      attackPath: z
+        .union([
+          draft_findingAttackPath.extend({
+            evidence_refs: draft_textList.optional(),
+            dataflow: acceptedTextOrSummary.optional(),
+            dataFlow: acceptedTextOrSummary.optional(),
+            data_flow: acceptedTextOrSummary.optional(),
+            reachability: acceptedReachability.optional(),
+          }),
+          z.null(),
+        ])
+        .optional(),
+    }),
+  ),
+});
+
 /** Native tool contracts; JSON resources are generated compatibility exports. */
 export const artifactSchemaDocuments = {
   "definitions/artifact-common": {

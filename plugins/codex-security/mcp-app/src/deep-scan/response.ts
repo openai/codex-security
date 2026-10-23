@@ -1,3 +1,4 @@
+import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
 import { isRecord } from "../record.js";
 import { z } from "zod";
 
@@ -27,6 +28,8 @@ export const workerSchema = responseObject({
   attempt: nonNegativeInteger,
   sdkThreadId: optionalString,
   resultManifestPath: optionalString,
+  acceptedResultPath: optionalString,
+  acceptedResultSha256: optionalString,
   completionSequence: optionalValue(positiveInteger),
   error: optionalString,
 }).transform(
@@ -40,6 +43,36 @@ export const dedupInputSchema = z.object({
   dedupWorkerId: requiredString,
   discoveryWorkerId: requiredString,
   inputOrder: nonNegativeInteger,
+  resultManifestPath: optionalString,
+  resultManifestSha256: optionalString,
+  attempt: optionalValue(positiveInteger),
+});
+
+export const finalizationInputSchema = z.object({
+  version: positiveInteger,
+  resultPath: requiredString.nullable(),
+  resultSha256: requiredString.nullable(),
+  terminalReason: z.enum(["saturated", "capped"]),
+  omittedWorkerIds: z.array(requiredString),
+  selectedAt: requiredString,
+});
+export const mergeClaimSchema = responseObject({
+  workerId: requiredString,
+  previousWorkerId: optionalString,
+  previousResultPath: optionalString,
+  previousResultSha256: optionalString,
+});
+const usageOwnerSchema = z.object({
+  threadId: optionalString.transform((value) => value ?? null),
+  turnId: optionalString.transform((value) => value ?? null),
+  startedAt: requiredString,
+  dedicated: z.boolean().optional(),
+});
+const committedMergeSchema = z.object({
+  workerId: requiredString,
+  resultManifestPath: requiredString,
+  resultManifestSha256: requiredString,
+  newFindings: nonNegativeInteger,
 });
 
 export const configSchema = z
@@ -76,6 +109,30 @@ export const runSchema = z
       includePaths: z.array(z.string()).optional(),
       filePaths: z.array(z.string()).optional(),
       scanId: requiredString,
+      ownerThreadId: optionalString,
+      schemaVersion: optionalValue(positiveInteger),
+      workflowVersion: optionalString,
+      model: optionalString,
+      reasoningEffort: optionalString,
+      finalizationInput: finalizationInputSchema
+        .nullish()
+        .transform((value) => value ?? undefined),
+      usageOwner: usageOwnerSchema
+        .nullish()
+        .transform((value) => value ?? null),
+      executionSettings: z
+        .looseObject({})
+        .nullish()
+        .transform((value) =>
+          value == null
+            ? undefined
+            : (value as unknown as DeepScanExecutionSettingsSnapshot),
+        ),
+      mergeClaims: z
+        .array(mergeClaimSchema)
+        .nullish()
+        .transform((value) => value ?? []),
+      committedMerge: committedMergeSchema.optional(),
       coordinatorGeneration: optionalValue(positiveInteger),
       createdAt: optionalString,
       updatedAt: optionalString,
@@ -101,10 +158,11 @@ export const runSchema = z
         .transform((value) => value ?? []),
     }),
   )
-  .transform(({ workers, dedupInputs, ...run }) => ({
+  .transform(({ workers, dedupInputs, mergeClaims, ...run }) => ({
     ...run,
     persistedWorkers: workers,
     persistedDedupInputs: dedupInputs,
+    persistedMergeClaims: mergeClaims,
   }));
 
 function parseResponse<T extends z.ZodType>(
@@ -134,14 +192,16 @@ export function parseDeepScan(result: Record<string, unknown>) {
 
 export function parseWorker(result: Record<string, unknown>, workerId: string) {
   const deepScan = parseResponse(z.looseObject({}), result.deepScan);
-  if (!Array.isArray(deepScan.workers)) {
+  if (!deepScan.workerReceipt && !Array.isArray(deepScan.workers)) {
     throw new Error(
       "Codex Security workbench did not return deepScan.workers.",
     );
   }
-  const value = deepScan.workers.find(
-    (candidate) => isRecord(candidate) && candidate.id === workerId,
-  );
+  const value =
+    deepScan.workerReceipt ??
+    (deepScan.workers as unknown[]).find(
+      (candidate) => isRecord(candidate) && candidate.id === workerId,
+    );
   if (!value) {
     throw new Error(
       `Codex Security workbench did not return Deep Scan worker ${workerId}.`,

@@ -173,7 +173,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
         for path in (checkpoint, head):
             os.utime(path, ns=(2_000_000_000, 2_000_000_000))
-    saved = workbench_api["saved_results"]
+    from workbench.saved_sources import _saved_result_paths
 
     def observations():
         return {
@@ -181,7 +181,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
                 (scan.scan_dir / relative).read_bytes(),
                 (scan.scan_dir / relative).stat().st_mtime_ns,
             )
-            for relative, _ in saved._saved_result_paths(scan.scan_dir, [])
+            for relative, _ in _saved_result_paths(scan.scan_dir, [])
             if (scan.scan_dir / relative).is_file()
         }
 
