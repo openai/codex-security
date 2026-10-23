@@ -93,6 +93,8 @@ jobs:
     if: needs.classify-changes.outputs.source-required == 'true'
     needs: classify-changes
     uses: ./.github/workflows/native-artifacts.yml
+    with:
+      reuse-verified: true
 
   container-validate:
     needs: [classify-changes, native]

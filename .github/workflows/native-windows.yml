@@ -43,6 +43,9 @@ jobs:
         with:
           architecture: ${{ matrix.arch }}
           compile: true
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Install helper dependencies
         working-directory: .
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
