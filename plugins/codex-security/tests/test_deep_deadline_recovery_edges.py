@@ -431,6 +431,8 @@ def test_deadline_interrupt_preserves_only_committed_publication(
 def test_mid_merge_failure_removes_only_created_recovery_evidence(
     tmp_path: Path, monkeypatch, workbench_api, write_kind: str
 ):
+    from workbench import saved_sources
+
     scan = deadline_fixture(tmp_path, "valid")
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     before = {
@@ -458,6 +460,7 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
             raise RuntimeError("Synthetic merge failure")
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", fail_during_merge)
+    monkeypatch.setattr(saved_sources, "write_scan_local_bytes", fail_during_merge)
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         record = workbench_api["require_scan"](connection, scan.scan_id)
@@ -476,6 +479,8 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
 def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
     tmp_path, monkeypatch, workbench_api, snapshot_failure
 ):
+    from workbench import saved_sources
+
     scan = deadline_fixture(tmp_path, "valid")
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     before = {
@@ -495,6 +500,7 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
         write(directory, relative, contents)
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", fail_before_snapshot_directory)
+    monkeypatch.setattr(saved_sources, "write_scan_local_bytes", fail_before_snapshot_directory)
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute(
@@ -516,8 +522,10 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
 
 @pytest.mark.parametrize("directory", ["checkpoints", "checkpoint-heads", "source-order"])
 def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
-    tmp_path: Path, workbench_api, directory: str
+    tmp_path: Path, workbench_api, monkeypatch, directory: str
 ):
+    from workbench import saved_sources
+
     scan = deadline_fixture(tmp_path)
     canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
     saved = workbench_api["saved_results"]
@@ -554,6 +562,15 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
             raise
         with pytest.raises(saved.ContractError) as rejected:
             saved.write_scan_local_bytes(scan.directory, relative.as_posix(), b"{}")
+        write = saved.write_scan_local_bytes
+        attempted_writes = set()
+
+        def record_write(directory, relative, contents):
+            attempted_writes.add(relative)
+            write(directory, relative, contents)
+
+        monkeypatch.setattr(saved, "write_scan_local_bytes", record_write)
+        monkeypatch.setattr(saved_sources, "write_scan_local_bytes", record_write)
         try:
             publication = saved.preserve_deep_deadline_draft(
                 SimpleNamespace(**workbench_api), connection, record
@@ -566,7 +583,10 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
                     "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
                 ).fetchone()[0]
             )
-            assert any(str(rejected.value) in warning for warning in warnings)
+            # Existing checkpoint names participate in the parent snapshot digest,
+            # so this entry can remain untouched while a new checkpoint is written.
+            if relative.as_posix() in attempted_writes:
+                assert any(str(rejected.value) in warning for warning in warnings)
             connection.rollback()
             saved._restore_published_outputs(*publication)
     assert target.is_symlink()

@@ -203,6 +203,8 @@ def _generic_surface_updates(
     record_order: Any,
     surface_receipts: Any,
     *,
+    canonical_rows: set[int] | None = None,
+    coverage_sources: dict[int, tuple[dict[str, Any], list[str]]] | None = None,
     surface_is_retained: Any = None,
     eligible_receipt_sources: set[str] | None = None,
     receipt_root: Path | None = None,
@@ -458,4 +460,20 @@ def _generic_surface_updates(
             if entry not in updates:
                 receipt_paths.update(replacement_paths)
                 updates.append(entry)
+            retained = next(
+                entry[3]
+                for entry in updates
+                if entry[:3] == (latest_relative, surface_owner, latest_surface)
+                and entry[3] == update
+            )
+            if coverage_sources is not None:
+                from workbench.retained_coverage import _inherit_coverage_sources
+
+                _inherit_coverage_sources(
+                    retained,
+                    [latest_surface, *(row for _, row in matches if id(row) in replaced_sources)],
+                    coverage_sources,
+                )
+            if canonical_rows is not None and id(latest_surface) in canonical_rows:
+                canonical_rows.add(id(retained))
     return replaced, updates

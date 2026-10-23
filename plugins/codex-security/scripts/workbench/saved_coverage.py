@@ -395,7 +395,53 @@ class SavedCoverageProjection:
             )
         ]
 
-    def finalize(self, coverage, canonical_rows, digest):
+    def finalize(
+        self,
+        coverage,
+        canonical_rows,
+        digest,
+        *,
+        preserve_canonical_parent,
+        all_sources,
+        source_order,
+        coverage_sources,
+        surface_ids_by_source,
+        retained_surface_rows,
+        resolved,
+    ):
+        from workbench.retained_coverage import _inherit_coverage_sources
+
+        source_owners = {relative: owner for relative, _, owner in all_sources}
+        recovered_worker_ids = {
+            worker_id for _, _, worker_id in all_sources if worker_id is not None
+        }
+        surface_positions: dict[str, int] = {}
+        resolved_surface_targets: dict[tuple[str | None, str], list[str]] = {}
+
+        def remember_surface_id(item: dict[str, Any], local_id: str) -> None:
+            final_id = item["id"]
+            surface_positions.setdefault(final_id, len(surface_positions))
+            shadowed_alias = (
+                self.project_worker_coverage
+                and id(item) not in named_surface_outputs
+                and (named := worker_surfaces.get((self.worker_row_owners.get(id(item)), local_id)))
+                is not None
+                and id(named) in named_surface_outputs
+            )
+            for relative in coverage_sources.get(id(item), (item, []))[1]:
+                # A candidate-derived ID cannot claim a link explicitly naming another surface.
+                if not shadowed_alias:
+                    targets = surface_ids_by_source.setdefault((relative, local_id), [])
+                    if final_id not in targets:
+                        targets.append(final_id)
+                candidate_id = item.get("candidateId")
+                if isinstance(candidate_id, str):
+                    key = (source_owners[relative], candidate_id)
+                    if key in resolved and resolved[key] == item.get("disposition"):
+                        targets = resolved_surface_targets.setdefault(key, [])
+                        if final_id not in targets:
+                            targets.append(final_id)
+
         retained_legacy_surface_links: dict[
             int, tuple[dict[str, Any], dict[str, dict[str, Any]]]
         ] = {}
@@ -436,6 +482,7 @@ class SavedCoverageProjection:
                         self.source_owner_by_id.get(id(surface), surface.get("workerId")),
                         "surfaces",
                     )
+                    _inherit_coverage_sources(retained_surface, [parent_surface], coverage_sources)
                     links[published_id] = retained_surface
         if self.project_worker_coverage:
             worker_surfaces: dict[tuple[str, str], dict[str, Any]] = {}
@@ -479,17 +526,73 @@ class SavedCoverageProjection:
                 for row in (items if isinstance(items, list) else [])
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
             }
+            normalized_items = []
             for item in items if isinstance(items, list) else []:
+                normalized_items.append(item)
                 if not isinstance(item, dict):
                     continue
                 if id(item) in canonical_rows:
                     if isinstance(item.get("id"), str):
                         used.add(item["id"])
+                        if field == "surfaces":
+                            remember_surface_id(item, item["id"])
                     continue
                 item.setdefault("id", _saved_coverage_id(item))
                 if not isinstance(item["id"], str):
                     # Preserve malformed rows for per-record recovery, including frozen replay.
                     continue
+                local_id = item["id"]
+                scoped = (
+                    preserve_canonical_parent
+                    and isinstance(worker_id := item.get("workerId"), str)
+                    and worker_id in recovered_worker_ids
+                )
+                if scoped:
+                    # Resolve worker-local candidate/deferred history before scoping IDs.
+                    item["id"] = f"{worker_id}/{item['id']}"
+                if isinstance(item.get("surfaceIds"), list):
+                    links: list[Any] = []
+                    for surface_id in item["surfaceIds"]:
+                        targets: list[str] = []
+                        declared = False
+                        if field == "deferred" and isinstance(surface_id, str):
+                            for relative in coverage_sources.get(id(item), (item, []))[1]:
+                                source_key = (relative, surface_id)
+                                history_keys = [source_key]
+                                if source_key not in surface_ids_by_source:
+                                    # A deferred-only checkpoint can refer to an earlier
+                                    # observation from this logical worker, including retries.
+                                    # Reused IDs can denote several retained observations.
+                                    history_keys = [
+                                        (historical, surface_id)
+                                        for historical, _, owner in all_sources
+                                        if owner == source_owners[relative]
+                                        and source_order[historical] <= source_order[relative]
+                                    ]
+                                for key in history_keys:
+                                    declared |= key in surface_ids_by_source
+                                    for target in surface_ids_by_source.get(key, []):
+                                        if target not in targets:
+                                            targets.append(target)
+                        if targets:
+                            targets.sort(key=surface_positions.__getitem__)
+                            for target in targets:
+                                if target not in links:
+                                    links.append(target)
+                        elif not declared:
+                            links.append(
+                                f"{worker_id}/{surface_id}"
+                                if scoped and isinstance(surface_id, str)
+                                else surface_id
+                            )
+                    item["surfaceIds"] = links
+                if scoped:
+                    if preserve_canonical_parent and item in normalized_items[:-1]:
+                        # A previous finish may have published files before its DB commit.
+                        if field == "surfaces":
+                            remember_surface_id(item, local_id)
+                        normalized_items.pop()
+                        continue
                 if item["id"] in used:
                     if self.project_worker_coverage:
                         base = item["id"]
@@ -499,9 +602,36 @@ class SavedCoverageProjection:
                             suffix += 1
                     else:
                         item["id"] = f"{item['id']}-{digest(item)[:16]}"
+                if preserve_canonical_parent and item in normalized_items[:-1]:
+                    if field == "surfaces":
+                        remember_surface_id(item, local_id)
+                    normalized_items.pop()
+                    continue
                 used.add(item["id"])
                 if field == "surfaces":
                     item.setdefault("receiptRefs", [])
+                    remember_surface_id(item, local_id)
+            if preserve_canonical_parent and isinstance(items, list):
+                coverage[field] = normalized_items
+            if field == "surfaces":
+                # Candidate resolution replaces pending surfaces independently of generic
+                # tasks. Preserve their original links, even when the outcome changes ID
+                # or a distinct retained surface shares the old source-local ID.
+                for relative, draft, owner in all_sources:
+                    originals = draft["coverage"].get("surfaces", [])
+                    for original in originals if isinstance(originals, list) else []:
+                        if (
+                            not isinstance(original, dict)
+                            or id(original) in retained_surface_rows
+                            or original.get("disposition") != "needs_follow_up"
+                            or not isinstance(local_id := original.get("id"), str)
+                            or not isinstance(candidate_id := original.get("candidateId"), str)
+                        ):
+                            continue
+                        targets = surface_ids_by_source.setdefault((relative, local_id), [])
+                        for target in resolved_surface_targets.get((owner, candidate_id), []):
+                            if target not in targets:
+                                targets.append(target)
         for task, links in retained_legacy_surface_links.values():
             task["surfaceIds"] = [
                 links[identity]["id"]
@@ -594,8 +724,16 @@ class SavedCoverageProjection:
 
 
 def prepare_saved_coverage_projection(
-    sources, parent, source_order, *, project_worker_coverage, receipt_resolver
+    sources,
+    parent,
+    source_order,
+    *,
+    project_worker_coverage,
+    receipt_resolver,
+    preserve_canonical_parent=False,
 ):
+    if preserve_canonical_parent:
+        return SavedCoverageProjection(False, [], sources)
     # Older parent publications use worker/id identities. Reconcile those copies
     # against their bound sources before projecting accepted attempt provenance.
     projected_metadata = {
