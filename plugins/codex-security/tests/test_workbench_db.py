@@ -979,6 +979,9 @@ def test_completed_finding_triage_and_remediation_persist(
     target.mkdir()
     source = target / "source.txt"
     source.write_bytes(f"vulnerable{line_ending}".encode())
+    create_workspace(
+        state_dir, str(uuid.uuid4()), "--target-path", str(tmp_path / "missing-target")
+    )
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -2063,9 +2066,10 @@ def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     missing = tmp_path / "missing"
+    workspace_id = str(uuid.uuid4())
     workspace = create_workspace(
         state_dir,
-        str(uuid.uuid4()),
+        workspace_id,
         "--target-path",
         str(missing),
         "--user-context",
@@ -2076,6 +2080,34 @@ def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     assert workspace["setupValidation"]["valid"] is False
     assert "readable local directory" in workspace["setupValidation"]["error"]
     assert workspace["userContext"] == "Focus on authentication and uploaded archives."
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP INDEX scans_by_target")
+    run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone() == (None, 1)
+        assert connection.execute("SELECT COUNT(*) FROM security_targets").fetchone() == (0,)
+
+    missing.mkdir()
+    invalid_scope = save_workspace(
+        state_dir, workspace_id, str(missing), "missing-scope", "standard", check=False
+    )
+    assert invalid_scope["returncode"] != 0
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone() == (None, 1)
+
+    saved = save_workspace(state_dir, workspace_id, str(missing), ".", "standard")
+    assert saved["setupValidation"]["valid"] is True
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone() == (stable_target_id(missing), 0)
 
 
 def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:
@@ -2175,17 +2207,26 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert "Only a running scan" in str(rejected_terminal["stderr"])
 
 
-def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path) -> None:
+@pytest.mark.parametrize("is_git", [False, True])
+def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path, is_git: bool) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
-    target.mkdir()
+    if is_git:
+        initialize_git_repository(target)
+    else:
+        target.mkdir()
     workspace = create_workspace(
         state_dir, str(uuid.uuid4()), "--target-path", str(target), "--scope", "missing"
     )
-    assert workspace["targetMetadata"]["isGit"] is False
+    assert workspace["targetMetadata"]["isGit"] is is_git
     assert workspace["scope"] == "missing"
     assert workspace["setupValidation"]["valid"] is False
     assert "existing directory" in workspace["setupValidation"]["error"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace["id"],),
+        ).fetchone() == (stable_target_id(target), 0)
 
 
 def test_workbench_resolves_structured_diff_target(tmp_path: Path) -> None:

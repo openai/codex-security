@@ -11,12 +11,16 @@ const script = fileURLToPath(
 );
 
 export function installFixtureSpawn(executable) {
-  const selected = win32.toNamespacedPath(executable);
   const spawn = childProcess.spawn;
   childProcess.spawn = (command, args, options) =>
     spawn(
       command,
-      win32.toNamespacedPath(command) === selected ? [script, ...args] : args,
+      win32.toNamespacedPath(command) ===
+        win32.toNamespacedPath(
+          options?.env?.PACKAGE_DEEP_EXECUTABLE ?? executable,
+        )
+        ? [script, ...args]
+        : args,
       options,
     );
   syncBuiltinESMExports();

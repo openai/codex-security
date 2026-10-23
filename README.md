@@ -141,6 +141,10 @@ try {
 The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
+Linked Git worktrees share scan history and saved findings when they use the same
+Codex Security state directory. Keep `CODEX_SECURITY_STATE_DIR` stable to retain
+that shared history and sign-in scope. See the [scan history guide](sdk/typescript/docs/cli.md#scan-history-and-reruns).
+
 ## Read existing Cloud findings
 
 When Codex Security Cloud is available to your account, the Security plugin's

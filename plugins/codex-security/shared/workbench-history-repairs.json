@@ -1,5 +1,26 @@
 [
   [
+    "-- Relocate repository-identity previews around the published external-source migration.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations JOIN (",
+    "    SELECT 54 AS version, 'stabilize Linux repository generations' AS name, 55 AS destination",
+    "    UNION ALL SELECT 53, 'persist repository identities', 54",
+    ") USING (version, name)",
+    "ORDER BY version DESC;"
+  ],
+  [
+    "-- Relocate the previous repository-identity preview before source-scope repairs.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations JOIN (",
+    "    SELECT 50 AS version, 'persist repository identities' AS name, 54 AS destination",
+    "    UNION ALL SELECT 51, 'stabilize Linux repository generations', 55",
+    ") USING (version, name);"
+  ],
+  [
     "-- Move source-scope previews before the shared history repairs.",
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",
@@ -7,16 +28,6 @@
     "FROM schema_migrations",
     "WHERE version IN (34, 40, 41, 42, 43, 44, 48)",
     "    AND name = 'persist authorized source excerpt scopes';"
-  ],
-  [
-    "WITH history AS (",
-    "    SELECT json_extract(value, '$.version') AS version,",
-    "        json_extract(value, '$.name') AS name FROM json_each(:history)",
-    ")",
-    "SELECT 'error' AS operation,",
-    "    'The Codex Security database has an unsupported source-scope migration history.' AS value",
-    "FROM schema_migrations JOIN history USING (version)",
-    "WHERE version IN (43, 50) AND schema_migrations.name != history.name;"
   ],
   [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
@@ -38,9 +49,20 @@
     "),",
     "moves(position, version, destination, name) AS (",
     "    VALUES",
-    "        (0, 33, 40, 'index finding identity and comparison history'),",
-    "        (1, 25, 26, 'persist scan completion warnings'),",
-    "        (2, 12, 20, 'phase-specific scan progress')",
+    "        (-2, 48, 54, 'persist repository identities'),",
+    "        (-1, 49, 55, 'stabilize Linux repository generations'),",
+    "        (0, 44, 55, 'stabilize Linux repository generations'),",
+    "        (1, 45, 55, 'stabilize Linux repository generations'),",
+    "        (2, 30, 54, 'persist repository identities'),",
+    "        (3, 31, 54, 'persist repository identities'),",
+    "        (4, 33, 54, 'persist repository identities'),",
+    "        (5, 40, 54, 'persist repository identities'),",
+    "        (6, 42, 54, 'persist repository identities'),",
+    "        (7, 43, 54, 'persist repository identities'),",
+    "        (8, 44, 54, 'persist repository identities'),",
+    "        (9, 33, 40, 'index finding identity and comparison history'),",
+    "        (10, 25, 26, 'persist scan completion warnings'),",
+    "        (11, 12, 20, 'phase-specific scan progress')",
     ")",
     "SELECT 0 AS position, 'error' AS operation,",
     "        'The Codex Security database has an unsupported mirror migration history.' AS value",
@@ -56,6 +78,16 @@
     "        ' WHERE version = ' || version || ' AND name = ' || quote(name)",
     "    FROM moves JOIN schema_migrations USING (version, name)",
     "ORDER BY position;"
+  ],
+  [
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS version,",
+    "        json_extract(value, '$.name') AS name FROM json_each(:history)",
+    ")",
+    "SELECT 'error' AS operation,",
+    "    'The Codex Security database has an unsupported source-scope migration history.' AS value",
+    "FROM schema_migrations JOIN history USING (version)",
+    "WHERE version IN (43, 50) AND schema_migrations.name != history.name;"
   ],
   [
     "-- profiles: preserve legacy columns before the later repairs.",

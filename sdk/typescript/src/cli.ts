@@ -260,7 +260,6 @@ import {
   resolvePluginPython,
   pluginMetadata,
   runWorkbench,
-  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginPythonOptions,
@@ -2066,7 +2065,7 @@ export async function main(
       runScanImport(options, errorOutput, dependencies),
     );
   const history = async (
-    args: readonly string[],
+    args: readonly string[] | (() => Promise<JsonObject>),
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
@@ -2074,13 +2073,15 @@ export async function main(
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(
-          args,
-          undefined,
-          undefined,
-          pythonPath,
-          protectedRoot,
-        ),
+        await (typeof args === "function"
+          ? args()
+          : dependencies.runWorkbench(
+              args,
+              undefined,
+              undefined,
+              pythonPath,
+              protectedRoot,
+            )),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -2293,52 +2294,19 @@ export async function main(
         dependencies.currentDirectory(),
         args.repository ?? ".",
       );
-      const repository = await realpath(requestedRepository).catch(
-        () => requestedRepository,
-      );
       return presentHistory(
-        await history(
-          ["list-repositories"],
-          async (value): Promise<JsonObject> => {
-            const repositories = value["repositories"] as JsonObject[];
-            let target = repositories.find(
-              (entry) => entry["targetPath"] === requestedRepository,
+        await history(async () => {
+          const findings = await listRepositoryFindings(
+            dependencies.runWorkbench,
+            { repository: requestedRepository },
+          );
+          if (findings === undefined) {
+            throw new CodexSecurityError(
+              "Repository findings are unavailable for the requested checkout.",
             );
-            const canonicalTarget = repositories.find(
-              (entry) => entry["targetPath"] === repository,
-            );
-            if (
-              target === undefined &&
-              canonicalTarget !== undefined &&
-              (await sameFile(
-                canonicalTarget["targetPath"] as string,
-                requestedRepository,
-              ))
-            ) {
-              target = canonicalTarget;
-            }
-            if (target === undefined) {
-              for (const entry of repositories) {
-                const storedPath = entry["targetPath"] as string;
-                if (await sameFile(storedPath, requestedRepository)) {
-                  target = entry;
-                  break;
-                }
-              }
-            }
-            const findings =
-              target === undefined
-                ? []
-                : await listRepositoryFindings(
-                    dependencies.runWorkbench,
-                    target["targetId"] as string,
-                  );
-            return {
-              repository: requestedRepository,
-              findings: findings ?? [],
-            };
-          },
-        ),
+          }
+          return { repository: requestedRepository, findings };
+        }),
         "findings",
         format,
         { repository: requestedRepository },
@@ -2754,8 +2722,12 @@ export async function main(
               "SCAN_IMPORT_FAILED",
             );
           }
+          const effectiveRecipe =
+            args.scanId === undefined && isJsonObject(recipe)
+              ? { ...recipe, repository: dependencies.currentDirectory() }
+              : recipe;
           scanArguments = await prepareScanArgumentsFromRecipe(
-            recipe,
+            effectiveRecipe,
             parentScanId,
             {
               scanPromptFile:
@@ -10460,7 +10432,7 @@ function printScanSummary(
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
   const findingSummary = repositoryFindings?.length
-    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    ? `${confirmedCount} confirmed in latest repository scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
     : severitySummary;
   const findingColor =
     findingCount === 0

@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -95,6 +96,9 @@ EXPECTED_MIGRATIONS = [
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
     (53, "store external source findings without assessments"),
+    (54, "persist repository identities"),
+    (55, "stabilize Linux repository generations"),
+    (56, "distinguish unvalidated workspace targets"),
 ]
 
 
@@ -1073,6 +1077,46 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     backfill.assert_called_once_with(connection)
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("binding", ["bound", "unbound", "dangling"])
+def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
+    tmp_path: Path, binding: str
+) -> None:
+    connection, apply_migrations = create_historical_database(56)
+    with closing(connection):
+        target_path = str(tmp_path / "unavailable")
+        target_id = None if binding == "unbound" else "legacy-target"
+        if binding == "bound":
+            connection.execute(
+                "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+                "VALUES (?, ?, 'Legacy target', 'created', 'updated')",
+                (target_id, target_path),
+            )
+        connection.execute(
+            "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+            "VALUES ('legacy-workspace', ?, ?, 'created', 'updated')",
+            (target_id, target_path),
+        )
+        before = dict(connection.execute("SELECT * FROM workspaces").fetchone())
+        for _ in range(2):
+            apply_migrations(connection)
+            after = dict(connection.execute("SELECT * FROM workspaces").fetchone())
+            assert after == {
+                **before,
+                "target_id": after["target_id"],
+                "target_path_unvalidated": 0,
+            }
+            assert after["target_id"] is not None
+            if binding == "bound":
+                assert after["target_id"] == target_id
+            assert (
+                connection.execute(
+                    "SELECT current_path FROM security_targets WHERE id = ?", (after["target_id"],)
+                ).fetchone()[0]
+                == target_path
+            )
+
+
 def test_scan_model_migration_preserves_existing_scans() -> None:
     connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
@@ -1448,6 +1492,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             "diff_resolution_id",
             "capability_preflight_json",
             "thread_id",
+            "target_path_unvalidated",
         }
 
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
@@ -2923,3 +2968,417 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize("installed", ["main", "repository-identities", "fresh"])
+def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        if installed != "fresh":
+            create_migration_history(connection)
+            historical = []
+            for version, name, sql in namespace["MIGRATIONS"]:
+                if installed == "main" and name == "persist repository identities":
+                    continue
+                if installed == "repository-identities" and name == "editable scan names":
+                    continue
+                historical.append(
+                    (42 if name == "persist repository identities" else version, name, sql)
+                )
+            apply_historical_migrations(connection, historical, "synthetic-original")
+        else:
+            namespace["apply_schema_migrations"](
+                connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
+            )
+        connection.execute(
+            "INSERT INTO workspaces(id,created_at,updated_at) "
+            "VALUES ('synthetic-workspace','synthetic-created','synthetic-updated')"
+        )
+        connection.execute(
+            "INSERT INTO scans(id,workspace_id,target_path,target_revision,scope,mode,scan_dir,"
+            "status,phase,started_at,completed_at,created_at,updated_at) VALUES "
+            "('synthetic-scan','synthetic-workspace','/synthetic/repository','synthetic-revision',"
+            "'.','standard','/synthetic/output','complete','reporting',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:01:00Z','synthetic-created','synthetic-updated')"
+        )
+        saved_scan = dict(connection.execute("SELECT * FROM scans").fetchone())
+        timestamps = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        for _ in range(2):
+            namespace["apply_schema_migrations"](
+                connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
+            )
+            scan = dict(connection.execute("SELECT * FROM scans").fetchone())
+            assert saved_scan.items() <= scan.items()
+            assert scan["name"] is None
+            assert scan["repository_generation"] is None
+            assert scan["completion_sequence"] == 1
+            migrations = {
+                row["name"]: (row["version"], row["applied_at"])
+                for row in connection.execute("SELECT * FROM schema_migrations")
+            }
+            assert migrations["editable scan names"][0] == 42
+            assert migrations["persist repository identities"][0] == 54
+            for name, timestamp in timestamps.items():
+                assert migrations[name][1] == timestamp
+
+
+@pytest.mark.parametrize("spelling", ["canonical", "dot", "trailing"])
+def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spelling: str) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    canonical = str(repository)
+    original = (
+        canonical + ({"canonical": "", "dot": os.sep + "." + os.sep, "trailing": os.sep}[spelling])
+    )
+    workspace = str(uuid.uuid4())
+    create_workspace(state, workspace, "--target-path", original, "--scope", "missing")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        before = connection.execute("SELECT id, current_path FROM security_targets").fetchall()
+        assert len(before) == 1
+        assert before[0][1] == original
+    save_workspace(state, workspace, canonical, ".", "standard")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT id, current_path FROM security_targets").fetchall() == before
+        )
+        assert connection.execute(
+            "SELECT target_id, target_path, submitted FROM workspaces WHERE id = ?", (workspace,)
+        ).fetchone() == (before[0][0], canonical, 1)
+    scan_id, _ = start_workspace_scan(state, workspace, tmp_path / "scans")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT target_id FROM scans WHERE id = ?", (scan_id,)).fetchone()[0]
+            == before[0][0]
+        )
+
+
+@pytest.mark.parametrize("before_version", [54, 55])
+@pytest.mark.parametrize("with_scan", [False, True])
+def test_identity_migrations_skip_unavailable_historical_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
+) -> None:
+    git = Path(shutil.which("git") or "git").resolve()
+    historical = str(git.parent)
+    monkeypatch.setenv("CODEX_SECURITY_GIT", str(git))
+    connection, apply_migrations = create_historical_database(before_version)
+    timestamp = "2026-08-01T00:00:00Z"
+    target_id, workspace_id = "historical-target", str(uuid.uuid4())
+    connection.execute(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+        "VALUES (?, ?, 'Historical tools', ?, ?)",
+        (target_id, historical, timestamp, timestamp),
+    )
+    connection.execute(
+        "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (workspace_id, target_id, historical, timestamp, timestamp),
+    )
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 55 else None
+    if old_identity is not None:
+        connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
+    if with_scan:
+        connection.execute(
+            "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, "
+            "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+            "VALUES ('historical-scan', ?, ?, ?, 'unversioned', '.', 'standard', "
+            "'historical-output', 'complete', 'reporting', ?, ?, ?)",
+            (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
+        )
+    apply_migrations(connection)
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 56
+    assert tuple(
+        connection.execute(
+            "SELECT id, current_path, repository_identity FROM security_targets"
+        ).fetchone()
+    ) == (target_id, historical, old_identity)
+    assert tuple(
+        connection.execute(
+            "SELECT target_id, target_path FROM workspaces WHERE id = ?", (workspace_id,)
+        ).fetchone()
+    ) == (target_id, historical)
+    if with_scan:
+        assert tuple(
+            connection.execute("SELECT id, target_id, target_path FROM scans").fetchone()
+        ) == ("historical-scan", target_id, historical)
+    with pytest.raises(SystemExit, match="outside the protected repository"):
+        apply_migrations.__globals__["ensure_security_target"](connection, historical)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with sqlite3.connect(state / "workbench.sqlite3") as saved:
+        connection.backup(saved)
+    connection.close()
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    workspace = create_saved_workspace(state, unrelated)
+    scan_id, _ = start_workspace_scan(state, str(workspace["id"]), tmp_path / "scans")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_path FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == str(unrelated)
+
+
+def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    connection, apply_migrations = create_historical_database(55)
+    connection.executescript("""
+        CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
+        WHEN NEW.id <> 'existing-target'
+        BEGIN
+            INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at)
+            VALUES ('existing-target', NEW.current_path, NEW.display_name, NEW.created_at, NEW.updated_at);
+            SELECT RAISE(IGNORE);
+        END;
+    """)
+    target = apply_migrations.__globals__["ensure_security_target"](connection, str(repository))
+    assert target == "existing-target"
+    assert [
+        tuple(row) for row in connection.execute("SELECT id, current_path FROM security_targets")
+    ] == [(target, str(repository))]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The executable marker fixture is a POSIX script")
+@pytest.mark.parametrize(
+    "executable_source",
+    [
+        "caller",
+        "historical",
+        "unavailable-historical",
+        "redirected-historical",
+        "redirected-destination",
+    ],
+)
+def test_identity_migration_excludes_all_history_and_caller_git(
+    tmp_path: Path, executable_source: str
+) -> None:
+    git = shutil.which("git")
+    assert git is not None
+    caller, saved, other = (tmp_path / name for name in ("caller", "saved", "other"))
+    for repository in (caller, saved, other):
+        initialize_git_repository(repository)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    connection, _ = create_historical_database(54)
+    timestamp = "2026-08-01T00:00:00Z"
+    destination = tmp_path / "destination"
+    if executable_source.startswith("redirected-"):
+        initialize_git_repository(destination)
+        (other / "subdir").symlink_to(destination, target_is_directory=True)
+    for index, repository in enumerate((saved, other)):
+        if index == 1 and executable_source.startswith("redirected-"):
+            repository = repository / "subdir"
+        if index == 1 and executable_source == "unavailable-historical":
+            (repository / "replaced-component").write_text("no longer a directory\n")
+            repository = repository / "replaced-component" / "old-target"
+        connection.execute(
+            "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+            "VALUES (?, ?, 'Saved repository', ?, ?)",
+            (f"saved-{index}", str(repository), timestamp, timestamp),
+        )
+    connection.commit()
+    with sqlite3.connect(state / "workbench.sqlite3") as database:
+        connection.backup(database)
+    connection.close()
+    executable_root = caller if executable_source == "caller" else other
+    if executable_source == "redirected-destination":
+        executable_root = destination
+    marker = tmp_path / "repository-git-ran"
+    executable = executable_root / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$MIGRATION_GIT_MARKER"\nexec "$MIGRATION_HOST_GIT" "$@"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(executable_root) + os.pathsep + os.environ.get("PATH", ""),
+        MIGRATION_GIT_MARKER=str(marker),
+        MIGRATION_HOST_GIT=git,
+    )
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "list-scans"],
+        cwd=caller,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["scans"] == []
+    assert not marker.exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as database:
+        identities = dict(database.execute("SELECT id, repository_identity FROM security_targets"))
+        assert identities["saved-0"] is not None
+        assert (identities["saved-1"] is None) == (executable_source == "unavailable-historical")
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("clock_reversed", [False, True])
+def test_identity_migration_merges_partially_sequenced_completion_history(
+    clock_reversed: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(55)
+    connection.execute(
+        "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
+    )
+    for scan_id, started, completed in (
+        ("older", "2026-08-01T00:01:00Z", "2026-08-01T00:02:00Z"),
+        ("newer", "2026-08-01T00:00:00Z", "2026-08-01T00:03:00Z"),
+        (
+            "last",
+            "2026-08-01T00:00:00Z",
+            "2026-08-01T00:01:00Z" if clock_reversed else "2026-08-01T00:04:00Z",
+        ),
+    ):
+        connection.execute(
+            "INSERT INTO scans(id, workspace_id, target_path, target_revision, scope, mode, "
+            "scan_dir, status, phase, started_at, completed_at, created_at, updated_at) "
+            "VALUES (?, 'workspace', '/synthetic/repository', 'revision', '.', 'standard', "
+            "?, 'complete', 'reporting', ?, ?, ?, ?)",
+            (scan_id, f"/synthetic/output/{scan_id}", started, completed, started, completed),
+        )
+    connection.execute("UPDATE scans SET completion_sequence = NULL WHERE id = 'older'")
+    for _ in range(2):
+        apply_migrations(connection)
+        assert [
+            row["id"]
+            for row in connection.execute("SELECT id FROM scans ORDER BY completion_sequence")
+        ] == ["older", "newer", "last"]
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "migration",
+    [
+        pytest.param("pre-release", marks=pytest.mark.cross_platform),
+        pytest.param(
+            "linux-v3",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux generation conversion"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("unavailable", ["file-parent", "permission-error", "bounded-missing"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_identity_migrations_respect_git_availability_for_unavailable_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    migration: str,
+    unavailable: str,
+    configured: bool,
+) -> None:
+    repository = tmp_path / "healthy"
+    initialize_git_repository(repository)
+    connection, apply_migrations = create_historical_database(
+        54 if migration == "pre-release" else 55
+    )
+    import workbench_target as target
+    import workbench_target_state as state
+    from filesystem_identity import serialize_filesystem_identity
+
+    identity = state._repository_identity_details(repository)
+    assert identity is not None
+    stored_identity = identity.value if migration == "pre-release" else identity.previous_value
+    assert stored_identity is not None
+    timestamp = apply_migrations.__globals__["now"]()
+    if migration == "pre-release":
+        connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (54, 'persist repository identities', ?)",
+            (timestamp,),
+        )
+    missing = tmp_path / "unavailable" / "old-checkout"
+    if unavailable == "file-parent":
+        missing.parent.write_text("no longer a directory\n")
+    elif unavailable == "bounded-missing":
+        initialize_git_repository(missing.parent)
+    else:
+        original = target._protected_repository_root
+
+        def inaccessible(path: Path) -> Path:
+            if path == missing:
+                raise PermissionError("historical checkout is inaccessible")
+            return original(path)
+
+        monkeypatch.setattr(target, "_protected_repository_root", inaccessible)
+    connection.executemany(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at, "
+        "repository_identity) VALUES (?, ?, 'Saved checkout', ?, ?, ?)",
+        [
+            ("healthy", str(repository), timestamp, timestamp, stored_identity),
+            ("unavailable", str(missing), timestamp, timestamp, None),
+        ],
+    )
+    connection.execute(
+        "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+        "VALUES ('workspace', 'healthy', ?, ?, ?)",
+        (str(repository), timestamp, timestamp),
+    )
+    metadata = repository.stat()
+    connection.execute(
+        "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, "
+        "scan_dir, status, phase, started_at, completed_at, created_at, updated_at, "
+        "target_device, target_inode) "
+        "VALUES ('scan', 'workspace', 'healthy', ?, 'revision', '.', 'standard', "
+        "'/synthetic/output', 'complete', 'reporting', ?, ?, ?, ?, ?, ?)",
+        (
+            str(repository),
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino),
+        ),
+    )
+    if migration == "linux-v3":
+        connection.execute("UPDATE scans SET repository_generation = ?", (stored_identity,))
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    if configured:
+        host_git = shutil.which("git")
+        assert host_git is not None
+        monkeypatch.setenv("CODEX_SECURITY_GIT", host_git)
+    git_available = configured or unavailable == "bounded-missing"
+    expected_identity = (
+        identity.value if git_available else None if migration == "pre-release" else stored_identity
+    )
+    for _ in range(2):
+        apply_migrations(connection)
+        assert (
+            connection.execute(
+                "SELECT repository_identity FROM security_targets WHERE id = 'healthy'"
+            ).fetchone()[0]
+            == expected_identity
+        )
+        if migration == "linux-v3":
+            assert (
+                connection.execute("SELECT repository_generation FROM scans").fetchone()[0]
+                == expected_identity
+            )
+    connection.close()
+
+
+@pytest.mark.cross_platform
+def test_current_database_does_not_inspect_historical_git_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, apply_migrations = create_historical_database(55)
+    connection.executemany(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+        "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",
+        [(str(index), f"/synthetic/history/{index}") for index in range(100)],
+    )
+    import workbench_target as target
+
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    with mock.patch.object(
+        target, "_protected_repository_root", wraps=target._protected_repository_root
+    ) as inspect_root:
+        apply_migrations(connection)
+        inspect_root.assert_not_called()
+    assert connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0] == 100
+    connection.close()
