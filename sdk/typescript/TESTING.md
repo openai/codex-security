@@ -175,20 +175,20 @@ Coverage is diagnostic and split across shards, not a combined percentage.
 Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
-The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow, setup tools, Bun configuration,
-shard runner, timing metadata, report comparator, or Windows test-root helper.
-It compares the previous layout (three shards on Linux/macOS, seven on Windows)
-with the expanded production layout (six on Linux/macOS, fourteen on Windows),
-for 39 sharded runner jobs. Both layouts use the same serial Bun runner and
-platform timing snapshot; the comparison combines all shards for each OS before
-checking inventory and outcomes. Local full-suite runs still cover unsharded
-cross-file ordering. More jobs add setup overhead, so compare required-green
+The separate `test-quality` workflow runs weekly and can be dispatched manually.
+Ordinary source pull requests run focused contracts for the shard runner, timing
+metadata, report comparator, and Windows test-root helper in the required SDK suite.
+The diagnostic workflow compares the previous layout (three shards on Linux/macOS,
+seven on Windows) with the expanded production layout (six on Linux/macOS,
+fourteen on Windows), for 39 sharded runner jobs. Both layouts use the same serial
+Bun runner and platform timing snapshot; the comparison combines all shards for
+each OS before checking inventory and outcomes. Local full-suite runs still cover
+unsharded cross-file ordering. More jobs add setup overhead, so compare required-green
 latency and summed runner time alongside shard test timings.
 
-Every layout uses the same seed for property cases and test ordering: pull requests
-replay seed 1; scheduled and manual runs use the workflow run number. Reports have
-unique OS/mode/shard names. The workflow requires every expected shard report
+Scheduled and manual diagnostics use the workflow run number as the same seed for
+property cases and test ordering in every layout. Reports have unique OS/layout/shard
+names. The workflow requires every expected shard report
 before accepting comparisons, then compares complete shard groups by test
 identity, outcome, assertion count, and occurrence count, retaining legitimate
 repeated names from parameterized tests while detecting missing or extra instances. It records every
