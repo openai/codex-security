@@ -25,6 +25,7 @@ import {
   validatePreparedOutputDir,
 } from "./runtime.js";
 import {
+  EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
@@ -61,7 +62,10 @@ export interface NormalizedExternalPublicationOptions {
 }
 
 /** File readers accept the vendor formats installed in this SDK. */
-export interface ExternalPublicationOptions extends NormalizedExternalPublicationOptions {
+export interface ExternalPublicationOptions extends Omit<
+  NormalizedExternalPublicationOptions,
+  "provider"
+> {
   provider: ExternalFindingsReaderOptions["provider"];
   sourceRepositoryUrl?: string;
 }
@@ -347,11 +351,19 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   const parsed = await readExternalFindings(path, options);
+  const normalizedOptions = {
+    ...options,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+  };
   return parsed.publication
-    ? preparePublicationInput(parsed.publication, options, dependencies)
+    ? preparePublicationInput(
+        parsed.publication,
+        normalizedOptions,
+        dependencies,
+      )
     : prepareNormalizedExternalPublication(
         parsed.findings,
-        options,
+        normalizedOptions,
         dependencies,
       );
 }

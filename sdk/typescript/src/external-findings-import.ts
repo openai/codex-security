@@ -3,7 +3,10 @@ import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
 } from "./external-import-contract.js";
-import { readExternalFindings } from "./external-findings-read.js";
+import {
+  EXTERNAL_FINDINGS_PROVIDERS,
+  readExternalFindings,
+} from "./external-findings-read.js";
 import {
   prepareNormalizedLocalImport,
   type LocalExternalImportDependencies,
@@ -21,8 +24,12 @@ export async function prepareLocalExternalImport(
     () => readExternalFindings(path, options, "local"),
     dependencies.signal,
   );
+  const normalizedOptions = {
+    ...options,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+  };
   let sourceRepositories = parsed.sourceRepositories ?? [];
-  if (options.provider === "semgrep") {
+  if (normalizedOptions.provider === "semgrep") {
     // The Cloud reader allows custom GitHub casing. Local provenance must also
     // agree with the caller's source URL when the checkout has no remote.
     const source = options.sourceRepositoryUrl!;
@@ -47,7 +54,7 @@ export async function prepareLocalExternalImport(
         })),
       ];
   }
-  return prepareNormalizedLocalImport(parsed.findings, options, {
+  return prepareNormalizedLocalImport(parsed.findings, normalizedOptions, {
     ...dependencies,
     sourceRepositories: [
       ...(dependencies.sourceRepositories ?? []),

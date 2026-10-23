@@ -114,6 +114,7 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { listLocalExternalFindings } from "./external-findings-local.js";
+import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
   publishPatchReview,
@@ -3618,7 +3619,7 @@ export async function main(
         "Local repository path for --to local; authorized repository ID or URL for --to cloud.",
       ),
       provider: z
-        .enum(["wiz", "snyk", "semgrep", "endor", "github"])
+        .enum(EXTERNAL_FINDINGS_READERS)
         .describe("Provider that produced these findings."),
       sourceRepositoryUrl: optionValue("--source-repository-url")
         .optional()

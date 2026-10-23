@@ -147,6 +147,85 @@ class SarifProjectionTest(unittest.TestCase):
         self.assertIn(f"Weaknesses: {', '.join(cwes)}", run["results"][0]["message"]["text"])
         self.assertEqual(self.finding["taxonomy"]["cwe"], cwes)
 
+    def test_sarif_projection_reports_run_warnings_without_changing_status_or_seal(self) -> None:
+        warning = "Optional writeup unavailable: notes/review.md\nThe finding was retained."
+        for status in ("completed", "failed", "interrupted", "canceled"):
+            for warnings in (None, [], [warning]):
+                with (
+                    self.subTest(status=status, warnings=warnings),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    scan_dir = Path(directory) / "scan"
+                    shutil.copytree(EXAMPLE_DIR, scan_dir)
+                    manifest = copy.deepcopy(self.manifest)
+                    manifest["scan"]["status"] = status
+                    if warnings is not None:
+                        manifest["scan"]["warnings"] = warnings
+                    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest) + "\n")
+                    before = {
+                        name: (scan_dir / name).read_bytes()
+                        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+                    }
+
+                    contents = FINALIZER.build_findings_export(scan_dir, "sarif")
+                    run = json.loads(contents)["runs"][0]
+                    if status == "completed" and not warnings:
+                        self.assertNotIn("invocations", run)
+                    else:
+                        self.assertEqual(
+                            run["invocations"],
+                            [
+                                {
+                                    "executionSuccessful": status == "completed",
+                                    "toolExecutionNotifications": [
+                                        {"level": "warning", "message": {"text": message}}
+                                        for message in warnings or []
+                                    ],
+                                }
+                            ],
+                        )
+                    FINALIZER.write_sarif_projection(scan_dir)
+                    self.assertEqual((scan_dir / "exports/results.sarif").read_bytes(), contents)
+                    self.assertEqual(
+                        before, {name: (scan_dir / name).read_bytes() for name in before}
+                    )
+
+    def test_sarif_projection_appends_unique_run_warnings_after_deferred_reasons(self) -> None:
+        deferred_reason = "Review of a deferred surface is incomplete."
+        warning = "Optional writeup unavailable."
+        for warnings, messages in (
+            (None, [deferred_reason, deferred_reason]),
+            ([], [deferred_reason, deferred_reason]),
+            (
+                [warning, deferred_reason, warning, warning + " "],
+                [deferred_reason, deferred_reason, warning, warning + " "],
+            ),
+        ):
+            with self.subTest(warnings=warnings), tempfile.TemporaryDirectory() as directory:
+                scan_dir = Path(directory) / "scan"
+                shutil.copytree(EXAMPLE_DIR, scan_dir)
+                manifest = copy.deepcopy(self.manifest)
+                if warnings is not None:
+                    manifest["scan"]["warnings"] = warnings
+                coverage_path = scan_dir / "coverage.json"
+                coverage = json.loads(coverage_path.read_bytes())
+                coverage["deferred"] = [
+                    {"id": f"deferred-{index}", "reason": deferred_reason} for index in range(2)
+                ]
+                coverage_path.write_text(json.dumps(coverage) + "\n")
+                for artifact in manifest["scan"]["artifacts"]:
+                    if artifact["path"] == "coverage.json":
+                        artifact["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+                (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest) + "\n")
+
+                invocation = FINALIZER.build_sarif_projection(scan_dir)["runs"][0]["invocations"][0]
+
+                self.assertTrue(invocation["executionSuccessful"])
+                self.assertEqual(
+                    invocation["toolExecutionNotifications"],
+                    [{"level": "warning", "message": {"text": message}} for message in messages],
+                )
+
     def test_sarif_projection_preserves_inventoried_exports(self) -> None:
         relative_path = "exports/results.sarif"
         error = "SARIF output path cannot overwrite a sealed scan artifact"

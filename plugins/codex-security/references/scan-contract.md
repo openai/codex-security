@@ -39,6 +39,8 @@ Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format.
 
 Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
 
+Optional `scan.warnings` records run-level diagnostics available when the bundle is first sealed. SARIF exports include these messages alongside deferred-task reasons in `toolExecutionNotifications`; warnings do not change `executionSuccessful`, which follows `scan.status`. Missing or empty warnings add no notifications. Existing sealed bundles remain unchanged, and export or publication warnings discovered afterward remain separate operation diagnostics.
+
 ### Stopped Result Recovery
 
 To validate and republish retained checkpoints for a failed, non-canceled workbench scan, run:

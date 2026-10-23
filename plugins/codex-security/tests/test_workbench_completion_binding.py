@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_deep_coordinator_succeeded,
     resume_deep_scan,
     run_workbench,
@@ -1119,10 +1121,49 @@ def test_completion_persists_optional_model_projection_warnings(
     assert len(warnings) == 1
     assert warnings[0].startswith("Automatic threat model save failed:")
     assert json.loads(manifest_path.read_text())["scan"]["threatModel"] == model
+    assert "warnings" not in json.loads(manifest_path.read_text())["scan"]
     if already_completed:
         assert {name: (scan_dir / name).read_bytes() for name in before} == before
     assert get_scan(state_dir, scan_id)["scan"]["warnings"] == warnings
     assert scan_command(state_dir, "complete-scan", scan_id)["scan"]["warnings"] == warnings
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("prepare_first", [False, True])
+def test_completion_exports_warning_without_workbench_state(
+    tmp_path: Path, mode: str, prepare_first: bool
+) -> None:
+    start = (
+        _start_deep_scan_with_draft_findings if mode == "deep" else _start_scan_with_draft_findings
+    )
+    state_dir, scan_id, scan_dir = start(tmp_path)
+    path = scan_dir / "findings.json"
+    findings = json.loads(path.read_text())
+    findings["findings"][0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
+    path.write_text(json.dumps(findings))
+    if prepare_first:
+        prepared = scan_command(state_dir, "prepare-scan-completion", scan_id)["scan"]
+        assert prepared["warnings"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    warnings = completed["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Skipped missing writeup for finding 1:")
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"] == warnings
+    assert json.loads((scan_dir / "coverage.json").read_text())["deferred"] == []
+
+    portable = tmp_path / "portable"
+    shutil.copytree(scan_dir, portable)
+    finalizer = load_script("finalize_scan_contract", module_name="warnings_finalizer")
+    sarif = finalizer.build_sarif_projection(portable)
+    assert sarif["runs"][0]["invocations"] == [
+        {
+            "executionSuccessful": True,
+            "toolExecutionNotifications": [
+                {"level": "warning", "message": {"text": warning}} for warning in warnings
+            ],
+        }
+    ]
 
 
 @pytest.mark.parametrize("field", ["ruleId", "anchor", "instance"])
@@ -1222,6 +1263,12 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     assert (scan_dir / "report.md").is_file()
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is False
+    warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
+    assert warnings
+    notifications = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+    assert all(
+        {"level": "warning", "message": {"text": warning}} in notifications for warning in warnings
+    )
 
 
 def test_completion_rejects_unknown_optional_root_cause_evidence_reference(
@@ -1406,8 +1453,12 @@ def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
 
 
 @pytest.mark.cross_platform
-def test_completion_retry_preserves_missing_writeup_warning(tmp_path: Path) -> None:
-    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_completion_retry_preserves_missing_writeup_warning(tmp_path: Path, mode: str) -> None:
+    start = (
+        _start_deep_scan_with_draft_findings if mode == "deep" else _start_scan_with_draft_findings
+    )
+    state_dir, scan_id, scan_dir = start(tmp_path)
     path = scan_dir / "findings.json"
     document = json.loads(path.read_text())
     document["findings"][0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
@@ -1440,6 +1491,10 @@ def test_completion_retry_preserves_missing_writeup_warning(tmp_path: Path) -> N
     assert completed["findingCount"] == 1
     assert len(completed["warnings"]) == 1
     assert completed["warnings"][0].startswith("Skipped missing writeup for finding 1:")
+    assert (
+        json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
+        == completed["warnings"]
+    )
     finding = json.loads(path.read_text())["findings"][0]
     assert finding["summary"] == document["findings"][0]["summary"]
     assert "writeup" not in finding

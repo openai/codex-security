@@ -882,6 +882,15 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     assert not any("result publication needs follow-up" in warning for warning in warnings)
     assert "Recovered finding 1: normalized severity change conditions." in warnings
     assert preserved["warnings"] == warnings
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"] == warnings
+    sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
+    invocation = sarif["runs"][0]["invocations"][0]
+    assert invocation["executionSuccessful"] is False
+    assert all(
+        {"level": "warning", "message": {"text": warning}}
+        in invocation["toolExecutionNotifications"]
+        for warning in warnings
+    )
 
 
 @pytest.mark.parametrize("deep_status", ["failed", "interrupted"])
