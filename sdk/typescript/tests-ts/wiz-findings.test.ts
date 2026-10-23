@@ -890,6 +890,24 @@ test.each([
     CVSSSeverity: "",
     expected: "informational",
   },
+  {
+    Severity: "NONE",
+    VendorSeverity: "",
+    CVSSSeverity: "",
+    expected: "unknown",
+  },
+  {
+    Severity: "",
+    VendorSeverity: "NONE",
+    CVSSSeverity: "HIGH",
+    expected: "unknown",
+  },
+  {
+    Severity: "",
+    VendorSeverity: "",
+    CVSSSeverity: "NONE",
+    expected: "unknown",
+  },
 ])(
   "Wiz CSV uses the reported severity fallback %j",
   async ({ expected, ...severity }) => {
@@ -897,6 +915,25 @@ test.each([
     await writeFile(f.file, csvReport([{ ...csvRow, ...severity }]));
     const parsed = await readVendorFindings(f.file);
     expect(parsed.findings[0]!.evidence.severity).toBe(expected);
+  },
+);
+
+test.each([{ vendorSeverity: "NONE", severity: "HIGH" }, { severity: "NONE" }])(
+  "Wiz JSON preserves unrated severity as unknown: %j",
+  async (severity) => {
+    const record = {
+      id: "vendor-none",
+      name: "CVE-2099-0001",
+      detailedName: "example-package",
+      vulnerableAsset: { id: "synthetic-asset" },
+      ...severity,
+    };
+    const parsed = await parse(
+      envelope("vulnerabilityFindings", [record], false),
+    );
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.findings[0]!.evidence.severity).toBe("unknown");
+    expect(parsed.findings[0]!.evidence.source_data).toEqual(record);
   },
 );
 

@@ -114,7 +114,7 @@ export function wizCsvFinding(
           .filter(Boolean)
           .join(" "),
         description: text(row["Description"]),
-        severity,
+        severity: severity === "none" ? "unknown" : severity,
         url: text(row["WizURL"]),
         advisory_ids: [name],
         packages: [

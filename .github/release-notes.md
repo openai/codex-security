@@ -45,6 +45,7 @@
 - persist run warnings in SARIF exports ([#1893](https://github.com/openai/codex-security/pull/1893))
 - keep HTML entities literal in report text ([#1851](https://github.com/openai/codex-security/pull/1851))
 - keep saved findings consistent through recovery ([#1310](https://github.com/openai/codex-security/pull/1310))
+- preserve unrated vulnerability severity on import ([#1898](https://github.com/openai/codex-security/pull/1898))
 
 <!-- release-section: highlights:end -->
 

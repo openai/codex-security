@@ -55,7 +55,9 @@ function wizFinding(
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
   const version = text(record["version"]);
-  const severity = text(record["vendorSeverity"]) ?? text(record["severity"]);
+  const severity = (
+    text(record["vendorSeverity"]) ?? text(record["severity"])
+  )?.toLowerCase();
   const asset = object(record["vulnerableAsset"]);
   const artifact = object(record["artifactType"]);
   if (!name || !packageName || !text(asset?.["id"])) {
@@ -88,7 +90,7 @@ function wizFinding(
       text(record["title"]) ??
       [packageName, version, name].filter(Boolean).join(" "),
     description: text(record["description"]),
-    severity: severity?.toLowerCase(),
+    severity: severity === "none" ? "unknown" : severity,
     url: text(record["portalUrl"]),
     advisory_ids: [text(record["vulnerabilityExternalId"]) ?? name],
     packages: [
