@@ -108,6 +108,7 @@ plugin, root, active = map(Path, sys.argv[1:4])
 scan_id, complete = sys.argv[4], sys.argv[5] == "true"
 sys.path[:0] = [str(plugin / "scripts"), str(plugin / "tests")]
 import workbench_saved_results as saved
+import workbench.retained_coverage as retained
 from workbench_saved_results import merge_saved_results
 from workbench_test_support import saved_binding, saved_discovery_worker
 from finalize_scan_contract import _recover_unsealed_coverage
@@ -117,6 +118,7 @@ binding["target"].update(targetId="synthetic", displayName="Synthetic repository
 binding["scope"]["includePaths"] = json.loads(sys.argv[7])
 args = (root, scan_id, binding, [worker], [])
 original_capture = saved._capture_saved_source
+original_retained_capture = retained._capture_saved_source
 published = []
 def capture(*args, **kwargs):
     captured = original_capture(*args, **kwargs)
@@ -130,6 +132,7 @@ def capture(*args, **kwargs):
             (staged / name).replace(active / name)
     return captured
 saved._capture_saved_source = capture
+retained._capture_saved_source = capture
 frozen = None
 if sys.argv[9] == "true":
     db = SimpleNamespace(require_canonical_scan_directory=lambda path: path, artifact_path=lambda *args, **kwargs: None, ARTIFACTS={"manifest": "scan-manifest.json"})
@@ -138,6 +141,7 @@ if sys.argv[9] == "true":
     frozen, _ = saved._recovery_source_digests(db, connection, scan)
 merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen)
 saved._capture_saved_source = original_capture
+retained._capture_saved_source = original_retained_capture
 replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
 assert merged[2] == replay[2]
 rejects_changed_checkpoint = None
