@@ -2,12 +2,17 @@
 import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "./bundle_options.mjs";
 import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const sdkRequire = createRequire(
+  join(root, "../../../sdk/typescript/package.json"),
+);
 const maxChunkBytes = 140_000;
 
 export async function buildMcpApp({ output, native = "universal" }) {
@@ -77,20 +82,15 @@ export async function buildMcpApp({ output, native = "universal" }) {
     }
   }
   await writeRuntime("helpers", "helpers-main.ts");
-  await build({
-    bundle: true,
-    entryPoints: [join(root, "src/deep-scan/permission-profile-preflight.ts")],
-    format: "esm",
-    outfile: join(mcpDir, "permission-profile-preflight.mjs"),
-    platform: "node",
-    target: "node20",
-  });
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
     const result = await build({
-      bundle: true,
-      define: { "import.meta.url": "__filename" },
+      ...mcpBundleOptions,
+      inject:
+        name === "server"
+          ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")]
+          : [],
       entryPoints: [join(root, entryPoint)],
       external: ["fsevents"],
       format: "cjs",

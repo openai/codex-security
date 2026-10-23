@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { createInterface } from "node:readline";
 
 // Native startup needs provider identity and auth selection, while exec reads
@@ -34,6 +34,165 @@ export function profileConfigOverrides(config) {
   return Object.entries(config)
     .filter(([, value]) => value != null)
     .map(([key, value]) => `${key}=${toml(value)}`);
+}
+
+/** Read native configuration origins and ordered layers without starting a thread. */
+export async function readCodexRuntimeConfigWithOrigins(options) {
+  const abortError = () =>
+    options.signal.reason instanceof Error
+      ? options.signal.reason
+      : new DOMException("Codex configuration read aborted.", "AbortError");
+  if (options.signal.aborted) throw abortError();
+  const args = [...(options.appServerArgs ?? options.commandArgs ?? [])];
+  if (options.appServerArgs === undefined) {
+    for (const override of [
+      ...options.configOverrides,
+      ...(options.providerConfigOverrides ?? []),
+    ])
+      args.push("--config", override);
+    args.push("app-server", "--stdio");
+  }
+  let executable = options.codexPath;
+  if (process.platform === "win32" && win32.isAbsolute(executable)) {
+    const root = win32.parse(executable).root;
+    if (root !== "\\" && root !== "/")
+      executable = win32.toNamespacedPath(executable);
+  }
+  const child = spawn(executable, args, {
+    cwd: options.cwd,
+    ...(options.env === undefined ? {} : { env: options.env }),
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const stderr = [];
+  let pending;
+  let nextId = 1;
+  let failure;
+  let closing = false;
+  let closed = false;
+  const fail = (error) => {
+    failure ??= error;
+    pending?.reject(failure);
+    pending = undefined;
+  };
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  child.on("error", fail);
+  child.stdin.on("error", fail);
+  lines.on("error", fail);
+  const childClose = new Promise((resolve) => {
+    child.once("close", (code, signal) => {
+      closed = true;
+      if (!closing)
+        fail(
+          new Error(
+            `Codex ${JSON.stringify(options.codexPath)} exited before configuration read completed (${signal ? `signal ${signal}` : `code ${code}`}).`,
+          ),
+        );
+      resolve();
+    });
+  });
+  const malformed = () =>
+    new Error("Codex returned a malformed configuration-read response.");
+  lines.on("line", (line) => {
+    if (failure || !line.trim()) return;
+    try {
+      const message = JSON.parse(line);
+      if (!isRecord(message)) throw malformed();
+      // Ignore notifications and server requests; this client only reads configuration.
+      if (typeof message.id !== "number") return;
+      if (!pending || message.id !== pending.id) throw malformed();
+      if (message.error !== undefined) {
+        const detail = isRecord(message.error) ? message.error : {};
+        throw new Error(
+          `Codex returned an error for ${JSON.stringify(pending.method)}${typeof detail.code === "number" ? ` (${detail.code})` : ""}.${typeof detail.message === "string" ? `\n${detail.message}` : ""}`,
+          { cause: message.error },
+        );
+      }
+      if (!isRecord(message.result)) throw malformed();
+      pending.resolve(message.result);
+      pending = undefined;
+    } catch (error) {
+      fail(error);
+    }
+  });
+  const write = (message) => {
+    if (!child.stdin.writable) {
+      fail(
+        new Error("Codex could not exchange app-server JSON-RPC over stdio."),
+      );
+      return;
+    }
+    child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+      if (error) fail(error);
+    });
+  };
+  const request = (method, params) => {
+    if (failure) return Promise.reject(failure);
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      pending = { id, method, resolve, reject };
+      write({ jsonrpc: "2.0", id, method, params });
+    });
+  };
+  const stop = () => {
+    lines.close();
+    if (!child.stdin.destroyed) child.stdin.end();
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGTERM");
+  };
+  const onAbort = () => {
+    fail(abortError());
+    stop();
+  };
+  options.signal.addEventListener("abort", onAbort, { once: true });
+  const close = async () => {
+    closing = true;
+    options.signal.removeEventListener("abort", onAbort);
+    stop();
+    if (closed) return;
+    const forcedTermination = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null)
+        child.kill("SIGKILL");
+      // Descendants may retain the pipes after the app-server process exits.
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, 1_000);
+    try {
+      await childClose;
+    } finally {
+      clearTimeout(forcedTermination);
+    }
+  };
+  try {
+    await request("initialize", {
+      clientInfo: {
+        name: "codex-security",
+        title: "Codex Security",
+        version: options.clientVersion,
+      },
+      capabilities: { experimentalApi: true },
+    });
+    if (failure) throw failure;
+    write({ jsonrpc: "2.0", method: "initialized", params: {} });
+    return await request("config/read", {
+      cwd: options.cwd,
+      includeLayers: true,
+    });
+  } catch (error) {
+    await close();
+    const diagnostic = Buffer.concat(stderr).toString("utf8");
+    if (error instanceof Error && diagnostic)
+      error.message += `\n${diagnostic}`;
+    throw error;
+  } finally {
+    await close();
+  }
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // Native profile files keep provider configuration off process arguments while

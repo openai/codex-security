@@ -3,6 +3,7 @@ import {
   cp,
   lstat,
   mkdir,
+  readdir,
   readFile,
   realpath,
   symlink,
@@ -76,12 +77,12 @@ async function archiveWorkbenchOutput(
       "-B",
       "-c",
       [
-        "import argparse, json, sqlite3, sys",
+        "import argparse, json, sys",
         "from pathlib import Path",
         "sys.path.insert(0, sys.argv[1])",
+        "from workbench_db import connect",
         "from workbench_scan_start import archive_scan",
-        "connection = sqlite3.connect(':memory:')",
-        "connection.execute('CREATE TABLE scans (id TEXT, status TEXT, scan_dir TEXT)')",
+        "connection = connect()",
         "args = argparse.Namespace(archived_scan_dir=None, archive_existing=True)",
         "with archive_scan(connection, args, Path(sys.argv[2]), '2026-10-08T00:00:00Z', lambda path: path.resolve()) as archive:",
         "    print(json.dumps(str(archive)))",
@@ -99,6 +100,19 @@ async function archiveWorkbenchOutput(
   );
   return JSON.parse(result.stdout) as string;
 }
+
+test("workbench archiving preserves output and creates an empty replacement", async () => {
+  const root = await temporaryDirectory();
+  const output = await runtime.prepareOutputDir(undefined, "fixture", root);
+  await writeFile(join(output, "retained.txt"), "Synthetic retained scan data");
+
+  const archive = await archiveWorkbenchOutput(output, root);
+
+  expect(await readFile(join(archive, "retained.txt"), "utf8")).toBe(
+    "Synthetic retained scan data",
+  );
+  expect(await readdir(output)).toEqual([]);
+});
 
 windowsTest(
   "new Windows scan roots start private beneath a shared parent",

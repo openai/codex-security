@@ -6,7 +6,6 @@ import type {
   ThreadOptions,
 } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import { codexSettings, threadSettings } from "../secret-discovery/harness.mts";
-import { deepScanPermissionProfileFallbackError } from "../secret-discovery/runtime.mts";
 import { cases, routingPrompt, type RoutingCase } from "./cases.mts";
 
 const pluginRoot = join(import.meta.dirname, "../../plugins/codex-security");
@@ -139,10 +138,7 @@ export async function runRoutingCase(
 ) {
   const prompt = routingPrompt(scenario);
   const events: ThreadEvent[] = [];
-  const controller = new AbortController();
-  const combined = signal
-    ? AbortSignal.any([signal, controller.signal])
-    : controller.signal;
+  const combined = signal ?? new AbortController().signal;
   const started = performance.now();
   let error: string | undefined;
   try {
@@ -150,17 +146,6 @@ export async function runRoutingCase(
     const stream = await thread.runStreamed(prompt, { signal: combined });
     for await (const event of stream.events) {
       events.push(event);
-      const warning =
-        event.type === "error"
-          ? event.message
-          : event.type === "item.completed" && event.item.type === "error"
-            ? event.item.message
-            : undefined;
-      const fallback = deepScanPermissionProfileFallbackError(warning);
-      if (fallback) {
-        error ??= fallback.message;
-        controller.abort(fallback);
-      }
       // Drain after cancellation before the shared harness removes temp state.
     }
     combined.throwIfAborted();

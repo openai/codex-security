@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
 import { brotliCompressSync, brotliDecompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 import {
@@ -268,6 +268,8 @@ function runPackageCommand(
   environment: NodeJS.ProcessEnv,
 ): Promise<{ status: number; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const startedAt = performance.now();
+    const timeoutMs = 30_000;
     execFile(
       command,
       args,
@@ -275,10 +277,10 @@ function runPackageCommand(
         cwd: root,
         env: environment,
         encoding: "utf8",
-        timeout: 30_000,
+        timeout: timeoutMs,
         windowsHide: true,
       },
-      (error, _stdout, stderr) => {
+      (error, stdout, stderr) => {
         if (error === null) {
           resolve({ status: 0, stderr });
         } else if (
@@ -288,6 +290,12 @@ function runPackageCommand(
         ) {
           resolve({ status: error.code, stderr });
         } else {
+          Object.assign(error, {
+            stdout,
+            stderr,
+            elapsedMs: performance.now() - startedAt,
+            timeoutMs,
+          });
           reject(error);
         }
       },
@@ -1280,7 +1288,18 @@ describe("npm package tar listings", () => {
           },
         );
         if (scenario.error) {
-          expect({ scenario: scenario.name, status: result.status }).toEqual({
+          expect(
+            { scenario: scenario.name, status: result.status },
+            inspect(
+              {
+                error: result.error,
+                signal: result.signal,
+                stdout: result.stdout,
+                stderr: result.stderr,
+              },
+              { depth: null, maxStringLength: null },
+            ),
+          ).toEqual({
             scenario: scenario.name,
             status: 1,
           });

@@ -1,6 +1,12 @@
+export { createApiTestFixtures } from "./temporary-directories.js";
+
+import { cp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
-import { CodexSecurity, runScanEvents } from "../../src/api.js";
+import { CodexSecurity } from "../../src/api.js";
+import { parse as parseToml } from "smol-toml";
+import { deepMerge, type JsonObject } from "../../src/config.js";
+import { runScanTurn } from "../../src/scan-events.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
 
@@ -20,7 +26,6 @@ export function preparedRuntime(
 ): PreparedRuntime {
   return {
     codexHome,
-    deepScanConfigPath: join(codexHome, "deep-scan.toml"),
     plugin: {
       pluginRoot: PLUGIN_ROOT,
       marketplaceRoot,
@@ -32,6 +37,32 @@ export function preparedRuntime(
     environment: {},
     credentialsAvailable: true,
   };
+}
+
+export async function copyPluginVariant(
+  directory: string,
+  marker: string,
+): Promise<string> {
+  const root = join(directory, marker);
+  await cp(PLUGIN_ROOT, root, { recursive: true });
+  await writeFile(
+    join(root, ".codex-plugin", "plugin.json"),
+    JSON.stringify({
+      name: "codex-security",
+      version: "0.1.0",
+      skills: "./skills/",
+      mcpServers: "./.mcp.json",
+    }),
+  );
+  await writeFile(
+    join(root, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        "synthetic-plugin": { command: process.execPath, args: [marker] },
+      },
+    }),
+  );
+  return root;
 }
 
 export function scanRuntimeDependencies(codexHome: string, scanDir: string) {
@@ -48,8 +79,8 @@ export type ScanObserverName = Parameters<
 >[0];
 
 type ScanEventOptions = Omit<
-  Parameters<typeof runScanEvents>[0],
-  "thread" | "events" | "signal" | "scanDir" | "pluginRoot" | "expectation"
+  Parameters<typeof runScanTurn>[0],
+  "thread" | "events" | "signal" | "scanDir" | "repository" | "model"
 > & { abortController?: AbortController };
 
 export function completedTurn(): Extract<
@@ -88,23 +119,16 @@ export function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
   options: ScanEventOptions = {},
-  repositoryRevision = "deadbeef",
-): ReturnType<typeof runScanEvents> {
-  return runScanEvents({
+): ReturnType<typeof runScanTurn> {
+  const { abortController = new AbortController(), ...observers } = options;
+  return runScanTurn({
     thread: { id: null },
     events,
     signal: (options.abortController ?? new AbortController()).signal,
     scanDir,
-    pluginRoot: PLUGIN_ROOT,
     model: "gpt-5.6-sol",
-    ...options,
-    expectation: {
-      repository: "/repository",
-      repositoryRevision,
-      target: { kind: "repository", paths: [] },
-      mode: "standard",
-      pluginVersion: "0.1.0",
-    },
+    ...observers,
+    repository: "/repository",
   });
 }
 
@@ -139,3 +163,10 @@ export function codexFactory<Run>(
 }
 
 export const failedPostScanEvents = failedEvents;
+
+export function effectiveCodexConfiguration(options: CodexOptions): JsonObject {
+  return (options.configOverrides ?? []).reduce(
+    (config, override) => deepMerge(config, parseToml(override) as JsonObject),
+    (options.config ?? {}) as JsonObject,
+  );
+}

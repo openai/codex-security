@@ -396,7 +396,7 @@ describe("scan publication and artifact recovery", () => {
     });
   });
 
-  test("builds each ordinary scan context once without losing selected findings", async () => {
+  test("builds each scan context once without losing selected findings", async () => {
     const fixture = await startDraftScan();
     const findingsPath = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(findingsPath);
@@ -459,7 +459,7 @@ describe("scan publication and artifact recovery", () => {
     expect(probe.status, probe.stderr).toBe(0);
     expect(JSON.parse(probe.stdout)).toEqual({
       ordinaryCalls: 1,
-      selectedCalls: 2,
+      selectedCalls: 1,
       ordinaryCount: 20,
       selectedCount: 21,
       workspaceCount: 20,

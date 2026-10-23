@@ -1,5 +1,5 @@
 import { captureCli } from "./support/cli-run.js";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/index.js";
@@ -19,9 +19,37 @@ import {
   scanInputIdentity,
 } from "../src/scan-inputs.js";
 import { workbenchCommand } from "./support/workbench-command.js";
+import { readRegularInputFile } from "../src/prompt-files.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
+
+test("prompt reads compare Windows file handles when path volume serials differ", async () => {
+  const root = await temporaryDirectory();
+  const path = join(root, "prompt.md");
+  await writeFile(path, "Original instructions.");
+  const metadata = await lstat(path, { bigint: true });
+  const selected = {
+    isFile: () => true,
+    ino: metadata.ino,
+    dev: metadata.dev ^ (1n << 60n),
+  };
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    expect(await readRegularInputFile(path, root, selected)).toBe(
+      "Original instructions.",
+    );
+    await expect(
+      readRegularInputFile(path, root, {
+        ...selected,
+        ino: selected.ino + 1n,
+      }),
+    ).rejects.toThrow("Input files must remain regular files");
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+});
 
 test("rerun recognizes unchanged context after the workbench serializes its recipe", async () => {
   const root = await temporaryDirectory();

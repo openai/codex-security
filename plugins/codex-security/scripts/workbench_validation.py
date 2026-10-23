@@ -16,11 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
-from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
-from workbench_scan_usage import (
-    _reject_nonstandard_json_number as reject_nonstandard_json_number,
-)
-from workbench_scan_usage import _timestamp as usage_timestamp
+from workbench_constants import TOKEN_FIELDS, reject_nonstandard_json_number
 
 reject_non_finite_json = finalizer._reject_non_finite_json
 
@@ -85,6 +81,9 @@ def _valid_legacy_scan_cost(cost: object) -> bool:
 
 
 def _valid_measured_scan_usage(usage: object) -> bool:
+    from workbench_scan_usage import _timestamp as usage_timestamp
+    from workbench_scan_usage import valid_account_rate_limit
+
     if not isinstance(usage, dict):
         return False
     coverage = usage.get("coverage")

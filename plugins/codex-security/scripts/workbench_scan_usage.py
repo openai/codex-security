@@ -16,14 +16,14 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
 
-TOKEN_FIELDS = {
-    "input_tokens": "inputTokens",
-    "cached_input_tokens": "cachedInputTokens",
-    "cache_write_input_tokens": "cacheWriteInputTokens",
-    "output_tokens": "outputTokens",
-    "reasoning_output_tokens": "reasoningOutputTokens",
-    "total_tokens": "totalTokens",
-}
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from finalize_scan_contract import ContractError
+from workbench_composition import CompositionView, load_composition
+from workbench_constants import TOKEN_FIELDS
+from workbench_constants import reject_nonstandard_json_number as _reject_nonstandard_json_number
+
 STATE_DATABASE_NAME = re.compile(r"state_(\d+)\.sqlite")
 STATE_DATABASE_TIMEOUT_SECONDS = 1.0
 
@@ -59,6 +59,17 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
+def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
+    """Keep measured usage unless an incoming receipt explicitly replaces it."""
+    if incoming is None:
+        return existing
+    replacement = stored_scan_cost_fields(incoming)
+    if "usage" in replacement:
+        return json.dumps(replacement, allow_nan=False)
+    fields = {**stored_scan_cost_fields(existing), **replacement}
+    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
+
+
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -66,19 +77,107 @@ def reconcile_completed_scan_cost(
 ) -> None:
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
-    existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
-    if isinstance(existing, dict) and "usage" in existing:
-        cost_json = json.dumps(
-            {**existing, "cost": json.loads(cost_json)},
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+    cost_json = merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
+
+
+def finalize_scan_usage(
+    db: Any, connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    scan_id = db.require_uuid(args.scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        scan = db.require_scan(connection, scan_id)
+        stored = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
+        usage = stored.get("usage", {})
+        completion = usage.get("completion")
+        if scan["status"] != "complete" or not completion:
+            raise SystemExit("The scan has no pending completion usage.")
+        if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
+            raise SystemExit("The scan usage belongs to a different completion turn.")
+        if not completion["finalized"]:
+            usage = collect_scan_usage(
+                connection,
+                scan,
+                thread_id=args.thread_id,
+                completed_turn_id=args.turn_id,
+            )
+            if usage["coverage"] == "unavailable":
+                if not usage.get("accountRateLimits"):
+                    return db.scan_context(connection, scan_id)
+                usage = {**stored["usage"], "accountRateLimits": usage["accountRateLimits"]}
+            else:
+                if args.turn_status != "completed":
+                    if usage["coverage"] == "complete":
+                        usage["coverage"] = "partial"
+                    usage["warnings"] = [
+                        *usage.get("warnings", []),
+                        f"scan_turn_{args.turn_status}",
+                    ]
+                usage["completion"] = {**completion, "finalized": True}
+            cost_json = db.parse_scan_cost(json.dumps({**stored, "usage": usage}))
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET cost_json = ? WHERE id = ?", (cost_json, scan_id)
+                )
+        return db.scan_context(connection, scan_id)
+
+
+def completion_scan_cost(
+    db: Any,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    cost_json: str | None,
+    *,
+    completed_at: str,
+    thread_id: str | None,
+    turn_id: str | None,
+) -> str | None:
+    # Ordinary scans retain saved accounting unless an explicit usage envelope
+    # replaces it. Deep Scans supply a new total; earlier estimates are partial.
+    completion_cost_json = cost_json
+    if scan["mode"] != "deep" and "usage" not in stored_scan_cost_fields(cost_json):
+        completion_cost_json = merge_scan_cost(scan["cost_json"], cost_json)
+    cost_fields = stored_scan_cost_fields(completion_cost_json)
+    if "usage" not in stored_scan_cost_fields(cost_json):
+        measured_usage = collect_scan_usage(
+            connection,
+            scan,
+            thread_id=thread_id,
+            completed_at=completed_at,
+        )
+        if measured_usage["coverage"] != "complete" and "usage" in cost_fields:
+            retained_usage = cost_fields["usage"]
+            if retained_usage["coverage"] != "unavailable" and (
+                measured_usage["coverage"] == "unavailable"
+                or retained_usage["totalTokens"] > measured_usage["totalTokens"]
+            ):
+                measured_usage = {
+                    **retained_usage,
+                    "coverage": "partial",
+                    "warnings": sorted(
+                        {*retained_usage.get("warnings", []), *measured_usage.get("warnings", [])}
+                    ),
+                }
+        if thread_id is not None and turn_id is not None:
+            measured_usage["completion"] = {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "finalized": False,
+            }
+            if measured_usage["coverage"] == "complete":
+                measured_usage["coverage"] = "partial"
+            measured_usage["warnings"] = sorted(
+                {*measured_usage.get("warnings", []), "turn_in_progress"}
+            )
+        completion_cost_json = db.parse_scan_cost(
+            json.dumps({**cost_fields, "usage": measured_usage})
+        )
+    return completion_cost_json
 
 
 def collect_scan_usage(
@@ -91,9 +190,20 @@ def collect_scan_usage(
 ) -> dict[str, Any]:
     """Count attributable receipts and flag observable gaps inside the scan window."""
 
-    roots = _scan_root_thread_ids(connection, scan, thread_id)
-    parent_ids = set(_scan_root_thread_ids(connection, scan, thread_id, include_workers=False))
-    worker_directories = _scan_worker_directories(connection, scan)
+    try:
+        composition = load_composition(connection, scan)
+    except (ContractError, OSError) as exc:
+        print(f"Could not measure scan usage: {exc}", file=sys.stderr)
+        return _unavailable_usage("composition_checkpoint_unavailable")
+    roots = _scan_root_thread_ids(connection, scan, thread_id, composition=composition)
+    parent_ids = set(
+        _scan_root_thread_ids(
+            connection, scan, thread_id, composition=composition, include_workers=False
+        )
+    )
+    worker_directories = _scan_worker_directories(connection, scan) | {
+        child["scan_dir"] for child in composition.children
+    }
     if not roots and not worker_directories:
         return _unavailable_usage("scan_thread_unavailable")
 
@@ -108,6 +218,27 @@ def collect_scan_usage(
         return _unavailable_usage("scan_window_unavailable")
 
     warnings: set[str] = set()
+    checkpoint = composition.checkpoint
+    # Known currency receipts do not make unavailable session token counts complete.
+    if (
+        checkpoint is not None
+        and (
+            checkpoint.get("costUnavailable")
+            or (
+                not scan["continuation_thread_id"]
+                and (
+                    checkpoint.get("mergeStarted") is True
+                    or (
+                        checkpoint.get("version") != 3
+                        and checkpoint.get("mergeStarted") is not False
+                        and checkpoint.get("mergedScanIds")
+                    )
+                    or _merge_was_prepared(scan["scan_dir"])
+                )
+            )
+        )
+    ) or any(not child["continuation_thread_id"] for child in composition.children):
+        warnings.add("scan_thread_unavailable")
     try:
         sessions, missing_thread_ids = _discover_rollout_sessions(
             state_database,
@@ -217,11 +348,21 @@ def collect_scan_usage(
     return result
 
 
+def _merge_was_prepared(scan_dir: str) -> bool:
+    # The host persists this input before launch; a completed discovery is not a merge.
+    try:
+        (Path(scan_dir) / "artifacts/deep-scan/merge-inputs.json").lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _scan_root_thread_ids(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     supplied_thread_id: str | None,
     *,
+    composition: CompositionView,
     include_owner_threads: bool = True,
     include_workers: bool = True,
 ) -> list[str]:
@@ -237,19 +378,35 @@ def _scan_root_thread_ids(
         ).fetchone()
         if workspace is not None:
             candidates.append(workspace["thread_id"])
-    if include_workers and scan["mode"] == "deep":
-        candidates.extend(
+    historical_workers = (
+        {
             row["sdk_thread_id"]
             for row in connection.execute(
-                """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_worker_threads
-                WHERE scan_id = ?
-                ORDER BY sdk_thread_id
-                """,
+                "SELECT sdk_thread_id FROM deep_scan_worker_threads WHERE scan_id = ?",
+                (scan["id"],),
+            )
+        }
+        if scan["mode"] == "deep"
+        else set()
+    )
+    candidates.extend(
+        thread
+        for thread in composition.execution_threads
+        if include_workers or thread not in historical_workers
+    )
+    if include_workers and scan["mode"] == "deep":
+        candidates.extend(child["continuation_thread_id"] for child in composition.children)
+        candidates.extend(
+            row["thread_id"]
+            for row in connection.execute(
+                "SELECT sessions.thread_id FROM scan_execution_threads AS sessions "
+                "JOIN scans AS child ON child.id = sessions.scan_id "
+                "WHERE child.parent_scan_id = ? AND child.parent_scan_role = 'deep_pass'",
                 (scan["id"],),
             )
         )
+    if include_workers:
+        candidates.extend(sorted(historical_workers))
     roots: dict[str, None] = {}
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
@@ -257,13 +414,16 @@ def _scan_root_thread_ids(
     return list(roots)
 
 
-def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
+def _scan_execution_thread_ids(
+    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView
+) -> list[str]:
     # CLI recipes identify dedicated executions; Desktop continuations can be shared.
     return _scan_root_thread_ids(
         connection,
         scan,
         scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
         include_owner_threads=False,
+        composition=composition,
     )
 
 
@@ -950,10 +1110,6 @@ def _unavailable_usage(
     if rate_limits:
         result["accountRateLimits"] = [rate_limits[key] for key in sorted(rate_limits)]
     return result
-
-
-def _reject_nonstandard_json_number(value: str) -> None:
-    raise ValueError(f"invalid JSON number {value}")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ import {
   createCodexProfileClient,
   preflightProviderDefinitions,
   profileConfigOverrides,
+  readCodexRuntimeConfigWithOrigins,
 } from "../../scripts/codex_profile.mjs";
 
 test("native startup provider metadata preserves identity and auth without private configuration", () => {
@@ -84,6 +85,219 @@ test("native overrides reject null array elements", () => {
     () => profileConfigOverrides({ values: [null] }),
     /must contain finite TOML values/,
   );
+});
+
+async function runtimeConfigFixture(mode = "success") {
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-origins-test-"));
+  const script = path.join(directory, "native-fixture.mjs");
+  const marker = path.join(directory, "marker.json");
+  const response = {
+    config: { daybreak: true, features: { cli_daybreak: false } },
+    origins: {
+      daybreak: { name: { type: "user", profile: null } },
+      "features.cli_daybreak": {
+        name: { type: "project", path: "/synthetic/.codex/config.toml" },
+      },
+    },
+    layers: [
+      { name: { type: "commandLine" }, config: { model: "synthetic-model" } },
+      {
+        name: { type: "project", path: "/synthetic/.codex/config.toml" },
+        config: { features: { cli_daybreak: false } },
+      },
+      { name: { type: "user", profile: null }, config: { daybreak: true } },
+    ],
+    futureMetadata: { unchanged: [null, true, "synthetic"] },
+  };
+  await writeFile(
+    script,
+    String.raw`
+      import { writeFile } from "node:fs/promises";
+      import { createInterface } from "node:readline";
+      const record = {
+        args: process.argv.slice(2), cwd: process.cwd(), pid: process.pid,
+        environment: {
+          CODEX_HOME: process.env.CODEX_HOME,
+          PROFILE_RUNTIME_PARENT_ONLY: process.env.PROFILE_RUNTIME_PARENT_ONLY,
+        },
+        requests: [],
+      };
+      const emit = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+      for await (const line of createInterface({ input: process.stdin })) {
+        const request = JSON.parse(line);
+        record.requests.push(request);
+        await writeFile(process.env.PROFILE_RUNTIME_MARKER, JSON.stringify(record));
+        if (request.method === "initialize") {
+          emit({ jsonrpc: "2.0", id: request.id, result: {} });
+        } else if (request.method === "config/read") {
+          if (process.env.PROFILE_RUNTIME_MODE === "wait") {
+            await new Promise(() => {});
+          } else if (process.env.PROFILE_RUNTIME_MODE === "error") {
+            process.stderr.write("synthetic token=fixture-secret: runtime diagnostic\n");
+            emit({ id: request.id, error: { code: -32600, message: "Synthetic config failure" } });
+          } else if (process.env.PROFILE_RUNTIME_MODE === "malformed") {
+            emit({ id: request.id, result: [] });
+          } else {
+            emit({ method: "synthetic/notification", params: {} });
+            emit({ id: request.id, result: JSON.parse(process.env.PROFILE_RUNTIME_RESPONSE) });
+          }
+        }
+      }
+    `,
+  );
+  return {
+    directory,
+    script,
+    response,
+    options: {
+      clientVersion: "0.0.0-synthetic",
+      codexPath: process.execPath,
+      cwd: directory,
+      configOverrides: ['model="synthetic-model"'],
+      providerConfigOverrides: ['model_provider="synthetic-provider"'],
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([key]) =>
+            [
+              "PATH",
+              "Path",
+              "SystemRoot",
+              "WINDIR",
+              "HOME",
+              "USERPROFILE",
+              "TEMP",
+              "TMP",
+            ].includes(key),
+          ),
+        ),
+        CODEX_HOME: path.join(directory, "selected credential home"),
+        PROFILE_RUNTIME_MARKER: marker,
+        PROFILE_RUNTIME_MODE: mode,
+        PROFILE_RUNTIME_RESPONSE: JSON.stringify(response),
+      },
+      signal: new AbortController().signal,
+    },
+    record: async () => JSON.parse(await readFile(marker, "utf8")),
+    cleanup: () => rm(directory, { recursive: true, force: true }),
+  };
+}
+
+for (const fullInvocation of [false, true]) {
+  test(`native config origins preserve ordered layers and ${fullInvocation ? "full" : "constructed"} app-server invocation`, async () => {
+    const f = await runtimeConfigFixture();
+    const childClose = captureChildClose();
+    const previous = process.env.PROFILE_RUNTIME_PARENT_ONLY;
+    process.env.PROFILE_RUNTIME_PARENT_ONLY = "synthetic-parent-only";
+    try {
+      const suppliedArgs = [
+        f.script,
+        "--config",
+        "daybreak=false",
+        "app-server",
+        "--stdio",
+      ];
+      const result = await readCodexRuntimeConfigWithOrigins({
+        ...f.options,
+        commandArgs: [f.script],
+        ...(fullInvocation ? { appServerArgs: suppliedArgs } : {}),
+      });
+      assert.deepEqual(result, f.response);
+      const record = await f.record();
+      assert.equal(record.cwd, f.directory);
+      assert.deepEqual(record.environment, {
+        CODEX_HOME: f.options.env.CODEX_HOME,
+      });
+      assert.deepEqual(
+        record.args,
+        fullInvocation
+          ? suppliedArgs.slice(1)
+          : [
+              "--config",
+              'model="synthetic-model"',
+              "--config",
+              'model_provider="synthetic-provider"',
+              "app-server",
+              "--stdio",
+            ],
+      );
+      assert.deepEqual(
+        record.requests.map((request: { method: string }) => request.method),
+        ["initialize", "initialized", "config/read"],
+      );
+      assert.deepEqual(record.requests[0].params.capabilities, {
+        experimentalApi: true,
+      });
+      assert.equal(
+        record.requests[0].params.clientInfo.version,
+        f.options.clientVersion,
+      );
+      assert.deepEqual(record.requests[2].params, {
+        cwd: f.directory,
+        includeLayers: true,
+      });
+      await childClose.wait();
+      assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
+    } finally {
+      if (previous === undefined)
+        delete process.env.PROFILE_RUNTIME_PARENT_ONLY;
+      else process.env.PROFILE_RUNTIME_PARENT_ONLY = previous;
+      childClose.restore();
+      await f.cleanup();
+    }
+  });
+}
+
+test("native config origins retain errors and close failed app-server children", async () => {
+  for (const mode of ["error", "malformed"]) {
+    const f = await runtimeConfigFixture(mode);
+    const childClose = captureChildClose();
+    try {
+      await assert.rejects(
+        readCodexRuntimeConfigWithOrigins({
+          ...f.options,
+          commandArgs: [f.script],
+        }),
+        mode === "error"
+          ? /config\/read.*-32600[\s\S]*Synthetic config failure[\s\S]*synthetic token=fixture-secret: runtime diagnostic/
+          : /malformed configuration-read response/,
+      );
+      const record = await f.record();
+      await childClose.wait();
+      assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" });
+    } finally {
+      childClose.restore();
+      await f.cleanup();
+    }
+  }
+});
+
+test("native config origins abort without starting a turn or leaving a child", async () => {
+  const f = await runtimeConfigFixture("wait");
+  const childClose = captureChildClose();
+  const controller = new AbortController();
+  try {
+    const reading = readCodexRuntimeConfigWithOrigins({
+      ...f.options,
+      commandArgs: [f.script],
+      signal: controller.signal,
+    });
+    const rejected = assert.rejects(reading, { name: "AbortError" });
+    controller.abort();
+    await rejected;
+    await childClose.wait();
+    const reason = new Error("Synthetic cancellation");
+    await assert.rejects(
+      readCodexRuntimeConfigWithOrigins({
+        ...f.options,
+        commandArgs: [f.script],
+        signal: AbortSignal.abort(reason),
+      }),
+      (error) => error === reason,
+    );
+  } finally {
+    childClose.restore();
+    await f.cleanup();
+  }
 });
 
 async function fixture(mode = "success") {

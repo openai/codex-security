@@ -65,7 +65,7 @@ test("uses each platform's history and includes new files without selecting dele
   expect(partitionTests(files, 2, {}, "darwin").flat().sort()).toEqual(files);
 });
 
-test.each([3, 7])(
+test.each([3, 4, 5, 7])(
   "runs each eligible file once across %i native shards, including new files",
   async (count) => {
     const node = Bun.which("node");

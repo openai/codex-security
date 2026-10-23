@@ -1065,7 +1065,7 @@ test("cancellation after registration retains scan identity before executor disp
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "canceled" },
     },
   ]);
 });

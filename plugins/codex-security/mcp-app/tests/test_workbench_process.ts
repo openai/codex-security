@@ -1,10 +1,10 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { importSource } from "./import-module.ts";
@@ -152,7 +152,7 @@ def main():
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );
-    const workerIds = [
+    const values = [
       "ordinary",
       "--help",
       "-",
@@ -162,19 +162,20 @@ def main():
       "x".repeat(200_000),
       "--help",
     ];
-    const result = await executeParser(
-      process.env.PYTHON?.trim() || "python3",
-      workbenchArgs("claim-deep-scan-dedup", {
-        scanId: randomUUID(),
-        workerId: randomUUID(),
-        promptPath: "--prompt.md",
-        artifactDir: "",
-        inputWorkerId: workerIds,
-      }),
-    );
-    assert.equal(result.prompt_path, "--prompt.md");
-    assert.equal(result.artifact_dir, "");
-    assert.deepEqual(result.input_worker_id, workerIds);
+    for (const value of values) {
+      const result = await executeParser(
+        process.env.PYTHON?.trim() || "python3",
+        workbenchArgs("create-workspace", {
+          workspaceId: randomUUID(),
+          targetPath: "--target",
+          targetSummary: "",
+          targetTitle: value,
+        }),
+      );
+      assert.equal(result.target_path, "--target");
+      assert.equal(result.target_summary, "");
+      assert.equal(result.target_title, value);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -380,8 +381,8 @@ await test("large saved context retains cancellation results and diagnostics", a
         "--user-context-stdin",
       ],
       userContext,
-    )) as { deepScan: { scanId: string } };
-    const scanId = begun.deepScan.scanId;
+    )) as { scan: { scanId: string } };
+    const scanId = begun.scan.scanId;
     const readScan = async () =>
       (await executeWorkbench(python, ["get-scan", "--scan-id", scanId])) as {
         workspace: {

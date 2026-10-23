@@ -77,6 +77,24 @@ def start_headless_standard_scan(
     )
 
 
+def test_create_private_directory_propagates_missing_root_error() -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="missing_scan_root_test")
+    root = mock.Mock(spec=Path)
+    root.parent = root
+    failure = FileNotFoundError("Synthetic unavailable drive root.")
+    root.mkdir.side_effect = failure
+    directory = mock.Mock(spec=Path)
+    directory.parent = root
+    directory.mkdir.side_effect = FileNotFoundError("Synthetic missing parent.")
+
+    with pytest.raises(FileNotFoundError) as raised:
+        namespace["create_private_directory"](directory)
+
+    assert raised.value is failure
+    root.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+    directory.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
+
+
 def prompt_scan_arguments(target: Path, root: Path) -> argparse.Namespace:
     return argparse.Namespace(
         thread_id="thread-fixture",
@@ -207,6 +225,26 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
     assert workspace["id"]
     assert workspace["setup"] == {"submitted": True}
     assert workspace["results"]["scanId"] == scan["scanId"]
+
+
+@pytest.mark.parametrize("mode", ["standard", "diff"])
+def test_ordinary_scan_start_does_not_reuse_completed_results(tmp_path: Path, mode: str) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    options = {
+        "mode": mode,
+        "extra_args": ("--diff-target-kind", "working_tree") if mode == "diff" else (),
+    }
+    first = start_prompt_only_scan(state_dir, target, tmp_path / "scans", **options)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET status = 'complete', completed_at = updated_at WHERE id = ?",
+            (first["scan"]["scanId"],),
+        )
+    repeated = start_prompt_only_scan(state_dir, target, tmp_path / "scans", **options)
+    assert repeated["startDisposition"] == "created"
+    assert repeated["scan"]["scanId"] != first["scan"]["scanId"]
 
 
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(

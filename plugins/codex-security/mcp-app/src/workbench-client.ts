@@ -6,6 +6,7 @@ import { isRecord as isJsonObject } from "./record.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
+  workbenchCommandTimeout,
 } from "./python_command.js";
 import { WORKBENCH_PYTHON } from "./server/workbench-process.js";
 
@@ -51,41 +52,13 @@ export async function runWorkbench(
   }
 }
 
-async function executeWorkbench(
+export async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   input?: string | Buffer,
   options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
-  const timeout = [
-    "begin-deep-scan",
-    "cancel-scan",
-    "fail-scan",
-    "claim-deep-scan-dedup",
-    "commit-deep-scan-dedup",
-    "complete-scan",
-    "export-findings",
-    "finish-deep-scan",
-    "finding-issues",
-    "get-scan",
-    "get-deep-scan",
-    "get-workspace",
-    "inspect-setup",
-    "list-findings",
-    "preserve-scan-results",
-    "recover-scan-results",
-    "request-finding-remediation",
-    "request-finding-remediation-action",
-    "save-workspace",
-    "set-finding-triage",
-    "set-finding-remediation",
-    "start-headless-standard-scan",
-    "start-prompt-only-scan",
-    "start-scan",
-    "upsert-deep-scan-worker",
-  ].includes(args[0] ?? "")
-    ? 300_000
-    : 30_000;
+  const timeout = workbenchCommandTimeout(args[0]);
   const execution = execFileAsync(
     pythonCommand,
     [

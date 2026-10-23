@@ -1,79 +1,59 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
 
 import pytest
-from test_saved_deferred_identity import recover, save_worker
-from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
-from workbench_test_support import fail_deep_scan, saved_draft, scan_command, write_checkpoint
+from test_workbench_checkpoint_heads import select
+from workbench_test_support import saved_binding, saved_draft, write_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_saved_results as saved
 
 
 @pytest.mark.parametrize(
-    ("reason", "identity"),
+    "reason",
     [
-        pytest.param("\ud800", "deferred-7b02db7069064f21", id="high-surrogate"),
-        pytest.param("\udfff", "deferred-042d3e8a3549a045", id="low-surrogate"),
-        pytest.param("\U0001f600", "deferred-6403b70908c737af", id="emoji"),
-        pytest.param("\\ud800", "deferred-6e08d26c2848d312", id="literal-escape"),
-        pytest.param("é", "deferred-397a18fac04fedaa", id="accent"),
-        pytest.param("A\U0001f600Z", "deferred-93fabecbc432e3f8", id="embedded-emoji"),
+        pytest.param("\ud800", id="high-surrogate"),
+        pytest.param("\udfff", id="low-surrogate"),
+        "\U0001f600",
+        "\\ud800",
+        "é",
+        "A\U0001f600Z",
     ],
 )
-def test_recovery_accepts_unicode_ids_from_legacy_writers(
-    tmp_path: Path, reason: str, identity: str
+@pytest.mark.parametrize("closed", [False, True])
+def test_unicode_review_identity_survives_committed_and_frozen_recovery(
+    tmp_path: Path, reason: str, closed: bool
 ) -> None:
-    pending = {"reason": reason, "paths": ["src/example.py"]}
-    closed = saved_draft(
-        "identity-scan",
-        closures=[{"id": identity, "reason": "Review completed."}],
-        complete=True,
+    scan_id = "identity-scan"
+    identity = "unicode-review"
+    pending = saved_draft(
+        scan_id, deferred=[{"id": identity, "reason": reason, "paths": ["src/example.py"]}]
     )
-    worker = save_worker(
-        tmp_path,
-        saved,
-        "reviewer",
-        [saved_draft("identity-scan", deferred=[pending])],
-        closed,
-    )
-    result = recover(tmp_path, saved, [worker])
-    assert {row["id"] for row in result[2]["deferred"]} == {"scan-stopped"}
-    replay = recover(tmp_path, saved, [worker], result[0]["scan"]["preservedSources"])
-    assert replay[2] == result[2]
-
-
-@pytest.mark.parametrize(
-    ("reason", "identity"),
-    [
-        pytest.param("\ud800", "deferred-7b02db7069064f21", id="high-surrogate"),
-        pytest.param("\udfff", "deferred-042d3e8a3549a045", id="low-surrogate"),
-    ],
-)
-def test_stopped_publication_recovers_after_unicode_review_is_closed(
-    tmp_path: Path, reason: str, identity: str
-) -> None:
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    pending = saved_draft(scan_id, deferred=[{"reason": reason, "paths": ["src/example.py"]}])
-    checkpoint = write_checkpoint(result.parent / "checkpoints", pending)
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
     os.utime(checkpoint, ns=(100, 100))
-    closed = saved_draft(
-        scan_id,
-        closures=[{"id": identity, "reason": "Review completed."}],
-        complete=True,
+    if closed:
+        selected = write_checkpoint(
+            tmp_path / "checkpoints",
+            saved_draft(
+                scan_id, closures=[{"id": identity, "reason": "Review completed."}], complete=True
+            ),
+        )
+        select(tmp_path, selected, 200)
+    binding = saved_binding(repository="synthetic")
+    result = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], stopped=True, reason="interrupted"
     )
-    result.write_text(json.dumps(closed), encoding="utf-8")
-    os.utime(result, ns=(200, 200))
-    environment = {"CODEX_HOME": str(codex_home)}
-    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
-    coverage = json.loads((scan_dir / "coverage.json").read_text(encoding="utf-8"))
-    assert {row["id"] for row in coverage["deferred"]} == {"scan-stopped"}
-    manifest = (scan_dir / "scan-manifest.json").read_bytes()
-    recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
-    assert recovered["scan"]["resultsRecoveryNeeded"] is False
-    assert (scan_dir / "scan-manifest.json").read_bytes() == manifest
+    replay = saved.merge_saved_results(
+        tmp_path,
+        scan_id,
+        binding,
+        [],
+        stopped=True,
+        reason="interrupted",
+        frozen_source_digests=result[0]["scan"]["preservedSources"],
+    )
+    assert result[2] == replay[2]
+    assert any(row["id"] == identity for row in result[2]["deferred"]) is not closed

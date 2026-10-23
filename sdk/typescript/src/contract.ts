@@ -193,7 +193,7 @@ function normalizePersistedFindings(payload: unknown): unknown {
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    normalizePersistedFindingDetails(finding);
+    normalizePersistedFindingDetails(finding, "canonical");
   }
   return compatible;
 }
@@ -612,7 +612,11 @@ function validateExpectation(
     const actual = new Set(actualPaths);
     if (actualPaths.length === actual.size) {
       const expected = new Set(requested.paths);
-      if (actual.size === expected.size && actual.isSubsetOf(expected)) return;
+      if (
+        actual.size === expected.size &&
+        actualPaths.every((path) => expected.has(path))
+      )
+        return;
     }
     throw new ContractValidationError(
       "Manifest include paths do not match the requested path target.",

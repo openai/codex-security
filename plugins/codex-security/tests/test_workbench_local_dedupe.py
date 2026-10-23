@@ -186,3 +186,43 @@ def test_finding_body_update_invalidates_local_search_and_pending_groups(
         )
     assert workbench_db.execute("SELECT COUNT(*) FROM local_finding_embeddings").fetchone()[0] == 0
     assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == [changed]
+
+
+def test_global_dedupe_ignores_unpublished_child_placeholders(workbench_api, workbench_db):
+    upsert = workbench_api["index_findings"].__globals__["upsert_finding"]
+    with workbench_db:
+        upsert(workbench_db, finding(1), TIMESTAMP, publish=False)
+        # Explicitly published global records need no repository association.
+        upsert(workbench_db, finding(3), TIMESTAMP)
+    prepare(workbench_api, workbench_db, [finding(2)])
+    repository_path = str(Path(__file__).resolve().parent)
+    target_id = workbench_db.execute(
+        "SELECT id FROM security_targets WHERE current_path = ?", (repository_path,)
+    ).fetchone()[0]
+
+    def globally():
+        return request(
+            workbench_api,
+            workbench_db,
+            "prepare",
+            findings=[finding(2)],
+            anchorRepositoryId=target_id,
+            repositoryPath=repository_path,
+        )
+
+    result = globally()
+    assert set(result["cacheKeys"]) == {"finding-2", "finding-3"}
+    assert {value["findingId"] for value in result["findingsToEmbed"]} == {"finding-2", "finding-3"}
+    assert (
+        workbench_db.execute("SELECT details_json FROM findings WHERE id = 'finding-1'").fetchone()[
+            0
+        ]
+        is None
+    )
+    with workbench_db:
+        upsert(workbench_db, finding(1), TIMESTAMP, target_id)
+    assert set(globally()["cacheKeys"]) == {"finding-1", "finding-2", "finding-3"}
+    with workbench_db:
+        workbench_db.execute("UPDATE findings SET details_json = NULL WHERE id = 'finding-1'")
+    # A published repository association still requires its indexed document.
+    assert globally() == {"error": "finding_not_indexed"}

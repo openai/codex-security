@@ -4,171 +4,168 @@ import json
 from pathlib import Path
 
 import pytest
-from test_workbench_standard_deep_results import (
-    accepted_standard_worker,
-    deep_scan_fixture,
-    standard_finding,
-)
+from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
-    cancel_scan,
-    fail_deep_scan,
-    get_scan,
-    preserve_scan_results,
+    checkpoint,
+    register,
+    run_workbench,
     saved_draft,
+    write_checkpoint,
+    write_completed_contract,
 )
 
 
-@pytest.mark.parametrize("termination", ["failed", "interrupted", "canceled"])
-def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
-    tmp_path: Path, termination: str
+def composed_scan(tmp_path: Path):
+    state, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('synthetic')\n")
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    return state, target, parent, Path(parent["scanDir"])
+
+
+def child_scan(state, target, parent, name, *, surfaces=(), deferred=(), finding=False):
+    directory = Path(parent["scanDir"]) / "artifacts/deep-scan/passes" / name
+    child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+    findings = []
+    if finding:
+        write_completed_contract(directory, child["scanId"], target, relative_path="app.py")
+        findings = json.loads((directory / "findings.json").read_text())["findings"]
+        for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (directory / filename).unlink()
+    draft = saved_draft(
+        child["scanId"], complete=True, surfaces=surfaces, deferred=deferred, findings=findings
+    )
+    draft["coverage"]["inventoryStrategy"] = "repository"
+    selected = write_checkpoint(directory / "checkpoints", draft)
+    select_checkpoint(directory, selected)
+    return child, directory, selected
+
+
+def stop_parent(state, parent, children, termination="failed"):
+    directory = Path(parent["scanDir"])
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": str(path.relative_to(directory)), "scanId": child["scanId"]}
+            for child, path, _ in children
+        ],
+    )
+    run_workbench(
+        state,
+        "cancel-scan" if termination == "canceled" else "fail-scan",
+        "--scan-id",
+        parent["scanId"],
+        *([] if termination == "canceled" else ["--message", "Synthetic interruption"]),
+    )
+    return run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+
+
+@pytest.mark.parametrize("termination", ["failed", "canceled"])
+@pytest.mark.parametrize("same_label", [False, True])
+def test_stopped_composition_preserves_independent_coverage_and_receipts(
+    tmp_path: Path, termination: str, same_label: bool
 ) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
-    environment = {"CODEX_HOME": str(codex_home)}
-    finding = standard_finding(tmp_path, scan_id, target)
-    workers = {}
+    state, target, parent, parent_dir = composed_scan(tmp_path)
+    children = []
     originals = {}
     for name in ("first", "second"):
-        worker_id, result = accepted_standard_worker(
-            state_dir, codex_home, scan_dir, scan_id, name=name
+        child, directory, selected = child_scan(
+            state,
+            target,
+            parent,
+            name,
+            finding=name == "first",
+            surfaces=[
+                {
+                    "id": "api",
+                    "label": "API" if same_label else name,
+                    "disposition": "no_issue_found",
+                    "receiptRefs": ["artifacts/review.md"],
+                }
+            ],
+            deferred=[{"id": "review", "reason": f"Review {name} remains.", "surfaceIds": ["api"]}],
         )
-        receipt = result.parent / "artifacts/review.md"
-        receipt.parent.mkdir()
+        receipt = directory / "artifacts/review.md"
         receipt.write_text(f"Synthetic {name} review.\n")
-        result.write_text(
-            json.dumps(
-                saved_draft(
-                    scan_id,
-                    complete=True,
-                    findings=[finding] if name == "first" else [],
-                    surfaces=[
-                        {
-                            "id": "api",
-                            "label": name,
-                            "disposition": "no_issue_found",
-                            "receiptRefs": ["artifacts/review.md"],
-                        }
-                    ],
-                    deferred=[
-                        {
-                            "id": "review",
-                            "reason": f"Review {name} remains.",
-                            "surfaceIds": ["api"],
-                        }
-                    ],
-                )
-            )
-        )
-        workers[name] = (worker_id, receipt)
-        originals.update({path: path.read_bytes() for path in (result, receipt)})
-    assert not (scan_dir / "coverage.json").exists()
-    assert not (scan_dir / "checkpoints").exists()
-
-    if termination == "canceled":
-        cancel_scan(state_dir, scan_id, "standard-worker-thread", environment=environment)
-    else:
-        fail_deep_scan(state_dir, codex_home, scan_id, deep_status=termination)
-    stopped = get_scan(state_dir, scan_id)["scan"]
+        children.append((child, directory, selected))
+        originals.update({path: path.read_bytes() for path in (selected, receipt)})
+    stopped = stop_parent(state, parent, children, termination)
+    assert stopped["progress"]["status"] == termination
     assert stopped["findingCount"] == 1
     assert not any("coverage receipt" in warning for warning in stopped["warnings"])
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = json.loads((parent_dir / "coverage.json").read_text())
     assert "completeness" not in coverage
     assert {row["id"] for row in coverage["surfaces"]} == {
-        f"{worker_id}/api" for worker_id, _ in workers.values()
+        f"{child['scanId']}/api" for child, _, _ in children
     }
-    for name, (worker_id, receipt) in workers.items():
-        surface = next(row for row in coverage["surfaces"] if row["workerId"] == worker_id)
-        task = next(row for row in coverage["deferred"] if row.get("workerId") == worker_id)
-        assert surface["disposition"] == "no_issue_found"
-        assert surface["receiptRefs"] == [receipt.relative_to(scan_dir).as_posix()]
-        assert task["id"] == f"{worker_id}/review"
+    for child, directory, _ in children:
+        surface = next(row for row in coverage["surfaces"] if row["id"] == f"{child['scanId']}/api")
+        task = next(row for row in coverage["deferred"] if row["id"] == f"{child['scanId']}/review")
         assert task["surfaceIds"] == [surface["id"]]
-        assert (scan_dir / surface["receiptRefs"][0]).read_text() == f"Synthetic {name} review.\n"
-    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    assert manifest["scan"]["status"] == termination
-    assert isinstance(manifest["scan"]["sealedAt"], str)
+        assert surface["disposition"] == "no_issue_found"
+        assert surface["receiptRefs"] == [
+            (directory / "artifacts/review.md").relative_to(parent_dir).as_posix()
+        ]
     sealed = {
-        name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        name: (parent_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "coverage.json", "report.md")
     }
-    replay = preserve_scan_results(
-        state_dir, scan_id, "standard-worker-thread", environment=environment
-    )["scan"]
-    assert replay["findingCount"] == 1
-    assert all((scan_dir / name).read_bytes() == content for name, content in sealed.items())
-    assert all(path.read_bytes() == content for path, content in originals.items())
+    run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"])
+    assert all((parent_dir / name).read_bytes() == contents for name, contents in sealed.items())
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
-def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(tmp_path: Path) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    result.write_text(
-        json.dumps(
-            saved_draft(
-                scan_id,
-                complete=True,
-                surfaces=[
-                    {
-                        "id": "api",
-                        "label": "API",
-                        "disposition": "no_issue_found",
-                        "receiptRefs": ["result.json"],
-                    }
-                ],
-            )
-        )
+@pytest.mark.parametrize("reference", ["checkpoint.json", "artifacts/missing.md", "../outside.md"])
+def test_stopped_child_recovers_invalid_receipts_before_projection(
+    tmp_path: Path, reference: str
+) -> None:
+    state, target, parent, parent_dir = composed_scan(tmp_path)
+    child, directory, selected = child_scan(
+        state,
+        target,
+        parent,
+        "first",
+        surfaces=[
+            {
+                "id": "api",
+                "label": "API",
+                "disposition": "no_issue_found",
+                "receiptRefs": [reference],
+            }
+        ],
     )
-    original = result.read_bytes()
-
-    fail_deep_scan(state_dir, codex_home, scan_id)
-
-    coverage_path = scan_dir / "coverage.json"
-    surface = json.loads(coverage_path.read_text())["surfaces"][0]
-    assert surface["id"] == f"{worker_id}/api"
+    original = selected.read_bytes()
+    stopped = stop_parent(state, parent, [(child, directory, selected)])
+    assert stopped["progress"]["status"] == "failed"
+    surface = json.loads((parent_dir / "coverage.json").read_text())["surfaces"][0]
+    assert surface["id"] == f"{child['scanId']}/api"
     assert surface["disposition"] == "needs_follow_up"
     assert surface["receiptRefs"] == []
-    assert any(
-        "under artifacts/" in warning
-        for warning in get_scan(state_dir, scan_id)["scan"]["warnings"]
-    )
-    sealed = coverage_path.read_bytes()
-    preserve_scan_results(
-        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
-    )
-    assert coverage_path.read_bytes() == sealed
-    assert result.read_bytes() == original
+    child_state = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
+    assert any("coverage receipt" in warning for warning in child_state["warnings"])
+    assert selected.read_bytes() == original
 
 
 @pytest.mark.parametrize("anonymous_first", [True, False])
-def test_stopped_worker_links_follow_explicit_surface_identity_through_collisions(
+def test_child_links_remain_bound_to_explicit_surface_through_generated_id_collisions(
     tmp_path: Path, anonymous_first: bool
 ) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    state, target, parent, parent_dir = composed_scan(tmp_path)
     anonymous = {"candidateId": "api", "label": "Anonymous", "disposition": "needs_follow_up"}
     explicit = {"id": "api", "label": "Explicit", "disposition": "needs_follow_up"}
-    result.write_text(
-        json.dumps(
-            saved_draft(
-                scan_id,
-                complete=True,
-                surfaces=[anonymous, explicit] if anonymous_first else [explicit, anonymous],
-                deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
-            )
-        )
+    child, directory, selected = child_scan(
+        state,
+        target,
+        parent,
+        "first",
+        surfaces=[anonymous, explicit] if anonymous_first else [explicit, anonymous],
+        deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
     )
-    original = result.read_bytes()
-
-    fail_deep_scan(state_dir, codex_home, scan_id)
-
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    stop_parent(state, parent, [(child, directory, selected)])
+    coverage = json.loads((parent_dir / "coverage.json").read_text())
     surfaces = {row["label"]: row for row in coverage["surfaces"]}
     assert len(surfaces) == 2
     assert surfaces["Explicit"]["id"] != surfaces["Anonymous"]["id"]
-    assert coverage["deferred"][0]["surfaceIds"] == [surfaces["Explicit"]["id"]]
-    sealed = coverage_path.read_bytes()
-    preserve_scan_results(
-        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
-    )
-    assert coverage_path.read_bytes() == sealed
-    assert result.read_bytes() == original
+    task = next(row for row in coverage["deferred"] if row["id"] == f"{child['scanId']}/review")
+    assert task["surfaceIds"] == [surfaces["Explicit"]["id"]]

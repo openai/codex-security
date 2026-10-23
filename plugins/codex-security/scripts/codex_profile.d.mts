@@ -11,6 +11,22 @@ export function profileConfigOverrides(
   config: Record<string, unknown>,
 ): string[];
 
+export interface CodexRuntimeConfigReadOptions {
+  readonly clientVersion: string;
+  readonly codexPath: string;
+  readonly cwd: string;
+  readonly configOverrides: readonly string[];
+  readonly providerConfigOverrides?: readonly string[];
+  readonly commandArgs?: readonly string[];
+  readonly appServerArgs?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly signal: AbortSignal;
+}
+
+export function readCodexRuntimeConfigWithOrigins(
+  options: CodexRuntimeConfigReadOptions,
+): Promise<Record<string, unknown>>;
+
 export interface CodexProfileOptions {
   codexPathOverride: string;
   profileName: string;

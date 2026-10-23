@@ -39,13 +39,13 @@ Credential values remain part of the source evidence.
 ## Run
 
 Install dependencies and build the TypeScript SDK using the repository's normal
-setup, including the MCP app dependencies. `build:evals` type-checks the eval
-sources; Node runs them directly with `--experimental-strip-types`. The eval
-reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
-creating private homes. It bundles the MCP app's permission-profile preflight
-locally with esbuild and adds no dependencies.
+setup. The eval reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
+creating private homes. It bundles the SDK's permission-checked client and executable helper
+locally with esbuild and adds no dependencies. The shared preflight lock uses the
+host native binding from the normal source build.
 
 ```sh
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
 pnpm --dir sdk/typescript run build:evals
 node --experimental-strip-types evals/secret-discovery/run.mts
 ```
@@ -103,6 +103,7 @@ the model.
 ## Deterministic checks
 
 ```sh
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
 pnpm --dir sdk/typescript run build:evals
 node --experimental-strip-types --test evals/secret-discovery/test_*.mts
 ```

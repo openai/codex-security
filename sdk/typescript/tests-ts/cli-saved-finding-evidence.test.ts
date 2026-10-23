@@ -135,7 +135,6 @@ test("saved patch and verification tasks receive complete sealed evidence and li
   const previewFinding = (preview["scan"] as { findings: Finding[] })
     .findings[0]!;
   expect(previewFinding.codeEvidence).toHaveLength(4);
-  expect(previewFinding.writeup?.reportPath).not.toBe(full.writeup!.reportPath);
 
   for (const command of ["patch", "verify-fix"]) {
     const { runCli, stderr } = createCliTest(main);
@@ -195,10 +194,11 @@ test("saved patch and verification tasks receive complete sealed evidence and li
       "knownScanIds",
       "related",
       "sourceExcerpt",
-      "artifactPaths",
     ]) {
       expect(received[0]![key]).toEqual(previewFinding[key]);
     }
+    // The full workbench row restores artifact paths omitted by the preview.
+    expect(received[0]!["artifactPaths"]).toEqual([full.writeup!.reportPath]);
   }
 });
 

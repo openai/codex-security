@@ -25,23 +25,6 @@ const io = await importSource(
 const contextApi = await importSource(
   path.join(import.meta.dirname, "../src/artifact-context.ts"),
 );
-const writerApi = await importSource(
-  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
-  {
-    plugins: [
-      {
-        name: "observe-worker-context",
-        setup(builder) {
-          builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
-            contents:
-              "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
-            loader: "js",
-          }));
-        },
-      },
-    ],
-  },
-);
 const schemas = await importSource(
   path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
 );
@@ -59,7 +42,6 @@ const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
 try {
   await testSchemaSourceOfTruth();
   await testScanContext();
-  await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
   await testAtomicReplacementAfterInterruptedWriter();
   await testAtomicReplacement();
@@ -151,8 +133,10 @@ async function testSchemaSourceOfTruth() {
 async function testScanContext() {
   const root = path.join(fixture, "scan");
   const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  await mkdir(repoRoot, { recursive: true });
+  await Promise.all([
+    mkdir(root, { recursive: true }),
+    mkdir(repoRoot, { recursive: true }),
+  ]);
   const scanId = "61a20957-1be8-4ccf-8de8-eab4061e8cc3";
   const contract = {
     target: {
@@ -195,7 +179,6 @@ async function testScanContext() {
   assert.deepEqual(calls, [["get-scan", "--scan-id", scanId]]);
   assert.equal(context.root, await realpath(root));
   assert.equal(context.repoRoot, await realpath(repoRoot));
-  assert.equal(context.layout, "scan");
   assert.equal(context.scope, ".");
   assert.equal(context.mode, "deep");
   assert.deepEqual(context.targetContract, contract);
@@ -233,74 +216,6 @@ async function testScanContext() {
   );
 }
 
-async function testWorkerStandardLayout() {
-  const root = path.join(fixture, "worker", "output");
-  const repoRoot = path.join(fixture, "repository");
-  await mkdir(root, { recursive: true });
-  const environment = {
-    CODEX_SECURITY_ARTIFACT_ROOT: root,
-    CODEX_SECURITY_REPO_ROOT: repoRoot,
-    CODEX_SECURITY_SCOPE: ".",
-    CODEX_SECURITY_PLUGIN_ROOT: "/fixture/plugin",
-  };
-  const { context } =
-    await writerApi.createCodexSecurityArtifactWriterServer(environment);
-  const inventory = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "in_scope_files.txt"],
-    "review_items",
-  );
-  const candidates = await io.artifactDestination(
-    context,
-    ["artifacts", "02_discovery", "candidate_ledger.jsonl"],
-    "discovery_candidates",
-  );
-  assert.equal(
-    inventory,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "in_scope_files.txt",
-    ),
-  );
-  assert.equal(
-    candidates,
-    path.join(
-      await realpath(root),
-      "artifacts",
-      "02_discovery",
-      "candidate_ledger.jsonl",
-    ),
-  );
-  assert.equal(context.layout, "worker");
-  assert.equal(context.scope, ".");
-
-  await assert.rejects(
-    writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [],
-      }),
-    }),
-    /coordinator-bound reducer context/,
-  );
-  const { context: reducer } =
-    await writerApi.createCodexSecurityArtifactWriterServer({
-      ...environment,
-      CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
-      CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-        scanRoot: root,
-        claimedWorkers: [
-          { id: "worker-1", resultPath: path.join(root, "worker-result.json") },
-        ],
-      }),
-    });
-  assert.equal(reducer.layout, "reducer");
-  assert.equal(reducer.deepReducer.claimedWorkers[0].id, "worker-1");
-}
-
 async function testAtomicReplacementAfterInterruptedWriter() {
   const destination = await io.artifactDestination(
     context,
@@ -325,6 +240,11 @@ async function testAtomicReplacementAfterInterruptedWriter() {
 }
 
 async function testSafeJsonAndJsonl() {
+  const context = {
+    root: path.join(fixture, "scan"),
+    repoRoot: path.join(fixture, "repository"),
+  };
+  const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
     context,
     components,
@@ -362,10 +282,10 @@ async function testSafeJsonAndJsonl() {
     manifestComponents,
     "scan_manifest",
   );
-  await io.replaceArtifactJson(manifest, {
-    scanId: "fixture",
-    extension: true,
-  });
+  await io.replaceArtifactText(
+    manifest,
+    JSON.stringify({ scanId: "fixture", extension: true }) + "\n",
+  );
   assert.deepEqual(
     await io.readArtifactJsonObject(
       context,
@@ -421,6 +341,11 @@ async function testSafeJsonAndJsonl() {
 }
 
 async function testAtomicReplacement() {
+  const context = {
+    root: path.join(fixture, "scan"),
+    repoRoot: path.join(fixture, "repository"),
+  };
+  const components = ["artifacts", "02_discovery", "candidate_ledger.jsonl"];
   const destination = await io.artifactDestination(
     context,
     components,
@@ -429,16 +354,25 @@ async function testAtomicReplacement() {
   await io.replaceArtifactJsonl(destination, []);
   assert.equal(await readFile(destination, "utf8"), "");
 
-  const replacements = Array.from({ length: 12 }, (_, index) => ({
-    candidate_id: "concurrent-" + index,
-  }));
+  const versions = Array.from({ length: 12 }, (_, index) => [
+    {
+      candidate_id: "concurrent-" + index,
+      evidence: String(index).repeat(8192),
+    },
+    { candidate_id: "tail-" + index },
+  ]);
+  const expected = new Set(versions.map((rows) => JSON.stringify(rows)));
   await Promise.all(
-    replacements.map((row) => io.replaceArtifactJsonl(destination, [row])),
-  );
-  const written = await readJson(destination);
-  assert.deepEqual(
-    written,
-    replacements.find((row) => row.candidate_id === written.candidate_id),
+    versions.map(async (rows) => {
+      await io.replaceArtifactJsonl(destination, rows);
+      const observed = await io.readArtifactJsonl(
+        context,
+        components,
+        "discovery_candidates",
+        { safeParse: (value: unknown) => ({ success: true, data: value }) },
+      );
+      assert.ok(expected.has(JSON.stringify(observed)));
+    }),
   );
   assert.deepEqual(await readdir(path.dirname(destination)), [
     "candidate_ledger.jsonl",
@@ -469,6 +403,10 @@ async function testBoundedPagination() {
 }
 
 async function testUnsafeArtifacts() {
+  const context = {
+    root: path.join(fixture, "scan"),
+    repoRoot: path.join(fixture, "repository"),
+  };
   for (const components of [
     [],
     ["..", "outside.json"],

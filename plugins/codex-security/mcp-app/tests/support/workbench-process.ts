@@ -9,9 +9,12 @@ export async function loadWorkbenchProcess(
 ) {
   const applicationRoot = path.resolve(import.meta.dirname, "../..");
   const file = path.join(applicationRoot, "src", "workbench-client.ts");
-  return importModule({
+  return await importModule({
+    banner: {
+      js: `import { createRequire as createFixtureRequire } from "node:module"; const require = createFixtureRequire(${JSON.stringify(pathToFileURL(file).href)});`,
+    },
     stdin: {
-      contents: `${transform(await readFile(file, "utf8"))}\nexport { executeWorkbench };`,
+      contents: transform(await readFile(file, "utf8")),
       loader: "ts",
       resolveDir: path.dirname(file),
     },

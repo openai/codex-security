@@ -1,3 +1,4 @@
+import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,7 +9,6 @@ import type {
   TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { parse as parseToml } from "smol-toml";
 import {
   ScanInterruptedError,
   type PatchOptions,
@@ -397,16 +397,13 @@ describe("CodexSecurity headless patching", () => {
       await patchClient();
     await using security = client;
     await security.patch(options);
-    expect(
-      parseToml(captured.codex!.configOverrides!.join("\n")),
-    ).toMatchObject({
+    expect(effectiveCodexConfiguration(captured.codex!)).toMatchObject({
       permissions: {
         codex_security_scan: {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
             [await realpath(codexHome)]: { ".": "deny" },
-            [preparedRuntime(codexHome).deepScanConfigPath!]: { ".": "deny" },
           },
           network: { enabled: false },
         },
@@ -443,27 +440,20 @@ describe("CodexSecurity headless patching", () => {
         });
       await using security = client;
       expect(await security.patch(options)).toMatchObject(verified);
-      expect(captured.codex?.nativeProfile).toBeDefined();
-      expect(
-        parseToml(
-          await readFile(
-            join(codexHome, `${captured.codex!.nativeProfile}.config.toml`),
-            "utf8",
-          ),
-        ),
-      ).toEqual({
+      expect(captured.codex?.config).toMatchObject({
+        model_provider: "synthetic.provider",
         model_providers: { "synthetic.provider": provider },
       });
-      expect(
-        parseToml(captured.codex!.configOverrides!.join("\n")),
-      ).toMatchObject({
+      expect(captured.codex!.configOverrides!.join("\n")).not.toContain(
+        "synthetic-auth",
+      );
+      expect(effectiveCodexConfiguration(captured.codex!)).toMatchObject({
         permissions: {
           codex_security_scan: {
             filesystem: {
               ":root": "read",
               ":workspace_roots": "write",
               [await realpath(codexHome)]: { ".": "deny" },
-              [preparedRuntime(codexHome).deepScanConfigPath!]: { ".": "deny" },
             },
             network: { enabled: false },
           },
@@ -471,7 +461,6 @@ describe("CodexSecurity headless patching", () => {
         project_root_markers: [],
         projects: { [projectTrustKey]: { trust_level: "untrusted" } },
       });
-      expect(captured.codex?.config).not.toHaveProperty("model_providers");
       expect(captured.codex?.apiKey).toBeUndefined();
       expect(captured.codex?.env).not.toHaveProperty("OPENAI_API_KEY");
       expect(captured.thread?.workingDirectory).toBe(options.repositoryPath);

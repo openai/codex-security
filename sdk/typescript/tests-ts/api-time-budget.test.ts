@@ -49,7 +49,11 @@ async function fixture(start = Date.UTC(2026, 0, 1)) {
   const repository = join(root, "repository");
   const codexHome = join(root, "home");
   const scanDir = join(root, "scan");
-  await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+  await Promise.all([
+    mkdir(repository),
+    mkdir(codexHome),
+    mkdir(scanDir, { mode: 0o700 }),
+  ]);
   let clock = start;
   let clockReads = 0;
   const prompts: string[] = [];
@@ -68,6 +72,9 @@ async function fixture(start = Date.UTC(2026, 0, 1)) {
         recipes.push(JSON.parse(input!).recipe);
       }
       if (args[0] === "get-scan-feedback") clock += 60_000;
+      if (args[0] === "list-scans") return { scans: [] };
+      if (args[0] === "get-scan")
+        return { scan: { progress: { status: "running" } } };
       return mockWorkbench(args, input);
     },
     createCodex: codexFactory(async (prompt: string, options: TurnOptions) => {
@@ -141,7 +148,8 @@ test("omitted budget preserves the base prompt and post-scan instructions", asyn
   });
   expect(state.prompts[1]).toStartWith(`${baseline}\n\n`);
   expect(state.prompts[1]).toContain("2026-01-01T00:07:00.000Z");
-  expect(state.prompts[2]).toBe("Summarize the completed scan.");
+  expect(state.prompts[2]).toEndWith("\n\nSummarize the completed scan.");
+  expect(state.prompts[2]).not.toContain("2026-01-01T00:07:00.000Z");
 });
 
 test("concurrent clients keep independent deadlines and reruns get a fresh deadline", async () => {
@@ -177,7 +185,8 @@ test("explicit cancellation remains authoritative with an advisory allowance", a
       signal: controller.signal,
     }),
   ).rejects.toBeInstanceOf(ScanInterruptedError);
-  expect(state.commands).toContain("fail-scan");
+  expect(state.commands).toContain("cancel-scan");
+  expect(state.commands).not.toContain("fail-scan");
   expect(state.commands).not.toContain("complete-scan");
 });
 
@@ -208,9 +217,14 @@ test("Deep stores its converted hard limit without adding the Standard advisory 
     client.run(state.repository, {
       mode: "deep",
       maxTimeMinutes: 90,
+      workers: 1,
+      subagents: 0,
+      maxDiscoveryRuns: 1,
+      stopAfterConsecutiveErrors: 1,
     }),
-  ).rejects.toThrow("Captured Deep launch");
+  ).rejects.toThrow("Deep Scan reached its consecutive error limit.");
   expect(state.clockReads).toBe(0);
+  expect(state.prompts).toHaveLength(1);
   expect(state.prompts[0]).not.toContain("2026-01-01T00:01:00.000Z");
   expect(state.recipes[0]).toMatchObject({
     maxTimeMinutes: 90,

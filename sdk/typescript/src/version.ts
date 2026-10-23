@@ -1,16 +1,14 @@
-import { isNonEmptyString } from "./value.js";
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
+import packageManifest from "../package.json" with { type: "json" };
 
-const PACKAGE_VERSIONS = packageVersions(
-  new URL("../package.json", import.meta.url),
-);
-
-export const VERSION = PACKAGE_VERSIONS.package;
-export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
-export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
+export const VERSION = packageManifest.version;
+export const CODEX_SDK_VERSION =
+  packageManifest.dependencies["@openai/codex-sdk"];
+export const CODEX_EXECUTABLE_VERSION =
+  packageManifest.dependencies["@openai/codex"];
 export const BUNDLED_PLUGIN_VERSION = "0.1.95" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
@@ -159,39 +157,4 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
     `╰${"─".repeat(width + 2)}╯`,
     "",
   ].join("\n");
-}
-
-function packageVersions(url: URL) {
-  try {
-    const manifest: unknown = JSON.parse(readFileSync(url, "utf8"));
-    if (
-      typeof manifest !== "object" ||
-      manifest === null ||
-      !("version" in manifest) ||
-      !isNonEmptyString(manifest.version)
-    ) {
-      throw new Error("version must be a non-empty string");
-    }
-    const dependencies =
-      "dependencies" in manifest ? manifest.dependencies : undefined;
-    if (typeof dependencies !== "object" || dependencies === null) {
-      throw new Error("dependencies must be an object");
-    }
-    const sdk =
-      "@openai/codex-sdk" in dependencies
-        ? dependencies["@openai/codex-sdk"]
-        : undefined;
-    const executable =
-      "@openai/codex" in dependencies
-        ? dependencies["@openai/codex"]
-        : undefined;
-    if (!isNonEmptyString(sdk) || !isNonEmptyString(executable)) {
-      throw new Error("Codex dependencies must have non-empty versions");
-    }
-    return { package: manifest.version, sdk, executable };
-  } catch (error) {
-    throw new Error("Unable to read Codex Security package versions.", {
-      cause: error,
-    });
-  }
 }

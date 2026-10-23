@@ -1,199 +1,191 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { test } from "node:test";
+import { readdir, rm } from "node:fs/promises";
+import { test, type TestContext } from "node:test";
 import { deserializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { finding } from "./scan-draft-fixture.ts";
-import {
-  draftApi,
-  fixture,
-  interruptDraftWrite,
-} from "./scan-draft-recovery-fixture.ts";
-import { readJson } from "./support/json.ts";
+import type { PreparedScanDraft } from "../../../../sdk/typescript/src/scan-semantics.js";
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import { importSource } from "./import-module.ts";
+import { privateDirectory } from "./helpers/source.mjs";
 
+const { recordCodexSecurityScanDraft, scanDraftInputSchema } =
+  await importSource("../src/artifact-scan-draft.ts", {
+    absWorkingDir: import.meta.dirname,
+  });
 const marker = "overflow-number";
 const finiteError = {
   name: "TypeError",
   message: "Stored finding JSON cannot contain non-finite numbers.",
 };
+const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 
-// JSON exponent overflow survives the MCP decoder and registered tool schema.
-function requestInput(draft: unknown, token = "1e400") {
+function requestInput(input: unknown, token = "1e400") {
   const line = JSON.stringify({
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
-    params: { name: "record_codex_security_scan_draft", arguments: draft },
+    params: { name: "record_codex_security_scan_draft", arguments: input },
   }).replaceAll(JSON.stringify(marker), token);
   const request = CallToolRequestSchema.parse(deserializeMessage(line));
-  return draftApi.scanDraftInputSchema.parse(request.params.arguments);
+  return scanDraftInputSchema.parse(request.params.arguments);
 }
 
-function markedFinding(repositoryPath = "api/source.py") {
+function draft(overrides: Record<string, unknown> = {}) {
   return {
-    ...finding("overflow", repositoryPath),
+    scanId,
+    findings: [],
+    coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+    ...overrides,
+  };
+}
+function markedFinding(path = "api/source.py") {
+  return {
+    ...finding("overflow", path),
     extensions: { audit: { measurement: marker } },
   };
 }
-
-async function checkpoints(root: string) {
-  const names = await readdir(join(root, "checkpoints"));
-  assert.ok(names.length > 0);
-  return Promise.all(names.map((name) => readJson(root, "checkpoints", name)));
+async function fixture(t: TestContext, mode: "standard" | "diff" | "deep") {
+  const root = await privateDirectory("codex-security-finite-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return {
+    root,
+    repoRoot: root,
+    scanId,
+    mode,
+    status: "running",
+    targetContract: {
+      target: {
+        allowedKinds: ["directory_snapshot"],
+        targetId: "synthetic-target",
+        displayName: "Synthetic repository",
+      },
+      scope: { requiredIncludePaths: ["api"], requiredExcludePaths: [] },
+      ...(mode === "diff"
+        ? {
+            diffTarget: {
+              kind: "range",
+              baseRevision: "a".repeat(40),
+              headRevision: "b".repeat(40),
+            },
+          }
+        : {}),
+    },
+  };
 }
 
-for (const layout of ["standard", "diff", "deep", "worker"] as const) {
-  for (const complete of layout === "deep" ? [false, true] : [true]) {
-    test(`${layout} ${complete ? "terminal" : "progress"} rejects retained overflow before writing`, async (t) => {
-      const f = await fixture(t, layout);
-      const input = requestInput({
-        ...f.draft({}, complete),
-        findings: [markedFinding()],
-      });
+for (const mode of ["standard", "diff", "deep"] as const) {
+  for (const complete of [false, true]) {
+    test(`${mode} ${complete ? "terminal" : "progress"} rejects retained overflow before publication`, async (t) => {
+      const context = await fixture(t, mode);
+      const input = requestInput(
+        draft({ complete, findings: [markedFinding()] }),
+      );
       assert.equal(input.findings[0].extensions.audit.measurement, Infinity);
       const before = structuredClone(input);
-      await assert.rejects(f.write(input), finiteError);
-      assert.deepEqual(await readdir(f.root), []);
-      assert.deepEqual(input, before);
-    });
-  }
-}
-
-for (const layout of ["standard", "deep"] as const) {
-  test(`${layout} progress retains outside findings in its authored checkpoint`, async (t) => {
-    const f = await fixture(t, layout);
-    Object.assign(f.context.targetContract!.scope as object, {
-      requiredIncludePaths: ["api"],
-    });
-    const input = requestInput(
-      { ...f.draft(), findings: [markedFinding("outside/source.py")] },
-      "-1e400",
-    );
-    await assert.rejects(f.write(input), finiteError);
-    assert.deepEqual(await readdir(f.root), []);
-  });
-}
-
-for (const layout of ["worker", "deep"] as const) {
-  test(`${layout} drops outside overflow before saving a terminal draft`, async (t) => {
-    const f = await fixture(t, layout);
-    f.context.scope = "api";
-    Object.assign(f.context.targetContract!.scope as object, {
-      requiredIncludePaths: ["api"],
-    });
-    const kept = finding("kept", "api/source.py");
-    const input = requestInput({
-      ...f.draft({ completeness: marker }, true),
-      findings: [kept, markedFinding("outside/source.py")],
-    });
-    const before = structuredClone(input);
-    assert.equal((await f.write(input)).findingCount, 1);
-    const saved =
-      layout === "worker"
-        ? await readJson(f.root, "result.json")
-        : {
-            ...(await readJson(f.root, "findings.json")),
-            coverage: await readJson(f.root, "coverage.json"),
-          };
-    for (const document of [saved, ...(await checkpoints(f.root))]) {
-      assert.deepEqual(document.findings, [kept]);
-      assert.equal(Object.hasOwn(document.coverage, "completeness"), false);
-    }
-    assert.deepEqual(input, before);
-    if (layout === "deep")
-      assert.deepEqual(await readdir(join(f.root, "drafts")), []);
-  });
-
-  test(`${layout} retains overflow when a later finding location matches scope`, async (t) => {
-    const f = await fixture(t, layout);
-    f.context.scope = "api";
-    Object.assign(f.context.targetContract!.scope as object, {
-      requiredIncludePaths: ["api"],
-    });
-    const mixed = markedFinding("outside/source.py");
-    mixed.locations.push({ path: "api/source.py", startLine: 3, endLine: 4 });
-    const input = requestInput(
-      { ...f.draft({}, true), findings: [mixed] },
-      "-1e400",
-    );
-    await assert.rejects(f.write(input), finiteError);
-    assert.deepEqual(await readdir(f.root), []);
-  });
-
-  for (const field of ["deferred", "surfaces", "threatModel"] as const) {
-    test(`${layout} rejects overflow in retained ${field} metadata`, async (t) => {
-      const f = await fixture(t, layout);
-      const metadata = { audit: { measurement: marker } };
-      const input = requestInput({
-        ...f.draft(
-          field === "deferred"
-            ? { deferred: [{ reason: "Review API", ...metadata }] }
-            : field === "surfaces"
-              ? {
-                  surfaces: [
-                    {
-                      label: "API",
-                      disposition: "needs_follow_up",
-                      ...metadata,
-                    },
-                  ],
-                }
-              : {},
-          true,
-        ),
-        ...(field === "threatModel"
-          ? { threatModel: { summary: "API model", ...metadata } }
-          : {}),
-      });
-      const before = structuredClone(input);
+      let published = false;
       await assert.rejects(
-        f.write(input),
-        layout === "worker" && field !== "threatModel"
-          ? {
-              name: "Error",
-              message: `coverage.${field}[0].<property>.<property>: non-finite JSON numbers are not supported`,
-            }
-          : finiteError,
+        recordCodexSecurityScanDraft(context, input, async () => {
+          published = true;
+        }),
+        finiteError,
       );
-      assert.deepEqual(await readdir(f.root), []);
+      assert.equal(published, false);
+      assert.deepEqual(await readdir(context.root), []);
       assert.deepEqual(input, before);
     });
   }
 }
 
-test("Deep retains historical threat-model reader behavior", async (t) => {
-  const f = await fixture(t, "deep");
-  const manifest =
-    '{"scan":{"threatModel":{"summary":"Earlier model","audit":{"measurement":1e400}}}}\n';
-  await writeFile(join(f.root, "scan-manifest.json"), manifest, "utf8");
-  const input = requestInput(f.draft({}, true));
-  let calls = 0;
-  await draftApi.recordCodexSecurityScanDraftViaWorkbench(
-    f.context,
+for (const mode of ["standard", "deep"] as const) {
+  test(`${mode} progress preserves outside findings in its authored checkpoint`, async (t) => {
+    const context = await fixture(t, mode);
+    const input = requestInput(
+      draft({
+        complete: false,
+        findings: [markedFinding("outside/source.py")],
+      }),
+      "-1e400",
+    );
+    await assert.rejects(
+      recordCodexSecurityScanDraft(context, input, async () =>
+        assert.fail("published invalid draft"),
+      ),
+      finiteError,
+    );
+    assert.deepEqual(await readdir(context.root), []);
+  });
+}
+
+test("terminal Deep publication drops outside overflow before writing", async (t) => {
+  const context = await fixture(t, "deep");
+  const kept = finding("kept", "api/source.py");
+  const input = requestInput(
+    draft({ findings: [kept, markedFinding("outside/source.py")] }),
+  );
+  const before = structuredClone(input);
+  let published = false;
+  await recordCodexSecurityScanDraft(
+    context,
     input,
-    async (args: string[]) => {
-      calls++;
-      const draft = await readJson(args[args.indexOf("--draft-path") + 1]);
-      const checkpoint = await readJson(
-        args[args.indexOf("--checkpoint-path") + 1],
-      );
-      assert.equal(draft.manifest.scan.threatModel.audit.measurement, null);
-      assert.equal(checkpoint.threatModel.audit.measurement, null);
-      return {};
+    async (
+      documents: PreparedScanDraft,
+      _digest: string | undefined,
+      checkpoint: ScanDraftInput,
+    ) => {
+      published = true;
+      assert.deepEqual(documents.findings.findings, [kept]);
+      assert.deepEqual(checkpoint.findings, [kept]);
+      assert.equal(Object.hasOwn(documents.coverage, "completeness"), false);
     },
   );
-  assert.equal(calls, 1);
-  assert.equal(
-    await readFile(join(f.root, "scan-manifest.json"), "utf8"),
-    manifest,
-  );
-  assert.deepEqual(await readdir(join(f.root, "drafts")), []);
-  assert.equal(Object.hasOwn(input, "threatModel"), false);
+  assert.equal(published, true);
+  assert.deepEqual(input, before);
 });
 
-test("worker recovers finite nested values after an interrupted result write", async (t) => {
-  const f = await fixture(t, "worker");
+test("terminal Deep publication retains overflow when a later location matches scope", async (t) => {
+  const context = await fixture(t, "deep");
+  const mixed = markedFinding("outside/source.py");
+  mixed.locations.push({ path: "api/source.py", startLine: 3, endLine: 4 });
+  await assert.rejects(
+    recordCodexSecurityScanDraft(
+      context,
+      requestInput(draft({ findings: [mixed] })),
+      async () => assert.fail("published invalid draft"),
+    ),
+    finiteError,
+  );
+});
+
+for (const field of ["deferred", "surfaces", "threatModel"] as const) {
+  test(`terminal Deep publication rejects overflow in retained ${field} metadata`, async (t) => {
+    const context = await fixture(t, "deep");
+    const metadata = { audit: { measurement: marker } };
+    const input = draft();
+    if (field === "threatModel")
+      Object.assign(input, {
+        threatModel: { summary: "API model", ...metadata },
+      });
+    else
+      Object.assign(input.coverage, {
+        [field]: [
+          field === "deferred"
+            ? { reason: "Review API", ...metadata }
+            : { label: "API", disposition: "needs_follow_up", ...metadata },
+        ],
+      });
+    await assert.rejects(
+      recordCodexSecurityScanDraft(context, requestInput(input), async () =>
+        assert.fail("published invalid draft"),
+      ),
+      finiteError,
+    );
+    assert.deepEqual(await readdir(context.root), []);
+  });
+}
+
+test("publication preserves finite nested values", async (t) => {
+  const context = await fixture(t, "standard");
   let nested: unknown = 1.25e300;
   for (let depth = 0; depth < 300; depth++) nested = [nested];
   const kept = {
@@ -203,9 +195,16 @@ test("worker recovers finite nested values after an interrupted result write", a
       nested,
     },
   };
-  const input = requestInput({ ...f.draft(), findings: [kept] });
-  await interruptDraftWrite(join(f.root, "result.json"), () => f.write(input));
-  assert.deepEqual((await checkpoints(f.root))[0].findings, [kept]);
-  await f.write(f.draft());
-  assert.deepEqual((await readJson(f.root, "result.json")).findings, [kept]);
+  await recordCodexSecurityScanDraft(
+    context,
+    requestInput(draft({ findings: [kept] })),
+    async (
+      documents: PreparedScanDraft,
+      _digest: string | undefined,
+      checkpoint: ScanDraftInput,
+    ) => {
+      assert.deepEqual(documents.findings.findings, [kept]);
+      assert.deepEqual(checkpoint.findings, [kept]);
+    },
+  );
 });

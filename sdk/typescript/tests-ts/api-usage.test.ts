@@ -19,14 +19,9 @@ import { writeSession } from "./support/usage-rollout.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each([
-  [false, null],
-  [true, null],
-  [false, undefined],
-  [true, undefined],
-] as const)(
-  "preserves finalizer results (workbenchValidated=%p, result=%p)",
-  async (workbenchValidated, finalizedUsage) => {
+test.each([null, undefined])(
+  "preserves finalizer usage result %p",
+  async (finalizedUsage) => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const codexHome = await temporaryDirectory();
     await writeSession(
@@ -42,7 +37,6 @@ test.each([
       model: "gpt-5.6-sol",
     });
     const result = await runEvents(scanDir, completedEvents(), {
-      workbenchValidated,
       onThreadStarted: (threadId) => tracker.start(threadId),
       onFinalize: async (usage) => {
         const snapshot = await tracker.stop(usage);
@@ -50,10 +44,8 @@ test.each([
       },
     });
 
-    expect(result.toJSON()).toMatchObject({
-      cost:
-        finalizedUsage === null ? null : { inputTokens: 10, outputTokens: 3 },
-      turn: {
+    expect(result).toMatchObject({
+      turnResult: {
         usage:
           finalizedUsage === null
             ? null

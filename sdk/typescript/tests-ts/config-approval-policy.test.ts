@@ -6,9 +6,9 @@ describe("scan approval policy", () => {
     expect(
       scanApprovalPolicy({
         approval_policy: "never",
-        profile: "review",
+        profile: "interactive",
         profiles: {
-          review: { approval_policy: "on-request" },
+          interactive: { approval_policy: "on-request" },
         },
       }),
     ).toBe("on-request");
@@ -24,21 +24,15 @@ describe("scan approval policy", () => {
     ).toBe("never");
   });
 
-  test.each([undefined, null])(
-    "falls back to the root policy when the profile policy is %p",
-    (policy) => {
-      expect(
-        scanApprovalPolicy({
-          approval_policy: "never",
-          profile: "review",
-          profiles: {
-            review: policy === undefined ? {} : { approval_policy: policy },
-          },
-        }),
-      ).toBe("never");
-    },
-  );
-
+  test("falls back to the root policy when the profile does not set one", () => {
+    expect(
+      scanApprovalPolicy({
+        approval_policy: "never",
+        profile: "review",
+        profiles: { review: { model: "gpt-5.6-terra" } },
+      }),
+    ).toBe("never");
+  });
   test("ignores unselected profiles and preserves the default policy", () => {
     expect(
       scanApprovalPolicy({

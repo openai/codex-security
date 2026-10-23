@@ -108,11 +108,11 @@ test("native table overrides preserve inherited literal metadata and opt-outs", 
     { responses_api_metadata: { "caller.tag": "synthetic" } },
     { surface: "cli", command: "publish", providerResolved: false },
   );
-  const { readDeepScanRuntimeConfig } = await import(
-    pathToFileURL(join(PLUGIN_ROOT, "mcp", "permission-profile-preflight.mjs"))
-      .href
+  const { readCodexRuntimeConfigWithOrigins } = await import(
+    pathToFileURL(join(PLUGIN_ROOT, "scripts", "codex_profile.mjs")).href
   );
-  const config = await readDeepScanRuntimeConfig({
+  const { config } = await readCodexRuntimeConfigWithOrigins({
+    clientVersion: VERSION,
     codexPath: resolveCodexCommand({}).command,
     cwd: home,
     configOverrides: [context.configOverride],

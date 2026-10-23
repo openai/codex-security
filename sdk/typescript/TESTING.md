@@ -142,8 +142,8 @@ Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
-The full Bun suite runs once per OS under Node 22: three file shards on Linux
-and macOS, and seven on Windows. The other Node versions run the installed
+The full Bun suite runs once per OS under Node 22: seven file shards on Linux,
+macOS, and Windows. The other Node versions run the installed
 package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
@@ -180,7 +180,7 @@ shard runner, timing metadata, report comparator, or Windows test-root helper.
 It compares Bun's default runner, `--isolate`, and `--parallel=2` on Linux, macOS,
 and Windows.
 Each mode uses the same duration-based file assignment and production shard count:
-three on Linux/macOS and seven on Windows. This gives 39 sharded runner jobs in place
+seven on Linux, macOS, and Windows. This gives 63 sharded runner jobs in place
 of 19 jobs that included an unsharded Windows baseline. It measures the production
 partition rather than cross-file interactions across one unsharded suite; local
 full-suite runs still cover that ordering. More jobs add setup overhead, so compare

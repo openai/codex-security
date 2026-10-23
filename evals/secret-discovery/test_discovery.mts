@@ -20,7 +20,7 @@ import {
   runPreparedEval,
   threadSettings,
 } from "./harness.mts";
-import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./runtime.mts";
+import { EVAL_PERMISSION_PROFILE_ID } from "./runtime.mts";
 
 function sourceEvidence(
   fixture: ReturnType<typeof createFixture>,
@@ -918,10 +918,7 @@ test("named read-only profile excludes gold and credentials without a legacy san
     CODEX_CLI_PATH: codexPath,
   });
   assert.equal(settings.codexPathOverride, codexPath);
-  assert.equal(
-    config.default_permissions,
-    DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-  );
+  assert.equal(config.default_permissions, EVAL_PERMISSION_PROFILE_ID);
   assert.equal(config.features.plugins, false);
   assert.equal(config.features.apps, false);
   assert.equal(config.features.memories, false);
@@ -933,7 +930,16 @@ test("named read-only profile excludes gold and credentials without a legacy san
     ignore_default_excludes: false,
   });
   assert.deepEqual(
-    config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].filesystem,
+    { ...config.shell_environment_policy },
+    {
+      inherit: "core",
+      ignore_default_excludes: false,
+    },
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(config.permissions[EVAL_PERMISSION_PROFILE_ID].filesystem),
+    ),
     {
       ":minimal": "read",
       ":workspace_roots": "read",
@@ -942,7 +948,7 @@ test("named read-only profile excludes gold and credentials without a legacy san
     },
   );
   assert.deepEqual(
-    config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].network,
+    { ...config.permissions[EVAL_PERMISSION_PROFILE_ID].network },
     { enabled: false },
   );
   assert.equal(

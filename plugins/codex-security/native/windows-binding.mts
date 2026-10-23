@@ -8,6 +8,7 @@ export interface WindowsResult<T = number> {
 
 /** Owns a synchronous Windows file. close() is idempotent; GC also closes it. */
 export interface WindowsHandle {
+  lock(nonblocking: boolean): number;
   close(): number;
   attributes(): { error: number; attributes: number; reparseTag: number };
   identity(): { error: number; volume: string; fileId: Buffer };

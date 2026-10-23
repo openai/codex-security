@@ -24,15 +24,19 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
+import { executablePathForSpawn } from "../src/executable-path.js";
 
 test.each([
-  ["codex_security_deep_scan", true, false],
-  ["codex_security_deep_scan", true, true],
-  ["codex_security_deep_scan", false, false],
-  ["codex-security", true, false],
+  ["codex_security_deep_scan", undefined, true, false],
+  ["codex_security_deep_scan", undefined, true, true],
+  ["codex-security", "Codex Security", true, false],
+  ["codex-security", "Codex Security", true, true],
+  ["codex-security", "Codex Security", false, false],
+  ["codex-security", undefined, true, false],
+  ["codex_security_deep_scan", undefined, false, false],
 ] as const)(
-  "native configuration fixture owns preflight shutdown: client=%s, layers=%p, error=%p",
-  async (clientName, includeLayers, error) => {
+  "native configuration fixture owns preflight shutdown: client=%s, title=%p, layers=%p, error=%p",
+  async (clientName, title, includeLayers, error) => {
     const root = await mkdtemp(join(tmpdir(), "native-config-lifetime-"));
     const exited = join(root, "native-exited");
     const response = {
@@ -79,7 +83,12 @@ test.each([
         JSON.stringify({
           id: 1,
           method: "initialize",
-          params: { clientInfo: { name: clientName } },
+          params: {
+            clientInfo: {
+              name: clientName,
+              ...(title === undefined ? {} : { title }),
+            },
+          },
         }) + "\n",
       );
       await once(lines, "line");
@@ -92,7 +101,11 @@ test.each([
       );
       const [line] = await once(lines, "line");
       expect(line).toBe(JSON.stringify(response));
-      if (clientName === "codex_security_deep_scan" && includeLayers) {
+      if (
+        (clientName === "codex_security_deep_scan" ||
+          (clientName === "codex-security" && title === "Codex Security")) &&
+        includeLayers
+      ) {
         expect(await readFile(exited, "utf8")).toBe("exited");
         child.stdin.end();
         child.kill("SIGTERM");
@@ -489,7 +502,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
       }) => {
         await writeCodexConfig(join(ambientHome, "config.toml"), {});
         const scanConfig = join(root, "scan.toml");
-        const workerConfig = join(root, "workers.toml");
         const workerRuntime: JsonObject =
           settings !== "explicit"
             ? {}
@@ -501,38 +513,9 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                   api_key_model_discovery: true,
                 },
               };
-        await writeCodexConfig(scanConfig, {});
-        await writeCodexConfig(workerConfig, { worker_runtime: workerRuntime });
+        await writeCodexConfig(scanConfig, workerRuntime);
         const prompt = join(root, "prompt.md");
         await writeFile(prompt, "Synthetic worker request.");
-        const executor = new URL(
-          "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
-          import.meta.url,
-        );
-        const catalog = join(root, "catalog.json");
-        await writeFile(
-          catalog,
-          JSON.stringify({
-            models: [
-              {
-                slug: "gpt-test",
-                display_name: "Synthetic",
-                base_instructions: "Synthetic instructions",
-                supported_reasoning_levels: [],
-                shell_type: "disabled",
-                visibility: "list",
-                supported_in_api: true,
-                priority: 0,
-                support_verbosity: false,
-                truncation_policy: { mode: "tokens", limit: 10000 },
-                experimental_supported_tools: [],
-                available_access_programs: {
-                  cyber: ["standard", "daybreak_red", "daybreak_blue"],
-                },
-              },
-            ],
-          }),
-        );
         const child = spawn(
           process.execPath,
           [
@@ -542,7 +525,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                 import.meta.url,
               ),
             ),
-            fileURLToPath(executor),
             prompt,
           ],
           {
@@ -553,7 +535,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
               CODEX_CLI_PATH: environment["SYNTHETIC_NATIVE_CODEX"],
               CODEX_API_KEY: "SYNTHETIC_KEY",
               CODEX_SECURITY_CONFIG_PATH: scanConfig,
-              CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfig,
             },
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true,
@@ -572,26 +553,38 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           return JSON.parse(next.value!);
         };
         const worker = async (
-          kind: "discovery" | "dedup",
+          kind: "discovery" | "merge",
           resumeThreadId?: string,
         ) => {
           child.stdin.write(JSON.stringify({ kind, resumeThreadId }) + "\n");
           return await response();
         };
         try {
-          const { baseUrl } = await response();
           await writeCodexConfig(join(sharedHome, "config.toml"), {
-            model_catalog_json: catalog,
-            openai_base_url: baseUrl,
             cli_auth_credentials_store: "file",
             features: { plugins: false },
             analytics: { enabled: false },
           });
-          // The first worker initializes the executor's per-scan snapshot.
+          // The first worker prepares the composed scan's frozen execution source.
           const { threadId, resumed, ...baseline } = await worker("discovery");
           expect(threadId).toBeString();
           expect(resumed).toBe(false);
-          expect(baseline.program).toBe("standard");
+          expect(baseline).toMatchObject({
+            codexHome: sharedHome,
+            codexPath: environment["SYNTHETIC_NATIVE_CODEX"],
+            executable: executablePathForSpawn(
+              environment["SYNTHETIC_NATIVE_CODEX"]!,
+            ),
+            apiKey: "SYNTHETIC_KEY",
+            permissionProfile: "codex_security_deep_scan_worker",
+          });
+          expect(baseline.permissions).toMatchObject({
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [sharedHome]: { ".": "deny" },
+            },
+          });
           expect(baseline.daybreak).toBe(
             settings === "explicit" ? false : null,
           );
@@ -599,11 +592,15 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             expect(baseline.daybreakFeatures).toEqual(
               workerRuntime["features"],
             );
-          const reducer = await worker("dedup");
-          expect(reducer).toMatchObject({ ...baseline, resumed: false });
+          const reducer = await worker("merge");
+          expect(reducer).toEqual({
+            ...baseline,
+            threadId: reducer.threadId,
+            resumed: false,
+          });
           const previousThreads = {
             discovery: threadId,
-            dedup: reducer.threadId,
+            merge: reducer.threadId,
           };
           const features =
             settings === "omitted" ? undefined : disabledDaybreakFeatures;
@@ -615,13 +612,17 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             daybreak: true,
             ...(features === undefined ? {} : { daybreakFeatures: features }),
           });
-          for (const kind of ["discovery", "dedup"] as const) {
+          for (const kind of ["discovery", "merge"] as const) {
             for (const resume of [false, true]) {
               const receipt = await worker(
                 kind,
                 resume ? previousThreads[kind] : undefined,
               );
-              expect(receipt).toMatchObject({ ...baseline, resumed: resume });
+              expect(receipt).toEqual({
+                ...baseline,
+                threadId: receipt.threadId,
+                resumed: resume,
+              });
               if (resume) expect(receipt.threadId).toBe(previousThreads[kind]);
             }
           }

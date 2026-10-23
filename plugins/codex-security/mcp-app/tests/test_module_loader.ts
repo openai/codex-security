@@ -9,17 +9,13 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 
-test("loads the coordinator fixture from a checkout path containing spaces", async (t) => {
+test("loads the workbench fixture from a checkout path containing spaces", async (t) => {
   const checkout = await mkdtemp(path.join(tmpdir(), "test module paths "));
   t.after(() => rm(checkout, { recursive: true, force: true }));
   const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
   const tests = path.join(checkout, "tests");
   await mkdir(tests);
-  for (const entry of [
-    "deep_scan_coordinator_fixture.ts",
-    "import-module.ts",
-    "support",
-  ]) {
+  for (const entry of ["import-module.ts", "support"]) {
     await cp(
       path.join(applicationRoot, "tests", entry),
       path.join(tests, entry),
@@ -34,13 +30,13 @@ test("loads the coordinator fixture from a checkout path containing spaces", asy
     );
   }
   const fixture = pathToFileURL(
-    path.join(tests, "deep_scan_coordinator_fixture.ts"),
+    path.join(tests, "support", "workbench-process.ts"),
   );
   const { stdout } = await exec(process.execPath, [
     "--experimental-strip-types",
     "--input-type=module",
     "-e",
-    'const fixture = await import(process.argv[1]); if (typeof fixture.DeepScanCoordinator !== "function") throw new Error("Coordinator fixture was not loaded.");',
+    'const fixture = await import(process.argv[1]); const loaded = await fixture.loadWorkbenchProcess(); if (typeof loaded.executeWorkbench !== "function") throw new Error("Workbench fixture was not loaded.");',
     fixture.href,
   ]);
   assert.equal(stdout, "");

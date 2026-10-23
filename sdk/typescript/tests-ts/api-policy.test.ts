@@ -1,5 +1,4 @@
-import { requestMetadata } from "./support/request-metadata.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   chmod,
@@ -23,6 +22,7 @@ import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
+import { VERSION } from "../src/version.js";
 import {
   InvalidTargetError,
   OutputDirectoryNotEmptyError,
@@ -32,8 +32,16 @@ import {
 } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { InternalSecurity } from "./support/internal-security.js";
-import type { PluginPythonOptions } from "../src/runtime.js";
+import {
+  resolveCodexCommand,
+  type PluginPythonOptions,
+} from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
+import {
+  codexConfigOverrides,
+  deepMerge,
+  type JsonObject,
+} from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
@@ -50,6 +58,13 @@ import { writeSession } from "./support/usage-rollout.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
+
+function effectiveConfiguration(configuration: CodexOptions): JsonObject {
+  return (configuration.configOverrides ?? []).reduce(
+    (config, override) => deepMerge(config, parseToml(override) as JsonObject),
+    (configuration.config ?? {}) as JsonObject,
+  );
+}
 
 async function setup(
   options: {
@@ -68,7 +83,7 @@ async function setup(
   const f = await fixture();
   const codexHome = join(f.root, "codex-home");
   const ambientHome = join(f.root, "ambient [codex-home]{fixture}");
-  await mkdir(codexHome);
+  await mkdir(codexHome, { mode: 0o700 });
   const runtime = preparedRuntime(codexHome);
   Object.assign(runtime.environment, options.environment);
   const createCodex = mock((_config: CodexOptions) => {
@@ -98,14 +113,15 @@ async function setup(
     "threat_model",
     "policy",
   ];
+  const environment: NodeJS.ProcessEnv = {
+    CODEX_HOME: ambientHome,
+    CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
+    ...options.environment,
+  };
   const security = new InternalSecurity(
     options.config ?? {},
     {
-      environment: {
-        CODEX_HOME: ambientHome,
-        CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
-        ...options.environment,
-      },
+      environment,
       prepareRuntime: async () => {
         options.onPrepare?.();
         return runtime;
@@ -136,6 +152,7 @@ async function setup(
     ),
     security,
     runtime,
+    environment,
     threads,
     prompts,
     turns,
@@ -171,6 +188,38 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
+  test("keeps executable read permissions bound to the prepared policy command", async () => {
+    const runtimeFixture = await fixture();
+    const suffix = process.platform === "win32" ? ".exe" : "";
+    const first = join(runtimeFixture.root, `codex-first${suffix}`);
+    const second = join(runtimeFixture.root, `codex-second${suffix}`);
+    await writeFile(first, "synthetic first executable\n");
+    await writeFile(second, "synthetic second executable\n");
+    const f = await setup({ environment: { CODEX_CLI_PATH: first } });
+    await using security = f.security;
+
+    await security.generatePolicy(f.repository, {
+      outputDir: f.outputDir,
+      onOutputDirReady() {
+        f.environment["CODEX_CLI_PATH"] = second;
+      },
+    });
+
+    const configuration = f.configuration()!;
+    expect(configuration.codexPathOverride).toBe(
+      runtime.executablePathForSpawn(first),
+    );
+    const effective = effectiveConfiguration(configuration);
+    const filesystem = (
+      (effective["permissions"] as JsonObject)[
+        "codex_security_policy"
+      ] as JsonObject
+    )["filesystem"] as JsonObject;
+    expect(filesystem[await realpath(first)]).toEqual({ ".": "read" });
+    expect(filesystem).not.toHaveProperty(await realpath(second));
+    expect(f.threads).toHaveLength(3);
+  });
+
   test.each([
     "bundled",
     "symlink",
@@ -280,33 +329,31 @@ describe("CodexSecurity policy API", () => {
 
       await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
 
-      const overrides = f.configuration()!.configOverrides!;
-      expect(f.configuration()!.config!["default_permissions"]).toBe(
+      const configuration = effectiveConfiguration(f.configuration()!);
+      expect(configuration["default_permissions"]).toBe(
         "codex_security_policy",
       );
-      expect(parseToml(overrides.join("\n"))["permissions"]).toEqual({
-        codex_security_scan: {
-          filesystem: {
-            ":root": "read",
-            ":workspace_roots": "write",
-            [await realpath(f.runtime.codexHome)]: { ".": "deny" },
-            [f.runtime.deepScanConfigPath!]: { ".": "deny" },
-          },
-        },
-        codex_security_policy: {
-          filesystem: {
-            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
-            ":workspace_roots": "read",
-            ...Object.fromEntries(
-              readPaths.map((path) => [path, { ".": "read" }]),
-            ),
-            [await realpath(f.runtime.codexHome)]: { ".": "deny" },
-            ...(process.platform === "win32"
-              ? { [f.ambientCredentialsGlob]: "deny" }
-              : {}),
-            [f.runtime.deepScanConfigPath!]: { ".": "deny" },
-          },
-        },
+      expect(
+        (
+          (configuration["permissions"] as JsonObject)[
+            "codex_security_policy"
+          ] as JsonObject
+        )["filesystem"],
+      ).toEqual({
+        [await realpath(f.runtime.codexHome)]: { ".": "deny" },
+        ...(process.platform === "win32"
+          ? { [f.ambientCredentialsGlob]: "deny" }
+          : {}),
+        [process.platform === "win32" ? ":root" : ":minimal"]: "read",
+        ":workspace_roots": "read",
+        ...Object.fromEntries(readPaths.map((path) => [path, { ".": "read" }])),
+      });
+      expect(configuration["responses_api_metadata"]).toEqual({
+        codex_security_surface: "sdk",
+        codex_security_command: "policy",
+        codex_security_package_version: VERSION,
+        codex_security_plugin_version: f.runtime.plugin.version,
+        codex_security_provider: "openai",
       });
       expect(f.threads).toHaveLength(3);
       for (const thread of f.threads) {
@@ -332,7 +379,7 @@ describe("CodexSecurity policy API", () => {
           config: { codexOverrides: { windows: { sandbox } } },
         });
         policyGit(f.repository, "init", "--quiet");
-        await mkdir(f.ambientHome);
+        await mkdir(f.ambientHome, { mode: 0o700 });
         if (sandbox === "unelevated") f.runtime.codexHome = f.ambientHome;
         await writeFile(
           join(f.ambientHome, "auth.json"),
@@ -342,10 +389,8 @@ describe("CodexSecurity policy API", () => {
           join(f.ambientHome, "config.toml"),
           "# Synthetic private provider configuration\n",
         );
-        // Older runtimes can keep the worker snapshot outside the credential home.
-        f.runtime.deepScanConfigPath = join(f.root, "private-worker.toml");
-        await writeFile(f.runtime.deepScanConfigPath, "synthetic = true\n");
         f.runtime.configPath = join(f.root, "config-preflight.toml");
+        await writeFile(f.runtime.configPath, "synthetic = true\n");
         return { f, sandbox };
       }),
     );
@@ -356,15 +401,16 @@ describe("CodexSecurity policy API", () => {
         ),
       );
       for (const { f, sandbox } of sessions) {
-        const configuration = f.configuration()!;
-        expect(configuration.config?.["windows"]).toEqual({ sandbox });
-        const overrides = parseToml(configuration.configOverrides!.join("\n"));
+        const configuration = effectiveConfiguration(f.configuration()!);
+        expect(configuration["windows"]).toEqual({ sandbox });
         const filesystem = (
-          overrides["permissions"] as Record<string, Record<string, unknown>>
+          configuration["permissions"] as Record<
+            string,
+            Record<string, unknown>
+          >
         )["codex_security_policy"]!["filesystem"] as Record<string, unknown>;
         for (const path of [
           await realpath(f.runtime.codexHome),
-          f.runtime.deepScanConfigPath!,
           f.runtime.configPath!,
           join(f.repository, ".git"),
         ]) {
@@ -381,9 +427,7 @@ describe("CodexSecurity policy API", () => {
         for (const { f: other } of sessions) {
           if (other !== f) {
             expect(filesystem).not.toHaveProperty(other.runtime.codexHome);
-            expect(filesystem).not.toHaveProperty(
-              other.runtime.deepScanConfigPath!,
-            );
+            expect(filesystem).not.toHaveProperty(other.runtime.configPath!);
           }
         }
         expect(f.threads).toHaveLength(3);
@@ -403,7 +447,7 @@ describe("CodexSecurity policy API", () => {
       const f = await setup({
         environment: { OPENAI_API_KEY: "synthetic-policy-key" },
       });
-      await mkdir(f.ambientHome);
+      await mkdir(f.ambientHome, { mode: 0o700 });
       const ambientAuth = join(f.ambientHome, "auth.json");
       await writeFile(ambientAuth, "{}");
       await chmod(f.ambientHome, 0);
@@ -1037,13 +1081,13 @@ describe("CodexSecurity policy API", () => {
         path: scope,
         outputDir: f.outputDir,
       });
-      const overrides = parseToml(
-        f.configuration()!.configOverrides!.join("\n"),
+      const configuration = f.configuration()!;
+      const effective = configuration.configOverrides!.reduce(
+        (config, override) =>
+          deepMerge(config, parseToml(override) as JsonObject),
+        configuration.config as JsonObject,
       );
-      expect(f.configuration()!.config!["default_permissions"]).toBe(
-        "codex_security_policy",
-      );
-      expect(overrides).toMatchObject({
+      expect(effective).toMatchObject({
         permissions: {
           codex_security_policy: {
             filesystem: {
@@ -1063,7 +1107,7 @@ describe("CodexSecurity policy API", () => {
         bareAlternate,
         commonAlternate,
       ]) {
-        expect(overrides).toMatchObject({
+        expect(effective).toMatchObject({
           permissions: {
             codex_security_policy: { filesystem: { [path]: { ".": "deny" } } },
           },
@@ -1483,7 +1527,13 @@ describe("CodexSecurity policy API", () => {
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
     });
-    expect(requestMetadata(f.configuration()?.configOverrides)).toMatchObject({
+    const configuration = f.configuration()!;
+    const effective = configuration.configOverrides!.reduce(
+      (config, override) =>
+        deepMerge(config, parseToml(override) as JsonObject),
+      configuration.config as JsonObject,
+    );
+    expect(effective["responses_api_metadata"]).toMatchObject({
       codex_security_surface: "cli",
       codex_security_command: "policy",
     });
@@ -1749,25 +1799,63 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
-  test("leaves quoted model-provider names in the native configuration", async () => {
+  test("keeps quoted policy provider definitions through native startup", async () => {
     const provider = "synthetic.provider";
+    const definition = {
+      name: "Synthetic provider",
+      base_url: "https://example.invalid/v1",
+      wire_api: "responses",
+    };
     const f = await setup({
+      stream: async function* (stage) {
+        if (stage === "architecture") {
+          const config = f.configuration()!.config as JsonObject;
+          const result = spawnSync(
+            resolveCodexCommand({}).command,
+            [
+              ...codexConfigOverrides(config).flatMap((value) => [
+                "--config",
+                value,
+              ]),
+              "debug",
+              "prompt-input",
+              "Synthetic policy request",
+            ],
+            {
+              cwd: f.outputDir,
+              env: {
+                PATH: process.env["PATH"],
+                SystemRoot: process.env["SystemRoot"],
+                CODEX_HOME: f.runtime.codexHome,
+              },
+              encoding: "utf8",
+            },
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            parseToml(
+              await readFile(join(f.runtime.codexHome, "config.toml"), "utf8"),
+            ),
+          ).toMatchObject({
+            model_provider: provider,
+            model_providers: { [provider]: definition },
+          });
+        }
+        yield* events(stage);
+      },
       config: {
         codexOverrides: {
           model_provider: provider,
-          model_providers: {
-            [provider]: {
-              name: "Synthetic provider",
-              base_url: "https://example.invalid/v1",
-              wire_api: "responses",
-            },
-          },
+          model_providers: { [provider]: definition },
         },
       },
     });
+    f.runtime.configPath = join(f.root, "preflight.toml");
     await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
     expect(f.configuration()?.config?.["model_provider"]).toBe(provider);
-    expect(f.configuration()?.config).not.toHaveProperty("model_providers");
+    expect(f.configuration()?.config?.["model_providers"]).toEqual({
+      [provider]: definition,
+    });
     await f.security.close();
   });
 

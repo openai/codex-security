@@ -3,13 +3,17 @@ import { createCliTest } from "./support/cli-run.js";
 import { gitText, nodeCommand } from "./support/shell.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   chmod,
+  cp,
   readFile,
   readdir,
   realpath,
   rename,
+  rm,
   stat,
   symlink,
   unlink,
@@ -18,6 +22,9 @@ import {
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
+import { Codex, type ThreadOptions } from "@openai/codex-sdk";
+import { stringify } from "smol-toml";
+import type { JsonObject } from "../src/config.js";
 import { parse as parseToml } from "smol-toml";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
@@ -36,6 +43,8 @@ import {
 } from "../src/component-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
+import { semanticScanDraft } from "../src/scan-semantics.js";
+import { deriveFindingIdentity } from "../src/contract.js";
 import * as runtime from "../src/runtime.js";
 import { normalizeTarget, nullIfMissingFile } from "../src/targets.js";
 import {
@@ -1774,7 +1783,93 @@ test.each([
     const ready = Promise.withResolvers<void>();
     let arrivals = 0;
     const resolveCommand = runtime.resolveCodexCommand;
+    const records = new Map<
+      string,
+      {
+        scanId: string;
+        scanDir: string;
+        targetId: string;
+        targetPath: string;
+        parentScanId: string | null;
+        parentScanRole: string | null;
+        mode: string;
+        value: string;
+        progress: { status: string };
+      }
+    >();
+    const projected: string[] = [];
+    const failures: string[] = [];
+    const commands: string[] = [];
+    const writeDocuments = async (
+      scanDir: string,
+      documents: Record<string, any>,
+    ) => {
+      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+        recursive: true,
+      });
+      const scanId = [...records.values()].find(
+        (record) => record.scanDir === scanDir,
+      )!.scanId;
+      await writeFile(join(scanDir, "report.md"), "# Synthetic scan\n");
+      for (const [key, name] of Object.entries({
+        manifest: "scan-manifest.json",
+        findings: "findings.json",
+        coverage: "coverage.json",
+      })) {
+        const previous = await json(join(scanDir, name));
+        if (key === "manifest") previous.scan.id = scanId;
+        else previous.scanId = scanId;
+        const update = documents[key];
+        await writeFile(
+          join(scanDir, name),
+          JSON.stringify(
+            key === "manifest"
+              ? { ...previous, scan: { ...previous.scan, ...update.scan } }
+              : { ...previous, ...update },
+          ),
+        );
+      }
+      const manifest = await json(join(scanDir, "scan-manifest.json"));
+      const findings = await json(join(scanDir, "findings.json"));
+      for (const finding of findings.findings)
+        Object.assign(
+          finding,
+          deriveFindingIdentity(
+            manifest.scan.id,
+            manifest.scan.target.targetId,
+            finding.ruleId,
+            finding.identity,
+          ),
+        );
+      await writeFile(join(scanDir, "findings.json"), JSON.stringify(findings));
+      const coverage = await json(join(scanDir, "coverage.json"));
+      // Workbench finalization binds explicit component paths, including ".".
+      coverage.mode = "scoped_path";
+      await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
+      for (const artifact of manifest.scan.artifacts) {
+        artifact.sha256 = createHash("sha256")
+          .update(await readFile(join(scanDir, artifact.path)))
+          .digest("hex");
+      }
+      await writeFile(
+        join(scanDir, "scan-manifest.json"),
+        JSON.stringify(manifest),
+      );
+    };
+    const spawn = childProcess.spawn;
     const spies = [
+      spyOn(childProcess, "spawn").mockImplementation(((
+        ...args: Parameters<typeof childProcess.spawn>
+      ) => {
+        const [command, argv, options] = args;
+        // Node needs a script argument before Codex's app-server flags. The
+        // preload implements its permission RPC and leaves exec launches intact.
+        return command === runtime.executablePathForSpawn(node) &&
+          Array.isArray(argv) &&
+          argv.includes("app-server")
+          ? spawn(command, ["exec", ...argv], options)
+          : spawn(...args);
+      }) as typeof childProcess.spawn),
       spyOn(runtime, "resolveCodexCommand").mockImplementation(
         (environment) => {
           if (environment?.["CODEX_CLI_PATH"] !== node)
@@ -1793,11 +1888,154 @@ test.each([
       spyOn(runtime, "resolvePluginPython").mockResolvedValue(
         "/managed/python",
       ),
-      spyOn(runtime, "prepareScanArtifactRestorer").mockResolvedValue({
-        restore: async () => {},
-      }),
+      spyOn(runtime, "prepareScanArtifactRestorer").mockImplementation(
+        async (_options, directory) => {
+          const restore = async (path: string, contents: Uint8Array) => {
+            await mkdir(dirname(join(directory, path)), { recursive: true });
+            await writeFile(join(directory, path), contents);
+          };
+          return {
+            restore,
+            restoreMany: async (artifacts) => {
+              for (const artifact of artifacts)
+                await restore(artifact.path, artifact.contents);
+            },
+            prepareDirectory: async (path) => {
+              await mkdir(join(directory, path), { recursive: true });
+            },
+            remove: async (path) => {
+              await rm(join(directory, path), { force: true });
+            },
+            projectChild: async (parentId, childId, childDirectory) => {
+              const parent = records.get(parentId)!;
+              const child = records.get(childId)!;
+              expect(child).toMatchObject({
+                parentScanId: parentId,
+                scanDir: childDirectory,
+                value: parent.value,
+                progress: { status: "complete" },
+              });
+              projected.push(childId);
+              const manifest = await json(
+                join(childDirectory, "scan-manifest.json"),
+              );
+              const findings = (
+                await json(join(childDirectory, "findings.json"))
+              ).findings;
+              const coverage = await json(
+                join(childDirectory, "coverage.json"),
+              );
+              return {
+                scanId: childId,
+                scanDir: childDirectory,
+                sourceFindings: findings,
+                draft: semanticScanDraft(
+                  parentId,
+                  manifest.scan,
+                  findings,
+                  coverage,
+                ),
+              };
+            },
+          };
+        },
+      ),
       spyOn(runtime, "runWorkbench").mockImplementation(
-        async (_options, args, input) => mockWorkbench(args, input),
+        async (options, args, input): Promise<JsonObject> => {
+          commands.push(args[0]!);
+          if (args[0] === "fail-scan")
+            failures.push(args[args.indexOf("--message") + 1]!);
+          if (args[0] === "register-cli-scan") {
+            const registration = mockWorkbench(args, input);
+            const { recipe, parentScanRole } = JSON.parse(input!);
+            const value = options.environment!["SYNTHETIC_COMPONENT"]!;
+            const scanId = `synthetic-${value}-${records.size + 1}`;
+            const parentScanId = args.includes("--parent-scan-id")
+              ? args[args.indexOf("--parent-scan-id") + 1]
+              : undefined;
+            const record = {
+              scanId,
+              scanDir: registration["scanDir"] as string,
+              targetId: registration["targetId"] as string,
+              targetPath: recipe.repository,
+              parentScanId: parentScanId ?? null,
+              parentScanRole: parentScanRole ?? null,
+              mode: recipe.mode,
+              value,
+              progress: { status: "running" },
+            };
+            records.set(scanId, record);
+            const findings = await json(
+              join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+            );
+            findings.scanId = scanId;
+            for (const finding of findings.findings) {
+              // Distinct child observations require the parent's real reducer turn.
+              if (parentScanId) finding.identity.instance = scanId;
+              Object.assign(
+                finding,
+                deriveFindingIdentity(
+                  scanId,
+                  record.targetId,
+                  finding.ruleId,
+                  finding.identity,
+                ),
+              );
+            }
+            await writeFile(
+              join(record.scanDir, "synthetic-registration.json"),
+              JSON.stringify({ ...record, findings }),
+            );
+            const contract = registration["contract"] as JsonObject;
+            return {
+              ...registration,
+              scanId,
+              contract: {
+                ...contract,
+                target: {
+                  ...(contract["target"] as JsonObject),
+                  targetId: record.targetId,
+                  displayName: "Synthetic component",
+                },
+                scope: {
+                  requiredIncludePaths: ["."],
+                  requiredExcludePaths: [],
+                },
+              },
+            };
+          }
+          if (args[0] === "list-scans") {
+            const root = args[args.indexOf("--scan-root") + 1]!;
+            return {
+              scans: [...records.values()].filter(
+                (record) =>
+                  record.scanDir === root ||
+                  record.scanDir.startsWith(root + sep),
+              ),
+            };
+          }
+          const record = records.get(args[args.indexOf("--scan-id") + 1]!);
+          if (args[0] === "save-scan-artifact") {
+            const path = join(
+              record!.scanDir,
+              args[args.indexOf("--artifact-path") + 1]!,
+            );
+            await mkdir(dirname(path), { recursive: true });
+            await writeFile(path, input!);
+          }
+          if (args[0] === "get-scan-feedback")
+            return {
+              scanId: record!.scanId,
+              targetId: record!.targetId,
+              falsePositives: [],
+            };
+          if (args[0] === "write-scan-draft")
+            await writeDocuments(record!.scanDir, JSON.parse(input!).documents);
+          if (args[0] === "complete-scan" || args[0] === "fail-scan")
+            record!.progress.status =
+              args[0] === "complete-scan" ? "complete" : "failed";
+          return record ? { scan: record } : {};
+        },
       ),
     ];
     try {
@@ -1805,7 +2043,7 @@ test.each([
         ["first", "second"].map(async (value) => {
           const paths = await fixture();
           const preload = join(paths.root, "codex.mjs");
-          const receipt = join(paths.root, "child.json");
+          const receipt = join(paths.root, "children.jsonl");
           const environment = {
             ...Object.fromEntries(
               Object.entries(process.env).filter(([key]) =>
@@ -1832,19 +2070,25 @@ test.each([
           await writeFile(
             preload,
             [
-              'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
+              'import { appendFileSync, cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
               'import { join } from "node:path";',
               'import { createHash } from "node:crypto";',
+              'import { createInterface } from "node:readline";',
+              `import { parse } from ${JSON.stringify(pathToFileURL(Bun.resolveSync("smol-toml", import.meta.dir)).href)};`,
+              'if (process.argv.includes("app-server")) {',
+              'const config = {}; for (let i = 0; i < process.argv.length; i++) if (["-c", "--config"].includes(process.argv[i])) { const value = parse(process.argv[++i]); const permissions = { ...config.permissions, ...value.permissions }; Object.assign(config, value, { permissions }); }',
+              'for await (const line of createInterface({ input: process.stdin })) { const request = JSON.parse(line); if (request.id === undefined) continue; const result = request.method === "config/read" ? { config } : request.method === "permissionProfile/list" ? { data: [{ id: config.default_permissions, allowed: true }], nextCursor: null } : {}; console.log(JSON.stringify({ id: request.id, result })); } process.exit(0);',
+              "}",
               "for await (const chunk of process.stdin) {}",
               `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
               'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
-              'const coveragePath = join(scan, "coverage.json"); const coverage = JSON.parse(readFileSync(coveragePath, "utf8")); coverage.mode = "scoped_path";',
-              'const bytes = JSON.stringify(coverage); writeFileSync(coveragePath, bytes); const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
-              'manifest.scan.artifacts.find(artifact => artifact.path === "coverage.json").sha256 = createHash("sha256").update(bytes).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
+              'const registration = JSON.parse(readFileSync(join(scan, "synthetic-registration.json"), "utf8"));',
+              'writeFileSync(join(scan, "findings.json"), JSON.stringify(registration.findings)); const coveragePath = join(scan, "coverage.json"); const coverage = JSON.parse(readFileSync(coveragePath, "utf8")); coverage.scanId = registration.scanId; coverage.mode = "scoped_path"; writeFileSync(coveragePath, JSON.stringify(coverage));',
+              'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8")); manifest.scan.id = registration.scanId; for (const artifact of manifest.scan.artifacts) artifact.sha256 = createHash("sha256").update(readFileSync(join(scan, artifact.path))).digest("hex"); writeFileSync(manifestPath, JSON.stringify(manifest));',
               'const authPath = join(process.env.CODEX_HOME, "auth.json");',
-              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
+              `appendFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, scanId: registration.scanId, mode: registration.mode, args: process.argv }) + "\\n");`,
               'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
-              'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "scan complete" } }));',
+              'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: registration.mode === "deep" ? JSON.stringify({ matches: [], uncertain: [] }) : "scan complete" } }));',
               'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
               "process.exit(0);",
             ].join("\n"),
@@ -1861,31 +2105,54 @@ test.each([
                 },
               },
             },
-            scanOptions: { auth, mode },
+            scanOptions: {
+              auth,
+              mode,
+              ...(mode === "deep" ? { workers: 1, maxDiscoveryRuns: 2 } : {}),
+            },
           }).finally(ready.resolve);
           expect(
             summary,
-            JSON.stringify(await json(summary.summaryPath!)),
+            JSON.stringify({
+              summary: await json(summary.summaryPath!),
+              failures,
+            }),
           ).toMatchObject({ completed: 1, failed: 0 });
-          const child = await json(receipt);
-          expect(await realpath(child.executable)).toBe(await realpath(node));
-          expect(child).toMatchObject({
-            home: join(environment.CODEX_SECURITY_STATE_DIR, "codex-home"),
-            state: environment.CODEX_SECURITY_STATE_DIR,
-            key: auth === "api-key" ? environment.OPENAI_API_KEY : null,
-            auth: auth === "chatgpt" ? storedAuthentication : null,
-            value,
-            python: "/managed/python",
-          });
+          const children = (await readFile(receipt, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          expect(
+            children.filter((child) => child.mode === "standard"),
+          ).toHaveLength(mode === "deep" ? 2 : 1);
           if (mode === "deep") {
-            expect(parseToml(child.workerConfig)).toMatchObject({
-              worker_runtime: {
-                shell_environment_policy: {
-                  set: { SYNTHETIC_COMPONENT: `worker-${value}` },
-                },
+            expect(children.some((child) => child.mode === "deep")).toBe(true);
+            expect(
+              projected.filter((id) => records.get(id)!.value === value),
+            ).toHaveLength(2);
+          }
+          for (const child of children) {
+            expect(await realpath(child.executable)).toBe(await realpath(node));
+            expect(child).toMatchObject({
+              home: join(environment.CODEX_SECURITY_STATE_DIR, "codex-home"),
+              state: environment.CODEX_SECURITY_STATE_DIR,
+              key: auth === "api-key" ? environment.OPENAI_API_KEY : null,
+              auth: auth === "chatgpt" ? storedAuthentication : null,
+              value,
+              python: "/managed/python",
+            });
+            const overrides = child.args.flatMap(
+              (arg: string, index: number) =>
+                arg === "-c" || arg === "--config"
+                  ? [parseToml(child.args[index + 1])]
+                  : [],
+            );
+            expect(Object.assign({}, ...overrides)).toMatchObject({
+              shell_environment_policy: {
+                set: { SYNTHETIC_COMPONENT: `worker-${value}` },
               },
             });
-          } else expect(child.workerConfig).toBeNull();
+          }
           expect(environment).toEqual(original);
           expect(await json(join(environment.CODEX_HOME, "auth.json"))).toEqual(
             storedAuthentication,
@@ -1894,6 +2161,12 @@ test.each([
       );
       for (const outcome of outcomes)
         if (outcome.status === "rejected") throw outcome.reason;
+      expect(
+        [...records.values()].every(
+          (record) => record.progress.status === "complete",
+        ),
+      ).toBe(true);
+      expect(commands).not.toContain("fail-scan");
       expect(arrivals).toBe(2);
       expect(Bun.deepEquals(process.env, originalEnvironment)).toBe(true);
     } finally {
@@ -2028,6 +2301,115 @@ test("CLI rejects ambiguous component selection", async () => {
     expect(result.stderr).toContain("Choose exactly one");
   }
 });
+
+test.each([
+  {
+    name: "explicit model and effort",
+    overrides: { model: "requested-model", model_reasoning_effort: "high" },
+    model: "requested-model",
+    effort: "high",
+  },
+  {
+    name: "explicit model",
+    overrides: { model: "requested-model" },
+    model: "requested-model",
+    effort: "low",
+  },
+  {
+    name: "explicit effort",
+    overrides: { model_reasoning_effort: "high" },
+    model: "ambient-model",
+    effort: "high",
+  },
+  {
+    name: "explicit profile",
+    overrides: {
+      profile: "requested",
+      profiles: {
+        requested: { model: "profile-model", model_reasoning_effort: "medium" },
+      },
+    },
+    model: "profile-model",
+    effort: "medium",
+  },
+  {
+    name: "inherited profile",
+    overrides: {},
+    model: "ambient-model",
+    effort: "low",
+  },
+])(
+  "component helpers preserve $name over ambient profile settings",
+  async ({ overrides, model, effort }) => {
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const home = join(paths.root, "home");
+    await mkdir(home, { mode: 0o700 });
+    const homeConfig = stringify({
+      profile: "ambient",
+      profiles: {
+        ambient: { model: "ambient-model", model_reasoning_effort: "low" },
+      },
+    });
+    await writeFile(join(home, "config.toml"), homeConfig);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+      OPENAI_API_KEY: "synthetic-component-key",
+    };
+    const config = { codexOverrides: overrides as JsonObject };
+    const launches: Array<ThreadOptions | undefined> = [];
+    let planning = true;
+    const synthetic = fakeCodex(() => (planning ? { components } : noMatches));
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation((options) => {
+      launches.push(options);
+      return synthetic.startThread(options!) as ReturnType<
+        Codex["startThread"]
+      >;
+    });
+    // Profile merging belongs to the wrapper; MCP enumeration is independent.
+    const mcpCommand = spyOn(runtime, "runCodexCommand").mockImplementation(
+      async (_command, args) => {
+        expect(args).toContain("mcp");
+        return { success: true, exitCode: 0, stdout: "[]", stderr: "" };
+      },
+    );
+    try {
+      const plan = await planComponents(paths.repository, {
+        config,
+        environment,
+      });
+      expect(plan.components).toContainEqual(components[0]!);
+      planning = false;
+      const summary = await scan(paths, {
+        components: components.slice(0, 2),
+        config,
+        environment,
+        matchFindings: undefined,
+      });
+      expect(summary.deduplication?.status).toBe("completed");
+      expect(launches).toHaveLength(2);
+      for (const launch of launches)
+        expect(launch).toMatchObject({
+          model,
+          modelReasoningEffort: effort,
+          sandboxMode: "read-only",
+          networkAccessEnabled: false,
+        });
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+        homeConfig,
+      );
+    } finally {
+      startThread.mockRestore();
+      mcpCommand.mockRestore();
+    }
+  },
+);
 
 (process.platform === "win32" ? test.skip : test)(
   "component inventory excludes checkout-local Git when planning a subdirectory",

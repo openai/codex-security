@@ -82,7 +82,9 @@ const rawDiscoveryCandidate = z.strictObject({
 });
 
 const discoveryCandidate = z.looseObject({
-  candidate_id: z.string().regex(new RegExp("^(?!\\.{1,2}$)[^/\\\\]+$")),
+  candidate_id: z
+    .string()
+    .regex(new RegExp("^(?!\\.{1,2}$)(?=.*\\S)[^/\\\\]+$")),
   ...rawDiscoveryCandidate.shape,
   cwe_ids: z.array(z.string().regex(new RegExp("^CWE-[1-9][0-9]*$"))),
   locations: z.array(normalizedDiscoveryLocation).min(1),
@@ -231,7 +233,7 @@ const draft_finding = z.looseObject({
     .looseObject({
       reportPath: pattern(
         z.string(),
-        "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
+        "^(?:artifacts/deep-scan/passes/[a-zA-Z0-9][a-zA-Z0-9._-]*/)?findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\\.md$",
       ),
     })
     .optional(),
@@ -484,34 +486,6 @@ export const artifactSchemaDocuments = {
       completedScanInput: z.strictObject({
         scanId: scanId,
         handoffClaimToken: draft_handoffClaimToken.optional(),
-      }),
-    },
-  },
-  "tools/deep-reducer": {
-    title: "Codex Security Deep Scan semantic reducer operations",
-    $ref: "#/$defs/reductionInput",
-    $defs: {
-      reducerInputs: z.strictObject({
-        cursor: z
-          .string()
-          .regex(new RegExp("^(0|[1-9][0-9]*)$"))
-          .describe("Continue the same document from its returned nextCursor.")
-          .optional(),
-        maxBytes: integer(1, 9007199254740991).describe(
-          "Caller-selected byte budget for the serialized MCP response. Choose below the transport and output budgets; reduce it if transport reports an oversized response.",
-        ),
-        findingRef: z
-          .string()
-          .describe(
-            "Omit to page assigned findings and the previous aggregate without retained provenance bodies. Use source:<sourceFindingId> to fetch a complete original, or previous:<zero-based index> to fetch a complete previous aggregate finding, including its retained history.",
-          )
-          .optional(),
-      }),
-      reductionInput: draft_scanDraftInput.omit({ coverage: true }).extend({
-        complete: z
-          .boolean()
-          .describe("Omit or set true when submitting the finished aggregate.")
-          .optional(),
       }),
     },
   },

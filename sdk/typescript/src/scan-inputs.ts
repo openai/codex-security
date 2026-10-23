@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
@@ -12,7 +12,7 @@ const KNOWLEDGE_SNAPSHOT_FILE = ".scan-knowledge.json";
 
 const knowledgeSnapshotSchema = z.object({
   sources: z.array(z.string()),
-  protectedRoots: z.array(z.string()).optional(),
+  protectedRoots: z.array(z.string()),
   documents: z.record(z.string(), z.string()),
 });
 
@@ -39,6 +39,17 @@ export function scanInputIdentity(
             ),
           },
   };
+}
+
+export async function promptFileDigest(
+  path: string | undefined,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  return path === undefined
+    ? null
+    : createHash("sha256")
+        .update(await readFile(path, { signal }))
+        .digest("hex");
 }
 
 export async function saveScanKnowledge(

@@ -90,7 +90,7 @@ def test_atomic_write_closes_directories_after_cleanup_failures(
             assert destination.read_bytes() == b"original"
         else:
             assert destination.read_bytes() == b"replacement"
-        staging = list(tmp_path.glob(".report.md.*.tmp"))
+        staging = [path for path in tmp_path.iterdir() if path != destination]
         assert len(staging) == (1 if failure == "write_and_unlink" else 0)
     finally:
         # Keep a failed regression assertion from leaking descriptors in the test runner.
