@@ -8,7 +8,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-required-version = "==0.17.0"
+required-version = "==0.17.1"
 target-version = "py310"
 
 [tool.ruff.lint]
