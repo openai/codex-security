@@ -32,6 +32,9 @@ Model-based evaluations live in [`evals/`](evals/README.md), outside the plugin
 source. Deterministic triage checks and the MCP reducer IPC regression remain
 part of normal CI.
 
+See the [CI guide](docs/ci.md) for check selection, platform/version coverage,
+required status checks, and test-runner qualification.
+
 ## Where to make a change
 
 Start with the owner of the behavior, then follow its callers when the change

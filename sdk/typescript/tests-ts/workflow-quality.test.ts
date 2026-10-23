@@ -1,7 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 
 const ci = Bun.YAML.parse(
@@ -59,6 +60,7 @@ function eventContext(
 }
 
 const aggregates = [
+  ["ci", {}, "ci"] as const,
   ...ci.jobs["required-test"]!.strategy!.matrix["os"]!.map(
     (os) => ["required-test", { os }, `${os} / node-22`] as const,
   ),
@@ -108,6 +110,7 @@ test.each([
 
 test("all source jobs depend on classification and titles cannot block source checks", () => {
   expect(aggregates.map(([, , name]) => name)).toEqual([
+    "ci",
     "ubuntu-latest / node-22",
     "macos-latest / node-22",
     "windows-latest / node-22",
@@ -192,121 +195,74 @@ bashTest(
   },
 );
 
-bashTest(
-  "selects workflow and runner checks for relevant changes and main pushes",
-  async () => {
-    const scope = ci.jobs["classify-changes"]!.steps.find(
-      (step) => step.name === "Select additional checks",
-    )!;
-    const directory = await mkdtemp(join(tmpdir(), "workflow-quality-"));
-    try {
-      for (const [
-        event,
-        baseChanged,
-        paths,
-        expected,
-        runnerExpected = "false",
-      ] of [
-        ["push", false, [], "true"],
-        ["pull_request", true, [], "true", "true"],
-        ["pull_request", false, [".github/workflows/node-release.yml"], "true"],
-        [
-          "pull_request",
-          false,
-          [".github/actions/download-native/action.yml"],
-          "true",
-        ],
-        ["pull_request", false, [".github/actionlint.yaml"], "true"],
-        ["pull_request", false, [".github/zizmor.yml"], "true"],
-        [
-          "pull_request",
-          false,
-          [".github/scripts/release-progress.mjs"],
-          "true",
-        ],
-        [
-          "pull_request",
-          false,
-          [".github/scripts/test_release_progress.mjs"],
-          "true",
-        ],
-        [
-          "pull_request",
-          false,
-          ["sdk/typescript/scripts/release-pr.mjs"],
-          "true",
-        ],
-        ["pull_request", false, ["docker/verify-container-compose.sh"], "true"],
-        ["pull_request", false, ["sdk/typescript/src/index.ts"], "false"],
-        ["pull_request", false, ["README.md"], "false"],
-        [
-          "pull_request",
-          false,
-          [".github/workflows/node-ci.yml"],
-          "true",
-          "true",
-        ],
-        [
-          "pull_request",
-          false,
-          [".github/workflows/test-quality.yml"],
-          "true",
-          "true",
-        ],
-        [
-          "pull_request",
-          false,
-          [".github/actions/setup-tools/action.yml"],
-          "true",
-          "true",
-        ],
-        ...[
-          "sdk/typescript/bunfig.toml",
-          "sdk/typescript/scripts/compare-test-reports.mts",
-          "sdk/typescript/scripts/prepare-windows-test-root.ps1",
-          "sdk/typescript/scripts/run-ci-tests.mts",
-          "sdk/typescript/scripts/test-shards.mts",
-          "sdk/typescript/scripts/test-timings.json",
-        ].map(
-          (path) => ["pull_request", false, [path], "false", "true"] as const,
-        ),
-      ] as const) {
-        const output = join(directory, "output");
-        await rm(output, { force: true });
-        const result = spawnSync(
-          "bash",
-          [
-            "-c",
-            'changed_paths=("$@"); git() { if ((${#changed_paths[@]})); then printf "%s\\0" "${changed_paths[@]}"; fi; }\n' +
-              scope.run,
-            "scope",
-            ...paths,
-          ],
-          {
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              EVENT_NAME: event,
-              BASE_CHANGED: String(baseChanged),
-              GITHUB_OUTPUT: output,
-            },
-          },
-        );
-        expect(result.status, result.stderr).toBe(0);
-        const outputs = Object.fromEntries(
-          (await readFile(output, "utf8"))
-            .trim()
-            .split("\n")
-            .map((line) => line.split("=")),
-        );
-        expect(outputs["workflow-quality"], paths.join(",")).toBe(expected);
-        expect(outputs["test-quality"], paths.join(",")).toBe(runnerExpected);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  },
-);
+test("classification reads the PR merge diff rather than unrelated base changes", async () => {
+  const scope = ci.jobs["classify-changes"]!.steps.find(
+    (step) => step.name === "Select required checks",
+  )!;
+  const [command, script] = scope.run.split(" ");
+  expect(command).toBe("node");
+  const directory = await mkdtemp(join(tmpdir(), "ci-merge-diff-"));
+  const repository = join(directory, "repository");
+  const output = join(directory, "outputs");
+  await mkdir(repository);
+  const git = (...args: string[]) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=CI Test",
+        "-c",
+        "user.email=ci@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: repository, encoding: "utf8", stdio: "pipe" },
+    );
+  try {
+    git("init", "-b", "main");
+    await writeFile(join(repository, "README.md"), "Original documentation\n");
+    git("add", ".");
+    git("commit", "-m", "Initial fixture");
+    git("checkout", "-b", "docs");
+    await writeFile(join(repository, "README.md"), "Updated documentation\n");
+    git("commit", "-am", "Update documentation");
+    git("checkout", "main");
+    await writeFile(
+      join(repository, "runtime.ts"),
+      "export const value = 1;\n",
+    );
+    git("add", ".");
+    git("commit", "-m", "Independent base change");
+    git("merge", "--no-ff", "docs", "-m", "Merge fixture");
+    const result = spawnSync(
+      command!,
+      [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          EVENT_NAME: "pull_request",
+          BASE_CHANGED: "false",
+          GITHUB_OUTPUT: output,
+        },
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const outputs = Object.fromEntries(
+      (await readFile(output, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => line.split("=")),
+    );
+    expect(outputs["source-required"]).toBe("false");
+    expect(outputs["container-validate"]).toBe("false");
+    expect(outputs["workflow-quality"]).toBe("false");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 for (const target of musl.jobs.primitives.strategy.matrix.include) {
   for (const scenario of ["ecr-success", "ecr-failure", "both-fail"] as const) {
@@ -406,36 +362,19 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
   }
 }
 
-bashTest(
-  "required Unix checks fail when selected workflow checks do not pass",
-  () => {
-    const aggregate = ci.jobs["required-test"]!;
+test("legacy required check names propagate the final CI gate result", () => {
+  for (const id of ["required-test", "windows"]) {
+    const aggregate = ci.jobs[id]!;
+    expect(aggregate.needs).toContain("ci");
     expect(aggregate.if).toContain("always()");
     const gate = aggregate.steps.find(
-      (step) => step.name === "Require selected workflow checks",
+      (step) => step.name === "Require CI gate",
     )!;
-    const condition = gate
-      .if!.replaceAll(
-        "needs.classify-changes.outputs.workflow-quality",
-        '"$SELECTED"',
-      )
-      .replaceAll("needs.workflow-quality.result", '"$RESULT"');
-    for (const [selected, result, expected] of [
-      ["true", "success", 0],
-      ["true", "failure", 1],
-      ["true", "cancelled", 1],
-      ["true", "skipped", 1],
-      ["false", "skipped", 0],
-    ] as const) {
-      const execution = spawnSync(
-        "bash",
-        ["-c", `if [[ ${condition} ]]; then\n${gate.run}\nfi`],
-        {
-          encoding: "utf8",
-          env: { ...process.env, SELECTED: selected, RESULT: result },
-        },
+    expect(gate.run).toBe("exit 1");
+    for (const result of ["success", "failure", "cancelled", "skipped"]) {
+      expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
+        result !== "success",
       );
-      expect(execution.status, execution.stderr).toBe(expected);
     }
-  },
-);
+  }
+});
