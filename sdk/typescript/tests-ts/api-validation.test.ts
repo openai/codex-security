@@ -1074,6 +1074,8 @@ describe("CodexSecurity finding validation", () => {
     );
     usePersistedValidationWorkbench(resumed);
     await using client = resumed.client;
+    await client.validate(request);
+    expect(modelCalls).toBe(1);
     client.config.codexOverrides!["model"] = "changed-validation-model";
     const changedModel = await client.validate(request);
     expect(modelCalls).toBe(2);
