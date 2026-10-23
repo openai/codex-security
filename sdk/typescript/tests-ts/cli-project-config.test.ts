@@ -6,15 +6,22 @@ import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
-import { main } from "../src/cli.js";
+import { main, parseCodexOverrides } from "../src/cli.js";
 import {
+  scanModel,
+  scanModelProvider,
   mergedCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
 } from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
-import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  fakeResult,
+  fakeSecurity,
+} from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { rejecting, throwing } from "./support/errors.js";
@@ -208,6 +215,62 @@ test("info resolves a config and its sources without a target, prompt reads, or 
       },
     },
   });
+});
+
+test.each(
+  ["openrouter", "fireworks", "cheaperinference", "amazon-bedrock"].flatMap(
+    (provider) =>
+      ["root", "selected profile"].map((location) => ({ provider, location })),
+  ),
+)(
+  "info requires a configured model for $provider in the $location",
+  async ({ provider, location }) => {
+    const providerConfig: JsonObject = { model_provider: provider };
+    const codex: JsonObject =
+      location === "root"
+        ? providerConfig
+        : { profile: "review", profiles: { review: providerConfig } };
+    const input = await fixture({ codex });
+    const deps = dependencies({
+      currentDirectory: input.configDirectory,
+      environment: { CODEX_HOME: join(input.root, "unused-home") },
+      onConfig: throwing("No runtime for info"),
+    });
+    const rejected = createCliTest(main);
+    expect(
+      await rejected.runCli(["info", "-c", input.config, "--json"], deps),
+    ).toBe(2);
+    expect(rejected.stderr.text()).toContain(
+      `--model is required when using --provider ${provider}`,
+    );
+
+    providerConfig["model"] = "synthetic-provider-model";
+    await writeFile(input.config, JSON.stringify({ codex }));
+    const accepted = createCliTest(main);
+    expect(
+      await accepted.runCli(["info", "-c", input.config, "--json"], deps),
+    ).toBe(0);
+    expect(JSON.parse(accepted.stdout.text())).toMatchObject({
+      model: "synthetic-provider-model",
+    });
+  },
+);
+
+test("info ignores an external provider in an unselected profile", async () => {
+  const input = await fixture({
+    codex: { profiles: { unused: { model_provider: "openrouter" } } },
+  });
+  const stdout = captureCli(main, "stdout");
+  expect(
+    await stdout.run(
+      ["info", "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.configDirectory,
+        onConfig: throwing("No runtime for info"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({ model: "gpt-5.6-sol" });
 });
 
 test("info without a file reports default sources, including unset settings", async () => {
@@ -970,6 +1033,188 @@ test("file prompts use the config directory and CLI prompt overrides use the inv
   });
 });
 
+test.each(["root", "file profile", "CLI profile"])(
+  "an explicit OpenAI provider overrides the %s and omission preserves it",
+  async (selection) => {
+    const configured: JsonObject = {
+      model: "synthetic-model",
+      model_provider: "amazon-bedrock",
+      ...(selection === "root"
+        ? {}
+        : {
+            profile: selection === "CLI profile" ? "other" : "review",
+            profiles: {
+              review: {
+                model_provider: "amazon-bedrock",
+                model_reasoning_effort: "high",
+              },
+              other: { model_provider: "amazon-bedrock" },
+            },
+          }),
+    };
+    const input = await fixture({ codex: configured });
+    for (const provider of [undefined, "openai"] as const) {
+      let native: CodexSecurityConfig | undefined;
+      expect(
+        await runCapturedCli(
+          main,
+          [
+            "scan",
+            "-c",
+            input.config,
+            ...(provider === undefined ? [] : ["--provider", provider]),
+            ...(selection === "CLI profile"
+              ? ["--codex", 'profile="review"']
+              : []),
+            "--json",
+          ],
+          dependencies({
+            currentDirectory: input.repository,
+            onConfig: (value) => {
+              native = value;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(scanModelProvider(native!.codexOverrides!)).toBe(
+        provider ?? "amazon-bedrock",
+      );
+      if (selection !== "root") {
+        expect(native?.codexOverrides).toMatchObject({
+          profiles: {
+            review: { model_reasoning_effort: "high" },
+            other: { model_provider: "amazon-bedrock" },
+          },
+        });
+      }
+      expect((await readProjectConfig(input.config)).input.codex).toEqual(
+        configured,
+      );
+    }
+  },
+);
+
+test.each(["openrouter", "fireworks", "amazon-bedrock"] as const)(
+  "requires an explicit or configured model for inherited %s before preparing runtime",
+  async (provider) => {
+    for (const selection of [
+      "root",
+      "file profile",
+      "CLI profile",
+      "native override",
+    ]) {
+      for (const model of [undefined, "synthetic-provider-model"]) {
+        const codex: JsonObject =
+          selection === "root"
+            ? {
+                model_provider: provider,
+                ...(model === undefined ? {} : { model }),
+              }
+            : selection === "native override"
+              ? {}
+              : {
+                  model_provider: "openai",
+                  profile: selection === "CLI profile" ? "other" : "review",
+                  profiles: {
+                    review: {
+                      model_provider: provider,
+                      ...(model === undefined ? {} : { model }),
+                    },
+                    other: { model_provider: "openai" },
+                  },
+                };
+        const input = await fixture({ codex });
+        const stdout = capture();
+        const stderr = capture();
+        const onConfig = mock<(config: CodexSecurityConfig) => void>();
+        const args = [
+          "scan",
+          "-c",
+          input.config,
+          "--json",
+          ...(selection === "CLI profile"
+            ? ["--codex", 'profile="review"']
+            : []),
+          ...(selection === "native override"
+            ? [
+                "--codex",
+                `model_provider="${provider}"`,
+                ...(model === undefined ? [] : ["--codex", `model="${model}"`]),
+              ]
+            : []),
+        ];
+        expect(
+          await main(
+            args,
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              currentDirectory: input.repository,
+              onConfig,
+              environment: {
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
+          ),
+          `${provider} / ${selection} / ${model}: ${stderr.text()}`,
+        ).toBe(model === undefined ? 2 : 0);
+        if (model === undefined) {
+          expect(onConfig).not.toHaveBeenCalled();
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            status: "failed",
+            code: "SCAN_FAILED",
+          });
+          expect(stderr.text()).toContain(
+            `--model is required when using --provider ${provider}`,
+          );
+          if (selection !== "native override") {
+            expect(
+              await main(
+                [...args, "--provider", "openai"],
+                capture().stream,
+                capture().stream,
+                dependencies({ currentDirectory: input.repository, onConfig }),
+              ),
+            ).toBe(0);
+            expect(
+              scanModelProvider(onConfig.mock.lastCall![0].codexOverrides!),
+            ).toBe("openai");
+          }
+        } else {
+          expect(onConfig).toHaveBeenCalledTimes(1);
+          expect(
+            scanModelProvider(onConfig.mock.lastCall![0].codexOverrides!),
+          ).toBe(provider);
+          expect(scanModel(onConfig.mock.lastCall![0].codexOverrides!)).toBe(
+            model,
+          );
+        }
+      }
+    }
+  },
+);
+
+test("explicit OpenAI rejects a conflicting direct provider override", () => {
+  expect(() =>
+    parseCodexOverrides(
+      ['model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      "openai",
+    ),
+  ).toThrow("--provider conflicts with --codex model_provider");
+});
+
+test("malformed TOML explains shell quoting with a usable example", () => {
+  expect(() => parseCodexOverrides(["model_reasoning_effort=high"])).toThrow(
+    "--codex 'model_reasoning_effort=\"high\"'",
+  );
+  expect(parseCodexOverrides(['model_reasoning_effort="high"'])).toEqual({
+    model_reasoning_effort: "high",
+  });
+});
+
 test("an explicit file can supply the model required by a provider override", async () => {
   const input = await fixture({
     codex: { model: "synthetic-model" },
@@ -1233,6 +1478,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     stopAfterConsecutiveErrors: 2,
     maxDiscoveryRuns: 40,
     maxTimeHours: 96,
+    maxTimeMinutes: 5760,
     projectConfig: {
       path: input.config,
       sources: {
@@ -1247,6 +1493,47 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     failOnSeverity: "high",
   });
 });
+
+test.each([undefined, "2.5"])(
+  "Standard dry-run reports the effective time budget without a runtime: %s",
+  async (minutes) => {
+    const input = await fixture({});
+    const environment = {
+      CODEX_HOME: join(input.root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
+    };
+    const createCodex = mock(throwing("No inference in dry-run"));
+    const prepareRuntime = mock(rejecting("No runtime in dry-run"));
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment,
+    });
+    deps.createSecurity = cliClientFactory({
+      environment,
+      createCodex,
+      prepareRuntime,
+    });
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        [
+          "scan",
+          "--dry-run",
+          "--json",
+          ...(minutes === undefined ? [] : ["--max-time", minutes]),
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const output = JSON.parse(stdout.text());
+    expect(output.mode).toBe("standard");
+    expect(output.maxTimeMinutes).toBe(
+      minutes === undefined ? undefined : Number(minutes),
+    );
+    expect(createCodex).not.toHaveBeenCalled();
+    expect(prepareRuntime).not.toHaveBeenCalled();
+  },
+);
 
 test.each([
   [{ output: { directory: "../repository/artifacts" } }, "outside"],
@@ -1371,6 +1658,69 @@ test.each([
     expect(onRun).not.toHaveBeenCalled();
   },
 );
+
+test.each([
+  { values: ['profiles.review.model_provider="amazon-bedrock"'] },
+  {
+    values: [
+      'profile="review"',
+      'profiles.review.model_provider="amazon-bedrock"',
+    ],
+  },
+  { values: ['profiles.review={model_provider="amazon-bedrock"}'] },
+])(
+  "rejects an explicit selected-profile provider conflict: %j",
+  ({ values }) => {
+    expect(() =>
+      parseCodexOverrides(values, undefined, undefined, "openai", {
+        profile: "review",
+        profiles: { review: { model: "synthetic-model" } },
+      }),
+    ).toThrow(
+      "--provider conflicts with --codex profiles.review.model_provider",
+    );
+  },
+);
+
+test("provider selection preserves inherited and unselected profile controls", () => {
+  const defaults = {
+    profile: "review",
+    profiles: {
+      review: { model: "synthetic-model", model_provider: "amazon-bedrock" },
+    },
+  };
+  expect(
+    parseCodexOverrides([], undefined, undefined, "openai", defaults),
+  ).toMatchObject({
+    model_provider: "openai",
+    profiles: { review: { model_provider: "openai" } },
+  });
+  expect(
+    parseCodexOverrides(
+      ['profiles.unselected.model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      "openai",
+      defaults,
+    ),
+  ).toMatchObject({
+    profiles: {
+      review: { model_provider: "openai" },
+      unselected: { model_provider: "amazon-bedrock" },
+    },
+  });
+  expect(
+    parseCodexOverrides(
+      ['profiles.review.model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      undefined,
+      defaults,
+    ),
+  ).toMatchObject({
+    profiles: { review: { model_provider: "amazon-bedrock" } },
+  });
+});
 
 test.each([
   { model: "gpt-5.6-sol", showCost: false },

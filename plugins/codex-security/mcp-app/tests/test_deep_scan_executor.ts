@@ -1076,13 +1076,21 @@ async function testOpenAiCredentialsReachWorker() {
     };
     nativeProvider?: string;
     configuration?: string;
+    projectConfiguration?: string;
   }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
+    {
+      configuration:
+        'model_provider = "amazon-bedrock"\nprofile = "selected"\n[profiles.selected]\nmodel_provider = "openai"\n',
+      openai: "synthetic-openai-key",
+      expected: "synthetic-openai-key",
+    },
     {
       openai: "synthetic-openai-key",
       expected: "synthetic-openai-key",
       // Optional null auth is omitted from the SDK's private TOML snapshot.
-      configuration: 'model_provider = "openai"\n[model_providers.openai]\n',
+      projectConfiguration:
+        'model_provider = "openai"\n[model_providers.openai]\n',
     },
     {
       openai: "  synthetic-openai-key  ",
@@ -1107,6 +1115,7 @@ async function testOpenAiCredentialsReachWorker() {
       accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
     },
     {
+      configuration: 'model_provider = "synthetic-provider"\n',
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
@@ -1169,14 +1178,16 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("OPENAI_IDENTITY_TOKEN_FILE", undefined);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
-      const configPath = path.join(fixture.root, "scan-settings.toml");
-      await writeFile(configPath, entry.configuration ?? "");
-      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      if (entry.projectConfiguration !== undefined) {
+        const configPath = path.join(fixture.root, "scan-settings.toml");
+        await writeFile(configPath, entry.projectConfiguration);
+        process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      }
+      let configuration = entry.configuration ?? 'model_provider = "openai"\n';
       Object.assign(process.env, runtimeEnvironment);
       if (entry.nativeProvider !== undefined) {
-        await writeFile(
-          path.join(fixture.root, "config.toml"),
-          `model_provider = ${JSON.stringify(entry.nativeProvider)}
+        configuration = `model_provider = ${JSON.stringify(entry.nativeProvider)}
 cli_auth_credentials_store = "file"
 [features]
 plugins = false
@@ -1187,9 +1198,9 @@ wire_api = "responses"
 base_url = "https://provider.example.test/v1"
 requires_openai_auth = false
 env_key = "CODEX_API_KEY"
-`,
-        );
+`;
       }
+      await writeFile(path.join(fixture.root, "config.toml"), configuration);
       let nativePreflight:
         | {
             codexHome: string | undefined;
@@ -1274,6 +1285,14 @@ env_key = "CODEX_API_KEY"
             assert.equal(process.env[name], value);
           }
 
+          assert.equal(
+            invocation.configuration,
+            entry.projectConfiguration ?? configuration,
+          );
+          assertConfigOverrides(invocation.argv, {
+            model_provider:
+              entry.projectConfiguration === undefined ? undefined : "openai",
+          });
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,

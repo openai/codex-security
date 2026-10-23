@@ -237,6 +237,11 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
+External providers require a model selected with `--model` or native
+configuration; the built-in OpenAI model default does not apply. An explicit
+`--provider openai` selects OpenAI. Omit `--provider` to retain the configured
+provider.
+
 ### Amazon Bedrock
 
 Use AWS credentials and a region with access to the exact Bedrock model ID:
@@ -426,13 +431,22 @@ codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
+Standard mode runs discovery and validation for the selected scope. Deep mode
+uses repeated discovery workers, then combines and validates their findings.
+Deep scans support repository and path targets.
+
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
 
-`--diff` scans committed changes; `--working-tree` scans staged and unstaged
-changes. Both require Git. Deep scans support whole repositories and path scopes.
-Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
-be clean and at the commit recorded by the parent.
+`--path` scopes a scan to one or more repository-relative paths, `--diff REF`
+scans committed changes from `REF` to `--head` (default: `HEAD`), and
+`--working-tree` scans staged, unstaged, and untracked changes against `--base`
+(default: `HEAD`). The two change selectors require Git. All three scope selectors are mutually exclusive; `--path`
+cannot filter a diff. Committed-diff scans require a clean, nonsparse checkout,
+including no untracked files, and `--head` must resolve to the checked-out commit.
+
+Working-tree snapshots include untracked nested Git repositories. Initialized
+submodules must be clean and at the commit recorded by the parent.
 
 `--owner-suggestions` writes optional `owner-suggestions.json` after a completed
 committed Git scan, using the same checkout, model, and reasoning effort. Owner
@@ -446,18 +460,25 @@ Use the separate `suggest-owners` command for explicit owner-only jobs.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
-explicit unsupported binary files are rejected. Bulk scans share this context
-with every repository.
+explicit unsupported binary files are rejected. Supplying `--knowledge-base`
+replaces the configured context list. CLI context, prompt, and output paths resolve
+from the invocation directory. Bulk scans share this context with every repository.
 
-Use `--output-dir DIR` to choose where a scan saves its results. The directory
-must be empty and outside the scanned directory and enclosing Git worktree. On
-macOS/Linux, existing directories must be private (`chmod 700`).
+Output directories must be new or empty and outside the scanned directory and
+enclosing Git worktree. On macOS/Linux, existing directories must be private (`chmod 700`).
 `--archive-existing` moves earlier output to
-`<output-dir>.previous-<timestamp>-<id>`; `--dry-run` previews the move.
+`<output-dir>.previous-<timestamp>-<id>` and also works with configured output;
+`--dry-run` previews the move. The summary shows the saved directory; `scans` lists
+saved runs and `findings` lists their findings.
 
 Scans also attempt to write SARIF to `<scan-dir>/exports/results.sarif`. If that
 optional export fails, the scan can still complete. Use the
 [export command](#export-findings) to write or retry SARIF from the saved results.
+
+`--post-scan-prompt-file FILE` sends the file contents as model instructions; it
+does not execute a shell script. This best-effort follow-up skips early setup
+failures, cancellation, and budget exhaustion. Follow-up patching and these
+instructions are outside `--max-cost`.
 
 Completed scans exit with `0` by default. Configure `--fail-on-severity high`
 to return `1` for high or critical findings. Scope exclusions, skipped files, and follow-up notes
@@ -486,14 +507,24 @@ imports. Existing sealed reports remain readable and exportable without
 rewriting their contents. Older unfinished drafts must be updated to the current
 schema or completed with their original CLI/plugin version.
 
-`scan`, `scans rerun`, and `scans resume` execution failures with `--json`, JSON,
-or JSONL output produce:
+Completed scans print progress and summaries to stderr and leave stdout empty
+unless explicit output options are selected. `--json` aliases `--format json`;
+`--headless` uses plain progress and skips interactive questions. Select `--auth`
+when a particular credential source is needed. `scan` argument and execution
+failures, and `scans rerun` and `scans resume` execution failures with JSON or
+JSONL output produce:
 
 ```json
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
 ```
 
-With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+With `--full-output`, success appears under `data` in an `ok: true` envelope;
+failures use `error` in an `ok: false` envelope. `--token-limit` and `--token-offset`
+slice rendered output, not model usage, and may produce incomplete JSON. With
+`--full-output`, truncated `data` is text in a valid envelope. Diagnostics stay on
+stderr. `scan --schema --format json` describes arguments and completed, dry-run,
+and failure result shapes.
+
 If the scan target changed, the error explains that the results no longer
 represent the current checkout. Retained sealed results remain available under
 `data`, including their manifest, findings, coverage, scan directory, and report
@@ -507,9 +538,6 @@ Saved-scan setup failures use the same output shape with
 available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
 scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
 stderr-only failures, including when `--full-output` is selected.
-
-Diagnostics stay on stderr. Each command's `--schema --format json` describes
-its successful output and failure codes.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Understand scan scope and follow-up work
@@ -789,7 +817,8 @@ hours. Explicit settings override lower-priority configuration across units.
 At the winning source, conflicting minute/hour durations are errors; equivalent
 durations are accepted.
 `stopAfterConsecutiveErrors` is an SDK/project-file setting, with no CLI flag.
-`--codex` does not configure deep-scan settings. See
+`--codex` does not configure deep-scan settings.
+`--stop-after-no-new` counts consecutive runs without new issues. See
 [Deep settings and limits](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#deep-settings-and-limits).
 
 `bulk-scan --workers` controls concurrent repositories; `scan --workers` controls
@@ -964,8 +993,8 @@ directory.
 ### Progress and cost
 
 Interactive scans show full-screen progress. CI, redirected output, `--headless`,
-and `--verbose` use plain status lines. Results go to stdout; progress and
-diagnostics go to stderr. Press `d` in the dashboard for details, then `a` for
+and `--verbose` use plain status lines. Explicitly formatted results go to
+stdout; progress, summaries, and diagnostics go to stderr. Press `d` in the dashboard for details, then `a` for
 all sources, `m` for the main scan, or `1`–`9` for a worker.
 
 Token totals include input plus output; cache reads and writes are subsets of
@@ -1000,7 +1029,8 @@ is recorded by `cacheWriteInputTokensReported: false`.
 
 `--max-cost USD` stops the scan and workers after estimated cost exceeds the
 limit; in-flight requests can finish above it. Bulk limits apply per repository
-attempt. Post-scan prompts run after cost tracking and are outside this limit.
+attempt. No cost limit is set unless selected by flag or configuration.
+Post-scan prompts and follow-up patching are outside this limit.
 Automatic history matching gets at most one extra call with a limit; if more
 work is needed, the scan is preserved and you can run `scans match --all`.
 
@@ -2249,12 +2279,13 @@ document, or null. Export still works if the document could not be written.
 
 ### Use exports in CI
 
-Save each scan's results outside the checkout and set a severity threshold:
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`, keep committed-diff checkouts
+clean, place output outside the checkout, and set a severity threshold:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
 codex-security scan . --diff origin/main \
-  --output-dir "$SCAN_ROOT/results" --json --fail-on-severity high \
+  --auth api-key --output-dir "$SCAN_ROOT/results" --json --fail-on-severity high \
   > "$SCAN_ROOT/findings.json"
 ```
 
@@ -2696,7 +2727,7 @@ patch-risk assessment still uses its read-only sandbox.
 
 `scan --patch` runs after a complete scan. `--patch-severity` defaults to `low`;
 `high` selects high and critical findings. Interactive users can select findings
-and add instructions. Patch results are `verified`, `no_change`, `blocked`, or
+and add instructions; headless runs use the severity threshold. Patch results are `verified`, `no_change`, `blocked`, or
 `failed`. Verified/already-fixed findings no longer fail the severity threshold.
 
 ### Create or resume a draft pull request
