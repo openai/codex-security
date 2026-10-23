@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sqlite3
@@ -70,6 +71,53 @@ def finish(workbench_api, connection, scan, *, terminal_reason="saturated"):
             omitted_worker_id=[],
         ),
     )["deepScan"]
+
+
+@pytest.mark.parametrize("scope", ["subdir/extract.py", "./subdir/extract.py", "subdir"])
+def test_deadline_scope_filters_replays_before_identity_reconciliation(
+    workbench_api, workbench_db, publication_scan, scope
+):
+    scan = publication_scan(paths=[scope])
+    result_path = add_worker(workbench_db, scan, status="canceled")
+    accepted = copy.deepcopy(scan.findings[0])
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        accepted.pop(key, None)
+    accepted.update(
+        identity={"anchor": "accepted-exact-file"},
+        summary="Accepted exact-file observation",
+        provenance={"source": "local_plugin", "workerId": result_path.parent.name},
+    )
+    accepted["severity"]["level"] = "low"
+    stronger = copy.deepcopy(accepted)
+    stronger.update(
+        summary="Stronger descendant observation",
+        locations=[{"path": "subdir/extract.py/generated", "startLine": 1}],
+    )
+    stronger["severity"]["level"] = "critical"
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": [accepted]}))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan.scan_dir / name, ns=(1_000_000_000, 1_000_000_000))
+    result_path.write_text(json.dumps(saved_draft(scan.scan_id, findings=[stronger])))
+    os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
+    worker_bytes = result_path.read_bytes()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "created_at = '2000-01-01T00:00:00+00:00', manifest_path = NULL, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    assert (
+        finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
+    )
+    assert complete(workbench_api, workbench_db, scan)["findingCount"] == 1
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    expected = stronger if scope == "subdir" else accepted
+    assert findings[0]["summary"] == expected["summary"]
+    assert findings[0]["locations"] == expected["locations"]
+    assert findings[0]["identity"] == accepted["identity"]
+    assert result_path.read_bytes() == worker_bytes
 
 
 def test_saturated_finish_cancels_unfinished_discovery_without_using_its_drafts(

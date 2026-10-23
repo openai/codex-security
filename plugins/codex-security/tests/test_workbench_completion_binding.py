@@ -1144,8 +1144,9 @@ def test_completion_rejects_malformed_finding_identity(tmp_path: Path, field: st
     assert findings_path.read_bytes() == original
 
 
+@pytest.mark.parametrize("missing_identity", [False, True])
 def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
-    tmp_path: Path,
+    tmp_path: Path, missing_identity: bool
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
     findings = json.loads((scan_dir / "findings.json").read_text())
@@ -1156,8 +1157,11 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     unsafe_location = copy.deepcopy(valid)
     unsafe_location["identity"]["anchor"] = "unsafe-location"
     unsafe_location["locations"][0]["path"] = "../outside.py"
-    missing_identity = copy.deepcopy(valid)
-    missing_identity.pop("identity")
+    invalid_identity = copy.deepcopy(valid)
+    if missing_identity:
+        invalid_identity.pop("identity")
+    else:
+        invalid_identity["identity"] = []
     invalid_evidence_id = copy.deepcopy(valid)
     invalid_evidence_id["identity"]["anchor"] = "invalid-evidence-id"
     invalid_evidence_id["codeEvidence"][0]["id"] = "src/extract.py:41"
@@ -1169,7 +1173,7 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
         [
             missing_summary,
             unsafe_location,
-            missing_identity,
+            invalid_identity,
             invalid_evidence_id,
             copy.deepcopy(valid),
             None,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import uuid
 from argparse import Namespace
@@ -869,6 +870,176 @@ def test_stopped_deep_projection_filters_the_canonical_parent(
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 0
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
+
+
+@pytest.mark.parametrize("scope", ["subdir/extract.py", "./subdir/extract.py", "subdir"])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("source_kind", ["discovery", "dedup"])
+@pytest.mark.parametrize("out_of_scope_source", ["worker", "parent"])
+def test_stopped_exact_file_filters_replays_before_identity_reconciliation(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    scope,
+    retry,
+    source_kind,
+    out_of_scope_source,
+):
+    scan = publication_scan(paths=[scope])
+    result_path = add_worker(workbench_db, scan)
+    accepted = copy.deepcopy(scan.findings[0])
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        accepted.pop(key, None)
+    accepted.update(
+        identity={"anchor": "accepted-exact-file"},
+        summary="Accepted exact-file observation",
+        provenance={"source": "local_plugin", "workerId": result_path.parent.name},
+    )
+    accepted["severity"]["level"] = "low"
+    if source_kind == "dedup":
+        result_path.write_text(json.dumps(saved_draft(scan.scan_id, findings=[accepted])))
+        os.utime(result_path, ns=(1_000_000_000, 1_000_000_000))
+        result_path = add_worker(workbench_db, scan)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+                (result_path.parent.name,),
+            )
+    stronger = copy.deepcopy(accepted)
+    stronger.update(
+        summary="Stronger descendant observation",
+        locations=[{"path": "subdir/extract.py/generated", "startLine": 1}],
+    )
+    stronger["severity"]["level"] = "critical"
+    parent = stronger if out_of_scope_source == "parent" else accepted
+    worker = accepted if out_of_scope_source == "parent" else stronger
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": [parent]}))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan.scan_dir / name, ns=(1_000_000_000, 1_000_000_000))
+    result = saved_draft(scan.scan_id, findings=[worker])
+    if source_kind == "dedup":
+        result.pop("coverage", None)
+    result_path.write_text(json.dumps(result))
+    os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
+    worker_bytes = result_path.read_bytes()
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    stop = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Interrupted.")
+    if retry:
+
+        def fail(*args, **kwargs):
+            raise OSError("Synthetic publication failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail)
+            stopped = saved.fail_scan(context, workbench_db, stop)["scan"]
+        assert stopped["resultsRecoveryNeeded"]
+        saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    else:
+        saved.fail_scan(context, workbench_db, stop)
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    expected = stronger if scope == "subdir" else accepted
+    assert findings[0]["summary"] == expected["summary"]
+    assert findings[0]["locations"] == expected["locations"]
+    assert findings[0]["identity"] == accepted["identity"]
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    published = {name: (scan.scan_dir / name).read_bytes() for name in names}
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
+    assert result_path.read_bytes() == worker_bytes
+
+
+@pytest.mark.parametrize("worker_stronger", [False, True])
+@pytest.mark.parametrize("excluded_source", ["worker", "parent_first", "parent_last"])
+@pytest.mark.parametrize("parent_kind", ["canonical", "checkpoint", "reducer"])
+def test_stopped_scope_retains_identity_ambiguity_from_excluded_findings(
+    workbench_api, workbench_db, publication_scan, worker_stronger, excluded_source, parent_kind
+):
+    scan = publication_scan(paths=["subdir/extract.py"])
+    result_path = add_worker(workbench_db, scan)
+    parent = copy.deepcopy(scan.findings[0])
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        parent.pop(key, None)
+    parent.update(
+        identity={"anchor": "reused-report-anchor"},
+        extensions={"candidateId": "reused-report-candidate"},
+        locations=[{"path": "subdir/extract.py", "startLine": 1}],
+        summary="Accepted parent observation.",
+        provenance={"source": "local_plugin", "workerId": result_path.parent.name},
+    )
+    parent["severity"]["level"] = "low"
+    inside = copy.deepcopy(parent)
+    inside.update(
+        locations=[{"path": "subdir/extract.py", "startLine": 2}],
+        summary="Independent in-scope observation.",
+    )
+    if worker_stronger:
+        inside["severity"]["level"] = "critical"
+    outside = copy.deepcopy(inside)
+    outside["locations"] = [{"path": "subdir/extract.py/generated", "startLine": 1}]
+    parent_findings = (
+        [outside, parent]
+        if excluded_source == "parent_first"
+        else [parent, outside]
+        if excluded_source == "parent_last"
+        else [parent]
+    )
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": parent_findings}))
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    for name in names:
+        os.utime(scan.scan_dir / name, ns=(1_000_000_000, 1_000_000_000))
+    selected_parent = None
+    if parent_kind != "canonical":
+        for name in names:
+            (scan.scan_dir / name).unlink()
+        if parent_kind == "checkpoint":
+            draft = saved_draft(scan.scan_id, findings=parent_findings)
+            draft["coverage"] = {
+                key: value
+                for key, value in scan.coverage.items()
+                if key not in {"documentType", "schemaVersion", "scanId"}
+            }
+            selected_parent = write_checkpoint(scan.scan_dir / "checkpoints", draft)
+            head = scan.scan_dir / "checkpoint-head.json"
+            head.write_text(json.dumps({"checkpoint": selected_parent.name}))
+            os.utime(head, ns=(1_000_000_000, 1_000_000_000))
+        else:
+            selected_parent = add_worker(workbench_db, scan)
+            with workbench_db:
+                workbench_db.execute(
+                    "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+                    (selected_parent.parent.name,),
+                )
+            reduction = saved_draft(scan.scan_id, findings=parent_findings)
+            reduction.pop("coverage", None)
+            selected_parent.write_text(json.dumps(reduction))
+        os.utime(selected_parent, ns=(1_000_000_000, 1_000_000_000))
+    parent_bytes = selected_parent.read_bytes() if selected_parent else None
+    worker_findings = [inside, outside] if excluded_source == "worker" else [inside]
+    result_path.write_text(json.dumps(saved_draft(scan.scan_id, findings=worker_findings)))
+    os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
+    original = result_path.read_bytes()
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Interrupted."),
+    )
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert [finding["locations"] for finding in findings] == [
+        parent["locations"],
+        inside["locations"],
+    ]
+    assert findings[0]["identity"] != findings[1]["identity"]
+    published = {name: (scan.scan_dir / name).read_bytes() for name in names}
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
+    assert result_path.read_bytes() == original
+    if selected_parent:
+        assert selected_parent.read_bytes() == parent_bytes
 
 
 def test_already_sealed_legacy_capped_scan_remains_immutable(

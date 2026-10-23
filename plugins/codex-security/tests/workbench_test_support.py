@@ -88,7 +88,12 @@ def saved_binding(coverage_mode="repository", *, repository="test", status="inte
     return {
         "status": status,
         "allowedTargetKinds": ["git_revision"],
-        "target": {"kind": "git_revision", "repository": repository, "revision": "head"},
+        "target": {
+            "kind": "git_revision",
+            "targetId": f"synthetic:{repository}",
+            "repository": repository,
+            "revision": "head",
+        },
         "scope": {"includePaths": ["."], "excludePaths": []},
         "coverageMode": coverage_mode,
     }
