@@ -298,10 +298,14 @@ jobs:
         uses: ./.github/actions/check-action-candidate
 
   mcp:
-    name: MCP app tests
+    name: MCP app tests (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [classify-changes, package]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - *checkout-repository
       - &set-up-mcp-tools
@@ -319,13 +323,18 @@ jobs:
       - name: Restore bundled plugin
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
       - name: Test MCP app
-        run: pnpm --dir plugins/codex-security/mcp-app run test:mcp
+        working-directory: plugins/codex-security/mcp-app
+        # Keep Node options before the glob; trailing shard flags run every file.
+        run: >-
+          node --experimental-strip-types --test --test-concurrency=2
+          --test-shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          --test-reporter=./scripts/test_reporter.mts "tests/test_*.ts"
       - name: Upload MCP test reports
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mcp-test-reports
+          name: mcp-test-reports-${{ matrix.shard }}
           overwrite: true
           path: plugins/codex-security/mcp-app/reports/junit.xml
           if-no-files-found: warn
