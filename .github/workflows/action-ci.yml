@@ -24,6 +24,10 @@ defaults:
 
 jobs:
   validate:
+    # Internal branches use PR validation; forks still exercise their push workflow.
+    if: &run-action-ci >-
+      github.event_name != 'push' || github.ref == 'refs/heads/main' ||
+      github.repository != 'openai/codex-security'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -38,6 +42,9 @@ jobs:
       - &set-up-the-ubuntu-sandbox
         name: Set up the Ubuntu sandbox
         run: |
+          # The hosted image's unrelated PHP service times out during needrestart.
+          printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' \
+            | sudo tee /etc/needrestart/conf.d/action-ci.conf > /dev/null
           sudo apt-get update
           sudo apt-get install --yes bubblewrap apparmor-profiles
           sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
@@ -58,20 +65,15 @@ jobs:
           if-no-files-found: error
 
   smoke:
-    name: Hosted Action smoke test (${{ matrix.name }})
+    name: Hosted Action smoke tests
     # Fork PRs are unsupported; their push workflows exercise the Action instead.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      (github.event_name != 'push' || github.ref == 'refs/heads/main' ||
+       github.repository != 'openai/codex-security') &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    strategy:
-      matrix:
-        include:
-          - name: OpenAI default
-            provider: ""
-            model: ""
-          - name: Bedrock
-            provider: amazon-bedrock
-            model: openai.gpt-5.6-luna
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,29 +81,44 @@ jobs:
           persist-credentials: false
       - *actions-setup-node
       - *set-up-the-ubuntu-sandbox
-      - name: Run the packaged Action without credentials or model calls
-        id: smoke
+      - name: Validate the default OpenAI configuration without model calls
+        id: openai
         uses: ./
         with:
-          provider: ${{ matrix.provider }}
-          model: ${{ matrix.model }}
           dry-run: "true"
-      - name: Verify dry-run outputs
+      - name: Verify OpenAI dry-run outputs
         env:
-          SCAN_STATUS: ${{ steps.smoke.outputs.scan-status }}
-          SKIP_REASON: ${{ steps.smoke.outputs.skip-reason }}
-          EXIT_CODE: ${{ steps.smoke.outputs.exit-code }}
-          SCANNED_SHA: ${{ steps.smoke.outputs.scanned-sha }}
+          SCAN_STATUS: ${{ steps.openai.outputs.scan-status }}
+          SKIP_REASON: ${{ steps.openai.outputs.skip-reason }}
+          EXIT_CODE: ${{ steps.openai.outputs.exit-code }}
+          SCANNED_SHA: ${{ steps.openai.outputs.scanned-sha }}
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          SARIF_UPLOAD_READY: ${{ steps.smoke.outputs.sarif-upload-ready }}
-        run: |
+          SARIF_UPLOAD_READY: ${{ steps.openai.outputs.sarif-upload-ready }}
+        run: &verify-dry-run-outputs |
           test "$SCAN_STATUS" = skipped
           test "$SKIP_REASON" = dry-run
           test "$EXIT_CODE" = 0
           test "$SCANNED_SHA" = "$EXPECTED_SHA"
           test "$SARIF_UPLOAD_READY" = false
+      - name: Validate the Bedrock configuration without model calls
+        id: bedrock
+        uses: ./
+        with:
+          provider: amazon-bedrock
+          model: openai.gpt-5.6-luna
+          dry-run: "true"
+      - name: Verify Bedrock dry-run outputs
+        env:
+          SCAN_STATUS: ${{ steps.bedrock.outputs.scan-status }}
+          SKIP_REASON: ${{ steps.bedrock.outputs.skip-reason }}
+          EXIT_CODE: ${{ steps.bedrock.outputs.exit-code }}
+          SCANNED_SHA: ${{ steps.bedrock.outputs.scanned-sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SARIF_UPLOAD_READY: ${{ steps.bedrock.outputs.sarif-upload-ready }}
+        run: *verify-dry-run-outputs
 
   dependencies:
+    if: *run-action-ci
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
