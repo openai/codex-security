@@ -13,6 +13,9 @@
 - preserve large Git configuration environments ([#1882](https://github.com/openai/codex-security/pull/1882))
 - accept large security policy files ([#1883](https://github.com/openai/codex-security/pull/1883))
 - preserve complete scan failure diagnostics ([#1884](https://github.com/openai/codex-security/pull/1884))
+- preserve all reviewed scan feedback ([#1885](https://github.com/openai/codex-security/pull/1885))
+- update OpenCode SDK to 1.19.2 ([#1880](https://github.com/openai/codex-security/pull/1880))
+- preserve complete local vendor evidence ([#1886](https://github.com/openai/codex-security/pull/1886))
 
 <!-- release-section: highlights:end -->
 
