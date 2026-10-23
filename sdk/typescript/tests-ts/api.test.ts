@@ -6578,9 +6578,14 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["", "\0literal", "\0high\ud800.low\udfff.pair😀"])(
-    "preserves original failures in saved scan history (%j)",
-    async (suffix) => {
+  test.each([
+    ["plain", ""],
+    ["NUL", "\0literal"],
+    ["Unicode", "\0high\ud800.low\udfff.pair😀"],
+    ["long", `${"detail ".repeat(20_000)}final cause`],
+  ])(
+    "preserves original failures in saved scan history (%s)",
+    async (_label, suffix) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const stateDirectory = join(root, "state");
       const python = Bun.which("python3") ?? Bun.which("python");

@@ -3038,7 +3038,7 @@ export class CodexSecurity {
               activeScan.id,
               "--cost-json",
               JSON.stringify(snapshot?.cost ?? failure.cost),
-              `--message=${failure.message.slice(0, 2400)}`,
+              `--message=${failure.message}`,
             ],
           );
           if (terminalTurnStatus !== null)
@@ -3144,7 +3144,7 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            `--message=${errorMessage(failure).slice(0, 2400)}`,
+            `--message=${errorMessage(failure)}`,
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -4203,7 +4203,7 @@ export class CodexSecurity {
           "fail-scan",
           "--scan-id",
           activeScan.id,
-          `--message=${errorMessage(error).slice(0, 2400)}`,
+          `--message=${errorMessage(error)}`,
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();

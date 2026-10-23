@@ -11,6 +11,8 @@
 - isolate audits and retain exact file identities ([#1859](https://github.com/openai/codex-security/pull/1859))
 - update Node to security release 26.12.1 ([#1870](https://github.com/openai/codex-security/pull/1870))
 - preserve large Git configuration environments ([#1882](https://github.com/openai/codex-security/pull/1882))
+- accept large security policy files ([#1883](https://github.com/openai/codex-security/pull/1883))
+- preserve complete scan failure diagnostics ([#1884](https://github.com/openai/codex-security/pull/1884))
 
 <!-- release-section: highlights:end -->
 
