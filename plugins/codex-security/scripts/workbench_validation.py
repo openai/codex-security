@@ -189,8 +189,6 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 def parse_scan_cost(value: str | None) -> str | None:
     if value is None:
         return None
-    if len(value.encode("utf-8")) > 8192:
-        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     try:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:

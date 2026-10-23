@@ -17,6 +17,7 @@
 - update OpenCode SDK to 1.19.2 ([#1880](https://github.com/openai/codex-security/pull/1880))
 - preserve complete local vendor evidence ([#1886](https://github.com/openai/codex-security/pull/1886))
 - preserve MCP connections for large scan checkpoints ([#1873](https://github.com/openai/codex-security/pull/1873))
+- persist large scan usage at completion and failure ([#1874](https://github.com/openai/codex-security/pull/1874))
 
 <!-- release-section: highlights:end -->
 
