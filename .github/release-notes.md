@@ -25,6 +25,7 @@
 - recover publication after a lost reply ([#938](https://github.com/openai/codex-security/pull/938))
 - render MCP threat models in TypeScript ([#1839](https://github.com/openai/codex-security/pull/1839))
 - recover checkpoints at discovery deadlines ([#1594](https://github.com/openai/codex-security/pull/1594))
+- validate findings after a scan ([#1007](https://github.com/openai/codex-security/pull/1007))
 
 <!-- release-section: highlights:end -->
 
