@@ -3,6 +3,8 @@ name: node-release-pr
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "27 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -23,7 +25,7 @@ jobs:
     if: >-
       github.repository == 'openai/codex-security' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'workflow_dispatch' && inputs.dry_run) ||
-      (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true'))
+      (github.event_name == 'push' && vars.RELEASE_PR_ENABLED != 'true'))
     name: preview release PR
     runs-on: ubuntu-latest
     env:

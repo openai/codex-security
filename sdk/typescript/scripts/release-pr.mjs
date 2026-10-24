@@ -585,6 +585,7 @@ export async function reconcileReleasePullRequest({
   repo,
   github,
   dryRun = true,
+  refreshBase = true,
 }) {
   // Rebuild the plan only when main or the proposal actually moves.
   for (;;) {
@@ -628,7 +629,7 @@ export async function reconcileReleasePullRequest({
       };
     const branchChanged =
       !headSha ||
-      previous.mergeBase !== mainSha ||
+      (refreshBase && previous.mergeBase !== mainSha) ||
       Object.entries(plan.files).some(
         ([path, content]) => repo.readFile(headSha, path) !== content,
       );
@@ -784,6 +785,7 @@ if (isMain(import.meta.url)) {
     repo: createGitRepository(directory),
     github: createGitHubClient(repository, token),
     dryRun: process.env.RELEASE_PR_DRY_RUN !== "false",
+    refreshBase: process.env.GITHUB_EVENT_NAME !== "push",
   });
   console.log(JSON.stringify(result, null, 2));
 }

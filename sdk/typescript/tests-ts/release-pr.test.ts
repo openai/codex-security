@@ -115,6 +115,7 @@ const {
     repo: GitRepository;
     github: GitHubClient;
     dryRun?: boolean;
+    refreshBase?: boolean;
   }) => Promise<{
     action: string;
     reason?: string;
@@ -320,11 +321,12 @@ class Fixture {
     return sha;
   }
 
-  run(dryRun = false) {
+  run(dryRun = false, refreshBase = true) {
     return reconcileReleasePullRequest({
       repo: this.repo,
       github: this.github,
       dryRun,
+      refreshBase,
     });
   }
 }
@@ -877,6 +879,8 @@ describe("release workflow controls", () => {
     { event: "push", enabled: undefined, dryRun: undefined, expected: true },
     { event: "push", enabled: "false", dryRun: undefined, expected: true },
     { event: "push", enabled: "true", dryRun: undefined, expected: false },
+    { event: "schedule", enabled: "true", dryRun: undefined, expected: false },
+    { event: "schedule", enabled: "false", dryRun: undefined, expected: null },
     {
       event: "workflow_dispatch",
       enabled: undefined,
@@ -927,9 +931,9 @@ describe("release workflow controls", () => {
           { RELEASE_PR_ENABLED: enabled },
         );
       });
-      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual([
-        String(expected),
-      ]);
+      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual(
+        expected === null ? [] : [String(expected)],
+      );
     },
   );
 });
@@ -1347,7 +1351,7 @@ describe("rolling release reconciliation", () => {
     fixture.merge("fix!: new interface", {
       "sdk/typescript/src/example.ts": "export const next = true;\n",
     });
-    const second = await fixture.run();
+    const second = await fixture.run(false, false);
     expect(second.action).toBe("updated");
     expect(second.pull).toBe(first.pull);
     expect(second.plan.version).toBe("0.2.0");
@@ -1404,11 +1408,17 @@ describe("rolling release reconciliation", () => {
     ]);
   });
 
-  test("incorporates main-only changes without another proposal review or repeated commits", async () => {
+  test("keeps an unchanged proposal head until a base refresh", async () => {
     const { fixture, first } = await Fixture.withInitialPull();
     fixture.merge("test: add coverage", {
       "sdk/typescript/tests-ts/example.test.ts": "// Additional coverage.\n",
     });
+    const initialWrites = fixture.github.writes.length;
+    const push = await fixture.run(false, false);
+    expect(push.action).toBe("unchanged");
+    expect(push.headSha).toBe(first.headSha);
+    expect(fixture.github.writes).toHaveLength(initialWrites);
+
     const updated = await fixture.run();
     expect(updated.action).toBe("updated");
     expect(updated.headSha).not.toBe(first.headSha);
