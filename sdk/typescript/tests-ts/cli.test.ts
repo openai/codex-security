@@ -52,6 +52,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  OPPER_CODEX_PROVIDER,
   scanModelConfiguration,
 } from "../src/config.js";
 import {
@@ -818,6 +819,7 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
+              "opper",
               "amazon-bedrock",
             ],
           },
@@ -3246,6 +3248,7 @@ describe("CLI", () => {
       "claude-sonnet-5",
       CHEAPERINFERENCE_CODEX_PROVIDER,
     ],
+    ["Opper", "opper", "gpt-5.5", "claude-sonnet-4-6", OPPER_CODEX_PROVIDER],
   ] as const)(
     "routes scans through %s",
     async (_name, provider, selectedModel, codexModel, providerConfig) => {

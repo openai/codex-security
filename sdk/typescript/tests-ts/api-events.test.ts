@@ -322,6 +322,7 @@ describe("one-shot scan events", () => {
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "CHEAPER_INFERENCE_API_KEY",
+      "OPPER_API_KEY",
     ] as const) {
       for (const status of ["not_granted", "unknown"] as const) {
         const scanDir = await copyCompletedScan(await temporaryDirectory());
