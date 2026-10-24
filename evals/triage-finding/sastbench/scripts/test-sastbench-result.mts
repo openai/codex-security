@@ -65,6 +65,9 @@ for (const output of [
   truncated + "\n```\n" + fenced,
   'Prose {"other": true}\n' + fenced.replaceAll("```", "   ```"),
   '```json\n"invalid\n```\n' + fenced,
+  fenced.replaceAll("```", "~~~"),
+  fenced.replaceAll("```", "````"),
+  "````markdown\n```text\nquoted\n```\n````\n\n" + fenced,
 ]) {
   assert.equal(
     parseCaseOutcome(output, "sastbench-000000").verdict,

@@ -77,13 +77,23 @@ export function extractTriageResult(
     // The result may be inside a multiline Markdown fence.
   }
   const candidates: string[] = [];
-  let fenceStart = -1;
-  for (const match of text.matchAll(/^[\t ]*```([^\r\n]*)\r?$/gm)) {
-    if (fenceStart < 0) {
-      fenceStart = match.index + match[0].length;
-    } else if (/^[\t ]*$/.test(match[1])) {
-      candidates.push(text.slice(fenceStart, match.index));
-      fenceStart = -1;
+  // A fence closes only on the same marker, at least as long as its opener.
+  let fence: { start: number; marker: string; length: number } | null = null;
+  for (const match of text.matchAll(/^[\t ]*(`{3,}|~{3,})([^\r\n]*)\r?$/gm)) {
+    const [line, run, info] = match;
+    if (fence === null) {
+      fence = {
+        start: match.index + line.length,
+        marker: run[0],
+        length: run.length,
+      };
+    } else if (
+      run[0] === fence.marker &&
+      run.length >= fence.length &&
+      /^[\t ]*$/.test(info)
+    ) {
+      candidates.push(text.slice(fence.start, match.index));
+      fence = null;
     }
   }
   for (const candidate of candidates) {
