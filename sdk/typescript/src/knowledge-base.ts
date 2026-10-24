@@ -226,6 +226,8 @@ async function discover(
         documents.push(document);
       }
     } else if (entry.isFile()) {
+      // Office keeps a "~$" owner file next to each open document.
+      if (entry.name.startsWith("~$")) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
