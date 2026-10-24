@@ -529,6 +529,17 @@ describe("TypeScript package skeleton", () => {
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
     expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
+    for (const trigger of ["workflow_call", "workflow_dispatch"]) {
+      expect(quality.on[trigger]).toMatchObject({
+        inputs: { "compare-layouts": { type: "boolean", default: true } },
+      });
+    }
+    expect(quality.jobs["properties"]).toMatchObject({
+      env: { CODEX_SECURITY_PROPERTY_SEED: "${{ github.run_number }}" },
+      strategy: {
+        matrix: { os: ["ubuntu-latest", "macos-latest", "windows-latest"] },
+      },
+    });
     const unixMatrix = ci.jobs["test"]!.strategy!.matrix as Record<
       string,
       unknown
@@ -597,7 +608,7 @@ describe("TypeScript package skeleton", () => {
       "working-directory": "sdk/typescript",
     });
     expect(execution?.run).toContain(
-      "scripts/run-ci-tests.mts ${{ matrix.target.shard }}/${{ matrix.target.count }}",
+      "scripts/run-ci-tests.mts ${{ env.SHARD }}",
     );
     expect(execution?.run).toContain(
       "--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}",
@@ -616,8 +627,12 @@ describe("TypeScript package skeleton", () => {
       (step) => step.name === "Upload runner report",
     );
     expect(runnerUpload).not.toHaveProperty("continue-on-error");
-    expect(runnerUpload?.with?.["name"]).toBe(
-      "runner-${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
+    expect(runnerUpload?.with?.["name"]).toBe("runner-${{ env.REPORT_ID }}");
+    expect(runner.env?.["SHARD"]).toBe(
+      "${{ matrix.target.shard }}/${{ matrix.target.count }}",
+    );
+    expect(runner.env?.["REPORT_ID"]).toBe(
+      "${{ matrix.target.os }}-${{ matrix.target.mode }}-${{ matrix.target.shard }}",
     );
     expect(
       quality.jobs["mutation"]?.steps!.find(

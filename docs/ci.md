@@ -38,9 +38,9 @@ neither cancel source runs nor satisfy their required check names.
 
 The `ci` job checks every selected required job. A failed, cancelled, missing,
 or unexpectedly skipped selected job fails the gate. An explicitly unselected
-job can be skipped. Static checks are always required. Broad test-runner
-experiments run through the separate scheduled/manual `test-quality` workflow;
-they are not merge gates.
+job can be skipped. Static checks are always required. The separate `test-quality`
+workflow runs weekly property and mutation tests. Dispatch it to compare full SDK
+shard layouts.
 
 The existing OS-named check contexts temporarily forward the `ci` result so
 repository branch rules continue to work during migration. To finish migration:
