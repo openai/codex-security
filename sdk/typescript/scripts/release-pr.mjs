@@ -439,7 +439,7 @@ function reviewComment(
     marker,
     proposalMarker,
     suggestionsMarker,
-    `Release proposal updated through main commit \`${plan.mainSha}\`.`,
+    `Release PR head \`${headSha}\`. Release plan evaluated through main commit \`${plan.mainSha}\`.`,
     plan.humanOwned.length > 0
       ? `Preserved human-owned sections: ${plan.humanOwned.join(", ")}. The suggestions below have not replaced them.`
       : "The note sections still match the generated draft and were refreshed.",
