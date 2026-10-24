@@ -491,6 +491,10 @@ test("forwards scan events with their component identity without letting observe
     createSecurity: client(async (repository, options) => {
       expect(planned).toBe(true);
       const target = scope(repository, options);
+      options.onAuthentication?.({
+        method: "stored_credentials",
+        verified: false,
+      });
       options.onProgress?.({
         phase: "discovery",
         filesCompleted: 1,
@@ -517,6 +521,17 @@ test("forwards scan events with their component identity without letting observe
         reasoning_output_tokens: 0,
         total_tokens: 110,
       });
+      options.onUsageObservation?.({
+        tokensUpdatedAt: null,
+        accountRateLimits: [
+          {
+            limitId: target,
+            observedAt: "2026-01-01T00:00:00Z",
+            primary: { usedPercent: 75, windowMinutes: 300, resetsAt: null },
+            secondary: null,
+          },
+        ],
+      });
       options.onWorkerStatus?.({
         kind: "dispatch",
         phase: "validation",
@@ -537,16 +552,23 @@ test("forwards scan events with their component identity without letting observe
       ({ componentId }) => componentId === `component-${index + 1}`,
     );
     expect(received.map(({ type }) => type)).toEqual([
+      "authentication",
       "progress",
       "activity",
       "session",
       "cost",
       "usage",
+      "usage-observation",
       "workers",
       "warning",
     ]);
-    expect(received[1]).toMatchObject({
+    expect(received.find(({ type }) => type === "activity")).toMatchObject({
       value: { description: component.paths.join(",") },
+    });
+    expect(
+      received.find(({ type }) => type === "usage-observation"),
+    ).toMatchObject({
+      value: { accountRateLimits: [{ limitId: component.paths.join(",") }] },
     });
   }
 });
@@ -586,6 +608,17 @@ test.each([
         }),
         createSecurity: client(async (repository, options) => {
           expect(typeof options.onProgress).toBe("function");
+          options.onAuthentication?.({
+            method: "stored_credentials",
+            credentialType: presentation === "ci" ? "api_key" : "chatgpt",
+            verified: false,
+          });
+          if (presentation !== "dashboard")
+            expect(
+              stderr
+                .text()
+                .includes("apps/api | ChatGPT allowance not reported"),
+            ).toBe(presentation === "headless");
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
@@ -598,6 +631,10 @@ test.each([
             output_tokens: 20,
             reasoning_output_tokens: 0,
             total_tokens: 120,
+          });
+          options.onUsageObservation?.({
+            tokensUpdatedAt: "2026-01-01T07:08:09Z",
+            accountRateLimits: [],
           });
           options.onCost?.({
             model: "gpt-5.6",
@@ -636,6 +673,7 @@ test.each([
       expect(stderr.text()).toContain(
         "apps/api | Tokens: 90 uncached input, 10 cache reads, 0 cache writes, 20 output, 120 total",
       );
+      expect(stderr.text()).toMatch(/apps\/api \| .*07:08:09 UTC/u);
     }
     expect(
       [...signals.listeners.values()].every(

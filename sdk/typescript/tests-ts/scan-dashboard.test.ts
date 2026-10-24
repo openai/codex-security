@@ -702,6 +702,101 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test("keeps the token and cost measurement time on later timer redraws", () => {
+    const stderr = capture(true);
+    const measured = "2026-07-29T12:34:56Z";
+    let now = Date.parse(measured);
+    let redraw: (() => void) | undefined;
+    const terminal = { ...stderr.stream, columns: 60, rows: 24 };
+    const dashboard = createDashboard(terminal, {
+      showCost: true,
+      clock: {
+        ...fakeClock(() => now),
+        setInterval(callback) {
+          redraw = callback;
+          return {} as NodeJS.Timeout;
+        },
+      },
+    });
+    dashboard.start();
+    dashboard.setUsageObservation({
+      tokensUpdatedAt: measured,
+      accountRateLimits: [],
+    });
+    expect(lastFrame(stderr)).not.toMatch(/^\s*USAGE\b/m);
+    dashboard.setCost(
+      fakeResult([], "complete", { input_tokens: 100, output_tokens: 1 }).cost!,
+    );
+    const before = lastFrame(stderr);
+    expect(before).toContain("12:34:56");
+    expect(before).toMatch(/COST\s+\$/);
+    expect(before).not.toMatch(/^\s*LIMITS\b/m);
+    now += 42 * 60_000;
+    redraw!();
+    const after = lastFrame(stderr);
+    expect(after.match(/12:34:56/g)).toHaveLength(1);
+    expect(after.replace(/\s+/gu, " ")).toContain("in-flight usage");
+    expect(after).toMatch(/TIME\s+42:00/);
+    expect(after.split("\n")).toHaveLength(24);
+    expect(after.split("\n").every((line) => stringWidth(line) <= 60)).toBe(
+      true,
+    );
+    terminal.columns = 80;
+    terminal.rows = 12;
+    dashboard.setUsageObservation({
+      tokensUpdatedAt: "2026-07-29T13:15:05Z",
+      accountRateLimits: [
+        {
+          limitId: "codex",
+          observedAt: "2026-07-29T13:15:07Z",
+          primary: { usedPercent: 73, windowMinutes: 300, resetsAt: null },
+          secondary: { usedPercent: 87, windowMinutes: 10_080, resetsAt: null },
+        },
+      ],
+    });
+    const resized = lastFrame(stderr);
+    expect(resized).toContain("13:15:05");
+    expect(resized).not.toContain("12:34:56");
+    expect(resized).toContain("5h 73% used, 7d 87% used");
+    expect(resized).toContain("13:15:07");
+    expect(resized).toContain("Ctrl+C to exit");
+    expect(resized.split("\n")).toHaveLength(12);
+    dashboard.stop();
+  });
+
+  test("shows ChatGPT account windows before any token measurement", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 60, rows: 24 },
+      { mode: "deep" },
+    );
+    dashboard.start();
+    expect(lastFrame(stderr)).not.toMatch(/^\s*LIMITS\b/m);
+    dashboard.setChatGptAuth(true);
+    expect(lastFrame(stderr).replace(/\s+/gu, " ")).toMatch(
+      /LIMITS .*?(?:unavailable|not reported)/i,
+    );
+    dashboard.setUsageObservation({
+      tokensUpdatedAt: null,
+      accountRateLimits: [
+        {
+          limitId: "codex",
+          observedAt: "2026-07-29T14:23:19Z",
+          primary: { usedPercent: 73, windowMinutes: 300, resetsAt: null },
+          secondary: null,
+        },
+      ],
+    });
+    const frame = lastFrame(stderr);
+    expect(frame).toMatch(/TOKENS\s+waiting for usage/);
+    expect(frame).not.toMatch(/^\s*(?:COST|USAGE)\b/m);
+    expect(frame).toContain("73%");
+    expect(frame).toContain("14:23:19");
+    expect(frame).not.toMatch(/unavailable|not reported/i);
+    expect(frame.split("\n")).toHaveLength(24);
+    dashboard.stop();
+  });
+
   test("edits a higher total budget while continuing to show live cost", async () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
@@ -1245,6 +1340,18 @@ describe("live scan dashboard", () => {
       output_tokens: 10,
     }).cost!;
     for (const [index, receipt] of receipts.slice(0, 2).entries()) {
+      dashboard.recordComponentEvent(
+        {
+          componentId: receipt.id,
+          type: "authentication",
+          value: {
+            method: "stored_credentials",
+            credentialType: index === 0 ? "chatgpt" : "api_key",
+            verified: false,
+          },
+        },
+        "auto",
+      );
       dashboard.recordComponentEvent({
         componentId: receipt.id,
         type: "progress",
@@ -1302,8 +1409,18 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("component scans only");
     expect(frame()).toContain("before deduplication");
     expect(frame().split("\n")).toHaveLength(20);
+    dashboard.recordComponentEvent({
+      componentId: receipts[0]!.id,
+      type: "usage-observation",
+      value: {
+        tokensUpdatedAt: "2026-07-29T12:34:56Z",
+        accountRateLimits: [],
+      },
+    });
     input.emit("data", "\r");
     expect(frame()).toContain("API only activity");
+    expect(frame()).toContain("12:34:56");
+    expect(frame()).toMatch(/ChatGPT allowance not reported/i);
     expect(frame()).not.toContain("Web only activity");
     expect(frame()).toContain("$1.00");
     for (const chunk of ["\u001BO", "1;5P"]) {
@@ -1320,6 +1437,8 @@ describe("live scan dashboard", () => {
     input.emit("data", "B\r");
     expect(frame()).toContain("Web only activity");
     expect(frame()).not.toContain("API only activity");
+    expect(frame()).not.toContain("12:34:56");
+    expect(frame()).not.toContain("ChatGPT allowance");
     dashboard.updateComponent({
       ...receipts[0]!,
       status: "completed",
@@ -1705,6 +1824,7 @@ describe("live scan dashboard", () => {
     expect(frame).toContain("worker 1 · Reviewed source file 2");
     expect(frame).toContain("worker 1 · Reviewed source file 6");
     expect(frame).toContain("TOKENS");
+    expect(frame).toContain("Usage report time unavailable");
     expect(frame).not.toContain("COST");
     expect(frame).toContain("TIME");
   });
