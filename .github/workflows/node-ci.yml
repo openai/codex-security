@@ -365,6 +365,9 @@ jobs:
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Test the native Python report gate
+        if: matrix.python == '3.12'
+        run: python -m pytest -q .github/scripts/test_require_native_python_report.py
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp
@@ -382,14 +385,7 @@ jobs:
           python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        shell: python
-        run: |
-          from xml.etree import ElementTree
-          report = ElementTree.parse("reports/python.xml")
-          if report.find(".//testcase") is None:
-              raise SystemExit("No native platform tests ran")
-          if report.find(".//testcase/skipped") is not None:
-              raise SystemExit("Native platform tests must run without skips")
+        run: python .github/scripts/require_native_python_report.py
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
