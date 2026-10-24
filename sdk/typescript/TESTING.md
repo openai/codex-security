@@ -43,6 +43,11 @@ executor receipts. To rerun just the installed-package check, use
 Tests run in random order by default. To replay a failure, pass the seed from
 Bun's summary to `pnpm run test --seed 12345`.
 
+The SDK shards in `node-ci` use the workflow run number as their seed, so
+rerunning a job repeats its test order. To replay a shard locally, use its
+platform, shard selector, and seed, for example
+`node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
+
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner diagnostics allow 120 seconds for slower native
 credential and document checks. `test:ci` writes `reports/junit.xml` and

@@ -259,6 +259,9 @@ describe("TypeScript package skeleton", () => {
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
+    expect(
+      jobs["test"]?.steps?.find(({ name }) => name === "Test")?.run,
+    ).toContain("--seed=${{ github.run_number }}");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
         run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}",
