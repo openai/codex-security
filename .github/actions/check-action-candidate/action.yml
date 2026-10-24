@@ -10,10 +10,7 @@ runs:
         package-manager-cache: false
     - name: Set up the Ubuntu sandbox
       shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install --yes bubblewrap apparmor-profiles
-        sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+      run: bash github-action/scripts/setup-ubuntu-sandbox.sh
     - name: Test Action compatibility with the packed CLI
       shell: bash
       run: |
