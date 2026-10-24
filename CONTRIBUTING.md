@@ -110,10 +110,10 @@ are not required to open, test, review, or merge a pull request.
 
 ## Investigate a CI failure
 
-Open the `node-ci` run for the PR revision that failed. The `ci` job and its
-OS-named checks report the overall result. Open the failing build, test shard,
-or validation job to find the original error. If a later attempt passed, use
-the run's attempt selector to inspect the first failure. From the command line,
+Open the `node-ci` run for the PR revision that failed. The `ci` job reports
+the overall result. Open the failing build, test shard, or validation job to
+find the original error. If a later attempt passed, use the run's attempt
+selector to inspect the first failure. From the command line,
 `gh run view RUN_ID --attempt 1 --log-failed` shows that attempt's failed steps.
 
 For a transient infrastructure failure, rerun the failed jobs after checking
