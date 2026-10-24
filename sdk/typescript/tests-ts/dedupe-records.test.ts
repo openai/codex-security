@@ -694,6 +694,47 @@ test("a disconnect while flushing the final result does not send a second respon
   expect(messages).toHaveLength(1);
 });
 
+test.each(["signal", "notification"] as const)(
+  "cancellation by %s stops a blocked review request",
+  async (notification) => {
+    const inputStream = new PassThrough();
+    const messages: Message[] = [];
+    let release!: () => void;
+    let started!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        messages.push(JSON.parse(chunk.toString()));
+        release = callback;
+        started();
+      },
+    });
+    const controller = new AbortController();
+    const done = runRecordsProtocol(inputStream, output, controller.signal);
+    try {
+      inputStream.write(`${JSON.stringify(run)}\n`);
+      await writing;
+      if (notification === "notification")
+        inputStream.write(
+          `${JSON.stringify({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } })}\n`,
+        );
+      else controller.abort("SIGTERM");
+      expect(output.destroyed).toBe(true);
+      expect(await done).toBe(2);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.method).toBe("review.run");
+    } finally {
+      output.destroy();
+      release();
+      controller.abort();
+      inputStream.destroy();
+      await done;
+    }
+  },
+);
+
 test.each(["result", "error"] as const)(
   "cancellation stops a blocked terminal %s without sending another response",
   async (terminal) => {
