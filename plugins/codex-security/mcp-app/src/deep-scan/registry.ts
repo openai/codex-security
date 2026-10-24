@@ -52,6 +52,7 @@ export class DeepScanCoordinatorRegistry {
       }
     };
     void coordinator.settled().then(removeCoordinator, removeCoordinator);
+    options.onStart?.(coordinator);
     coordinator.start();
     return coordinator;
   }

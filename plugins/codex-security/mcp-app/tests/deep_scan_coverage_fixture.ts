@@ -3,12 +3,12 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { build } from "esbuild";
 
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
+import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
@@ -83,8 +83,16 @@ export async function readFixtureCoverage(
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const exec = promisify(execFile);
-const bundled = await build({
-  bundle: true,
+const {
+  archiveDirectory,
+  getCodexSecurityCompletedScan,
+  DeepScanCoordinator,
+  WorkbenchDeepScanStore,
+  createScanArtifactContext,
+  recordCodexSecurityScanDraftViaWorkbench,
+  recordCodexSecurityWorkerScanDraft,
+  recordCodexSecurityDeepReduction,
+} = (await importModule({
   stdin: {
     contents: [
       'export { archiveDirectory } from "./src/deep-scan/artifacts.ts";',
@@ -96,11 +104,8 @@ const bundled = await build({
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
-  format: "esm",
-  platform: "node",
   loader: { ".md": "text" },
-  write: false,
-});
+})) as FixtureRuntime;
 export async function publishCoverageFixture(
   root: string,
   completeness: string,
@@ -129,18 +134,6 @@ export async function publishCoverageFixture(
     interruptPublication = false,
   }: CoverageFixtureOptions = {},
 ) {
-  const runtimePath = path.join(root, "fixture-runtime.mjs");
-  await writeFile(runtimePath, bundled.outputFiles![0]!.contents);
-  const {
-    archiveDirectory,
-    getCodexSecurityCompletedScan,
-    DeepScanCoordinator,
-    WorkbenchDeepScanStore,
-    createScanArtifactContext,
-    recordCodexSecurityScanDraftViaWorkbench,
-    recordCodexSecurityWorkerScanDraft,
-    recordCodexSecurityDeepReduction,
-  } = (await import(pathToFileURL(runtimePath).href)) as FixtureRuntime;
   const targetPath = path.join(root, "target");
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");

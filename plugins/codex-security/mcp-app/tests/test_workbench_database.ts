@@ -735,11 +735,22 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47])
+  for (const version of [27, 28, 31, 32, 47, 54, 55])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
   applyMigrations(database);
+  assert.equal(
+    database.prepare("SELECT deep_scan_config_json FROM workspaces").get()
+      ?.deep_scan_config_json,
+    null,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT pending_target_project_path FROM deep_scan_runs")
+      .get()?.pending_target_project_path,
+    null,
+  );
   assert.equal(
     database
       .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
