@@ -3848,8 +3848,8 @@ describe("GitHub release workflow safeguards", () => {
       "${{ github.event_name == 'pull_request' }}",
     );
     const classifier = workflow.jobs["classify-changes"]!;
-    expect(classifier["timeout-minutes"]).toBe(10);
-    expect(classifier.if).toContain("github.event.changes.base != null");
+    expect(classifier["timeout-minutes"]).toContain("40 || 10");
+    expect(classifier.if).toBeUndefined();
     const checkout = classifier.steps.find(
       ({ name }) => name === "Checkout repository for change classification",
     );
@@ -3859,6 +3859,9 @@ describe("GitHub release workflow safeguards", () => {
     });
     expect(checkout).not.toHaveProperty("if");
 
+    expect(workflow.jobs["static-checks"]?.if).toBe(
+      "needs.classify-changes.outputs.source-run == ''",
+    );
     const aggregates = ["ci", "required-test"];
     const checks = Object.entries(workflow.jobs).filter(
       ([name]) => name !== "classify-changes" && !aggregates.includes(name),
@@ -3886,8 +3889,11 @@ describe("GitHub release workflow safeguards", () => {
         .href
     )) as { failedChecks(needs: unknown): string[] };
     const classifierOutputs = classifier.outputs!;
+    expect(classifierOutputs["source-run"]).toBe(
+      "${{ steps.proof.outputs.source-run }}",
+    );
     const flags = Object.keys(classifierOutputs).filter(
-      (key) => !key.endsWith("-matrix"),
+      (key) => key !== "source-run" && !key.endsWith("-matrix"),
     );
     for (const enabled of flags) {
       expect(classifierOutputs[enabled]).toBe(
@@ -3897,7 +3903,8 @@ describe("GitHub release workflow safeguards", () => {
         flags.map((key) => [key, String(key === enabled)]),
       );
       const scheduled = checks.filter(
-        ([, job]) =>
+        ([name, job]) =>
+          name === "static-checks" ||
           !job.if ||
           job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
       );
