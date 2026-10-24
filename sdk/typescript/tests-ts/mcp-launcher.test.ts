@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, parse } from "node:path";
+import { basename, dirname, join, parse, relative } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
@@ -220,6 +220,70 @@ test.skipIf(process.platform !== "win32")(
             });
           }
         }
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "starts POSIX launchers through absolute, relative, and bare paths",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "launcher-path-")),
+    );
+    try {
+      const scripts = join(root, "-plugin with spaces 雪\nline", "scripts");
+      const mcp = join(dirname(scripts), "mcp");
+      await mkdir(scripts, { recursive: true });
+      await mkdir(mcp);
+      const launcher = join(scripts, "launch_codex_security_mcp");
+      await copyFile(
+        join(PLUGIN_ROOT, "scripts", basename(launcher)),
+        launcher,
+      );
+      await chmod(launcher, 0o700);
+      await writeFile(
+        join(mcp, "server.mjs"),
+        "console.log(JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), path: process.env.PATH }));\nprocess.exitCode = 23;\n",
+      );
+      const args = ["--stdio", "argument with spaces 雪", ""];
+      for (const invocation of [
+        { command: launcher, args, cwd: root },
+        {
+          command: "/bin/sh",
+          args: ["--", relative(root, launcher), ...args],
+          cwd: root,
+        },
+        {
+          command: "/bin/sh",
+          args: [basename(launcher), ...args],
+          cwd: scripts,
+        },
+      ]) {
+        const utility = join(invocation.cwd, "dirname");
+        await writeFile(
+          utility,
+          '#!/bin/sh\nprintf used > "$0.used"\nexec /usr/bin/dirname "$@"\n',
+          { mode: 0o700 },
+        );
+        const result = spawnSync(invocation.command, invocation.args, {
+          cwd: invocation.cwd,
+          env: { PATH: ".", CODEX_MCP_NODE_PATH: node },
+          encoding: "utf8",
+        });
+        expect(result.status, result.stderr || result.error?.message).toBe(23);
+        const output = JSON.parse(result.stdout);
+        expect(output.cwd).toBe(invocation.cwd);
+        expect(output.args).toEqual(args);
+        expect(output.path.split(":")[0]).toBe(".");
+        await expect(readFile(`${utility}.used`)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
       }
     } finally {
       await removeTemporaryDirectory(root);
@@ -506,14 +570,15 @@ setInterval(() => {}, 1000);
 
 test.each(
   (["server", "helper"] as const).flatMap((mode) =>
-    ["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"].map((cache) => ({
-      mode,
-      cache,
-    })),
+    ["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"].flatMap((cache) =>
+      (process.platform === "win32" ? ["empty"] : ["empty", "repository"]).map(
+        (path) => ({ mode, cache, path }),
+      ),
+    ),
   ),
 )(
-  "starts the packaged $mode with managed Node before $cache cache and an empty PATH",
-  async ({ mode, cache }) => {
+  "starts the packaged $mode with managed Node before $cache cache and $path PATH",
+  async ({ mode, cache, path }) => {
     const node = Bun.which("node");
     if (node === null)
       throw new Error("Node is required for the MCP smoke test.");
@@ -531,12 +596,24 @@ test.each(
       expect(config.env_vars).toContain("CODEX_MCP_NODE_PATH");
       let managedNode: string;
       const marker = join(root, "managed-node-used");
+      const tools = join(root, "repository tools");
+      const utilityNames = ["dirname", "od", "tr"];
+      if (path === "repository") {
+        await mkdir(tools);
+        for (const utility of utilityNames) {
+          await writeFile(
+            join(tools, utility),
+            `#!/bin/sh\nprintf used > "$0.used"\nexec /usr/bin/${utility} "$@"\n`,
+            { mode: 0o700 },
+          );
+        }
+      }
       if (process.platform !== "win32") {
         managedNode = join(root, "managed node");
         const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
         await writeFile(
           managedNode,
-          `#!/bin/sh\nprintf used > ${quote(marker)}\nexec ${quote(node)} "$@"\n`,
+          `#!/bin/sh\nprintf used > ${quote(marker)}\nprintf '%s' "$PATH" > ${quote(`${marker}.path`)}\nexec ${quote(node)} "$@"\n`,
         );
         await chmod(managedNode, 0o700);
       } else {
@@ -609,7 +686,7 @@ test.each(
         {
           cwd: mode === "helper" ? root : PLUGIN_ROOT,
           env: {
-            PATH: "",
+            PATH: path === "empty" ? "" : tools,
             HOME: root,
             USERPROFILE: root,
             LOCALAPPDATA: root,
@@ -642,6 +719,13 @@ test.each(
         },
       );
       expect(result.status, result.stderr || result.error?.message).toBe(0);
+      for (const utility of utilityNames) {
+        await expect(
+          readFile(join(tools, `${utility}.used`)),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
       if (mode === "helper") {
         expect(result.stdout).toBe("");
         expect(
@@ -656,6 +740,11 @@ test.each(
         );
       }
       expect((await readFile(marker, "utf8")).trim()).toBe("used");
+      if (path === "repository") {
+        expect((await readFile(`${marker}.path`, "utf8")).split(":")[0]).toBe(
+          tools,
+        );
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

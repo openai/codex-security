@@ -2045,6 +2045,55 @@ for await (const line of createInterface({ input: process.stdin })) {
       return { selected, home, staged, installed, record, calls, bootstrap };
     }
 
+    test.skipIf(process.platform === "win32")(
+      "starts installed launchers without PATH utilities with or without a selected root",
+      async () => {
+        const { selected, installed } = await fixture(true);
+        const tools = join(dirname(selected), "repository tools");
+        await mkdir(tools);
+        const utility = join(tools, "dirname");
+        await writeFile(
+          utility,
+          '#!/bin/sh\nprintf used > "$0.used"\nexec /usr/bin/dirname "$@"\n',
+          { mode: 0o700 },
+        );
+        for (const [root, label] of [
+          [selected, "selected"],
+          [installed, "installed"],
+        ] as const) {
+          await writeFile(
+            join(root, "scripts", "launch_codex_security_mcp"),
+            `#!/bin/sh\nprintf '%s\\n' ${label} "$@"\nexit 23\n`,
+            { mode: 0o700 },
+          );
+        }
+        const name = "launch_codex_security_mcp_sdk";
+        const scripts = join(installed, "scripts");
+        for (const launcher of [join(scripts, name), `./${name}`, name]) {
+          for (const pluginRoot of ["", selected]) {
+            const result = spawnSync(
+              "/bin/sh",
+              [launcher, "--stdio", "argument with spaces 雪", ""],
+              {
+                cwd: scripts,
+                env: { PATH: tools, CODEX_SECURITY_PLUGIN_ROOT: pluginRoot },
+                encoding: "utf8",
+              },
+            );
+            expect(result.status, result.stderr || result.error?.message).toBe(
+              23,
+            );
+            expect(result.stdout).toBe(
+              `${pluginRoot ? "selected" : "installed"}\n--stdio\nargument with spaces 雪\n\n`,
+            );
+          }
+        }
+        await expect(readFile(`${utility}.used`)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      },
+    );
+
     test("reuses root-independent launchers and refreshes source changes", async () => {
       const { selected, staged, installed, calls, bootstrap } =
         await fixture(true);

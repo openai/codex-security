@@ -2676,7 +2676,11 @@ async function pluginRuntimeProjection(
         'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
         '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
         "fi\n" +
-        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+        "case $0 in\n" +
+        "  */*) launcher_dir=${0%/*} ;;\n" +
+        "  *) launcher_dir=. ;;\n" +
+        "esac\n" +
+        'exec "$launcher_dir/launch_codex_security_mcp" "$@"\n',
     ),
     mode: 0o755,
   });
