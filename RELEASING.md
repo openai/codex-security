@@ -109,6 +109,7 @@ proposal files, the updater immediately appends a commit containing the latest
 `main` and requests Codex review. If the proposal files are identical, the
 push keeps the existing PR head and CI results. The hourly run incorporates
 intervening changes to `main` without requesting the same proposal review.
+Scheduled and manually requested writes keep their place when newer pushes arrive.
 New suggestions for human-owned notes still appear on the PR.
 
 Before merging, check that the reviewed head contains current `main`.
