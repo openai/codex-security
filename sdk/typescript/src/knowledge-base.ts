@@ -271,10 +271,13 @@ async function extractPdf(
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
+        const page = await document.getPage(number);
+        signal?.throwIfAborted();
+        const content = await page.getTextContent();
         signal?.throwIfAborted();
         pages.push(
           content.items
@@ -287,7 +290,7 @@ async function extractPdf(
       await loadingTask.destroy();
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
+    if (signal?.aborted) signal.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });
