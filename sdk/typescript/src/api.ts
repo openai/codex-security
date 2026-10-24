@@ -5278,13 +5278,13 @@ function scanPrompt(
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target, python),
-    ...(skillName === "security-scan" || enforceCostLimit || customValidation
+    ...(mode === "deep"
       ? [
-          "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+          "Once the Deep Scan coordinator returns its aggregate, end this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.",
         ]
-      : skillName === "deep-security-scan"
+      : skillName === "security-scan" || enforceCostLimit || customValidation
         ? [
-            "The Deep Scan coordinator already wrote the canonical scan artifacts. Call complete_codex_security_scan exactly once without submitting another semantic draft; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
+            "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",

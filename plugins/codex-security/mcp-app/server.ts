@@ -925,7 +925,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. The call returns after finalization succeeds, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the sealed canonical parent scan-manifest.json. Do not call completion again.",
+        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. For an SDK-registered scan it returns the aggregate to the SDK for finalization. Follow the returned instructions for the authoritative scanId, scanDir, and manifestPath.",
       inputSchema: startDeepScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -983,7 +983,8 @@ export function createCodexSecurityServer(): McpServer {
         return toolErrorResult(deepScanInvocationFailureMessage(error));
       }
       const completeDeepScan = async (run: DeepScanRunState) => {
-        if (run.status !== "succeeded") return deepScanTerminalResult(run);
+        if (run.status !== "succeeded" || run.sdkOwnsCompletion)
+          return deepScanTerminalResult(run);
         try {
           const turnMetadata = codexTurnMetadataFromExtra(extra);
           const turnId =
@@ -2230,7 +2231,9 @@ function deepScanTerminalResult(
 ) {
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
-    const instructions = `Deep Scan ${run.scanId} completed. The coordinator validated and sealed scan-manifest.json, findings.json, and coverage.json and generated report.md under ${run.scanDir}. Independent Standard scans have already performed validation and attack-path analysis. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the completed results and link the generated report.`;
+    const instructions = run.sdkOwnsCompletion
+      ? `Deep Scan ${run.scanId} aggregated its validated findings under ${run.scanDir}. End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
+      : `Deep Scan ${run.scanId} completed. The coordinator validated and sealed scan-manifest.json, findings.json, and coverage.json and generated report.md under ${run.scanDir}. Independent Standard scans have already performed validation and attack-path analysis. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the completed results and link the generated report.`;
     return scanActionResult(
       {
         scanId: run.scanId,

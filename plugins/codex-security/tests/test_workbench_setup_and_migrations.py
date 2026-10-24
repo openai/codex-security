@@ -97,6 +97,7 @@ EXPECTED_MIGRATIONS = [
     (53, "store external source findings without assessments"),
     (54, "snapshot deep scan setup configuration"),
     (55, "retain undelivered headless deep scan results"),
+    (56, "recover unfinished legacy headless deep scans"),
 ]
 
 

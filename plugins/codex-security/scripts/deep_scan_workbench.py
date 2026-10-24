@@ -434,6 +434,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             )
     return {
         "scanId": run["scan_id"],
+        "sdkOwnsCompletion": scan["recipe_json"] is not None,
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "includePaths": dependencies().requested_scan_paths(scan),
