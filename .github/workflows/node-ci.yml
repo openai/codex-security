@@ -81,6 +81,7 @@ jobs:
             plugins/codex-security/mcp-app/pnpm-lock.yaml
       - &install-dependencies
         name: Install dependencies
+        shell: bash
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
@@ -520,12 +521,17 @@ jobs:
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test shard ${{ matrix.shard }}
-        env:
+        env: &windows-shard-env
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
         run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}
+      - name: Test MCP helper paths on Windows
+        if: matrix.shard == 1
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
