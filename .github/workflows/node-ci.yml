@@ -487,8 +487,9 @@ jobs:
     if: *source-aggregate
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Require CI gate
         if: needs.ci.result != 'success'
@@ -567,16 +568,3 @@ jobs:
         working-directory: sdk/typescript
         shell: bash
         run: node scripts/check-package.mjs ../../dist/*.tgz
-
-  windows:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
-    runs-on: ubuntu-latest
-    if: *source-aggregate
-    needs: [classify-changes, ci]
-    strategy:
-      matrix:
-        node: ["22.13.0", "24"]
-    steps:
-      - name: Require CI gate
-        if: needs.ci.result != 'success'
-        run: exit 1
