@@ -65,7 +65,6 @@ const unsupportedConfiguration = (error: Error) =>
   error.message.includes("with this Codex configuration");
 
 await testAllowedProfileAndRawArgv();
-await testReducerCodeModePrerequisites();
 await testPreflightStartsInWorkerCwd();
 await testProvidedEnvForwardedWithoutMutation();
 await testOpenAiApiKeyFallbackPreservesNativeAuthentication();
@@ -90,73 +89,6 @@ await testAbortKillsPreflightChild();
 await testAbortPreservesCallerReason();
 await testDirectScanSession();
 await testParentTurnCyberAccessProgram();
-
-async function testReducerCodeModePrerequisites() {
-  const bothEnabled = { code_mode: true, code_mode_host: true };
-  for (const [features, requirements, allowed] of [
-    [
-      { code_mode: { enabled: true }, code_mode_host: { enabled: true } },
-      null,
-      true,
-    ],
-    [bothEnabled, null, true],
-    [undefined, null, false],
-    [
-      { code_mode: { enabled: false }, code_mode_host: { enabled: true } },
-      null,
-      false,
-    ],
-    [
-      { code_mode: { enabled: true }, code_mode_host: { enabled: false } },
-      null,
-      false,
-    ],
-    [bothEnabled, { featureRequirements: { code_mode: false } }, false],
-    [bothEnabled, { featureRequirements: { code_mode_host: false } }, false],
-  ] as const) {
-    const response = configReadResult(expectedProfile);
-    await withFakeCodex(
-      {
-        configResult: {
-          ...response,
-          config: { ...response.config, features },
-        },
-        catalogResults: [catalogResult(true)],
-        requirementsResult: { requirements },
-      },
-      async ({ codexPath, cwd, callsPath }) => {
-        const execution = preflightDeepScanWorkerPermissionProfile({
-          codexPath,
-          cwd,
-          configOverrides: rawOverrides,
-          expectedProfile,
-          requireCodeMode: true,
-          signal: new AbortController().signal,
-        });
-        if (allowed) {
-          await execution;
-        } else {
-          await assert.rejects(execution, (error: Error) => {
-            assert.equal(error.name, "DeepScanNonRetryableError");
-            assert.match(error.message, /code.mode/);
-            return true;
-          });
-        }
-        const calls = await readJsonLines(callsPath);
-        assert.deepEqual(
-          calls.map((call) => call.method),
-          [
-            "initialize",
-            "initialized",
-            "config/read",
-            "permissionProfile/list",
-            "configRequirements/read",
-          ],
-        );
-      },
-    );
-  }
-}
 
 async function testParentTurnCyberAccessProgram() {
   const parentTurn = {

@@ -15,9 +15,6 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 const temporaryEnvironment = Object.fromEntries(['TEMP', 'TMP'].map(name => [name, process.env[name]]));
-const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
-const configOverrides = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []);
-const features = Object.assign({}, ...configOverrides.map(value => value.features));
 if (process.argv.includes('app-server')) {
   const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR, temporaryEnvironment, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
@@ -40,7 +37,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
         }
         result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { features, default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -57,7 +54,8 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
 const stdin = (await process.stdin.toArray()).join('');
 let scopeInput;
 {
-  const configuration = configOverrides.findLast(value => value.mcp_servers?.cs_artifacts);
+  const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
+  const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
   const file = configuration?.mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_FILE;
   if (file) scopeInput = { file, ...JSON.parse(readFileSync(file, 'utf8')) };
 }
