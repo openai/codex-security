@@ -392,3 +392,16 @@ for (const resume of [false, true]) {
     });
   }
 }
+
+test("nested local receipt copies remain distinct from new work after a third attempt and recovery", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "nested-retry-coverage-"));
+  try {
+    await publishCoverageFixture(root, "complete", {
+      receiptRetry: true,
+      extraReceiptRetry: true,
+      stopAfterDraft: true,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,7 +1,15 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { artifactSourcePath } from "./artifact-io.js";
+import type { JsonObject } from "./types.js";
 import { dirname, join, posix, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   parsePersistedScanDraft,
+  readAcceptedWorkerCheckpoints,
+  reconcileAcceptedWorkerHistory,
+  readArchivedWorkerCheckpoints,
+  workerCoverageReceiptLocation,
   retainRecordedReceiptOwnership,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
@@ -58,7 +66,7 @@ export async function readDeepReductionSources(
           { ...context, root: dirname(worker.resultPath), layout: "worker" },
           stored,
         );
-        const result = parseStoredScanDraft(
+        let result = parseStoredScanDraft(
           stored,
           "Accepted Standard worker " + worker.id,
           bound.scanId,
@@ -69,6 +77,70 @@ export async function readDeepReductionSources(
         if (result.complete === false)
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
+          );
+        const workerContext = {
+          ...context,
+          root: dirname(worker.resultPath),
+          layout: "worker" as const,
+          scanId: result.scanId,
+        };
+        const archived = await readArchivedWorkerCheckpoints(
+          workerContext,
+          true,
+        ).catch(() => []);
+        const current = await readAcceptedWorkerCheckpoints(
+          workerContext,
+          result,
+        );
+        const receiptDigests = new Map<string, string>();
+        const receiptSources = archived.length
+          ? [
+              result.coverage,
+              ...current.map(({ input }) => input.coverage),
+              ...archived.map(({ input }) => input.coverage),
+            ]
+          : [];
+        for (const source of receiptSources) {
+          for (const surface of source.surfaces as JsonObject[]) {
+            for (const value of (surface.receiptRefs as string[] | undefined) ??
+              []) {
+              const ref = posix.normalize(value);
+              const shared =
+                (
+                  (surface.provenance as JsonObject | undefined)
+                    ?.scanReceiptRefs as string[] | undefined
+                )?.includes(ref) ?? false;
+              const key = JSON.stringify([shared, ref]);
+              if (receiptDigests.has(key)) continue;
+              try {
+                const location = workerCoverageReceiptLocation(
+                  workerContext,
+                  surface,
+                  ref,
+                );
+                const path = await artifactSourcePath(
+                  location.context,
+                  location.components,
+                  "Saved discovery receipt",
+                );
+                receiptDigests.set(
+                  key,
+                  createHash("sha256")
+                    .update(await readFile(path))
+                    .digest("hex"),
+                );
+              } catch {
+                // Missing evidence cannot establish an earlier receipt origin.
+              }
+            }
+          }
+        }
+        if (current.length || archived.length)
+          result = await reconcileAcceptedWorkerHistory(
+            workerContext,
+            result,
+            [...current, ...archived],
+            receiptDigests,
           );
         for (const [index, finding] of result.findings.entries()) {
           const provenance = finding.provenance as Record<string, unknown>;
@@ -125,6 +197,13 @@ export async function readDeepReductionSources(
               .split(sep)
               .join("/"),
             scanReceiptRefs,
+            archived.flatMap(({ input, attempt }) => {
+              const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
+              return number === undefined
+                ? []
+                : [{ attempt: Number(number), coverage: input.coverage }];
+            }),
+            receiptDigests,
           ),
           result: reduction,
         };

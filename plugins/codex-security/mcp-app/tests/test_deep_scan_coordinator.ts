@@ -1307,20 +1307,14 @@ async function testMissingDiscoveryResultResumesExistingThread(
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
-  await assert.rejects(
-    realpath(
-      path.join(
-        fixture.run.scanDir,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "discovery-0001",
-        "attempts",
-        "attempt-01",
-      ),
-    ),
-    { code: "ENOENT" },
-    "same-thread completion must preserve the Standard scan workspace instead of archiving it",
+  const workspace = [...executor.discoveryWorkingDirectories][0]!;
+  const attempt = path.join(path.dirname(workspace), "attempts", "attempt-01");
+  assert.equal(await realpath(workspace), workspace);
+  assert.equal(await realpath(attempt), attempt);
+  assert.equal(
+    executor.discoveryWorkingDirectories.size,
+    1,
+    "same-thread completion preserves its live workspace beside the retry snapshot",
   );
 }
 
