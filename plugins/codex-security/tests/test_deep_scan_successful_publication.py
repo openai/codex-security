@@ -421,6 +421,67 @@ def test_completion_preserves_non_utf8_filename_warning(
 
 
 @pytest.mark.cross_platform
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("missing_writeup", [False, True])
+def test_preseal_target_warning_survives_failed_publication(
+    workbench_api, workbench_db, publication_scan, monkeypatch, tmp_path, mode, missing_writeup
+):
+    scan = publication_scan(mode=mode)
+    if missing_writeup:
+        scan.findings[0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
+        (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+    source_path = tmp_path / "target" / "subdir" / "extract.py"
+    source_before = source_path.read_bytes()
+    source_path.write_text("# Changed before sealing\n")
+    row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    target_warning = workbench_api["scan_target_warning"](row)
+    assert target_warning is not None
+    finalizer_globals = workbench_api["_write_prepared_scan_finalization"].__globals__
+    write_bytes = finalizer_globals["write_scan_local_bytes"]
+    failed = False
+
+    def fail_first_report(scan_dir, relative_path, payload, **kwargs):
+        nonlocal failed
+        if relative_path == "report.md" and not failed:
+            failed = True
+            raise finalizer_globals["ContractError"]("Synthetic first report write failure")
+        return write_bytes(scan_dir, relative_path, payload, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setitem(finalizer_globals, "write_scan_local_bytes", fail_first_report)
+        with pytest.raises(SystemExit, match="Synthetic first report write failure"):
+            complete(workbench_api, workbench_db, scan)
+
+    row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    assert row["status"] == ("failed" if mode == "standard" else "running")
+    if mode == "deep":
+        # The failed output write must not erase an earlier observation if the
+        # next attempt finds that the target has returned to its original state.
+        source_path.write_bytes(source_before)
+        completed = complete(workbench_api, workbench_db, scan)
+        assert completed["progress"]["status"] == "complete"
+        row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == ("failed" if mode == "standard" else "completed")
+    run = json.loads((scan.scan_dir / "exports/results.sarif").read_text())["runs"][0]
+    notifications = [
+        notification
+        for invocation in run.get("invocations", [])
+        for notification in invocation["toolExecutionNotifications"]
+    ]
+    assert {
+        "database": target_warning in json.loads(row["completion_warnings_json"]),
+        "manifest": target_warning in manifest["scan"].get("warnings", []),
+        "sarif": {"level": "warning", "message": {"text": target_warning}} in notifications,
+    } == {"database": True, "manifest": True, "sarif": True}
+    assert run["invocations"][0]["executionSuccessful"] is (mode == "deep")
+    portable = tmp_path / "portable"
+    shutil.copytree(scan.scan_dir, portable)
+    exported = json.loads(finalizer_globals["build_findings_export"](portable, "sarif"))
+    assert exported["runs"][0] == run
+
+
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("scope", [".", "subdir"])
 @pytest.mark.parametrize("missing_parent", [False, True])
 def test_deep_completion_preserves_findings_with_missing_optional_writeups(

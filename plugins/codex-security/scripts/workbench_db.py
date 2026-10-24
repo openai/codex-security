@@ -1600,9 +1600,9 @@ def complete_scan_locked(
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
-        if prepared.warnings:
-            # Save the explanation before publication removes the broken reference,
-            # so a retry after failed publication retains it.
+        if warnings != json.loads(scan["completion_warnings_json"]):
+            # Persist all observed warnings before output writes can fail, so
+            # stopped-result publication and retries retain those diagnostics.
             with connection:
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
