@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const documentation =
@@ -58,6 +58,23 @@ if (
 ) {
   const event = process.env.EVENT_NAME;
   const baseChanged = process.env.BASE_CHANGED === "true";
+  if (event === "pull_request" && baseChanged) {
+    const { base, head } = JSON.parse(
+      readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"),
+    ).pull_request;
+    const parents = execFileSync("git", ["show", "-s", "--format=%P", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    const expected = `${base.sha} ${head.sha}`;
+    console.log(
+      `Requested base ${base.ref}. Expected merge parents ${expected}. Checked out ${parents}.`,
+    );
+    if (parents !== expected) {
+      throw new Error(
+        "GitHub supplied a stale test merge. After the merge ref updates, reopen the pull request to start a fresh source run. Rerunning this attempt uses the same commit.",
+      );
+    }
+  }
   const paths =
     event === "pull_request" && !baseChanged
       ? execFileSync(
