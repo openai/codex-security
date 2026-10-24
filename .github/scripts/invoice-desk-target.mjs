@@ -11,14 +11,9 @@ function eligible(pr, repository, sha) {
   );
 }
 
-export async function resolveScanTargets(
-  context,
-  getPullRequest,
-  pullRequestsForCommit,
-  dispatchedScanTitles,
-) {
+export async function resolveScanTargets(context, getPullRequest) {
   const { eventName, event, repository, sha, target } = context;
-  // After approval, recheck this matrix entry rather than other PRs on the same commit.
+  // After approval, keep the scan bound to its original PR and source commit.
   if (target) {
     if (target.pr === 0) return [{ pr: 0, sha }];
     const pr = await getPullRequest(String(target.pr));
@@ -26,26 +21,7 @@ export async function resolveScanTargets(
       ? [{ pr: pr.number, sha: target.sha }]
       : [];
   }
-  if (eventName === "workflow_run") {
-    const run = event.workflow_run;
-    if (run.event !== "pull_request" || run.conclusion === "cancelled")
-      return [];
-    // GitHub can suppress target events for automated PRs and some branch names.
-    const requests = await pullRequestsForCommit(run.head_sha);
-    const numbers = new Set(run.pull_requests.map((pr) => pr.number));
-    const candidates = requests.filter(
-      (pr) =>
-        eligible(pr, repository, run.head_sha) &&
-        (numbers.size === 0 || numbers.has(pr.number)),
-    );
-    if (candidates.length === 0) return [];
-    const dispatched = new Set(await dispatchedScanTitles(sha));
-    return candidates.flatMap((pr) =>
-      !dispatched.has(`Invoice Desk scan — PR #${pr.number} @ ${pr.head.sha}`)
-        ? { pr: pr.number, sha: pr.head.sha }
-        : [],
-    );
-  }
+  if (eventName === "schedule") return [{ pr: 0, sha }];
   if (eventName !== "workflow_dispatch") return [];
   const { pr_number: number = "", source_sha: sourceSha = "" } =
     event.inputs ?? {};
@@ -62,8 +38,6 @@ export async function resolveScanTargets(
 }
 
 if (isMain(import.meta.url)) {
-  const api = (args, options = {}) =>
-    execFileSync("gh", ["api", ...args], { encoding: "utf8", ...options });
   const repository = process.env.GITHUB_REPOSITORY;
   const targets = await resolveScanTargets(
     {
@@ -79,56 +53,23 @@ if (isMain(import.meta.url)) {
               sha: process.env.SOURCE_SHA,
             },
     },
-    (number) => JSON.parse(api([`repos/${repository}/pulls/${number}`])),
-    (sha) =>
+    (number) =>
       JSON.parse(
-        api([
-          "--paginate",
-          "--slurp",
-          `repos/${repository}/commits/${sha}/pulls?per_page=100`,
-        ]),
-      ).flat(),
-    (sha) =>
-      JSON.parse(
-        api(
-          [
-            "--paginate",
-            "--slurp",
-            `repos/${repository}/actions/workflows/invoice-desk-scan.yml/runs?event=workflow_dispatch&branch=main&head_sha=${sha}&per_page=100`,
-          ],
-          { maxBuffer: Infinity },
-        ),
-      ).flatMap((page) => page.workflow_runs.map((run) => run.display_title)),
+        execFileSync("gh", ["api", `repos/${repository}/pulls/${number}`], {
+          encoding: "utf8",
+        }),
+      ),
   );
-  const fallback = process.env.GITHUB_EVENT_NAME === "workflow_run";
-  if (fallback) {
-    for (const { pr, sha } of targets) {
-      execFileSync("gh", [
-        "workflow",
-        "run",
-        "invoice-desk-scan.yml",
-        "--repo",
-        repository,
-        "--ref",
-        "main",
-        "-f",
-        `pr_number=${pr}`,
-        "-f",
-        `source_sha=${sha}`,
-      ]);
-    }
-  }
   appendFileSync(
     process.env.GITHUB_OUTPUT,
-    `targets=${JSON.stringify(fallback ? [] : targets)}\n`,
+    `targets=${JSON.stringify(targets)}\n`,
   );
   const message =
     targets.length === 0
       ? "Skipped: no eligible PR revision needs a scan."
       : targets
           .map(
-            ({ pr, sha }) =>
-              `${fallback ? "Queued " : ""}${pr ? `PR #${pr}` : "Main baseline"} at ${sha}`,
+            ({ pr, sha }) => `${pr ? `PR #${pr}` : "Main baseline"} at ${sha}`,
           )
           .join("\n");
   console.log(message);

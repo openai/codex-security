@@ -14,6 +14,18 @@ import { main } from "../src/cli.js";
 import { capture } from "./cli-fixtures.js";
 import { bashCommand, runCommand } from "./support/shell.js";
 
+const { selectChecks } = (await import(
+  new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
+)) as {
+  selectChecks(
+    paths: string[],
+    options: { event: string; baseChanged?: boolean },
+  ): Record<
+    "compatibility-matrix" | "windows-node-matrix" | "python-matrix",
+    string
+  >;
+};
+
 interface WorkflowStep {
   name?: string;
   id?: string;
@@ -29,7 +41,7 @@ interface WorkflowJob {
   name?: string;
   needs?: string | string[];
   env?: Record<string, unknown>;
-  strategy?: { matrix: Record<string, unknown> };
+  strategy?: { matrix: Record<string, unknown> | string };
   steps?: WorkflowStep[];
 }
 
@@ -137,19 +149,28 @@ describe("TypeScript package skeleton", () => {
 
   test("runs Bun once per OS and checks every supported Node runtime with the installed package", async () => {
     const { jobs } = await workflow("node-ci.yml");
+    const selected = selectChecks([], { event: "push" });
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
       shard: [1, 2, 3, 4, 5, 6],
     });
-    expect(jobs["compatibility"]?.strategy?.matrix).toEqual({
-      os: ["ubuntu-latest"],
-      node: ["22.13.0", "24.0.0", "24", "26.0.0", "26"],
-      include: [{ os: "macos-latest", node: "22.13.0" }],
-    });
+    expect(jobs["compatibility"]?.strategy?.matrix).toBe(
+      "${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}",
+    );
+    expect(JSON.parse(selected["compatibility-matrix"]).include).toEqual([
+      ...["22.13.0", "24.0.0", "24", "26.0.0", "26"].map((node) => ({
+        os: "ubuntu-latest",
+        node,
+      })),
+      { os: "macos-latest", node: "22.13.0" },
+    ]);
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
       shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     });
-    expect(jobs["windows-verify"]?.strategy?.matrix["node"]).toEqual([
+    expect(jobs["windows-verify"]?.strategy?.matrix).toBe(
+      "${{ fromJSON(needs.classify-changes.outputs.windows-node-matrix) }}",
+    );
+    expect(JSON.parse(selected["windows-node-matrix"]).node).toEqual([
       "22.13.0",
       "24",
     ]);
@@ -178,10 +199,10 @@ describe("TypeScript package skeleton", () => {
       verificationSteps[pythonSetup]?.with?.["update-environment"],
     );
     expect(jobs["required-test"]?.name).toEndWith("${{ matrix.os }} / node-22");
-    expect(jobs["required-test"]?.needs).toEqual([
+    expect(jobs["ci"]?.needs).toEqual([
       "classify-changes",
-      "workflow-quality",
       "static-checks",
+      "native",
       "package",
       "test",
       "compatibility",
@@ -189,15 +210,13 @@ describe("TypeScript package skeleton", () => {
       "plugin-host",
       "plugin-source",
       "container-validate",
-    ]);
-    expect(jobs["windows"]?.needs).toEqual([
-      "classify-changes",
-      "static-checks",
-      "plugin-host",
-      "plugin-source",
+      "workflow-quality",
       "windows-test",
       "windows-verify",
     ]);
+    for (const name of ["required-test", "windows"]) {
+      expect(jobs[name]?.needs).toEqual(["classify-changes", "ci"]);
+    }
     for (const name of ["compatibility", "windows-verify"]) {
       expect(jobs[name]?.steps).toContainEqual(
         expect.objectContaining({
@@ -312,7 +331,11 @@ describe("TypeScript package skeleton", () => {
   test("covers the Python runtime floor and native platform paths", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const job = jobs["plugin-source"]!;
-    expect(job.strategy?.matrix["include"]).toEqual([
+    const selected = selectChecks([], { event: "push" });
+    expect(job.strategy?.matrix).toBe(
+      "${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}",
+    );
+    expect(JSON.parse(selected["python-matrix"]).include).toEqual([
       ...["3.10", "3.12", "3.14"].map((python) => ({
         os: "ubuntu-latest",
         python,
@@ -353,8 +376,9 @@ describe("TypeScript package skeleton", () => {
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
       );
     }
-    expect(jobs["required-test"]?.needs).toContain("plugin-source");
-    expect(jobs["windows"]?.needs).toContain("plugin-source");
+    expect(jobs["ci"]?.needs).toContain("plugin-source");
+    expect(jobs["required-test"]?.needs).toContain("ci");
+    expect(jobs["windows"]?.needs).toContain("ci");
   });
 
   test("checks one archive and restores its plugin before every test shard", async () => {
@@ -490,12 +514,7 @@ describe("TypeScript package skeleton", () => {
       "workflow_call",
       "workflow_dispatch",
     ]);
-    expect(ci.jobs["test-quality"]).toMatchObject({
-      needs: ["classify-changes", "native"],
-      if: "needs.classify-changes.outputs.test-quality == 'true'",
-      uses: "./.github/workflows/test-quality.yml",
-      with: { "native-artifacts-ready": true },
-    });
+    expect(ci.jobs).not.toHaveProperty("test-quality");
     expect(quality.env?.["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"]).toBe(
       "false",
     );
@@ -510,11 +529,16 @@ describe("TypeScript package skeleton", () => {
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
     expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
     expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
-    const unixMatrix = ci.jobs["test"]!.strategy!.matrix;
+    const unixMatrix = ci.jobs["test"]!.strategy!.matrix as Record<
+      string,
+      unknown
+    >;
     const unixShards = unixMatrix["shard"] as number[];
-    const windowsShards = ci.jobs["windows-test"]!.strategy!.matrix[
-      "shard"
-    ] as number[];
+    const windowsMatrix = ci.jobs["windows-test"]!.strategy!.matrix as Record<
+      string,
+      unknown
+    >;
+    const windowsShards = windowsMatrix["shard"] as number[];
     expect(runner.strategy?.matrix).toEqual({
       target: ["baseline", "expanded"].flatMap((mode) => [
         ...(unixMatrix["os"] as string[]).flatMap((os) => {
