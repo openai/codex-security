@@ -3,6 +3,48 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each([0, 3])(
+    "shows observed files (%i) separately from reviewed items",
+    (count) => {
+      const text = renderScanHistory(
+        {
+          scanId: "synthetic-scan",
+          targetPath: "/synthetic/repository",
+          progress: {
+            status: "complete",
+            coverage: { closedRows: 1, worklistRows: 4, filesTotal: 20 },
+          },
+          findings: [],
+          observedFilesRead: { count, observedAt: "2026-01-01T00:00:00Z" },
+        },
+        "show",
+        { color: false },
+      );
+      expect(text).toContain(`Files shown to model (observed): ${count}`);
+      expect(text).toContain("1 of 4 reviewed");
+      expect(text).toContain("20 files");
+      expect(text).toContain("not a count of fully reviewed files");
+    },
+  );
+
+  test.each([undefined, { count: null, observedAt: null }])(
+    "shows absent observations as unavailable",
+    (observedFilesRead) => {
+      const text = renderScanHistory(
+        {
+          scanId: "synthetic-scan",
+          targetPath: "/synthetic/repository",
+          progress: { status: "complete" },
+          findings: [],
+          ...(observedFilesRead === undefined ? {} : { observedFilesRead }),
+        },
+        "show",
+        { color: false },
+      );
+      expect(text).toContain("Files shown to model (observed): unavailable");
+    },
+  );
+
   test("shows canonical scope separately from the saved recipe without changing execution status", () => {
     const scan = {
       targetPath: "/synthetic/repository",
@@ -382,6 +424,7 @@ describe("scan history renderer", () => {
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      startedAt: "2026-01-01T11:00:00Z",
       updatedAt: "2026-01-01T12:00:00Z",
       parentScanId: "87654321-abcd-4567-abcd-1234567890ab",
       targetPath: "/demo/juice-shop",
@@ -420,6 +463,7 @@ describe("scan history renderer", () => {
     };
     const output = stripVTControlCharacters(renderScanHistory(scan, "show"));
     for (const expected of [
+      `STARTED  ${scan.startedAt}`,
       `UPDATED  ${scan.updatedAt}`,
       "FINDINGS  20 of 75",
       "PARENT SCAN  87654321",

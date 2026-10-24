@@ -37,6 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
+import workbench_observed_files as observed_files
 import workbench_progress as progress
 import workbench_publication as publication
 import workbench_remediation as remediation_state
@@ -2894,6 +2895,9 @@ def scan_result(
         "artifacts": artifacts,
         **model_fields,
         "canceledAt": scan["canceled_at"],
+        "startedAt": scan["started_at"],
+        "completedAt": scan["completed_at"],
+        "observedFilesRead": observed_files.observed_files_summary(connection, scan["id"]),
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
@@ -3525,6 +3529,11 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             if args.check_target:
                 require_scan_target_unchanged(require_scan(connection, args.scan_id))
             result = get_scan(connection, args)
+        elif args.command == "record-observed-files":
+            scan = require_scan(connection, args.scan_id)
+            result = observed_files.record_observed_files(
+                connection, scan["id"], json.load(sys.stdin), now()
+            )
         elif args.command == "rename-scan":
             result = scan_history.rename_scan(
                 connection, require_scan(connection, args.scan_id), args.name

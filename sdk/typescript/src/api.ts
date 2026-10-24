@@ -193,6 +193,8 @@ import {
 } from "./security-policy.js";
 import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import { refreshObservedFiles } from "./saved-file-observations.js";
+import type { ScanLogSource } from "./scan-logs.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
@@ -1977,6 +1979,11 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    let observation: {
+      id: string;
+      options: WorkbenchCommandOptions;
+      codexHome: string;
+    } | null = null;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
       prepareScanArtifactRestorer;
@@ -2642,6 +2649,7 @@ export class CodexSecurity {
         });
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      observation = { ...activeScan, codexHome: runtime.codexHome };
       notifyObserver(
         options,
         "onScanRegistered",
@@ -3512,6 +3520,31 @@ export class CodexSecurity {
     } finally {
       budgetAbortController.abort();
       scanProgressTracker?.stop();
+      if (observation !== null) {
+        try {
+          const workbenchOptions = {
+            ...observation.options,
+            signal: undefined,
+          };
+          const saved = await workbench(workbenchOptions, [
+            "get-scan",
+            "--scan-id",
+            observation.id,
+          ]);
+          if (isRecord(saved["scan"])) {
+            await refreshObservedFiles(
+              saved["scan"] as ScanLogSource,
+              [observation.codexHome],
+              (args, input) => workbench(workbenchOptions, args, input),
+            );
+          }
+        } catch (error) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not update observed files read: ${errorMessage(error)}`);
+        }
+      }
       // Temporary-input cleanup must not replace the scan's outcome.
       try {
         for (const cleanup of await Promise.allSettled([

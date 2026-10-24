@@ -441,5 +441,13 @@
     "statements": [
       "CREATE TABLE external_source_reports (\n    id TEXT PRIMARY KEY,\n    repository TEXT NOT NULL,\n    provider TEXT NOT NULL,\n    source_key TEXT NOT NULL,\n    source_finding_id TEXT NOT NULL,\n    evidence_json TEXT NOT NULL,\n    version INTEGER NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (repository, provider, source_key, source_finding_id)\n);"
     ]
+  },
+  {
+    "version": 54,
+    "name": "persist observed files from saved tool outputs",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN observed_files_read_at TEXT;",
+      "CREATE TABLE scan_observed_files (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    path TEXT NOT NULL,\n    thread_id TEXT NOT NULL,\n    call_id TEXT NOT NULL,\n    PRIMARY KEY (scan_id, path)\n);"
+    ]
   }
 ]

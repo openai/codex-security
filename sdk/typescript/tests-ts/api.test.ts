@@ -3622,6 +3622,7 @@ describe("CodexSecurity orchestration", () => {
       "prepare-scan-completion",
       "get-scan",
       "fail-scan",
+      "get-scan",
     ]);
     await client.close();
   });
@@ -3663,6 +3664,110 @@ describe("CodexSecurity orchestration", () => {
     expect(commands).toContain("get-scan");
     await client.close();
   });
+
+  test.each([false, true])(
+    "persists observed files when scan execution finishes (failed=%p)",
+    async (failed) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const timestamp = "2026-07-26T12:01:00Z";
+      const rollout = await writeUsageSession(
+        codexHome,
+        "thread-1",
+        {},
+        {
+          cwd: repository,
+          timestamp,
+        },
+      );
+      await appendFile(
+        rollout,
+        [
+          {
+            type: "response_item",
+            timestamp,
+            payload: {
+              type: "function_call",
+              name: "exec_command",
+              call_id: "read-source",
+              arguments: JSON.stringify({
+                cmd: "cat src/example.ts",
+                workdir: repository,
+              }),
+            },
+          },
+          {
+            type: "response_item",
+            timestamp,
+            payload: {
+              type: "function_call_output",
+              call_id: "read-source",
+              output:
+                "Wall time: 0.01 seconds\nExit code: 0\nOutput:\nexport const example = 1;\n",
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      const observations: unknown[] = [];
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: { CODEX_CLI_PATH: process.execPath },
+        }),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "get-scan") {
+            return {
+              scan: {
+                scanId: "scan_example_001",
+                targetPath: repository,
+                startedAt: "2026-07-26T12:00:00Z",
+                completedAt: "2026-07-26T12:05:00Z",
+                continuationThreadId: "thread-1",
+                executionThreadIds: ["thread-1"],
+                progress: {
+                  status: failed ? "failed" : "complete",
+                  updatedAt: "2026-07-26T12:05:00Z",
+                },
+              },
+            };
+          }
+          if (args[0] === "record-observed-files") {
+            expect(args).toEqual([
+              "record-observed-files",
+              "--scan-id",
+              "scan_example_001",
+            ]);
+            expect(options.signal).toBeUndefined();
+            observations.push(JSON.parse(input!));
+            return { count: 1, observedAt: timestamp };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          if (!failed) await copyCompletedScan(root);
+          return { events: failed ? failedEvents() : completedEvents() };
+        }, "thread-1"),
+      });
+
+      const result = client.run(repository);
+      if (failed)
+        await expect(result).rejects.toThrow("Could not draft fixes.");
+      else expect(await result).toMatchObject({ threadId: "thread-1" });
+      expect(observations).toEqual([
+        {
+          files: [
+            {
+              path: "src/example.ts",
+              threadId: "thread-1",
+              callId: "read-source",
+            },
+          ],
+        },
+      ]);
+    },
+  );
 
   test.each([
     ["without", false],
@@ -4981,6 +5086,7 @@ describe("CodexSecurity orchestration", () => {
         "prepare-scan-completion",
         "complete-scan",
         "list-global-findings",
+        "get-scan",
       ]);
       await client.close();
     },
@@ -5688,7 +5794,7 @@ describe("CodexSecurity orchestration", () => {
             ScanCostLimitExceededError,
           );
           if (completion === "unavailable") {
-            expect(commands.at(-1)?.[0]).toBe("fail-scan");
+            expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
           } else {
             expect(commands.some((args) => args[0] === "fail-scan")).toBe(
               false,
@@ -5782,6 +5888,7 @@ describe("CodexSecurity orchestration", () => {
       "prepare-scan-completion",
       "complete-scan",
       "list-global-findings",
+      "get-scan",
     ]);
     expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
     await client.close();
