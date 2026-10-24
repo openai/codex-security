@@ -36,7 +36,7 @@ Pass the existing handoff token when required, including after a waiter detaches
 
 Wait on the coordinator call or its running execution cell. It owns discovery progress, the configured time limit, worker cancellation at that limit, and aggregation. Leave the public phase at preflight before the call; do not publish competing progress while it runs.
 
-An ended turn or host timeout detaches the caller, not the scan. A later continuation can rejoin with the same scan ID and token; a CLI/headless caller can repeat the identical target form to rejoin its owning thread's active scan. Server restart recovery retains completed worker results. A terminal failure is not a detached waiter and must not trigger a replacement scan.
+After an ended turn or host timeout, rejoin with the same scan ID and token. If a CLI/headless call detached before returning its ID, repeat the identical target form. It can recover the completed report for the same checkout snapshot, context, and project-file selection after a server restart. Once the report is returned, a later target-based call can start a fresh scan. A terminal failure must not trigger a replacement scan.
 
 ## Handle the Result
 

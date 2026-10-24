@@ -448,5 +448,12 @@
     "statements": [
       "ALTER TABLE workspaces ADD COLUMN deep_scan_config_json TEXT;"
     ]
+  },
+  {
+    "version": 55,
+    "name": "retain undelivered headless deep scan results",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN pending_target_project_path TEXT;"
+    ]
   }
 ]

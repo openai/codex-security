@@ -1167,6 +1167,7 @@ model_reasoning_summary = "none"
     } finally {
       await restartedServer.stop();
     }
+    await testDetachedTargetReplay(serverBundlePath, environment, targetPath);
     await testCliDeepScanEngine({
       fixtureRoot,
       environment,
@@ -1182,6 +1183,63 @@ model_reasoning_summary = "none"
     await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
     parentSandboxState = readOnlyParentSandboxState(pluginRoot);
+  }
+}
+
+async function testDetachedTargetReplay(
+  serverBundlePath: string,
+  environment: NodeJS.ProcessEnv,
+  targetPath: string,
+) {
+  const threadId = "detached-headless-owner";
+  const request = toolCall(
+    "start_codex_security_deep_scan",
+    { targetPath },
+    threadId,
+  );
+  let server = startServer(serverBundlePath, environment);
+  try {
+    assertNoError(await server.initialize("detached-target"));
+    server.sendRequest(2, "tools/call", request);
+    const scanId = await waitForScanId({ server, requestId: 2 });
+    server.notify("notifications/cancelled", { requestId: 2 });
+    await waitFor(async () => {
+      const state = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ]);
+      return state.scan.progress.status === "complete";
+    }, "the detached target request to finalize");
+    assert.equal(server.response(2)?.result?.structuredContent, undefined);
+    const { scanDir } = await getDeepScan({ environment, scanId, threadId });
+    const report = await readFile(path.join(scanDir, "report.md"), "utf8");
+    const launches = await readLogLines(environment.FAKE_CODEX_START_LOG!);
+    await server.stop();
+
+    server = startServer(serverBundlePath, environment);
+    assertNoError(await server.initialize("detached-target-retry"));
+    const replay = await server.callTool(2, request);
+    assertNoError(replay);
+    const completed = replay.result.structuredContent;
+    assert.equal(completed.scanId, scanId);
+    assert.equal(completed.scanDir, scanDir);
+    assert.equal(completed.completion.scan.reportAvailable, true);
+    assert.equal(
+      await readFile(path.join(completed.scanDir, "report.md"), "utf8"),
+      report,
+    );
+    assert.equal(
+      (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
+      launches.length,
+    );
+
+    server.sendRequest(3, "tools/call", request);
+    const fresh = await server.waitForResponse(3, 60_000);
+    assertNoError(fresh);
+    assert.notEqual(fresh.result.structuredContent.scanId, scanId);
+  } finally {
+    await server.stop();
   }
 }
 
