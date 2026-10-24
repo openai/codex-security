@@ -705,9 +705,12 @@ export class ScanDashboard {
   }
 
   public scroll(lines: number): void {
+    const { footer, details } = this.#usageLayout();
     const maximum = Math.max(
       0,
-      this.#activityLines(this.#width()).length - this.#activityRows(),
+      this.#activityLines(this.#width()).length +
+        details.length -
+        this.#activityRows(footer.length),
     );
     this.#scrollOffset = Math.max(
       0,
@@ -742,8 +745,8 @@ export class ScanDashboard {
     const verification = this.#options.presentation === "verification";
     const findingProgress = publication || verification;
     const width = this.#width();
-    const usageLines = findingProgress ? [] : this.#usageLines();
-    const availableRows = this.#availableActivityRows(usageLines.length);
+    const { footer, details } = this.#usageLayout();
+    const availableRows = this.#availableActivityRows(footer.length);
     const activityRows = Math.max(1, availableRows);
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     const elapsed = Math.max(
@@ -763,7 +766,8 @@ export class ScanDashboard {
           : count.completed > 0
             ? `${formatCount(count.completed)} / ${formatCount(count.total)} reviewed`
             : `${formatCount(count.total)} in scope`;
-    const history = this.#activityLines(width);
+    let history = this.#activityLines(width);
+    if (details.length > 0) history = history.concat(details);
     const maximumOffset = Math.max(0, history.length - activityRows);
     this.#scrollOffset = Math.min(this.#scrollOffset, maximumOffset);
     const first = Math.max(
@@ -811,7 +815,7 @@ export class ScanDashboard {
                   `  STAGE    ${this.#stage}`,
                   `  ${count?.label === "reviews" ? "REVIEWS" : "FILES  "}  ${files}`,
                 ]),
-            ...usageLines,
+            ...footer,
             ...(this.#budget === null
               ? []
               : [
@@ -1013,17 +1017,15 @@ export class ScanDashboard {
     return Math.max(1, Math.min(this.#stream.columns ?? 88, 160));
   }
 
-  #activityRows(): number {
-    return Math.max(1, this.#availableActivityRows());
+  #activityRows(usageRows = this.#usageLayout().footer.length): number {
+    return Math.max(1, this.#availableActivityRows(usageRows));
   }
 
-  #availableActivityRows(usageRowCount?: number): number {
+  #availableActivityRows(usageRows: number): number {
     const findingProgress =
       this.#options.presentation === "publication" ||
       this.#options.presentation === "verification";
     const stageRows = this.#options.mode === "deep" && !findingProgress ? 0 : 2;
-    const usageRows =
-      usageRowCount ?? (findingProgress ? 0 : this.#usageLines().length);
     return (
       (this.#stream.rows ?? 24) -
       FIXED_SCREEN_ROWS -
@@ -1033,12 +1035,18 @@ export class ScanDashboard {
     );
   }
 
-  #usageLines(): string[] {
+  #usageLayout(): { footer: string[]; details: DashboardActivityLine[] } {
+    if (
+      this.#options.presentation === "publication" ||
+      this.#options.presentation === "verification"
+    ) {
+      return { footer: [], details: [] };
+    }
     const width = this.#width();
     const limits =
       this.#accountLimits ??
       (this.#chatGptAuth ? ACCOUNT_LIMITS_UNAVAILABLE : null);
-    return [
+    const lines = [
       ...wrapActivity(
         "  TOKENS   ",
         this.#tokens ?? "waiting for usage",
@@ -1054,6 +1062,22 @@ export class ScanDashboard {
           )),
       ...(limits === null ? [] : wrapActivity("  LIMITS   ", limits, width)),
     ];
+    // Both dividers can give way, but one activity row must remain.
+    const capacity = Math.max(0, this.#availableActivityRows(0) + 1);
+    if (lines.length <= capacity) return { footer: lines, details: [] };
+    if (this.#view === "details") {
+      return {
+        footer: [],
+        details: lines.map((text) => ({ text, kind: "path" })),
+      };
+    }
+    const footer = lines.slice(0, capacity);
+    if (footer.length > 0)
+      footer[footer.length - 1] =
+        this.#options.input?.isTTY === true
+          ? "  … Full readings in details"
+          : "  … Resize for full readings";
+    return { footer, details: [] };
   }
 
   #costLines(): string[] {

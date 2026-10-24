@@ -1027,8 +1027,9 @@ During a scan, progress shows when Codex reported the displayed token and cost
 totals, in UTC. If the report has no timestamp, progress says so.
 In-flight requests may add tokens and cost after that time. When Codex supplies
 account allowance, progress shows the percentage used in each reported window
-and the time of that reading. With ChatGPT authentication, progress also says
-when Codex has yet to report allowance.
+and the time of that reading. On a short terminal, resize the window or press
+`d` to scroll through the full readings in Details. With ChatGPT authentication,
+progress also says when Codex has yet to report allowance.
 
 `usage.accountRateLimits` saves the latest observed account-wide readings with
 their own timestamps, window durations, and reset times. These are historical

@@ -764,6 +764,61 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test("keeps the clock and budget visible when allowance readings need several pages", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 48, rows: 16 },
+      { maxCostUsd: 20, input },
+    );
+    const cost = fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 2,
+    }).cost!;
+    const limits = Array.from({ length: 8 }, (_, index) => ({
+      limitId: `pool-${index + 1}`,
+      observedAt: "2026-07-29T12:35:00Z",
+      primary: { usedPercent: 11 + index, windowMinutes: 300, resetsAt: null },
+      secondary: null,
+    }));
+    dashboard.start();
+    try {
+      dashboard.setCost(cost);
+      dashboard.setUsageObservation({
+        tokensUpdatedAt: "2026-07-29T12:34:56Z",
+        accountRateLimits: limits,
+      });
+      expect(lastFrame(stderr).split("\n")).toHaveLength(16);
+      expect(lastFrame(stderr)).toContain("Full readings in details");
+      const budget = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost,
+        signal: new AbortController().signal,
+      });
+      const prompt = lastFrame(stderr);
+      expect(prompt.split("\n")).toHaveLength(16);
+      expect(prompt).toContain("BUDGET");
+      expect(prompt.split("\n").at(-1)).toMatch(/TIME.*Enter to apply/);
+      input.emit("data", "\r");
+      await expect(budget).resolves.toBeUndefined();
+      input.emit("data", "d");
+      const pages = new Set<string>();
+      while (!pages.has(lastFrame(stderr))) {
+        const page = lastFrame(stderr);
+        expect(page.split("\n")).toHaveLength(16);
+        pages.add(page);
+        input.emit("data", "\u001B[5~");
+      }
+      const details = [...pages].join(" ").replace(/\s+/gu, " ");
+      for (const limit of limits) {
+        expect(details).toContain(limit.limitId);
+        expect(details).toContain(`${limit.primary.usedPercent}% used`);
+      }
+    } finally {
+      dashboard.stop();
+    }
+  });
+
   test("shows ChatGPT account windows before any token measurement", () => {
     const stderr = capture(true);
     const dashboard = createDashboard(
