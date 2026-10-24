@@ -24,8 +24,10 @@ const path = new URL('../README.md', import.meta.url);
 const current = await readFile(path, 'utf8');
 const start = '<!-- action-reference:start -->';
 const end = '<!-- action-reference:end -->';
-assert.ok(current.includes(start) && current.includes(end), 'README must contain action reference markers');
-const updated = current.slice(0, current.indexOf(start)) + start + '\n\n' + reference + '\n' + current.slice(current.indexOf(end));
+const startIndex = current.indexOf(start);
+const endIndex = current.indexOf(end);
+assert.ok(startIndex >= 0 && startIndex < endIndex, 'README must contain action reference markers in order');
+const updated = current.slice(0, startIndex) + start + '\n\n' + reference + '\n' + current.slice(endIndex);
 if (process.argv.includes('--check')) {
   assert.equal(current, updated, 'Action reference differs from action.yml. Run npm run docs.');
 } else {
