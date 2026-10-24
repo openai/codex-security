@@ -88,6 +88,27 @@ test("binds assessments to exact UTF-8 snapshots without rewriting the original 
   expect(result.assessments[0]).not.toHaveProperty("findingId");
 });
 
+test.each(["none", "synthetic-effort"])(
+  "passes reasoning effort %p to the host unchanged",
+  async (effort) => {
+    const efforts: string[] = [];
+    const result = await classifySeverityRecords(
+      { ...input(), effort },
+      {
+        classificationRuns: 1,
+        reviewRunner: {
+          async run(request) {
+            efforts.push(request.effort);
+            return answer(request);
+          },
+        },
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(efforts).toEqual([effort]);
+  },
+);
+
 test.each([
   "rubric-hash",
   "finding-hash",

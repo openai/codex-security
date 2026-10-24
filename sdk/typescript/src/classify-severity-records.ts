@@ -47,15 +47,7 @@ export const classifySeverityRecordsInputSchema = z
       .strict()
       .optional(),
     model: text,
-    effort: z.enum([
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ]),
+    effort: text,
     records: z.array(
       z
         .object({
