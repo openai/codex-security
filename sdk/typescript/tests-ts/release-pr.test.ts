@@ -1,6 +1,6 @@
 import { gitText } from "./support/shell.js";
-import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, test } from "bun:test";
+import { cpSync, readFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { check } from "prettier";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
@@ -138,6 +138,9 @@ const workflow = readFileSync(
 );
 const directories = createTemporaryDirectoriesSync();
 afterEach(directories.cleanup);
+const templates = createTemporaryDirectoriesSync();
+afterAll(templates.cleanup);
+let baseRepository: string | undefined;
 
 function packageText(version = "0.1.23", dependencies = {}) {
   return `${JSON.stringify({ name: "@openai/codex-security", version, dependencies }, null, 2)}\n`;
@@ -240,6 +243,10 @@ class Fixture {
   readonly git = this.repo.git;
 
   constructor() {
+    if (baseRepository !== undefined) {
+      cpSync(baseRepository, this.directory, { recursive: true });
+      return;
+    }
     this.git("init", "-b", "main");
     this.git("config", "user.name", "Release Test");
     this.git("config", "user.email", "release-test@example.invalid");
@@ -255,6 +262,8 @@ class Fixture {
       },
       "release: bump to 0.1.23",
     );
+    baseRepository = templates.create("release pr template ");
+    cpSync(this.directory, baseRepository, { recursive: true });
   }
 
   head(branch = "main") {
