@@ -146,6 +146,7 @@ export class WorkbenchDeepScanStore {
       threadId: input.threadId,
       scanId: input.scanId || undefined,
       targetPath: input.targetPath || undefined,
+      projectConfigPath: input.projectConfigPath,
       scope: input.scope || undefined,
       userContextStdin: Boolean(userContext),
       claimToken: input.handoffClaimToken || undefined,

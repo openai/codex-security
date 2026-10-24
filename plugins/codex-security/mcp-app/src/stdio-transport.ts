@@ -3,6 +3,7 @@ import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import {
   ErrorCode,
   type JSONRPCMessage,
+  type RequestId,
 } from "@modelcontextprotocol/sdk/types.js";
 
 // The native client's rmcp transport drops lines above 16 MiB, including the LF,
@@ -10,6 +11,31 @@ import {
 const NATIVE_STDIO_LINE_LIMIT_BYTES = 16 * 1024 * 1024;
 
 export class CodexSecurityStdioTransport extends StdioServerTransport {
+  private readonly resultReceipts = new Map<
+    RequestId,
+    () => Promise<unknown>
+  >();
+
+  afterResultSent(
+    id: RequestId,
+    signal: AbortSignal,
+    receipt: () => Promise<unknown>,
+  ) {
+    if (signal.aborted) return;
+    const attachedReceipt = async () => {
+      if (!signal.aborted) await receipt();
+    };
+    this.resultReceipts.set(id, attachedReceipt);
+    signal.addEventListener(
+      "abort",
+      () => {
+        if (this.resultReceipts.get(id) === attachedReceipt)
+          this.resultReceipts.delete(id);
+      },
+      { once: true },
+    );
+  }
+
   override async send(message: JSONRPCMessage): Promise<void> {
     if (
       !("result" in message || "error" in message) ||
@@ -18,8 +44,14 @@ export class CodexSecurityStdioTransport extends StdioServerTransport {
       return super.send(message);
     }
 
+    const receipt = this.resultReceipts.get(message.id);
+    this.resultReceipts.delete(message.id);
     const bytes = Buffer.byteLength(serializeMessage(message), "utf8");
-    if (bytes <= NATIVE_STDIO_LINE_LIMIT_BYTES) return super.send(message);
+    if (bytes <= NATIVE_STDIO_LINE_LIMIT_BYTES) {
+      await super.send(message);
+      if ("result" in message) await receipt?.();
+      return;
+    }
 
     return super.send({
       jsonrpc: "2.0",

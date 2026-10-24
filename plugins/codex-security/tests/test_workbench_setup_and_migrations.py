@@ -96,6 +96,7 @@ EXPECTED_MIGRATIONS = [
     (52, "record severity classification review counts"),
     (53, "store external source findings without assessments"),
     (54, "snapshot deep scan setup configuration"),
+    (55, "retain undelivered headless deep scan results"),
 ]
 
 

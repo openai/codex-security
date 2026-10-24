@@ -1,4 +1,5 @@
 import { workbenchArgs } from "./src/workbench-arguments.js";
+import { CodexSecurityStdioTransport } from "./src/stdio-transport.js";
 import {
   readingAnnotations,
   writingAnnotations,
@@ -1088,26 +1089,56 @@ export function createCodexSecurityServer(): McpServer {
         }));
       if ("invocationFailure" in preparation)
         return preparation.invocationFailure;
-      if (preparation.immediate)
-        return (await preparation.completion.result) ?? preparation.immediate;
-      const { begun, coordinator, joined } = preparation;
-      if (joined) {
-        logDeepScanEvent({
-          event: "coordinator_joined",
-          scanId: begun.scanId,
-        });
+      const { begun } = preparation;
+      let result;
+      if (preparation.immediate) {
+        result = (await preparation.completion.result) ?? preparation.immediate;
+      } else {
+        const { coordinator, joined } = preparation;
+        if (joined) {
+          logDeepScanEvent({
+            event: "coordinator_joined",
+            scanId: begun.scanId,
+          });
+        }
+        const terminal = await coordinator.wait(abortSignalFromExtra(extra));
+        result = preparation.completion.result
+          ? await preparation.completion.result
+          : await completeDeepScan(terminal);
       }
-      const terminal = await coordinator.wait(abortSignalFromExtra(extra));
-      const result = preparation.completion.result
-        ? await preparation.completion.result
-        : await completeDeepScan(terminal);
       if (!result) {
         return toolErrorResult(
           deepScanInvocationFailureMessage(
             new Error(
-              `Deep Scan ${terminal.scanId} ended without a terminal result.`,
+              `Deep Scan ${begun.scanId} ended without a terminal result.`,
             ),
           ),
+        );
+      }
+      // A canceled waiter or a transport size error never delivers the scan ID.
+      const transport = server.server.transport;
+      if (
+        !handoffClaimToken &&
+        "structuredContent" in result &&
+        "completion" in result.structuredContent &&
+        transport instanceof CodexSecurityStdioTransport
+      ) {
+        transport.afterResultSent(extra.requestId, extra.signal, () =>
+          deepScanStartLock.run(async () => {
+            try {
+              await runWorkbench(
+                workbenchArgs("acknowledge-deep-scan-result", {
+                  scanId: begun.scanId,
+                }),
+              );
+            } catch (error) {
+              logDeepScanEvent({
+                event: "target_result_acknowledgment_failed",
+                scanId: begun.scanId,
+                reason: failureDiagnostic(error),
+              });
+            }
+          }),
         );
       }
       return result;
