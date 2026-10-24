@@ -97,7 +97,7 @@ jobs:
       reuse-verified: true
 
   container-validate:
-    needs: [classify-changes, native]
+    needs: [classify-changes, native, static-checks]
     if: needs.classify-changes.outputs.container-validate == 'true'
     uses: ./.github/workflows/container-validate.yml
 
