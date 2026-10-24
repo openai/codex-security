@@ -916,6 +916,44 @@ describe("direct Linear API publication", () => {
   );
 
   test.each([
+    ["throws", throwing("The optional progress display failed.")],
+    ["rejects", rejecting("The optional progress display failed.")],
+    ["never settles", () => new Promise<void>(() => {})],
+  ] as const)(
+    "preserves direct publication when handoff progress %s",
+    async (_name, observer) => {
+      const publication = preparedPublication();
+      const handoffProgress = mock(observer);
+      const persisted = mock(copyPublishedIssues);
+      const receipts: PublishScanResult[] = [];
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "synthetic-key",
+          onProgress: (event) => {
+            if (event.type === "handoff_recorded") return handoffProgress();
+          },
+        },
+        dependencies(publication, {
+          linearClient: linearApiClient(publication),
+          recordPublishedIssues: persisted,
+          writeReceipt: recordReceipts(receipts),
+        }),
+      );
+
+      expect(handoffProgress).toHaveBeenCalledTimes(1);
+      expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+      expect(persisted).toHaveBeenCalledWith(
+        publication,
+        result.created,
+        expect.anything(),
+      );
+      expect(receipts.at(-1)).toEqual(result);
+    },
+  );
+
+  test.each([
     { label: "zero bytes", failedWrites: 1, partial: "" },
     { label: "a partial row", failedWrites: 1, partial: '{"scanId":' },
     {
@@ -1031,6 +1069,7 @@ describe("direct Linear API publication", () => {
     const updates: PublishScanProgress[] = [];
     let started = 0;
     let completed = 0;
+    let completedAtFirstHandoffProgress: number | undefined;
     let completedAtFirstIssueProgress: number | undefined;
     const firstBatchStarted = Promise.withResolvers<void>();
     const result = await publishScanInternal(
@@ -1041,7 +1080,7 @@ describe("direct Linear API publication", () => {
         onProgress: (event) => {
           updates.push(event);
           if (event.type === "handoff_recorded" && event.recorded === 1)
-            expect(completed).toBe(20);
+            completedAtFirstHandoffProgress = completed;
           if (
             event.type === "issue_completed" &&
             completedAtFirstIssueProgress === undefined
@@ -1072,6 +1111,7 @@ describe("direct Linear API publication", () => {
     expect(result.failed).toEqual([
       { findingId: "finding-22", error: "Linear rejected this finding." },
     ]);
+    expect(completedAtFirstHandoffProgress).toBe(20);
     expect(completedAtFirstIssueProgress).toBe(23);
     expect(
       updates.filter((event) => event.type === "handoff_recorded"),
