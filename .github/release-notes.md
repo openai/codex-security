@@ -49,6 +49,7 @@
 - match scan owner hints across email case variants ([#1900](https://github.com/openai/codex-security/pull/1900))
 - preserve worker coverage during recovery ([#1064](https://github.com/openai/codex-security/pull/1064))
 - update bundled undici to 6.29.1 ([#1915](https://github.com/openai/codex-security/pull/1915))
+- bump @opencode-ai/sdk from 1.19.2 to 1.19.3 in /evals/triage-finding in the third-party group across 1 directory ([#1919](https://github.com/openai/codex-security/pull/1919))
 
 <!-- release-section: highlights:end -->
 
