@@ -690,6 +690,15 @@ def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str
     return path
 
 
+def is_worktree_regular_file(target: Path, path: Path, linked_prefixes: dict[str, bool]) -> bool:
+    try:
+        return _directory_link_boundary(target, path, linked_prefixes) == path and stat.S_ISREG(
+            path.lstat().st_mode
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:

@@ -157,14 +157,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     return write_inventory(output, sorted(set(rows)))
 
 
-def generate_diff_in_scope_files(
+def diff_inventory_rows(
     repository: Path,
     base: str,
     head: str,
     mode: str,
-    output: Path,
-) -> int:
-    """Reuse the existing diff selection without generating previews or duplicate worklists."""
+) -> list[bytes]:
+    """Select the changed text files used for both registration and review."""
     from generate_rank_input import git_changed_paths
     from rank_preview import is_binary_file
 
@@ -209,7 +208,13 @@ def generate_diff_in_scope_files(
         message = detail.strip() if isinstance(detail, str) and detail.strip() else str(error)
         raise InventoryError(f"could not resolve the selected Git changes: {message}") from error
 
-    return write_inventory(output, sorted(set(rows)))
+    return sorted(set(rows))
+
+
+def generate_diff_in_scope_files(
+    repository: Path, base: str, head: str, mode: str, output: Path
+) -> int:
+    return write_inventory(output, diff_inventory_rows(repository, base, head, mode))
 
 
 def write_inventory(output: Path, rows: list[bytes]) -> int:

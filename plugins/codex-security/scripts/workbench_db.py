@@ -56,6 +56,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from generate_in_scope_files import InventoryError, diff_inventory_rows
 from workbench import handoff
 from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
@@ -809,6 +810,26 @@ def scan_target_root(scan_root: str | None, target: Path) -> Path:
     return target_root
 
 
+def scan_scope_file_count(
+    target: Path, paths: list[str], diff_target: dict[str, str] | None
+) -> int:
+    if diff_target is not None:
+        try:
+            rows = diff_inventory_rows(
+                target,
+                diff_target["baseRevision"],
+                diff_target["headRevision"],
+                "local-patch" if diff_target["kind"] == "working_tree" else "revisions",
+            )
+        except InventoryError as exc:
+            raise SystemExit(str(exc)) from exc
+        return len(rows)
+    return sum(
+        1 if (target / path).is_file() else directory_snapshot_regular_file_count(target / path)
+        for path in paths
+    )
+
+
 def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
     manages_transaction = not connection.in_transaction
@@ -847,9 +868,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         )
         if diff_target is not None and not target_summary:
             target_summary = diff_target_summary(diff_target)
-        scope_file_count = directory_snapshot_regular_file_count(
-            target if scope == "." else target / scope
-        )
+        scope_file_count = scan_scope_file_count(target, [scope], diff_target)
         target_identity = scan_target_identity(
             target,
             diff_target,
@@ -949,9 +968,7 @@ def _start_prompt_driven_scan(
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
-    scope_file_count = directory_snapshot_regular_file_count(
-        target if scope == "." else target / scope
-    )
+    scope_file_count = scan_scope_file_count(target, [scope], diff_target)
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
     source_scopes = capture_source_scopes(
@@ -1789,16 +1806,7 @@ def register_cli_scan(
         paths or ["."],
         diff_target_kind=diff_target["kind"] if diff_target is not None else None,
     )
-    scope_file_count = (
-        directory_snapshot_regular_file_count(repository)
-        if not paths
-        else sum(
-            1
-            if (repository / path).is_file()
-            else directory_snapshot_regular_file_count(repository / path)
-            for path in paths
-        )
-    )
+    scope_file_count = scan_scope_file_count(repository, paths or ["."], diff_target)
     parent_scan_id = (
         require_uuid(args.parent_scan_id, "parent-scan-id")
         if args.parent_scan_id is not None

@@ -88,6 +88,36 @@ def register_cli_scan(
     )
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected"), [("repository", 4), ("refs", 2), ("working_tree", 3)]
+)
+def test_cli_registration_counts_the_selected_target(
+    tmp_path: Path, kind: str, expected: int
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "README.md").write_text("updated fixture\n")
+    (target / "new.py").write_text("new = True\n")
+    (target / "binary.dat").write_bytes(b"\0")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Update fixture"], cwd=target, check=True)
+
+    (target / "README.md").unlink()
+    (target / "new.py").write_bytes(b"\0")
+    (target / "staged.py").write_text("staged = True\n")
+    subprocess.run(["git", "add", "staged.py"], cwd=target, check=True)
+    (target / "untracked.py").write_text("untracked = True\n")
+
+    scan_target = {"kind": kind, "paths": []}
+    if kind != "repository":
+        scan_target.update(base=base if kind == "refs" else "HEAD", head="HEAD")
+    registered = register_cli_scan(state_dir, target, tmp_path / "scan", scan_target=scan_target)
+    assert registered["scopeFileCount"] == expected
+    saved = get_scan(state_dir, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] == expected
+
+
 def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
