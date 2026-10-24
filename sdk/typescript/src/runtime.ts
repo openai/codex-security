@@ -1,12 +1,23 @@
+import { executablePathForSpawn } from "./executable-path.js";
+export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
 import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import {
+  execFile as execFileCallback,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  close as closeCallback,
   constants,
   createWriteStream,
+  fstat as fstatCallback,
+  open as openCallback,
+  read as readCallback,
   type BigIntStats,
   type Stats,
 } from "node:fs";
@@ -47,7 +58,7 @@ import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
-import { openPromise as openZip } from "yauzl";
+import { fromFdPromise, type ZipFile } from "yauzl";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
@@ -75,6 +86,12 @@ import {
 } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
+
+export type StartCodex = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
+) => ChildProcessWithoutNullStreams;
 
 export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
@@ -107,13 +124,13 @@ const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
-const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "CHEAPER_INFERENCE_API_KEY",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
 from pathlib import Path
@@ -410,10 +427,7 @@ function windowsCredentialAclFailure(error: unknown): string {
     typeof stderr === "string" && stderr.trim() !== ""
       ? stderr
       : errorMessage(error);
-  const normalized = errorMessage(detail)
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 512);
+  const normalized = errorMessage(detail).replace(/\s+/gu, " ").trim();
   return normalized === "" ? "" : `. ${normalized}`;
 }
 
@@ -633,10 +647,7 @@ export function inspectWindowsCredentialAcl(
   };
 }
 
-function windowsSecurityDescriptorRule(value: string): {
-  rule: string;
-  rest: string;
-} {
+function windowsSecurityDescriptorRule(value: string) {
   let depth = 0;
   let quoted = false;
   let escaped = false;
@@ -715,8 +726,7 @@ export async function streamWindowsCredentialAclDescriptors(
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
-    const remaining = MAX_WINDOWS_CREDENTIAL_ACL_STDERR - stderr.length;
-    if (remaining > 0) stderr += chunk.slice(0, remaining);
+    stderr += chunk;
   });
 
   let descendantsChanged = false;
@@ -790,9 +800,9 @@ export async function inspectWindowsCredentialAclSnapshot(
   home: WindowsCredentialAcl;
   descendantsArePrivate: boolean;
 }> {
-  let ancestors = 0;
+  const ancestors: string[] = [];
   for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-    ancestors += 1;
+    ancestors.push(ancestor);
     if (ancestor === dirname(ancestor)) break;
   }
 
@@ -827,24 +837,36 @@ export async function inspectWindowsCredentialAclSnapshot(
           inspected += 1;
           await options.resolveDescriptorAliases?.(descriptor);
 
-          if (index < ancestors) {
-            const ancestor = inspectWindowsCredentialAcl(
-              descriptor,
-              currentUserSid,
-              {
-                resolvedAliases: options.resolvedAliases,
-                scope: "ancestor",
-              },
-            );
-            if (ancestor.untrustedPrincipals.length !== 0) {
+          if (index < ancestors.length) {
+            const ancestorPath = ancestors[index]!;
+            try {
+              const ancestor = inspectWindowsCredentialAcl(
+                descriptor,
+                currentUserSid,
+                {
+                  resolvedAliases: options.resolvedAliases,
+                  scope: "ancestor",
+                },
+              );
+              if (ancestor.untrustedPrincipals.length !== 0) {
+                throw new Error(
+                  "Windows credential-home ancestor allows another identity to replace the directory",
+                );
+              }
+            } catch (error) {
+              const guidance =
+                ancestorPath === dirname(ancestorPath)
+                  ? "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this."
+                  : "Choose a location outside this ancestor with trusted ownership and permissions.";
               throw new Error(
-                "Windows credential-home ancestor allows another identity to replace the directory",
+                `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
+                { cause: error },
               );
             }
             return;
           }
 
-          if (index === ancestors) {
+          if (index === ancestors.length) {
             try {
               home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
                 resolvedAliases: options.resolvedAliases,
@@ -879,7 +901,7 @@ export async function inspectWindowsCredentialAclSnapshot(
       if (error instanceof WindowsCredentialDescendantsChangedError) continue;
       throw error;
     }
-    if (inspected <= ancestors) {
+    if (inspected <= ancestors.length) {
       throw new Error("Windows credential-home ancestry could not be verified");
     }
     if (!completed) {
@@ -1595,22 +1617,6 @@ def before_archive():
 workbench["main"](before_archive=before_archive)
 `;
 
-// Internal publication callers use only the SDK's bundled workbench.
-const PUBLICATION_PROGRAM = String.raw`
-import json, runpy, sys
-from contextlib import closing
-workbench = runpy.run_path(sys.argv[1])
-context = workbench["_WORKBENCH_PUBLICATION_CONTEXT"]
-payload = json.load(sys.stdin, parse_constant=workbench["reject_non_finite_json"])
-handler = getattr(workbench["publication"], sys.argv[2].replace("-", "_"))
-if sys.argv[2] == "inspect-linear-publication":
-    result = handler(context, payload)
-else:
-    with closing(workbench["connect"]()) as connection:
-        result = handler(context, connection, payload)
-print(json.dumps(result, allow_nan=False, sort_keys=True))
-`;
-
 export async function runWorkbench(
   options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
@@ -1627,6 +1633,8 @@ export async function runWorkbench(
       "database-info",
       "store-findings",
       "list-stored-findings",
+      "store-external-findings",
+      "list-external-findings",
       "find-potential-duplicates",
       "store-dedupe-groups",
       "list-dedupe-groups",
@@ -1659,22 +1667,9 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    const publicationInput =
-      input !== undefined &&
-      arguments_.length === 1 &&
-      [
-        "inspect-linear-publication",
-        "prepare-linear-publication",
-        "record-linear-publications",
-      ].includes(arguments_[0]!);
-    // OS argv cannot carry NUL, but workbench text fields can.
-    const framedArguments =
-      !native && arguments_.some((argument) => argument.includes("\0"));
-    let program = archiveHandshake
-      ? ARCHIVE_REGISTRATION_PROGRAM
-      : publicationInput
-        ? PUBLICATION_PROGRAM
-        : undefined;
+    // Workbench text fields can contain NUL or exceed OS command-line limits.
+    const framedArguments = !native;
+    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
     if (framedArguments)
       program =
         WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
@@ -1933,7 +1928,11 @@ export async function planOutputArchive(
   if (outputDirectory === null) return null;
   const entries = await readdir(outputDirectory).catch(nullIfMissingFileError);
   if (entries === null || entries.length === 0) return null;
-  return `${outputDirectory}.previous-${new Date()
+  return `${outputDirectory}${outputArchiveSuffix()}`;
+}
+
+function outputArchiveSuffix(): string {
+  return `.previous-${new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "")}-${randomUUID().slice(0, 8)}`;
@@ -2036,11 +2035,23 @@ async function prepareOutputDirectory(
   );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
-    const created = await mkdtemp(
-      join(temporaryRoot, `codex-security-${safePrefix(repositoryName)}-`),
-    );
-    if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
+    const prefix = `codex-security-${safePrefix(repositoryName)}`;
+    let created: string;
+    if (process.platform === "win32") {
+      const suffix = `-${randomUUID()}`;
+      // Reserve room within NTFS's 255-unit component limit for later archival.
+      // The SDK suffix is longer than the workbench's .previous-<tempname> suffix.
+      const prefixLength = 255 - suffix.length - outputArchiveSuffix().length;
+      created = join(
+        temporaryRoot,
+        `${prefix.slice(0, prefixLength)}${suffix}`,
+      );
+      await createWindowsOutputDirectory(created, false);
+    } else {
+      created = await mkdtemp(join(temporaryRoot, `${prefix}-`));
+    }
     try {
+      if ((process.umask() & 0o700) !== 0) await chmod(created, 0o700);
       return await validatePreparedOutputDir(created, validateLocation);
     } catch (error) {
       await rmdir(created).catch(() => undefined);
@@ -2059,7 +2070,10 @@ async function prepareOutputDirectory(
       }
     }
     if (existing === null) {
-      createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
+      createdRoot =
+        process.platform === "win32"
+          ? await createWindowsOutputDirectory(path, true)
+          : await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
     return await validatePreparedOutputDir(
@@ -2079,6 +2093,44 @@ async function prepareOutputDirectory(
       },
     );
   }
+}
+
+export async function createWindowsOutputDirectory(
+  path: string,
+  recursive: boolean,
+): Promise<string | undefined> {
+  const native = createRequire(import.meta.url)(
+    join(
+      await bundledPluginRoot(),
+      "mcp",
+      "native",
+      `win32-${process.arch}`,
+      "windows.node",
+    ),
+  ) as { createPrivateWindowsDirectory(path: Buffer): number };
+  const create = async (target: string): Promise<string | undefined> => {
+    const createOne = () =>
+      native.createPrivateWindowsDirectory(
+        Buffer.from(win32.toNamespacedPath(target), "utf16le"),
+      );
+    let error = createOne();
+    let firstCreated: string | undefined;
+    if (
+      recursive &&
+      (error === 2 || error === 3) &&
+      dirname(target) !== target
+    ) {
+      firstCreated = await create(dirname(target));
+      error = createOne();
+    }
+    if (error === 0) return firstCreated ?? target;
+    if (recursive && error === 183 && (await stat(target)).isDirectory())
+      return firstCreated;
+    throw new OutputDirectoryError(
+      `Unable to create private Windows output directory (Windows error ${error}): ${target}`,
+    );
+  };
+  return create(path);
 }
 
 export async function validatePreparedOutputDir(
@@ -2304,11 +2356,10 @@ export async function extractPluginZip(
   );
   try {
     throwIfSignalAborted(signal);
-    await rejectBackslashZipNames(archivePath, signal);
     let expandedSize = 0;
     const paths = new Set<string>();
     const checksums: Array<{ path: string; checksum: number }> = [];
-    const zip = await openZip(archivePath, { strictFileNames: true });
+    const zip = await openPluginZip(archivePath, signal);
     try {
       for await (const entry of zip.eachEntry()) {
         throwIfSignalAborted(signal);
@@ -2391,19 +2442,23 @@ export async function extractPluginZip(
   }
 }
 
-async function rejectBackslashZipNames(
+async function openPluginZip(
   path: string,
   signal?: AbortSignal,
-): Promise<void> {
-  const handle = await open(path, "r");
+): Promise<ZipFile> {
+  const fd = await promisify(openCallback)(
+    path,
+    constants.O_RDONLY |
+      (process.platform === "win32" ? 0 : constants.O_NONBLOCK),
+  );
   try {
-    const metadata = await handle.stat();
+    const metadata = await promisify(fstatCallback)(fd);
     if (!metadata.isFile() || metadata.size < 22) {
       throw new Error("missing end of central directory");
     }
     const tailSize = Math.min(metadata.size, 65_557);
     const tail = await readExactly(
-      handle,
+      fd,
       tailSize,
       metadata.size - tailSize,
       signal,
@@ -2441,12 +2496,7 @@ async function rejectBackslashZipNames(
     if (centralOffset + centralSize > endOffset) {
       throw new Error("invalid central directory bounds");
     }
-    const central = await readExactly(
-      handle,
-      centralSize,
-      centralOffset,
-      signal,
-    );
+    const central = await readExactly(fd, centralSize, centralOffset, signal);
     let offset = 0;
     for (let index = 0; index < entries; index += 1) {
       if (
@@ -2473,8 +2523,14 @@ async function rejectBackslashZipNames(
     if (offset !== central.byteLength) {
       throw new Error("invalid central directory size");
     }
-  } finally {
-    await handle.close();
+    // Yauzl owns the descriptor only after construction succeeds.
+    return await fromFdPromise(fd, {
+      autoClose: true,
+      strictFileNames: true,
+    });
+  } catch (error) {
+    await promisify(closeCallback)(fd);
+    throw error;
   }
 }
 
@@ -2691,16 +2747,6 @@ export async function codexExecutableReadPaths(
     executable,
     await realpath(resolveBundledCodexExecutable(packageJson)),
   ];
-}
-
-export function executablePathForSpawn(command: string): string {
-  if (process.platform !== "win32" || !win32.isAbsolute(command))
-    return command;
-  // Root-relative paths still depend on the child's drive and working directory.
-  const root = win32.parse(command).root;
-  return root === "\\" || root === "/"
-    ? command
-    : win32.toNamespacedPath(command);
 }
 
 export async function bootstrapPlugin(
@@ -3170,6 +3216,7 @@ export async function runCodexCommand(
 ): Promise<CodexCommandResult> {
   const cancellation = archiveHandshake ? new AbortController() : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
+  const commandSignal = cancellation?.signal ?? signal;
   let awaitingArchive = archiveHandshake;
   const child = spawn(
     executablePathForSpawn(command.command),
@@ -3178,7 +3225,7 @@ export async function runCodexCommand(
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      signal: cancellation?.signal ?? signal,
+      signal: commandSignal,
     },
   );
   let stdout = "";
@@ -3219,6 +3266,17 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
+  const releaseCanceledPipes = () => {
+    if (!commandSignal?.aborted) return;
+    if (child.exitCode === null && child.signalCode === null) return;
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  };
+  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
+    once: true,
+  });
+  child.once("exit", releaseCanceledPipes);
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -3230,6 +3288,8 @@ export async function runCodexCommand(
     return await completion;
   } finally {
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
+    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
+    child.removeListener("exit", releaseCanceledPipes);
   }
 }
 
@@ -3348,7 +3408,7 @@ async function copyPluginTree(
 }
 
 async function readExactly(
-  handle: Awaited<ReturnType<typeof open>>,
+  fd: number,
   length: number,
   position: number,
   signal?: AbortSignal,
@@ -3357,7 +3417,8 @@ async function readExactly(
   let offset = 0;
   while (offset < length) {
     throwIfSignalAborted(signal);
-    const { bytesRead } = await handle.read(
+    const { bytesRead } = await promisify(readCallback)(
+      fd,
       buffer,
       offset,
       length - offset,
@@ -3437,7 +3498,8 @@ async function usablePython(
       {
         env: command.environment,
         encoding: "utf8",
-        timeout: 5_000,
+        // Cold Python startup can exceed five seconds on busy Windows hosts.
+        timeout: 30_000,
         windowsHide: true,
         signal,
       },

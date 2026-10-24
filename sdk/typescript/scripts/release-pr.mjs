@@ -10,6 +10,7 @@ import { isMain } from "./is-main.mjs";
 export const packagePath = "sdk/typescript/package.json";
 export const actionPackagePath = "github-action/package.json";
 export const actionLockPath = "github-action/package-lock.json";
+export const exampleWorkflowPath = "examples/github-actions/codex-security.yml";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
 const packagePaths = [packagePath, actionPackagePath, actionLockPath];
@@ -17,6 +18,8 @@ const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
 const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\(([^)]*)\))?(!)?: (.+)$/u;
+const exampleVersionPattern =
+  /^([ \t]*CODEX_SECURITY_VERSION:[ \t]*)(["']?)[0-9]+\.[0-9]+\.[0-9]+\2(?=[ \t]*(?:#[^\r\n]*)?\r?$)/gmu;
 
 function isReleaseTitle(title) {
   const [, type, scope] = conventionalTitle.exec(title) ?? [];
@@ -185,6 +188,18 @@ function updateActionLockVersion(lockText, version) {
   return `${JSON.stringify(lock, null, 2)}\n`;
 }
 
+function updateExampleVersion(exampleText, version) {
+  if ([...exampleText.matchAll(exampleVersionPattern)].length !== 1) {
+    throw new Error(
+      "Unable to update only the GitHub Actions example CLI version.",
+    );
+  }
+  return exampleText.replace(
+    exampleVersionPattern,
+    (_match, prefix, quote) => `${prefix}${quote}${version}${quote}`,
+  );
+}
+
 function packageWithoutVersion(text, path) {
   if (text === null) return null;
   const metadata = JSON.parse(text);
@@ -232,6 +247,12 @@ export function createReleasePlan(history, previous = null) {
       version,
     );
   }
+  if (history.exampleWorkflowText != null) {
+    files[exampleWorkflowPath] = updateExampleVersion(
+      history.exampleWorkflowText,
+      version,
+    );
+  }
   return {
     baseVersion,
     baseCommit,
@@ -265,7 +286,7 @@ export function createGitRepository(directory) {
   };
 }
 
-export async function readReleaseHistory(repo, mainSha, github) {
+export function readVersionHistory(repo, mainSha) {
   repo.ensureCommit(mainSha);
   const packageText = repo.readFile(mainSha, packagePath);
   const baseVersion = releaseVersion(JSON.parse(packageText));
@@ -279,6 +300,14 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit = sha;
   }
 
+  return { baseVersion, baseCommit, packageText };
+}
+
+export async function readReleaseHistory(repo, mainSha, github) {
+  const { baseVersion, baseCommit, packageText } = readVersionHistory(
+    repo,
+    mainSha,
+  );
   const commits = repo
     .git("rev-list", "--first-parent", "--reverse", `${baseCommit}..${mainSha}`)
     .trim()
@@ -316,6 +345,7 @@ export async function readReleaseHistory(repo, mainSha, github) {
     packageText,
     actionPackageText: repo.readFile(mainSha, actionPackagePath),
     actionLockText: repo.readFile(mainSha, actionLockPath),
+    exampleWorkflowText: repo.readFile(mainSha, exampleWorkflowPath),
     changes: [...changes.values()],
   };
 }
@@ -329,7 +359,10 @@ function readReleaseBranch(repo, mainSha, headSha) {
     .filter(Boolean);
   if (
     paths.some(
-      (path) => ![...packagePaths, notesPath, statePath].includes(path),
+      (path) =>
+        ![...packagePaths, exampleWorkflowPath, notesPath, statePath].includes(
+          path,
+        ),
     )
   ) {
     return {
@@ -352,6 +385,18 @@ function readReleaseBranch(repo, mainSha, headSha) {
           "The release branch has package edits beyond its version. Preserve them before running the updater.",
       };
     }
+  }
+  const originalExample = repo
+    .readFile(mergeBase, exampleWorkflowPath)
+    ?.replace(exampleVersionPattern, "$1$2$2");
+  const branchExample = repo
+    .readFile(headSha, exampleWorkflowPath)
+    ?.replace(exampleVersionPattern, "$1$2$2");
+  if (originalExample !== branchExample) {
+    return {
+      holdReason:
+        "The release branch has GitHub Actions example edits beyond its CLI version. Preserve them before running the updater.",
+    };
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
   if (!state?.sections) {

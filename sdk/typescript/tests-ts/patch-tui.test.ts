@@ -359,6 +359,34 @@ describe("interactive patch finding browser", () => {
     expect(selected).toEqual([{ severity: "high", occurrenceIds: ["occ_1"] }]);
   });
 
+  test("deletes complete characters from finding instructions", async () => {
+    const selected: (PatchSelection | null)[] = [];
+    const app = render(
+      createElement(PatchTui, {
+        repository: "/work/example",
+        findings: findings(["high"]),
+        color: false,
+        onComplete: (value) => selected.push(value),
+      }),
+    );
+
+    await press(app, "i");
+    await press(app, "Ask 👩‍💻");
+    await press(app, "\u007F");
+    await press(app, "the owner 👍🏽");
+    await press(app, "\u007F");
+    await press(app, "\r");
+    await press(app, "\r");
+
+    expect(selected).toEqual([
+      {
+        severity: "high",
+        occurrenceIds: ["occ_1"],
+        instructions: { occ_1: "Ask the owner" },
+      },
+    ]);
+  });
+
   test("allows selecting none and canceling without patching", async () => {
     for (const input of ["q", "\r"]) {
       const selected: (PatchSelection | null)[] = [];

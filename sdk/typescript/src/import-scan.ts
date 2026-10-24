@@ -66,6 +66,7 @@ export interface ImportScanDependencies {
   environment?: ProcessEnvironment;
   runWorkbench?: typeof runWorkbench;
   resolvePluginPython?: typeof resolvePluginPython;
+  onWarning?: (warning: string) => void;
 }
 
 const IMPORT_DESCRIPTION =
@@ -352,7 +353,7 @@ export async function importScan(
         "fail-scan",
         "--scan-id",
         activeScan.id,
-        `--message=${errorMessage(error).slice(0, 2400)}`,
+        `--message=${errorMessage(error)}`,
       ]).catch(() => undefined);
     }
     if (signal?.aborted) {
@@ -364,6 +365,14 @@ export async function importScan(
     }
     throw error;
   } finally {
-    await cleanupSdkDirectory(workspace);
+    await cleanupSdkDirectory(workspace).catch((error: unknown) => {
+      void Promise.resolve()
+        .then(() =>
+          dependencies.onWarning?.(
+            `Could not clean up after the Codex Security import: ${errorMessage(error)}`,
+          ),
+        )
+        .catch(() => {});
+    });
   }
 }

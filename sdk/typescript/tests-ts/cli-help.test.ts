@@ -49,6 +49,26 @@ function option(helpText: string, flag: string): string {
 }
 
 describe("CLI help", () => {
+  test.each(["scan", "patch", "verify-fix"])(
+    "%s advertises hosted mode without entering the protocol",
+    async (command) => {
+      const text = await help([command, "--host", "--help"]);
+      expect(option(text, "--host")).toContain("JSON-RPC stdin/stdout");
+      expect(option(text, "--host")).toContain("use alone");
+      if (command !== "scan") {
+        expect(option(text, "--verification-mode")).toContain("static");
+        expect(option(text, "--verification-mode")).toContain("standard");
+        const schema = captureCli(main, "stdout");
+        expect(
+          await schema.run([command, "--schema", "--json"], dependencies()),
+        ).toBe(0);
+        expect(
+          JSON.parse(schema.text()).options.properties.verificationMode.enum,
+        ).toEqual(["static", "standard"]);
+      }
+    },
+  );
+
   test("groups the common workflow ahead of setup and integrations", async () => {
     const text = await help(["--help"]);
     const sections = text.split(/\n(?=[A-Z][^\n]+:\n)/u);
@@ -81,6 +101,9 @@ describe("CLI help", () => {
     expect(option(text, "--codex")).toContain("<key=value>");
     expect(option(text, "--codex")).toMatch(/repeat/iu);
     expect(option(text, "--max-cost")).toContain("<usd>");
+    expect(option(text, "--owner-suggestions")).toContain(
+      "owner-suggestions.json",
+    );
     expect(option(text, "--mode")).toContain("<mode>");
     expect(option(text, "--mode")).toContain("standard");
     expect(option(text, "--mode")).toContain("deep");

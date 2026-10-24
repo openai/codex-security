@@ -27,13 +27,14 @@ async function sourceDocument(): Promise<FindingsDocument> {
   );
 }
 
-function exportCsv(findings: Finding[]): string {
+function exportCsv(findings: Finding[], coverage = {}): string {
   return execFileSync(
     PYTHON,
     [
       "-c",
-      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), {}))",
+      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), json.loads(sys.argv[2])))",
       join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(coverage),
     ],
     {
       cwd: join(PLUGIN_ROOT, "scripts"),
@@ -88,7 +89,7 @@ describe("findings import formats", () => {
     ).rejects.toThrow("duplicate occurrence_id");
   });
 
-  test("round-trips literal apostrophes and spreadsheet escapes through the exporter", async () => {
+  test("round-trips required text and spreadsheet escapes through the exporter", async () => {
     const {
       findings: [finding],
     } = await sourceDocument();
@@ -100,6 +101,9 @@ describe("findings import formats", () => {
       "''-x",
       "''literal",
       "ordinary λ",
+      "\uFEFF",
+      "\u0085\uFEFF\u001c",
+      "  Required text. \n",
       "=formula",
       "\u0085=formula",
       "\u001c=formula",
@@ -144,6 +148,25 @@ describe("findings import formats", () => {
     }
   });
 
+  test.each(
+    (["title", "summary", "remediation"] as const).flatMap((field) =>
+      [" \t\r\n", "\u0085", "\u001c\u001d\u001e\u001f"].map(
+        (value) => [field, value] as const,
+      ),
+    ),
+  )("rejects canonical whitespace in CSV %s %j", async (field, value) => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    await expect(
+      parseImportedFindings(
+        exportCsv([{ ...finding!, [field]: value }]),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow(`requires ${field}`);
+  });
+
   test("retains a literal apostrophe before a non-whitespace byte order mark", async () => {
     const title = "'\uFEFF=formula";
     const [imported] = await parseImportedFindings(
@@ -153,6 +176,30 @@ describe("findings import formats", () => {
     );
 
     expect(imported!.title).toBe(title);
+  });
+
+  test("round-trips literal whitespace paths and FEFF candidate IDs through the exporter", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    for (const path of [" ", "\u00A0", "\u2028", "\u2029", "\uFEFF"]) {
+      const [imported] = await parseImportedFindings(
+        exportCsv(
+          [
+            {
+              ...finding!,
+              locations: [{ path, startLine: 1, endLine: 1 }],
+              extensions: { candidateId: "\uFEFF" },
+            },
+          ],
+          { mode: "deep_repository" },
+        ),
+        "csv",
+        PLUGIN_ROOT,
+      );
+      expect(imported!.locations).toEqual([{ path, startLine: 1, endLine: 1 }]);
+      expect(imported!.extensions?.["candidateId"]).toBe("\uFEFF");
+    }
   });
 
   test("accepts full findings documents and findings-service payloads", async () => {

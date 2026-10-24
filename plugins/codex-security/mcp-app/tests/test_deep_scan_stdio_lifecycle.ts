@@ -119,6 +119,28 @@ stop_after_no_new = 1
 max_discovery_runs = 2
 `,
   );
+  await writeFile(
+    path.join(codexHome, `${threadId}.jsonl`),
+    [
+      { type: "session_meta", payload: { id: threadId } },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "active-parent-turn",
+          cyber_access_program: "daybreak_red",
+        },
+      },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "another-parent-turn",
+          cyber_access_program: "standard",
+        },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n",
+  );
   await writeFakeCodex(fakeCodexPath);
   await writeFile(
     runtimeConfigPath,
@@ -230,7 +252,12 @@ model_reasoning_summary = "none"
         "start_codex_security_deep_scan",
         { targetPath, scope: ".", userContext: "stdio lifecycle fixture" },
         threadId,
-        { model: "gpt-5.5", reasoning_effort: "xhigh" },
+        {
+          model: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          thread_id: threadId,
+          turn_id: "active-parent-turn",
+        },
       ),
     );
 
@@ -274,6 +301,11 @@ model_reasoning_summary = "none"
       { code: "ENOENT" },
     );
     assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
+    assertFlagPair(
+      startedWorker.argv,
+      "--cyber-access-program",
+      "daybreak_red",
+    );
     assert.equal(
       startedWorker.argv.includes('model_reasoning_effort="xhigh"'),
       true,
@@ -1274,7 +1306,12 @@ function toolCall(
   name: string,
   args: Record<string, unknown>,
   threadId: string,
-  turnMetadata?: { model: string; reasoning_effort: string },
+  turnMetadata?: {
+    model: string;
+    reasoning_effort: string;
+    thread_id?: string;
+    turn_id?: string;
+  },
   sandboxState: unknown = parentSandboxState,
 ) {
   return {
@@ -1432,6 +1469,8 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'thread/read') {
+        result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
         result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {

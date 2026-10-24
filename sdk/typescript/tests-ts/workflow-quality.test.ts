@@ -1,7 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 
 const ci = Bun.YAML.parse(
@@ -10,14 +11,129 @@ const ci = Bun.YAML.parse(
     "utf8",
   ),
 ) as {
+  on: { pull_request: { types: string[] } };
+  concurrency: { group: string; "cancel-in-progress": string };
   jobs: Record<
     string,
     {
+      name: string;
+      needs?: string | string[];
       if?: string;
+      strategy?: { matrix: Record<string, string[]> };
       steps: { name: string; if?: string; run: string }[];
     }
   >;
 };
+
+// These workflow expressions use boolean/string operators shared with JavaScript.
+// Evaluate the YAML itself so routing and check-name regressions are exercised.
+function expression(source: string, context: Record<string, unknown>): unknown {
+  return new Function(...Object.keys(context), `return (${source});`)(
+    ...Object.values(context),
+  );
+}
+
+function interpolate(source: string, context: Record<string, unknown>): string {
+  return source.replace(/\$\{\{(.*?)\}\}/g, (_, value: string) =>
+    String(expression(value, context)),
+  );
+}
+
+function eventContext(
+  action: string,
+  changes: Record<string, unknown> = {},
+  title = "test(ci): update checks",
+) {
+  return {
+    github: {
+      workflow: "node-ci",
+      event_name: action === "push" ? "push" : "pull_request",
+      event: {
+        action,
+        changes,
+        pull_request: action === "push" ? {} : { number: 1, title },
+      },
+      run_id: 123,
+    },
+    always: () => true,
+  };
+}
+
+const aggregates = [
+  ["ci", {}, "ci"] as const,
+  ...ci.jobs["required-test"]!.strategy!.matrix["os"]!.map(
+    (os) => ["required-test", { os }, `${os} / node-22`] as const,
+  ),
+  ...ci.jobs["windows"]!.strategy!.matrix["node"]!.map(
+    (node) =>
+      [
+        "windows",
+        { node },
+        `windows-latest / node-${node === "22.13.0" ? "22" : node}`,
+      ] as const,
+  ),
+];
+
+test.each([
+  ["push", {}, true],
+  ["opened", {}, true],
+  ["synchronize", {}, true],
+  ["reopened", {}, true],
+  ["edited", { base: { ref: { from: "main" } } }, true],
+  ["edited", { title: { from: "Previous title" } }, false],
+  ["edited", { body: { from: "Previous body" } }, false],
+  ["edited", {}, false],
+] as const)(
+  "routes %s / %p without replacing required source checks",
+  (action, changes, sourceEvent) => {
+    const context = eventContext(action, changes);
+    const classifier = ci.jobs["classify-changes"]!;
+    expect(expression(classifier.if!, context)).toBe(sourceEvent);
+    for (const [id, matrix, name] of aggregates) {
+      const aggregate = ci.jobs[id]!;
+      expect(expression(aggregate.if!, context)).toBe(sourceEvent);
+      expect(interpolate(aggregate.name, { ...context, matrix })).toBe(
+        sourceEvent ? name : `metadata / ${name}`,
+      );
+    }
+    const sourceGroup = interpolate(
+      ci.concurrency.group,
+      eventContext("synchronize"),
+    );
+    const group = interpolate(ci.concurrency.group, context);
+    expect(group === sourceGroup).toBe(sourceEvent && action !== "push");
+    expect(interpolate(ci.concurrency["cancel-in-progress"], context)).toBe(
+      action === "push" ? "false" : "true",
+    );
+  },
+);
+
+test("all source jobs depend on classification and titles cannot block source checks", () => {
+  expect(aggregates.map(([, , name]) => name)).toEqual([
+    "ci",
+    "ubuntu-latest / node-22",
+    "macos-latest / node-22",
+    "windows-latest / node-22",
+    "windows-latest / node-24",
+  ]);
+  expect(ci.on.pull_request.types).toEqual([
+    "opened",
+    "edited",
+    "reopened",
+    "synchronize",
+  ]);
+  for (const [id, job] of Object.entries(ci.jobs)) {
+    if (id !== "classify-changes") {
+      const dependencies = Array.isArray(job.needs) ? job.needs : [job.needs];
+      expect(dependencies, id).toContain("classify-changes");
+    }
+  }
+  const classifier = ci.jobs["classify-changes"]!;
+  expect(JSON.stringify(classifier)).not.toContain("PR_TITLE");
+  expect(
+    expression(classifier.if!, eventContext("opened", {}, "Invalid title")),
+  ).toBe(true);
+});
 
 const musl = Bun.YAML.parse(
   await readFile(
@@ -46,64 +162,107 @@ const musl = Bun.YAML.parse(
 const bashTest = test.skipIf(process.platform === "win32");
 
 bashTest(
-  "selects workflow checks for workflow changes and main pushes",
+  "title corrections validate independently on every target branch",
   async () => {
-    const scope = ci.jobs["validate-title"]!.steps.find(
-      (step) => step.name === "Select additional checks",
+    const titleWorkflow = Bun.YAML.parse(
+      await readFile(
+        new URL(
+          "../../../.github/workflows/validate-pr-title.yml",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as typeof ci;
+    expect(titleWorkflow.on.pull_request).not.toHaveProperty("branches");
+    expect(titleWorkflow.on.pull_request.types).toEqual(
+      ci.on.pull_request.types,
+    );
+    const step = titleWorkflow.jobs["validate-pr-title"]!.steps.find(
+      (candidate) => candidate.name === "Check conventional title",
     )!;
-    const directory = await mkdtemp(join(tmpdir(), "workflow-quality-"));
-    try {
-      for (const [event, baseChanged, paths, expected] of [
-        ["push", false, [], "true"],
-        ["pull_request", true, [], "true"],
-        ["pull_request", false, [".github/workflows/node-release.yml"], "true"],
-        [
-          "pull_request",
-          false,
-          [".github/actions/download-native/action.yml"],
-          "true",
-        ],
-        ["pull_request", false, [".github/actionlint.yaml"], "true"],
-        ["pull_request", false, [".github/zizmor.yml"], "true"],
-        ["pull_request", false, ["docker/verify-container-compose.sh"], "true"],
-        ["pull_request", false, ["sdk/typescript/src/index.ts"], "false"],
-        ["pull_request", false, ["README.md"], "false"],
-      ] as const) {
-        const output = join(directory, "output");
-        await rm(output, { force: true });
-        const result = spawnSync(
-          "bash",
-          [
-            "-c",
-            'changed_paths=("$@"); git() { if ((${#changed_paths[@]})); then printf "%s\\0" "${changed_paths[@]}"; fi; }\n' +
-              scope.run,
-            "scope",
-            ...paths,
-          ],
-          {
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              EVENT_NAME: event,
-              BASE_CHANGED: String(baseChanged),
-              GITHUB_OUTPUT: output,
-            },
-          },
-        );
-        expect(result.status, result.stderr).toBe(0);
-        const outputs = Object.fromEntries(
-          (await readFile(output, "utf8"))
-            .trim()
-            .split("\n")
-            .map((line) => line.split("=")),
-        );
-        expect(outputs["workflow-quality"], paths.join(",")).toBe(expected);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+    for (const [title, expected] of [
+      ["Invalid title", 1],
+      ["test(ci): valid title", 0],
+      ["test(ci): valid title\nInvalid continuation", 1],
+      ["test(ci): corrected title", 0],
+    ] as const) {
+      const result = spawnSync("bash", ["-c", step.run], {
+        encoding: "utf8",
+        env: { ...process.env, PR_TITLE: title },
+      });
+      expect(result.status, result.stderr).toBe(expected);
     }
   },
 );
+
+test("classification reads the PR merge diff rather than unrelated base changes", async () => {
+  const scope = ci.jobs["classify-changes"]!.steps.find(
+    (step) => step.name === "Select required checks",
+  )!;
+  const [command, script] = scope.run.split(" ");
+  expect(command).toBe("node");
+  const directory = await mkdtemp(join(tmpdir(), "ci-merge-diff-"));
+  const repository = join(directory, "repository");
+  const output = join(directory, "outputs");
+  await mkdir(repository);
+  const git = (...args: string[]) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=CI Test",
+        "-c",
+        "user.email=ci@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: repository, encoding: "utf8", stdio: "pipe" },
+    );
+  try {
+    git("init", "-b", "main");
+    await writeFile(join(repository, "README.md"), "Original documentation\n");
+    git("add", ".");
+    git("commit", "-m", "Initial fixture");
+    git("checkout", "-b", "docs");
+    await writeFile(join(repository, "README.md"), "Updated documentation\n");
+    git("commit", "-am", "Update documentation");
+    git("checkout", "main");
+    await writeFile(
+      join(repository, "runtime.ts"),
+      "export const value = 1;\n",
+    );
+    git("add", ".");
+    git("commit", "-m", "Independent base change");
+    git("merge", "--no-ff", "docs", "-m", "Merge fixture");
+    const result = spawnSync(
+      command!,
+      [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          EVENT_NAME: "pull_request",
+          BASE_CHANGED: "false",
+          GITHUB_OUTPUT: output,
+        },
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const outputs = Object.fromEntries(
+      (await readFile(output, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => line.split("=")),
+    );
+    expect(outputs["source-required"]).toBe("false");
+    expect(outputs["container-validate"]).toBe("false");
+    expect(outputs["workflow-quality"]).toBe("false");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 for (const target of musl.jobs.primitives.strategy.matrix.include) {
   for (const scenario of ["ecr-success", "ecr-failure", "both-fail"] as const) {
@@ -203,36 +362,19 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
   }
 }
 
-bashTest(
-  "required Unix checks fail when selected workflow checks do not pass",
-  () => {
-    const aggregate = ci.jobs["required-test"]!;
-    expect(aggregate.if).toBe("always()");
+test("legacy required check names propagate the final CI gate result", () => {
+  for (const id of ["required-test", "windows"]) {
+    const aggregate = ci.jobs[id]!;
+    expect(aggregate.needs).toContain("ci");
+    expect(aggregate.if).toContain("always()");
     const gate = aggregate.steps.find(
-      (step) => step.name === "Require selected workflow checks",
+      (step) => step.name === "Require CI gate",
     )!;
-    const condition = gate
-      .if!.replaceAll(
-        "needs.validate-title.outputs.workflow-quality",
-        '"$SELECTED"',
-      )
-      .replaceAll("needs.workflow-quality.result", '"$RESULT"');
-    for (const [selected, result, expected] of [
-      ["true", "success", 0],
-      ["true", "failure", 1],
-      ["true", "cancelled", 1],
-      ["true", "skipped", 1],
-      ["false", "skipped", 0],
-    ] as const) {
-      const execution = spawnSync(
-        "bash",
-        ["-c", `if [[ ${condition} ]]; then\n${gate.run}\nfi`],
-        {
-          encoding: "utf8",
-          env: { ...process.env, SELECTED: selected, RESULT: result },
-        },
+    expect(gate.run).toBe("exit 1");
+    for (const result of ["success", "failure", "cancelled", "skipped"]) {
+      expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
+        result !== "success",
       );
-      expect(execution.status, execution.stderr).toBe(expected);
     }
-  },
-);
+  }
+});

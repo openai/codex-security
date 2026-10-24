@@ -1,4 +1,4 @@
-import { codexFactory } from "./support/api-events.js";
+import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -139,6 +139,108 @@ test("native worker override tables retain inherited features and MCP servers", 
   });
   expect(config.mcp_servers["codex-security"].enabled).toBe(false);
   expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
+});
+
+test("native patch overrides disable repository MCP while preserving host MCP", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "home");
+  const markerRoot = join(root, "Repository.V1 With Spaces Ü");
+  const repository = join(markerRoot, "packages", "app");
+  const projectTrustKey =
+    process.platform === "win32"
+      ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      : repository;
+  await mkdir(home, { mode: 0o700 });
+  await mkdir(join(repository, ".codex"), { recursive: true });
+  await writeFile(join(markerRoot, "package.json"), "{}\n");
+  const hostConfig = stringifyToml({
+    project_root_markers: ["package.json"],
+    projects: {
+      [markerRoot]: { trust_level: "trusted" },
+      [projectTrustKey]: { trust_level: "trusted" },
+    },
+    mcp_servers: { host: { command: "node", args: ["host-server.js"] } },
+  });
+  const repositoryConfig = stringifyToml({
+    mcp_servers: {
+      repository: { command: "node", args: ["repository-server.js"] },
+    },
+  });
+  await writeFile(join(home, "config.toml"), hostConfig);
+  await writeFile(join(repository, ".codex", "config.toml"), repositoryConfig);
+  const environment = { CODEX_HOME: home };
+  const { config: trusted } = await nativeRequest(
+    environment,
+    repository,
+    ["--cd", repository],
+    "config/read",
+    { cwd: repository, includeLayers: false },
+  );
+  expect(trusted.mcp_servers).toHaveProperty("repository");
+
+  await using client = new TestClient(
+    {},
+    {
+      prepareRuntime: async () => preparedRuntime(home),
+      resolvePluginPython: async () => "/managed/python",
+      createCodex: async (options) => {
+        // Exercise CLI parsing: parsing these arguments as a TOML document
+        // incorrectly treats quoted path components as literal keys.
+        const { config } = await nativeRequest(
+          environment,
+          repository,
+          [
+            "--cd",
+            repository,
+            ...[
+              ...profileConfigOverrides(options.config ?? {}),
+              ...(options.configOverrides ?? []),
+            ].flatMap((value) => ["--config", value]),
+          ],
+          "config/read",
+          { cwd: repository, includeLayers: false },
+        );
+        expect(config.mcp_servers).not.toHaveProperty("repository");
+        expect(config.projects[projectTrustKey]).toEqual({
+          trust_level: "untrusted",
+        });
+        expect(config.project_root_markers).toEqual([]);
+        expect(config.mcp_servers.host).toMatchObject({
+          command: "node",
+          args: ["host-server.js"],
+          enabled: true,
+        });
+        return codexFactory(async () => ({
+          events: completedEvents(
+            "patch-thread",
+            (async function* () {
+              yield {
+                type: "item.completed" as const,
+                item: {
+                  id: "result",
+                  type: "agent_message" as const,
+                  text: JSON.stringify({
+                    status: "no_change",
+                    changedFiles: [],
+                    verificationReport: "Synthetic patch result",
+                    reason: null,
+                  }),
+                },
+              };
+            })(),
+          ),
+        }))();
+      },
+    },
+  );
+  await client.patch({
+    repositoryPath: repository,
+    finding: "Synthetic finding",
+  });
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(hostConfig);
+  expect(
+    await readFile(join(repository, ".codex", "config.toml"), "utf8"),
+  ).toBe(repositoryConfig);
 });
 
 async function bundleWorkerSettings(root: string) {
@@ -455,7 +557,6 @@ test.each([
     }
     expect(existsSync(sharedHome)).toBe(true);
   },
-  30_000,
 );
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
@@ -869,5 +970,4 @@ test.each([
       await client.close();
     }
   },
-  30_000,
 );

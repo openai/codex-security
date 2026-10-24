@@ -1,4 +1,5 @@
 name: node-github-release
+run-name: Publish ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -34,6 +35,7 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
       integrity: ${{ steps.artifact.outputs.integrity }}
       has-action: ${{ steps.action.outputs.present }}
+      has-container: ${{ steps.container.outputs.present }}
 
     steps:
       - name: Checkout release automation
@@ -41,7 +43,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: refs/heads/main
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -372,6 +374,21 @@ jobs:
             echo 'present=true' >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Detect container release source
+        id: container
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          # Coordinated container publication starts at 0.5.0. Earlier releases
+          # use older container/native build contracts and retain npm/Action recovery.
+          if [[ "$RELEASE_VERSION" =~ ^0\.[0-4]\. ]]; then
+            exit 0
+          fi
+          if git cat-file -e "$RELEASE_SHA:Dockerfile" 2>/dev/null; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve published release history
         id: history
         shell: bash
@@ -667,42 +684,107 @@ jobs:
           fi
           cp github-action/build/release-manifest.json "$RUNNER_TEMP/action-release-manifest.json"
           cp github-action/build/sbom.cdx.json "$RUNNER_TEMP/action-sbom.cdx.json"
-          existing_assets="$(gh release view "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          comparison="$(mktemp -d)"
-          trap 'rm -rf "$comparison"' EXIT
-          for asset in action-release-manifest.json action-sbom.cdx.json; do
-            if grep -Fxq "$asset" <<< "$existing_assets"; then
-              gh release download "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
-                --pattern "$asset" --dir "$comparison"
-              if ! cmp "$RUNNER_TEMP/$asset" "$comparison/$asset"; then
-                echo "Published Action metadata differs: $asset" >&2
+          action_tag="action-v$RELEASE_VERSION"
+          if release_state="$(gh release view "$action_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets)"; then
+            existing_assets="$(jq -r '.assets[].name' <<< "$release_state")"
+            is_draft="$(jq -r '.isDraft' <<< "$release_state")"
+            comparison="$(mktemp -d)"
+            trap 'rm -rf "$comparison"' EXIT
+            for asset in action-release-manifest.json action-sbom.cdx.json; do
+              if grep -Fxq "$asset" <<< "$existing_assets"; then
+                gh release download "$action_tag" --repo "$GITHUB_REPOSITORY" \
+                  --pattern "$asset" --dir "$comparison"
+                if ! cmp "$RUNNER_TEMP/$asset" "$comparison/$asset"; then
+                  echo "Published Action metadata differs: $asset" >&2
+                  exit 1
+                fi
+              elif [[ "$is_draft" == true ]]; then
+                gh release upload "$action_tag" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/$asset"
+              else
+                echo "Published Action release is missing metadata: $asset" >&2
                 exit 1
               fi
-            else
-              gh release upload "npm-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/$asset"
+            done
+            if [[ "$is_draft" == true ]]; then
+              gh release edit "$action_tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
             fi
-          done
+          else
+            notes="$RUNNER_TEMP/action-release-notes.md"
+            {
+              printf 'GitHub Action for [Codex Security %s](%s/%s/releases/tag/npm-v%s).\n\n' \
+                "$RELEASE_VERSION" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
+              printf 'Installs `@openai/codex-security@%s`.\n\n' "$RELEASE_VERSION"
+              printf '```yaml\nuses: %s@%s # %s\n```\n' \
+                "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "$action_tag"
+            } > "$notes"
+            # gh attaches both assets to a draft before publishing the immutable release.
+            gh release create "$action_tag" \
+              "$RUNNER_TEMP/action-release-manifest.json" "$RUNNER_TEMP/action-sbom.cdx.json" \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+              --title "Codex Security GitHub Action $RELEASE_VERSION" --notes-file "$notes"
+          fi
           {
             printf '### Codex Security %s\n\n' "$RELEASE_VERSION"
             printf 'CLI source: `%s`\n\n' "$RELEASE_SHA"
             printf 'Action: `uses: %s@%s` (`action-v%s`)\n' "$GITHUB_REPOSITORY" "$(git rev-parse HEAD)" "$RELEASE_VERSION"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  container:
+    name: publish matching container
+    needs: [release, installed]
+    if: needs.release.outputs.has-container == 'true'
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
+    uses: ./.github/workflows/container-release.yml
+    with:
+      release-sha: ${{ needs.release.outputs.sha }}
+      release-version: ${{ needs.release.outputs.version }}
+
   complete:
     name: release status
     if: always()
-    needs: [release, installed, action]
+    needs: [release, installed, action, container]
     runs-on: ubuntu-latest
+    env:
+      RELEASE_RESULT: ${{ needs.release.result }}
+      INSTALL_RESULT: ${{ needs.installed.result }}
+      ACTION_RESULT: ${{ needs.action.result }}
+      HAS_ACTION: ${{ needs.release.outputs.has-action }}
+      CONTAINER_RESULT: ${{ needs.container.result }}
+      HAS_CONTAINER: ${{ needs.release.outputs.has-container }}
     steps:
-      - name: Require completed release channels
+      - name: Summarize release channels
+        continue-on-error: true
         env:
-          RELEASE_RESULT: ${{ needs.release.result }}
-          INSTALL_RESULT: ${{ needs.installed.result }}
-          ACTION_RESULT: ${{ needs.action.result }}
-          HAS_ACTION: ${{ needs.release.outputs.has-action }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          {
+            printf '## Release publication status\n\n'
+            printf '| Channel | Result |\n| --- | --- |\n'
+            printf '| npm package and CLI GitHub release | %s |\n' "$RELEASE_RESULT"
+            printf '| Published package installation checks | %s |\n' "$INSTALL_RESULT"
+            printf '| GitHub Action release | %s |\n' "$ACTION_RESULT"
+            printf '| GitHub Marketplace | Not checked; publish and verify separately |\n'
+            printf '| Container image | %s |\n\n' "$CONTAINER_RESULT"
+            if [[ "$HAS_ACTION" == true && "$ACTION_RESULT" == success ]]; then
+              printf 'Marketplace: [edit the Action release](%s/%s/releases/edit/action-v%s) to publish or verify its listing.\n\n' \
+                "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_VERSION"
+            fi
+            printf 'See the [release process](%s/%s/blob/main/RELEASING.md#publish-to-github-marketplace) for Marketplace publication.\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require completed release channels
         run: |
           test "$RELEASE_RESULT" = success
           test "$INSTALL_RESULT" = success
           if [[ "$HAS_ACTION" == true ]]; then
             test "$ACTION_RESULT" = success
+          fi
+          if [[ "$HAS_CONTAINER" == true ]]; then
+            test "$CONTAINER_RESULT" = success
           fi

@@ -1,0 +1,143 @@
+name: release-progress
+
+on:
+  workflow_run:
+    workflows: ["node-ci", "node-release", "node-github-release"]
+    types: [in_progress, completed]
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Release workflow run to refresh
+        required: true
+        type: string
+      watch:
+        description: Observe this run until it completes
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  # Refreshes read the latest upstream state, so only one pending refresh is needed.
+  # Observers must not hold that slot while their upstream run awaits approval.
+  group: release-progress-${{ inputs.run-id || github.event.workflow_run.id }}-${{ (inputs.watch || (github.event.action == 'in_progress' && github.event.workflow_run.name != 'node-ci')) && github.run_id || 'refresh' }}
+  cancel-in-progress: false
+
+jobs:
+  identify:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
+      (github.event_name != 'workflow_run' ||
+      github.event.workflow_run.name != 'node-ci' ||
+      (github.event.action == 'completed' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'))
+    name: identify release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Select release before checkout
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.run-id }}
+        shell: node {0}
+        run: |
+          const { execFileSync } = require("node:child_process");
+          const { appendFileSync, readFileSync } = require("node:fs");
+          const request = (path, ...options) => JSON.parse(execFileSync("gh", [
+            "api", `repos/${process.env.GITHUB_REPOSITORY}/${path}`, ...options,
+          ], { encoding: "utf8" }));
+          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+          const run = event.workflow_run ?? request(`actions/runs/${process.env.RELEASE_RUN_ID}`);
+          const workflow = run.path?.split("@", 1)[0];
+          let version;
+          if (workflow === ".github/workflows/node-ci.yml" && run.event === "push" && run.head_branch === "main") {
+            const pulls = request(`commits/${run.head_sha}/pulls?per_page=100`, "--paginate", "--slurp").flat();
+            for (const pull of pulls) {
+              const match = /^(?:chore\(release\)|release(?:\([^)]+\))?)!?: (\d+\.\d+\.\d+)$/u.exec(pull.title);
+              if (pull.merged_at && pull.base.ref === "main" && match) {
+                version = match[1];
+                break;
+              }
+            }
+          } else if (workflow === ".github/workflows/node-release.yml" && ["push", "workflow_dispatch"].includes(run.event)) {
+            version = /^npm-v(\d+\.\d+\.\d+)$/u.exec(run.head_branch)?.[1];
+          } else if (workflow === ".github/workflows/node-github-release.yml" && run.event === "workflow_dispatch" && run.head_branch === "main") {
+            version = /^Publish npm-v(\d+\.\d+\.\d+)$/u.exec(run.display_title)?.[1];
+          }
+          if (version) appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+
+  report:
+    needs: identify
+    if: needs.identify.outputs.version != ''
+    name: update release PR
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    concurrency:
+      # Different stages update one comment; do not discard a stage's first report.
+      group: release-progress-${{ github.repository }}-${{ needs.identify.outputs.version }}
+      queue: max
+    outputs:
+      pull: ${{ steps.update.outputs.pull }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - &setup-node
+        name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+      - name: Update release progress
+        id: update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.run-id || github.event.workflow_run.id }}
+        run: node .github/scripts/release-progress.mjs
+
+  watch:
+    needs: report
+    if: >-
+      needs.report.outputs.pull != '' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.watch) ||
+      (github.event_name == 'workflow_run' &&
+      github.event.action == 'in_progress' &&
+      github.event.workflow_run.name != 'node-ci'))
+    name: observe release milestones
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    concurrency:
+      group: release-progress-watch-${{ inputs.run-id || github.event.workflow_run.id }}
+      cancel-in-progress: true
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout trusted release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+      - *setup-node
+      - name: Refresh changed milestones
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.run-id || github.event.workflow_run.id }}
+          RELEASE_PROGRESS_WATCH: "true"
+        run: node .github/scripts/release-progress.mjs

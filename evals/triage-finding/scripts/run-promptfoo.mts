@@ -3,6 +3,7 @@ import childProcess, { type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const EVAL_ROOT = path.resolve(import.meta.dirname, "..");
 const PLUGIN_ROOT = path.resolve(
@@ -141,7 +142,16 @@ async function runPromptfoo(
       path.join(PLUGIN_ROOT, "mcp-app"),
     );
     if (built !== 0) return built;
-    return await runChild([PROMPTFOO_ENTRYPOINT, ...promptfooArgs], EVAL_ROOT);
+    return await runChild(
+      [
+        "--import",
+        pathToFileURL(path.join(import.meta.dirname, "initialize-provider.mts"))
+          .href,
+        PROMPTFOO_ENTRYPOINT,
+        ...promptfooArgs,
+      ],
+      EVAL_ROOT,
+    );
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     fs.rmSync(runtimeRoot, { recursive: true, force: true });

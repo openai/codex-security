@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -85,6 +86,40 @@ ${script}
   expect(result.success, result.stderr).toBe(true);
   return JSON.parse(result.stdout);
 }
+
+test("retries runtime initialization after shared and repeated failures", async () => {
+  const { store, environment } = await fixture();
+  const stateDirectory = environment.CODEX_SECURITY_STATE_DIR;
+  environment.CODEX_SECURITY_STATE_DIR += "\ninvalid";
+  const failures = await Promise.allSettled([
+    store.initialize(),
+    store.list({ limit: 10, offset: 0 }),
+    store.listDedupeGroups("synthetic-finding"),
+  ]);
+  expect(failures.every((result) => result.status === "rejected")).toBe(true);
+  const reasons = failures.map((result) =>
+    result.status === "rejected" ? result.reason : undefined,
+  );
+  expect(reasons.every((reason) => reason === reasons[0])).toBe(true);
+  await expect(store.initialize()).rejects.toThrow("control or line-separator");
+  environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
+  await Promise.all([store.initialize(), store.initialize()]);
+  expect(await store.list({ limit: 10, offset: 0 })).toMatchObject({
+    findings: [],
+  });
+});
+
+test("keeps resolved runtime options cached after a database command fails", async () => {
+  const { store, environment } = await fixture();
+  await store.initialize();
+  environment.CODEX_SECURITY_STATE_DIR += "\ninvalid";
+  await expect(
+    store.storeDedupeGroups([[finding(1).findingId, finding(2).findingId]]),
+  ).rejects.toMatchObject({ code: "finding_conflict" });
+  expect(await store.list({ limit: 10, offset: 0 })).toMatchObject({
+    findings: [],
+  });
+});
 
 test("persists complete findings, repository associations, pages, and idempotent groups atomically", async () => {
   const { store, environment } = await fixture();
@@ -286,3 +321,187 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
     ["repository-history", finding(2).findingId],
   ]);
 });
+
+for (const location of ["vector", "extension", "boxed extension"] as const) {
+  test.each([NaN, Infinity, -Infinity])(
+    `rejects %p in a later entry's ${location} without changing stored findings`,
+    async (value) => {
+      const { store, environment } = await fixture();
+      const original = embedded(1);
+      await store.insert([original], "repository-a");
+      const invalid = embedded(3);
+      if (location === "vector") invalid.embedding.vector = [1, value];
+      else
+        invalid.finding.extensions = {
+          nested: [
+            {
+              measurement:
+                location === "boxed extension" ? new Number(value) : value,
+            },
+          ],
+        };
+      const workbench = spyOn(runtime, "runWorkbench");
+      try {
+        await expect(
+          store.insert([embedded(2), invalid], "repository-a"),
+        ).rejects.toThrow(
+          new TypeError(
+            "Stored finding JSON cannot contain non-finite numbers.",
+          ),
+        );
+        expect(workbench).not.toHaveBeenCalled();
+      } finally {
+        workbench.mockRestore();
+      }
+      const reopened = new SqliteFindingsStore(environment);
+      expect((await reopened.list({ limit: 50, offset: 0 })).findings).toEqual([
+        original.finding,
+      ]);
+      expect(
+        await database(
+          environment,
+          `print(json.dumps([db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] for table in ["findings", "finding_embeddings", "finding_repositories"]]))`,
+        ),
+      ).toEqual([1, 1, 1]);
+    },
+  );
+}
+
+test("serializes getters and toJSON once and preserves their emitted values in SQLite", async () => {
+  const { store, environment } = await fixture();
+  const entry = embedded(1);
+  const events: string[] = [];
+  const convertedNumber = new Number(Infinity);
+  convertedNumber.valueOf = () => {
+    events.push("number valueOf");
+    return 4;
+  };
+  entry.finding.extensions = {
+    get converted() {
+      events.push("getter");
+      return {
+        ignored: Infinity,
+        toJSON() {
+          events.push("toJSON");
+          return {
+            get measurement() {
+              events.push("output getter");
+              return 7;
+            },
+            finite: [Number.MAX_VALUE, Number.MIN_VALUE, -0, 1e20],
+            boxed: [new Number(3), convertedNumber],
+            omitted: undefined,
+            array: [undefined, null, true, false, "Infinity"],
+          };
+        },
+      };
+    },
+    omitted: {
+      ignored: NaN,
+      toJSON() {
+        events.push("omitted toJSON");
+        return undefined;
+      },
+    },
+  };
+  const expected = {
+    ...finding(1),
+    extensions: {
+      converted: {
+        measurement: 7,
+        finite: [Number.MAX_VALUE, Number.MIN_VALUE, 0, 1e20],
+        boxed: [3, 4],
+        array: [null, null, true, false, "Infinity"],
+      },
+    },
+  };
+  const workbench = spyOn(runtime, "runWorkbench");
+  try {
+    expect(await store.insert([entry], "repository-a")).toEqual([
+      entry.finding.findingId,
+    ]);
+    expect(workbench).toHaveBeenCalledTimes(1);
+    expect(workbench.mock.calls[0]![1]).toEqual(["store-findings"]);
+    expect(JSON.parse(workbench.mock.calls[0]![2]!)).toEqual({
+      entries: [{ finding: expected, embedding: entry.embedding }],
+      repositoryId: "repository-a",
+    });
+  } finally {
+    workbench.mockRestore();
+  }
+  expect(events).toEqual([
+    "getter",
+    "toJSON",
+    "output getter",
+    "number valueOf",
+    "omitted toJSON",
+  ]);
+  expect(
+    await database(
+      environment,
+      "print(db.execute('SELECT details_json FROM findings').fetchone()[0])",
+    ),
+  ).toEqual(expected);
+  const reopened = new SqliteFindingsStore(environment);
+  expect((await reopened.list({ limit: 50, offset: 0 })).findings).toEqual([
+    expected,
+  ]);
+});
+
+test.each(["getter", "toJSON"] as const)(
+  "rejects the first non-finite %s result before later hooks run",
+  async (kind) => {
+    const { store } = await fixture();
+    const events: string[] = [];
+    const value = () => {
+      events.push(kind);
+      return Infinity;
+    };
+    const entry = embedded(1);
+    entry.finding.extensions = {
+      first:
+        kind === "getter"
+          ? {
+              get value() {
+                return value();
+              },
+            }
+          : { toJSON: value },
+      get later() {
+        events.push("later getter");
+        throw new Error("Synthetic later getter failure");
+      },
+    };
+    await expect(store.insert([entry])).rejects.toThrow(
+      new TypeError("Stored finding JSON cannot contain non-finite numbers."),
+    );
+    expect(events).toEqual([kind]);
+  },
+);
+
+test.each(["getter", "toJSON"] as const)(
+  "preserves an earlier %s exception",
+  async (kind) => {
+    const { store } = await fixture();
+    const failure = new Error("Synthetic JSON hook failure");
+    let calls = 0;
+    const fail = () => {
+      calls += 1;
+      throw failure;
+    };
+    const entry = embedded(1);
+    entry.finding.extensions = {
+      first:
+        kind === "getter"
+          ? {
+              get value() {
+                return fail();
+              },
+            }
+          : { toJSON: fail },
+      later: Infinity,
+    };
+    await expect(store.insert([entry])).rejects.toBe(failure);
+    expect(calls).toBe(1);
+  },
+);

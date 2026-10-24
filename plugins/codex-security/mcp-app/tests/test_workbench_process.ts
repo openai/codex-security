@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
+import { importSource } from "./import-module.ts";
 import { PassThrough } from "node:stream";
 import type { ExecFileOptionsWithStringEncoding } from "node:child_process";
 
@@ -56,6 +57,7 @@ try {
     "fail-scan",
     "preserve-scan-results",
     "complete-scan",
+    "finding-issues",
     "start-prompt-only-scan",
   ]) {
     await executeWorkbench("fixture-python", [command, "--scan-id", "fixture"]);
@@ -113,6 +115,9 @@ try {
 }
 
 const { executeWorkbench } = await loadWorkbenchProcess();
+const { workbenchArgs } = await importSource(
+  path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
+);
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
   const { stdout } = await promisify(execFile)(
@@ -133,6 +138,47 @@ async function fixtureWorkbench(root: string, source: string) {
   );
   return executeWorkbench as WorkbenchModule["executeWorkbench"];
 }
+
+await test("workbench scalar arguments reach the Python parser literally", async () => {
+  const root = await temporaryDirectory("workbench-literal-arguments-");
+  try {
+    const scripts = path.resolve(import.meta.dirname, "../../scripts");
+    const executeParser = await fixtureWorkbench(
+      root,
+      `import json, sys
+sys.path.insert(0, ${JSON.stringify(scripts)})
+from workbench_cli import parse_args
+def main():
+    print(json.dumps(vars(parse_args("argument transport"))))
+`,
+    );
+    const workerIds = [
+      "ordinary",
+      "--help",
+      "-",
+      "",
+      "λ 日本語😀\n\0",
+      "-key=value",
+      "x".repeat(200_000),
+      "--help",
+    ];
+    const result = await executeParser(
+      process.env.PYTHON?.trim() || "python3",
+      workbenchArgs("claim-deep-scan-dedup", {
+        scanId: randomUUID(),
+        workerId: randomUUID(),
+        promptPath: "--prompt.md",
+        artifactDir: "",
+        inputWorkerId: workerIds,
+      }),
+    );
+    assert.equal(result.prompt_path, "--prompt.md");
+    assert.equal(result.artifact_dir, "");
+    assert.deepEqual(result.input_worker_id, workerIds);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
   await test(`isolated workbench ignores ${variable} startup hooks and preserves its environment`, async () => {
@@ -243,17 +289,13 @@ try {
   for (const stdin of [true, false]) {
     const result = await executeWorkbench(
       process.env.PYTHON?.trim() || "python3",
-      [
-        "create-workspace",
-        "--workspace-id",
-        randomUUID(),
-        "--target-path",
-        target,
-        `--target-title=${title}`,
-        stdin
-          ? "--user-context-stdin"
-          : `--user-context=${input.toString("utf8")}`,
-      ],
+      workbenchArgs("create-workspace", {
+        workspaceId: randomUUID(),
+        targetPath: target,
+        targetTitle: title,
+        userContextStdin: stdin,
+        userContext: stdin ? undefined : input.toString("utf8"),
+      }),
       stdin ? input : undefined,
     );
     assert.equal(result.targetTitle, Buffer.from(title).toString("utf8"));

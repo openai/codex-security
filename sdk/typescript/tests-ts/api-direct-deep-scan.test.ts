@@ -14,12 +14,13 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each([undefined, "Summarize the completed scan."])(
-  "Deep Scan uses the finalized report with post-scan prompt %p",
+  "Deep Scan preserves worker usage and the finalized report with post-scan prompt %p",
   async (postScanPrompt) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -31,6 +32,9 @@ test.each([undefined, "Summarize the completed scan."])(
     const finalReport =
       "# Final scan report\n\nFinalized synthetic findings.\n";
     const commands: string[] = [];
+    let completionReceipt: string | undefined;
+    const { promise: runningCost, resolve: recordCost } =
+      Promise.withResolvers<number>();
     const parentTurn = mock(async () => {
       throw new Error("A parent model turn must not execute the Deep Scan.");
     });
@@ -42,70 +46,108 @@ test.each([undefined, "Summarize the completed scan."])(
       runStreamed: postScanTurn,
     }));
     const started = mock();
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      canRunDirectDeepScan: () => true,
-      environment: {
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        CODEX_API_KEY: "synthetic-direct-scan-key",
-      },
-      createCodex: () => ({
-        startThread: () => ({ id: null, runStreamed: parentTurn }),
-        resumeThread,
-      }),
-      runDeepScan: async function* (options) {
-        expect(options.scanId).toBe("scan_example_001");
-        expect(options.codexOptions.env).toMatchObject({
-          CODEX_SECURITY_SCAN_ID: options.scanId,
-          CODEX_SECURITY_SCAN_DIR: scanDir,
-          CODEX_SECURITY_REPOSITORY: repository,
-        });
-        await copyCompletedScan(root);
-        const coveragePath = join(scanDir, "coverage.json");
-        const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
-        coverage.mode = "deep_repository";
-        const coverageBytes = JSON.stringify(coverage);
-        await writeFile(coveragePath, coverageBytes);
-        const manifestPath = join(scanDir, "scan-manifest.json");
-        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-        const artifact = manifest.scan.artifacts.find(
-          (entry: { path: string }) => entry.path === "coverage.json",
-        );
-        artifact.sha256 = hash("sha256", coverageBytes);
-        await writeFile(manifestPath, JSON.stringify(manifest));
-        yield { type: "thread.started", thread_id: "engine-session" };
-        yield {
-          type: "turn.completed",
-          usage: {
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 0,
-          },
-        };
-      },
-      runWorkbench: async (_options, args, input) => {
-        commands.push(args[0]!);
-        if (args[0] === "prepare-scan-completion") {
-          await writeFile(
-            join(scanDir, "report.md"),
-            "# Prepared scan report\n",
+    const client = new TestClient(
+      { codexOverrides: { model: "gpt-5.6-sol" } },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        canRunDirectDeepScan: () => true,
+        environment: {
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          CODEX_API_KEY: "synthetic-direct-scan-key",
+        },
+        createCodex: () => ({
+          startThread: () => ({ id: null, runStreamed: parentTurn }),
+          resumeThread,
+        }),
+        runDeepScan: async function* (options) {
+          expect(options.scanId).toBe("scan_example_001");
+          expect(options.codexOptions.env).toMatchObject({
+            CODEX_SECURITY_SCAN_ID: options.scanId,
+            CODEX_SECURITY_SCAN_DIR: scanDir,
+            CODEX_SECURITY_REPOSITORY: repository,
+          });
+          await copyCompletedScan(root);
+          const coveragePath = join(scanDir, "coverage.json");
+          const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+          coverage.mode = "deep_repository";
+          const coverageBytes = JSON.stringify(coverage);
+          await writeFile(coveragePath, coverageBytes);
+          const manifestPath = join(scanDir, "scan-manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          const artifact = manifest.scan.artifacts.find(
+            (entry: { path: string }) => entry.path === "coverage.json",
           );
-        } else if (args[0] === "complete-scan") {
-          await writeFile(join(scanDir, "report.md"), finalReport);
-        }
-        return mockWorkbench(args, input);
+          artifact.sha256 = hash("sha256", coverageBytes);
+          await writeFile(manifestPath, JSON.stringify(manifest));
+          await writeSession(
+            codexHome,
+            "engine-session",
+            {},
+            {
+              cwd: scanDir,
+              timestamp: "2026-07-26T12:00:00Z",
+            },
+          );
+          await writeSession(
+            codexHome,
+            "discovery-session",
+            { input_tokens: 100, output_tokens: 10 },
+            {
+              cwd: join(
+                scanDir,
+                "artifacts",
+                "deep_discovery",
+                "workers",
+                "one",
+                "output",
+              ),
+              timestamp: "2026-07-26T12:00:01Z",
+            },
+          );
+          yield { type: "thread.started", thread_id: "engine-session" };
+          // The host must count workers while the no-inference coordinator runs.
+          expect(await runningCost).toBe(100);
+          yield {
+            type: "turn.completed",
+            usage: {
+              input_tokens: 0,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 0,
+            },
+          };
+        },
+        runWorkbench: async (_options, args, input) => {
+          commands.push(args[0]!);
+          if (args[0] === "prepare-scan-completion") {
+            await writeFile(
+              join(scanDir, "report.md"),
+              "# Prepared scan report\n",
+            );
+          } else if (args[0] === "complete-scan") {
+            const receiptIndex = args.indexOf("--cost-json");
+            completionReceipt =
+              receiptIndex < 0 ? undefined : args[receiptIndex + 1];
+            await writeFile(join(scanDir, "report.md"), finalReport);
+          }
+          return mockWorkbench(args, input);
+        },
       },
-    });
+    );
     try {
       const result = await client.run(repository, {
         mode: "deep",
         postScanPrompt,
         onScanStarted: started,
+        onCost: (cost) => recordCost(cost.inputTokens),
       });
       expect(result.threadId).toBe("engine-session");
       expect(result.reportPath).toBe(join(scanDir, "report.md"));
       expect(result.turnResult.finalResponse).toBe(finalReport);
+      expect(result.cost?.inputTokens).toBe(100);
+      expect(JSON.parse(completionReceipt!)).toMatchObject({
+        inputTokens: 100,
+      });
       expect(result.toJSON()["turn"]).toMatchObject({
         finalResponse: finalReport,
       });

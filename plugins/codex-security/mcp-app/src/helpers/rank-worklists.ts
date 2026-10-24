@@ -15,12 +15,9 @@ export interface RankRow {
   path: string;
   area: string;
   preview?: string;
-  reason?: string;
-  score?: number;
-  include?: boolean;
 }
 const blank = (value: string) => value.trim().length === 0;
-export function compare(left: string, right: string): number {
+function compare(left: string, right: string): number {
   const a = Array.from(left, (character) => character.codePointAt(0)!);
   const b = Array.from(right, (character) => character.codePointAt(0)!);
   for (let index = 0; index < Math.min(a.length, b.length); index++) {
@@ -29,7 +26,7 @@ export function compare(left: string, right: string): number {
   return a.length - b.length;
 }
 
-export function missingNames(
+function missingNames(
   expected: Iterable<string>,
   actual: Iterable<string>,
 ): string[] {
@@ -39,15 +36,9 @@ export function missingNames(
     .sort(compare);
 }
 
-export function loadRankRows(
-  path: string,
-  selection: boolean,
-  label = selection ? "Rank output" : "Rank input",
-): RankRow[] {
-  const fields = selection
-    ? ["path", "area", "score", "include", "reason"]
-    : ["path", "area", "preview"];
-  const rows = Array.from(readUtf8Lines(path, label), (line, index) => {
+export function loadRankRows(path: string): RankRow[] {
+  const fields = ["path", "area", "preview"];
+  const rows = Array.from(readUtf8Lines(path, "Rank input"), (line, index) => {
     const fail = (message: string): never => {
       throw new Error(`${path}:${index + 1}: ${message}`);
     };
@@ -69,9 +60,7 @@ export function loadRankRows(
     if (unexpected.length)
       details.push(`unexpected fields ${formatDiagnostic(unexpected)}`);
     if (details.length) fail(details.join("; "));
-    for (const field of selection
-      ? ["path", "area"]
-      : ["path", "area", "preview"]) {
+    for (const field of fields) {
       if (
         typeof row[field] !== "string" ||
         (field === "path" && blank(row[field]))
@@ -79,15 +68,6 @@ export function loadRankRows(
         fail(
           `${field} must be ${field === "path" ? "a non-empty string" : "a string"}`,
         );
-    }
-    if (selection) {
-      if (typeof row.score !== "number" || !Number.isInteger(row.score))
-        fail("score must be an integer from 1 through 10");
-      if ((row.score as number) < 1 || (row.score as number) > 10)
-        fail("score must be from 1 through 10");
-      if (typeof row.include !== "boolean") fail("include must be a boolean");
-      if (typeof row.reason !== "string" || blank(row.reason))
-        fail("reason must be a non-empty string");
     }
     return row as unknown as RankRow;
   });
@@ -122,18 +102,14 @@ export class ArgumentError extends Error {}
 export function argumentsFor(
   args: string[],
   required: readonly string[],
-  integerOptions: readonly string[] = [],
-): Record<string, string | number | true> {
+): Record<string, string | true> {
   try {
     const { values }: { values: Record<string, string | boolean | undefined> } =
       parseArgs({
         args,
         options: {
           ...Object.fromEntries(
-            [...required, ...integerOptions].map((name) => [
-              name,
-              { type: "string" as const },
-            ]),
+            required.map((name) => [name, { type: "string" as const }]),
           ),
           help: { type: "boolean", short: "h" },
         },
@@ -144,16 +120,10 @@ export function argumentsFor(
       throw new Error(
         `Missing required options: ${missing.map((name) => `--${name}`).join(", ")}`,
       );
-    const result: Record<string, string | number | true> = {};
+    const result: Record<string, string | true> = {};
     for (const [name, value] of Object.entries(values)) {
       if (typeof value !== "string") continue;
-      if (!integerOptions.includes(name)) result[name] = value;
-      else {
-        const number = Number(value);
-        if (!/^[+-]?\d+$/u.test(value.trim()) || !Number.isInteger(number))
-          throw new Error(`--${name} must be an integer`);
-        result[name] = number;
-      }
+      result[name] = value;
     }
     return result;
   } catch (error) {

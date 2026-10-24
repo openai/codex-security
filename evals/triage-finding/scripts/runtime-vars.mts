@@ -6,7 +6,7 @@ const sourceRoot = path.resolve(evalRoot, "../..");
 
 // Preserve the stable bindings used by saved native-provider configs, including
 // viewer replay, which does not rerun transforms. Current configs bind their
-// temporary runtime through the beforeAll extension instead.
+// temporary runtime through the runner's preload instead.
 export default (vars: Record<string, unknown>) => {
   const nodePath = fs.realpathSync(process.execPath);
   let targetRepo = vars.target_repo;

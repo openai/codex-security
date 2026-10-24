@@ -7,7 +7,11 @@ import { SaxesParser, type SaxesTagNS } from "saxes";
 
 type TestStatus = "passed" | "skipped" | "failed";
 type TestIdentity = [file: string, classname: string, name: string];
-type TestOutcome = [...TestIdentity, status: TestStatus];
+type TestOutcome = [
+  ...TestIdentity,
+  status: TestStatus,
+  assertions: string | null,
+];
 type TestRecord = {
   attributes: SaxesTagNS["attributes"];
   status: TestStatus;
@@ -114,7 +118,6 @@ function readReport(path: string) {
   );
   parser.write(content).close();
 
-  const identities = new Set<string>();
   const cases = new Map<string, number>();
   for (const { attributes, status } of records) {
     const identity: TestIdentity = [
@@ -124,18 +127,18 @@ function readReport(path: string) {
       attributes["classname"]?.value ?? "",
       attributes["name"]?.value ?? "",
     ];
-    const key = JSON.stringify(identity);
-    if (identities.has(key))
-      throw new Error(
-        `${path}: duplicate test identity: ${identity.join(" > ")}`,
-      );
-    identities.add(key);
-    cases.set(JSON.stringify([...identity, status]), 1);
+    const reportedAssertions = attributes["assertions"]?.value;
+    const assertions =
+      reportedAssertions === undefined
+        ? null
+        : integer(reportedAssertions).toString();
+    const key = JSON.stringify([...identity, status, assertions]);
+    cases.set(key, (cases.get(key) ?? 0) + 1);
   }
   if (!cases.size) throw new Error(`${path}: no test cases`);
   if (
-    integer(root!.attributes["tests"]?.value ?? String(cases.size)) !==
-    BigInt(cases.size)
+    integer(root!.attributes["tests"]?.value ?? String(records.length)) !==
+    BigInt(records.length)
   ) {
     throw new Error(`${path}: reported test count does not match test cases`);
   }
@@ -150,13 +153,33 @@ function readReport(path: string) {
   const duration = seconds(root!.attributes["time"]?.value ?? "0");
   const skipped = records.filter(({ status }) => status === "skipped").length;
   console.log(
-    `| ${basename(path)} | ${cases.size} | ${skipped} | ${duration.toFixed(2)} |`,
+    `| ${basename(path)} | ${records.length} | ${skipped} | ${duration.toFixed(2)} |`,
   );
   return {
     cases,
     duration,
     failed,
   };
+}
+
+function readReports(patterns: string[]) {
+  const cases = new Map<string, number>();
+  const durations: number[] = [];
+  let failed = false;
+  for (const pattern of patterns) {
+    const paths = matchingReports(pattern).sort((a, b) =>
+      Buffer.compare(Buffer.from(a), Buffer.from(b)),
+    );
+    if (!paths.length) throw new Error(`No reports match ${pattern}`);
+    for (const path of paths) {
+      const report = readReport(path);
+      failed ||= report.failed;
+      for (const [identity, count] of report.cases)
+        cases.set(identity, (cases.get(identity) ?? 0) + count);
+      durations.push(report.duration);
+    }
+  }
+  return { cases, durations, failed };
 }
 
 function main(): number {
@@ -176,32 +199,18 @@ function main(): number {
   }
   if (args.values.help) {
     console.log(
-      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types compare-test-reports.mts baseline candidates [candidates ...]\nCandidates are JUnit files or glob patterns.",
+      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types compare-test-reports.mts baseline candidates [candidates ...]\nBaseline and candidates are JUnit files or glob patterns.",
     );
     return 0;
   }
   console.log("| Report | Cases | Skipped | Seconds |");
   console.log("| --- | ---: | ---: | ---: |");
-  const baseline = readReport(args.positionals[0]!);
-  let failed = baseline.failed;
-  const candidates = new Map<string, number>();
-  const durations: number[] = [];
-  for (const pattern of args.positionals.slice(1)) {
-    const paths = matchingReports(pattern).sort((a, b) =>
-      Buffer.compare(Buffer.from(a), Buffer.from(b)),
-    );
-    if (!paths.length) throw new Error(`No reports match ${pattern}`);
-    for (const path of paths) {
-      const report = readReport(path);
-      failed ||= report.failed;
-      for (const [identity, count] of report.cases)
-        candidates.set(identity, (candidates.get(identity) ?? 0) + count);
-      durations.push(report.duration);
-    }
-  }
+  const baseline = readReports([args.positionals[0]!]);
+  const candidate = readReports(args.positionals.slice(1));
+  let failed = baseline.failed || candidate.failed;
   for (const [label, left, right] of [
-    ["Missing", baseline.cases, candidates],
-    ["Extra", candidates, baseline.cases],
+    ["Missing", baseline.cases, candidate.cases],
+    ["Extra", candidate.cases, baseline.cases],
   ] as const) {
     const differences = [...left]
       .map(([identity, count]): [TestOutcome, number] => [
@@ -212,8 +221,8 @@ function main(): number {
       .sort(([a], [b]) => {
         for (let index = 0; index < a.length; index++) {
           const order = Buffer.compare(
-            Buffer.from(a[index]!),
-            Buffer.from(b[index]!),
+            Buffer.from(a[index] ?? ""),
+            Buffer.from(b[index] ?? ""),
           );
           if (order) return order;
         }
@@ -221,12 +230,20 @@ function main(): number {
       });
     for (const [identity, count] of differences) {
       failed = true;
-      console.error(`${label} (${count}): ${identity.join(" > ")}`);
+      const [file, classname, name, status, assertions] = identity;
+      const description = [file, classname, name, status];
+      if (assertions !== null) description.push(`assertions=${assertions}`);
+      console.error(`${label} (${count}): ${description.join(" > ")}`);
     }
   }
   if (failed) return 1;
+  if (baseline.durations.length > 1) {
+    console.log(
+      `\nBaseline shards: slowest ${Math.max(...baseline.durations).toFixed(2)}s; combined test time: ${baseline.durations.reduce((sum, duration) => sum + duration, 0).toFixed(2)}s.`,
+    );
+  }
   console.log(
-    `\nIdentical test inventory and outcomes. Slowest candidate: ${Math.max(...durations).toFixed(2)}s; combined test time: ${durations.reduce((sum, duration) => sum + duration, 0).toFixed(2)}s.\n`,
+    `\nIdentical test inventory and outcomes. Slowest candidate: ${Math.max(...candidate.durations).toFixed(2)}s; combined test time: ${candidate.durations.reduce((sum, duration) => sum + duration, 0).toFixed(2)}s.\n`,
   );
   return 0;
 }

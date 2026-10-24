@@ -159,21 +159,52 @@ def test_absolute_scope_still_produces_repository_relative_paths(tmp_path: Path)
     assert all(not Path(line).is_absolute() for line in output.read_text().splitlines())
 
 
+@pytest.mark.parametrize("selected_path", [".", "component"])
+@pytest.mark.parametrize("linked_worktree", [False, True])
 def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
-    tmp_path: Path,
+    tmp_path: Path, selected_path: str, linked_worktree: bool
 ) -> None:
     repository = make_repository(tmp_path)
-    write_file(repository, "ignored/tracked.py")
-    git(repository, "add", "--force", "--", "ignored/tracked.py")
+    if linked_worktree:
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "base")
+        worktree = tmp_path / "worktree"
+        git(repository, "worktree", "add", "-q", str(worktree), "HEAD")
+        repository = worktree
+    selected = repository / selected_path
+    write_file(selected, "ignored/tracked.py")
+    write_file(selected, "ignored/untracked.py")
+    git(selected, "add", "--force", "--", "ignored/tracked.py")
     output = tmp_path / "in_scope_files.txt"
 
-    result = run_inventory(repository, ".", output)
+    result = run_inventory(selected, ".", output)
 
     assert result.returncode == 0, result.stderr
     paths = set(output.read_text(encoding="utf-8").splitlines())
     assert "./ignored/tracked.py" in paths
+    assert "./ignored/untracked.py" not in paths
     assert "./ignored/secret.py" not in paths
     assert "./app/ignored.skip" not in paths
+
+
+@pytest.mark.parametrize("scope", [".", ".svn", "vendor/.svn/pristine/base"])
+def test_inventory_excludes_svn_metadata_even_when_tracked(tmp_path: Path, scope: str) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, ".svn/wc.db")
+    write_file(repository, "vendor/.svn/pristine/base")
+    write_file(repository, ".gitignore", b".svn/\n")
+    git(repository, "add", "--force", ".svn", "vendor/.svn")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    assert all(".svn" not in PurePosixPath(path).parts for path in paths)
+    if scope == ".":
+        assert "./app/routes.py" in paths
+    else:
+        assert paths == []
 
 
 @pytest.mark.parametrize(
@@ -363,17 +394,22 @@ def test_inventory_uses_forward_slashes_when_ripgrep_defaults_to_backslashes(
     assert all("\\" not in path for path in paths)
 
 
-def test_empty_inventory_is_a_success_and_replaces_the_previous_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize("files", [[], ["app/handler.py"]])
+def test_inventory_without_git_metadata_replaces_the_previous_output(
+    tmp_path: Path, files: list[str]
+) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
+    for name in files:
+        write_file(repository, name)
     output = tmp_path / "in_scope_files.txt"
     output.write_text("old.py\n", encoding="utf-8")
 
     result = run_inventory(repository, ".", output)
 
     assert result.returncode == 0, result.stderr
-    assert output.read_bytes() == b""
-    assert "0 in-scope files" in result.stdout
+    assert output.read_bytes() == standard_inventory(repository, ".")
+    assert f"{len(files)} in-scope files" in result.stdout
 
 
 @pytest.mark.parametrize(

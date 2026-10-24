@@ -81,7 +81,13 @@ function packageTar({
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/classify-severity-records.md",
+    "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
+    "package/docs/hosted-remediation.md",
+    "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
+    "package/schemas/external-findings.schema.json",
     "package/LICENSE",
     ...executablePaths,
     ...packageDistFiles,
@@ -192,7 +198,7 @@ function commandPath(command: string): string {
   return path;
 }
 
-function installPackage(
+async function installPackage(
   root: string,
   archivePath: string,
   environment: NodeJS.ProcessEnv,
@@ -203,7 +209,7 @@ function installPackage(
     join(consumer, "package.json"),
     JSON.stringify({ name: "synthetic-consumer", private: true }),
   );
-  const resolved = spawnSync(
+  const resolved = await execFileAsync(
     commandPath("node"),
     [
       "--input-type=module",
@@ -212,15 +218,13 @@ function installPackage(
     ],
     { encoding: "utf8", env: environment, windowsHide: true },
   );
-  expect({ status: resolved.status, stderr: resolved.stderr }).toEqual({
-    status: 0,
-    stderr: "",
-  });
+  expect(resolved.stderr).toBe("");
   const npm = JSON.parse(resolved.stdout) as {
     command: string;
     args: string[];
   };
-  return spawnSync(
+  return runPackageCommand(
+    consumer,
     npm.command,
     [
       ...npm.args,
@@ -235,14 +239,60 @@ function installPackage(
       "--no-fund",
       archivePath,
     ],
-    {
-      cwd: consumer,
-      env: environment,
-      encoding: "utf8",
-      timeout: 30_000,
-      windowsHide: true,
-    },
+    environment,
   );
+}
+
+function checkPackage(
+  root: string,
+  archivePath: string,
+  contractPath: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<{ status: number; stderr: string }> {
+  return runPackageCommand(
+    root,
+    commandPath("node"),
+    [
+      fileURLToPath(new URL("../scripts/check-package.mjs", import.meta.url)),
+      archivePath,
+      contractPath,
+    ],
+    environment,
+  );
+}
+
+function runPackageCommand(
+  root: string,
+  command: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+): Promise<{ status: number; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      {
+        cwd: root,
+        env: environment,
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+      },
+      (error, _stdout, stderr) => {
+        if (error === null) {
+          resolve({ status: 0, stderr });
+        } else if (
+          typeof error.code === "number" &&
+          !error.killed &&
+          !error.signal
+        ) {
+          resolve({ status: error.code, stderr });
+        } else {
+          reject(error);
+        }
+      },
+    );
+  });
 }
 
 describe("npm package tar listings", () => {
@@ -451,7 +501,7 @@ describe("npm package tar listings", () => {
 
   test.each(["environment", "user-config"])(
     "keeps npm fixture installs local with global %s settings",
-    (configuration) => {
+    async (configuration) => {
       const root = mkdtempSync(join(tmpdir(), "codex-package-npm-local-"));
       try {
         const archivePath = join(root, "package.tgz");
@@ -475,7 +525,7 @@ describe("npm package tar listings", () => {
             ? { npm_config_global: "true" }
             : {}),
         });
-        const installed = installPackage(root, archivePath, environment);
+        const installed = await installPackage(root, archivePath, environment);
         expect({
           status: installed.status,
           stderr: installed.status === 0 ? "" : installed.stderr,
@@ -646,7 +696,7 @@ describe("npm package tar listings", () => {
         npm_config_cache: join(root, "npm-cache"),
       };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      const installed = installPackage(root, archivePath, environment);
+      const installed = await installPackage(root, archivePath, environment);
       const consumer = join(root, "consumer");
       expect({
         status: installed.status,
@@ -686,22 +736,11 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect({
         status: checked.status,
@@ -812,13 +851,12 @@ describe("npm package tar listings", () => {
         npm_config_cache: join(root, "npm-cache"),
         CODEX_SECURITY_EXPECTED_GIT_HEAD: gitHead,
       };
-      const installed = installPackage(root, archivePath, environment);
+      const installed = await installPackage(root, archivePath, environment);
       const invalidJson = [
         "oldgnu-manifest",
         "pax-map-prefix",
         "overwrite-json",
       ].includes(representation);
-      expect(installed.error).toBeUndefined();
       if (invalidJson) expect(installed.status).not.toBe(0);
       else {
         expect({
@@ -850,22 +888,11 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const checked = spawnSync(
-        commandPath("node"),
-        [
-          fileURLToPath(
-            new URL("../scripts/check-package.mjs", import.meta.url),
-          ),
-          archivePath,
-          contractPath,
-        ],
-        {
-          cwd: root,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
       );
       expect({
         status: checked.status,

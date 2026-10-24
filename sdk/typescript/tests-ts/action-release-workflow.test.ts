@@ -24,6 +24,7 @@ type Step = {
 };
 type Job = {
   steps: Step[];
+  env?: Record<string, string>;
   permissions?: Record<string, string>;
   needs?: string[];
   outputs?: Record<string, string>;
@@ -55,7 +56,9 @@ const reuse = script(
   "Reuse an existing immutable Action distribution",
 );
 const detect = script("release", "Detect Action release source");
+const detectContainer = script("release", "Detect container release source");
 const complete = script("complete", "Require completed release channels");
+const summarize = script("complete", "Summarize release channels");
 const publish = script("action", "Publish immutable Action tag and metadata");
 const directories: string[] = [];
 const version = "99.1.2";
@@ -616,55 +619,134 @@ test("detects Action support from the release commit during historical recovery"
   expect(current.output).toBe("present=true\n");
 });
 
-function publicationFixture(existingManifest: string) {
+type PublishedRelease = {
+  isDraft: boolean;
+  assets: Record<string, string>;
+};
+
+const actionAssets = {
+  "action-release-manifest.json": "verified manifest\n",
+  "action-sbom.cdx.json": "verified SBOM\n",
+};
+
+function publicationFixture(existingRelease: PublishedRelease | null) {
   const release = fixture();
+  const distribution = release.distribution();
+  release.git("checkout", "--detach", distribution);
   const runner = join(release.directory, "runner");
-  const remote = join(release.directory, "published assets");
-  const uploads = join(release.directory, "uploads");
+  const state = join(release.directory, "release.json");
+  const calls = join(release.directory, "calls.jsonl");
+  const github = join(release.directory, "github.cjs");
   mkdirSync(runner);
-  mkdirSync(remote);
-  writeFileSync(uploads, "");
+  writeFileSync(state, JSON.stringify(existingRelease));
+  writeFileSync(calls, "");
   release.write(
     "github-action/build/release-manifest.json",
-    "verified manifest\n",
+    actionAssets["action-release-manifest.json"],
   );
-  release.write("github-action/build/sbom.cdx.json", "verified SBOM\n");
-  writeFileSync(join(remote, "action-release-manifest.json"), existingManifest);
-  const fakeGitHub = `gh() {
-  case "$1 $2" in
-    'release view')
-      for asset in "$REMOTE_ASSETS/"*; do basename "$asset"; done
-      ;;
-    'release download')
-      local asset destination
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --pattern) asset="$2"; shift ;;
-          --dir) destination="$2"; shift ;;
-        esac
-        shift
-      done
-      cp "$REMOTE_ASSETS/$asset" "$destination/$asset"
-      ;;
-    'release upload')
-      local asset="$(basename "\${!#}")"
-      cp "\${!#}" "$REMOTE_ASSETS/$asset"
-      printf '%s\\n' "$asset" >> "$UPLOADS"
-      ;;
-    *) return 1 ;;
-  esac
+  release.write(
+    "github-action/build/sbom.cdx.json",
+    actionAssets["action-sbom.cdx.json"],
+  );
+  writeFileSync(
+    github,
+    `const assert = require("node:assert/strict");
+const { appendFileSync, readFileSync, writeFileSync } = require("node:fs");
+const { basename, join } = require("node:path");
+const [program, ...args] = process.argv.slice(2);
+if (program === "jq") {
+  const value = JSON.parse(readFileSync(0, "utf8"));
+  assert.equal(args[0], "-r");
+  if (args[1] === ".isDraft") console.log(value.isDraft);
+  else if (args[1] === ".assets[].name") {
+    for (const asset of value.assets) console.log(asset.name);
+  } else throw new Error("Unexpected jq filter: " + args[1]);
+  process.exit(0);
 }
+appendFileSync(process.env.GITHUB_CALLS, JSON.stringify(args) + "\\n");
+assert.equal(args[0], "release");
+assert.equal(args[2], "action-v99.1.2");
+const option = (name) => args[args.indexOf(name) + 1];
+assert.equal(option("--repo"), "example/security-tool");
+let state = JSON.parse(readFileSync(process.env.RELEASE_STATE, "utf8"));
+switch (args[1]) {
+  case "view":
+    if (state === null) process.exit(1);
+    assert.equal(option("--json"), "isDraft,assets");
+    console.log(JSON.stringify({
+      isDraft: state.isDraft,
+      assets: Object.keys(state.assets).map((name) => ({ name })),
+    }));
+    break;
+  case "download": {
+    const asset = option("--pattern");
+    assert.ok(Object.hasOwn(state.assets, asset));
+    writeFileSync(join(option("--dir"), asset), state.assets[asset]);
+    break;
+  }
+  case "create": {
+    assert.equal(state, null, "Cannot replace an existing release");
+    assert.ok(args.includes("--verify-tag"));
+    assert.ok(args.includes("--latest=false"));
+    assert.equal(option("--title"), "Codex Security GitHub Action 99.1.2");
+    const assets = args.slice(3, args.indexOf("--repo"));
+    assert.deepEqual(assets.map((asset) => basename(asset)).sort(), [
+      "action-release-manifest.json", "action-sbom.cdx.json",
+    ]);
+    state = {
+      isDraft: false,
+      assets: Object.fromEntries(assets.map((asset) => [basename(asset), readFileSync(asset, "utf8")])),
+      notes: readFileSync(option("--notes-file"), "utf8"),
+    };
+    break;
+  }
+  case "upload": {
+    assert.equal(state.isDraft, true, "Published release assets are immutable");
+    const path = args.at(-1);
+    const asset = basename(path);
+    assert.ok(!Object.hasOwn(state.assets, asset), "Cannot replace existing metadata");
+    state.assets[asset] = readFileSync(path, "utf8");
+    break;
+  }
+  case "edit":
+    assert.equal(state.isDraft, true, "Published releases are immutable");
+    assert.ok(args.includes("--draft=false"));
+    assert.ok(args.includes("--latest=false"));
+    assert.deepEqual(Object.keys(state.assets).sort(), [
+      "action-release-manifest.json", "action-sbom.cdx.json",
+    ]);
+    state.isDraft = false;
+    break;
+  default: throw new Error("Unexpected release command: " + args[1]);
+}
+writeFileSync(process.env.RELEASE_STATE, JSON.stringify(state));
+`,
+  );
+  const fakeGitHub = `gh() { node "$GITHUB_FIXTURE" gh "$@"; }
+jq() { node "$GITHUB_FIXTURE" jq "$@"; }
 `;
   return {
-    remote,
-    uploads,
+    distribution,
+    state() {
+      return JSON.parse(readFileSync(state, "utf8")) as PublishedRelease & {
+        notes?: string;
+      };
+    },
+    commands() {
+      return readFileSync(calls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => (JSON.parse(line) as string[])[1]);
+    },
     run() {
       return release.run(`${fakeGitHub}${publish}`, {
         EXISTING: "true",
         RUNNER_TEMP: runner.replaceAll("\\", "/"),
-        REMOTE_ASSETS: remote.replaceAll("\\", "/"),
-        UPLOADS: uploads.replaceAll("\\", "/"),
+        GITHUB_FIXTURE: github.replaceAll("\\", "/"),
+        GITHUB_CALLS: calls.replaceAll("\\", "/"),
+        RELEASE_STATE: state.replaceAll("\\", "/"),
         GITHUB_REPOSITORY: "example/security-tool",
+        GITHUB_SERVER_URL: "https://github.com",
         GITHUB_STEP_SUMMARY: join(release.directory, "summary.md").replaceAll(
           "\\",
           "/",
@@ -674,34 +756,118 @@ function publicationFixture(existingManifest: string) {
   };
 }
 
-test("completes partial Action metadata publication and reuses matching assets", () => {
-  const publication = publicationFixture("verified manifest\n");
-  expect(publication.run().status).toBe(0);
-  expect(readFileSync(publication.uploads, "utf8")).toBe(
-    "action-sbom.cdx.json\n",
+test("recovers an existing Action tag by creating its companion release with both metadata assets", () => {
+  const publication = publicationFixture(null);
+  const result = publication.run();
+  expect(result.status, result.stderr).toBe(0);
+  expect(publication.commands()).toEqual(["view", "create"]);
+  expect(publication.state()).toMatchObject({
+    isDraft: false,
+    assets: actionAssets,
+  });
+  expect(publication.state().notes).toContain(
+    "https://github.com/example/security-tool/releases/tag/npm-v99.1.2",
   );
-  expect(
-    readFileSync(join(publication.remote, "action-sbom.cdx.json"), "utf8"),
-  ).toBe("verified SBOM\n");
-  expect(publication.run().status).toBe(0);
-  expect(readFileSync(publication.uploads, "utf8")).toBe(
-    "action-sbom.cdx.json\n",
+  expect(publication.state().notes).toContain(
+    `uses: example/security-tool@${publication.distribution}`,
   );
+
+  const retry = publication.run();
+  expect(retry.status, retry.stderr).toBe(0);
+  expect(publication.commands()).toEqual([
+    "view",
+    "create",
+    "view",
+    "download",
+    "download",
+  ]);
 });
 
-test("rejects mismatched published Action metadata without replacing it", () => {
-  const publication = publicationFixture("different published manifest\n");
+const draftAssetSets: Record<string, string>[] = [
+  {},
+  {
+    "action-release-manifest.json":
+      actionAssets["action-release-manifest.json"],
+  },
+  actionAssets,
+];
+
+test.each(draftAssetSets)(
+  "completes an existing Action release draft before publishing it: %j",
+  (assets) => {
+    const publication = publicationFixture({ isDraft: true, assets });
+    const result = publication.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(publication.state()).toEqual({
+      isDraft: false,
+      assets: actionAssets,
+    });
+    expect(publication.commands()).toEqual([
+      "view",
+      Object.hasOwn(assets, "action-release-manifest.json")
+        ? "download"
+        : "upload",
+      Object.hasOwn(assets, "action-sbom.cdx.json") ? "download" : "upload",
+      "edit",
+    ]);
+  },
+);
+
+test("reuses identical published Action metadata without changing the immutable release", () => {
+  const publication = publicationFixture({
+    isDraft: false,
+    assets: actionAssets,
+  });
   const result = publication.run();
-  expect(result.status).not.toBe(0);
-  expect(result.stderr).toContain("Published Action metadata differs");
-  expect(readFileSync(publication.uploads, "utf8")).toBe("");
-  expect(
-    readFileSync(
-      join(publication.remote, "action-release-manifest.json"),
-      "utf8",
-    ),
-  ).toBe("different published manifest\n");
+  expect(result.status, result.stderr).toBe(0);
+  expect(publication.commands()).toEqual(["view", "download", "download"]);
+  expect(publication.state()).toEqual({ isDraft: false, assets: actionAssets });
 });
+
+test.each(
+  [false, true].flatMap((isDraft) =>
+    Object.keys(actionAssets).map((asset) => ({ isDraft, asset })),
+  ),
+)(
+  "rejects mismatched $asset without replacing it (draft=$isDraft)",
+  ({ isDraft, asset }) => {
+    const assets = {
+      ...actionAssets,
+      [asset]: "different published metadata\n",
+    };
+    const publication = publicationFixture({ isDraft, assets });
+    const result = publication.run();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Published Action metadata differs");
+    expect(publication.commands()).toEqual(
+      asset === "action-release-manifest.json"
+        ? ["view", "download"]
+        : ["view", "download", "download"],
+    );
+    expect(publication.state()).toEqual({ isDraft, assets });
+  },
+);
+
+test.each(Object.keys(actionAssets))(
+  "rejects published metadata missing %s without attempting an immutable upload",
+  (missing) => {
+    const assets = Object.fromEntries(
+      Object.entries(actionAssets).filter(([asset]) => asset !== missing),
+    );
+    const publication = publicationFixture({ isDraft: false, assets });
+    const result = publication.run();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "Published Action release is missing metadata",
+    );
+    expect(publication.commands()).toEqual(
+      missing === "action-release-manifest.json"
+        ? ["view"]
+        : ["view", "download"],
+    );
+    expect(publication.state()).toEqual({ isDraft: false, assets });
+  },
+);
 
 test.each([
   ["success", "success", "success", "true", true],
@@ -720,7 +886,99 @@ test.each([
       INSTALL_RESULT: installResult,
       ACTION_RESULT: actionResult,
       HAS_ACTION: hasAction,
+      CONTAINER_RESULT: "success",
+      HAS_CONTAINER: "true",
     });
     expect(result.status === 0).toBe(succeeds);
+  },
+);
+
+test("detects container support from the release commit, not the automation checkout", () => {
+  const release = fixture();
+  release.write("Dockerfile", "FROM scratch\n");
+  const containerSource = release.commit("Add container");
+  expect(release.run(detectContainer).output).toBe("");
+  expect(
+    release.run(detectContainer, { RELEASE_SHA: containerSource }).output,
+  ).toBe("present=true\n");
+});
+
+test.each([
+  ["0.1.26", false],
+  ["0.4.0", false],
+  ["0.5.0", true],
+  ["0.10.0", true],
+  ["1.0.0", true],
+] as const)(
+  "preserves historical recovery before coordinated containers: %s",
+  (version, included) => {
+    const release = fixture();
+    release.write("Dockerfile", "FROM scratch\n");
+    release.updateJson("sdk/typescript/package.json", (value) => ({
+      ...value,
+      version,
+    }));
+    const source = release.commit("Add container source");
+    expect(
+      release.run(detectContainer, {
+        RELEASE_SHA: source,
+        RELEASE_VERSION: version,
+      }).output,
+    ).toBe(included ? "present=true\n" : "");
+  },
+);
+
+test.each([
+  ["success", "true", true],
+  ["failure", "true", false],
+  ["cancelled", "true", false],
+  ["skipped", "true", false],
+  ["skipped", "", true],
+] as const)(
+  "requires container publication when present: result=%s present=%s",
+  (containerResult, hasContainer, succeeds) => {
+    const release = fixture();
+    const result = release.run(complete, {
+      RELEASE_RESULT: "success",
+      INSTALL_RESULT: "success",
+      ACTION_RESULT: "success",
+      HAS_ACTION: "true",
+      CONTAINER_RESULT: containerResult,
+      HAS_CONTAINER: hasContainer,
+    });
+    expect(result.status === 0).toBe(succeeds);
+  },
+);
+
+test.each(["success", "failure", "cancelled", "skipped"])(
+  "reports the coordinated container result: %s",
+  (containerResult) => {
+    const release = fixture();
+    const summary = join(release.directory, "summary.md");
+    const result = release.run(summarize, {
+      GITHUB_STEP_SUMMARY: summary.replaceAll("\\", "/"),
+      GITHUB_SERVER_URL: "https://github.com",
+      GITHUB_REPOSITORY: "example/project",
+      RELEASE_RESULT: "success",
+      INSTALL_RESULT: "success",
+      ACTION_RESULT: "success",
+      HAS_ACTION: "true",
+      CONTAINER_RESULT: containerResult,
+      HAS_CONTAINER: "true",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const rows = readFileSync(summary, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("|"))
+      .map((line) => line.split("|").map((cell) => cell.trim()));
+    expect(rows.find((row) => row[1] === "Container image")?.[2]).toBe(
+      containerResult,
+    );
+    expect(
+      step("complete", "Summarize release channels")["continue-on-error"],
+    ).toBe(true);
+    expect(workflow.jobs["complete"]?.env?.["CONTAINER_RESULT"]).toBe(
+      "${{ needs.container.result }}",
+    );
   },
 );

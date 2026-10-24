@@ -780,3 +780,59 @@ test.each(["screening", "pair-review"] as const)(
     ).toBe(true);
   },
 );
+
+test("records isolates each host review's finding schema", async () => {
+  const data: DeduplicateRecordsInput = {
+    version: 1,
+    observations: [record("a", "same"), record("b", "same")],
+    candidateRelationships: [
+      { observationId: "a", candidateObservationIds: ["b"] },
+    ],
+  };
+  const requests: DeduplicationReviewRequest[] = [];
+  type FindingSchema = {
+    properties: { title: Record<string, unknown> };
+  };
+  let pristine: FindingSchema | undefined;
+  let annotated: Record<string, unknown> | undefined;
+  let previous: PropertyDescriptor | undefined;
+  try {
+    for (let invocation = 0; invocation < 2; invocation++) {
+      const result = await deduplicateRecords(data, {
+        reviewRunner: {
+          async run(review) {
+            const schema = review.findingSchema as FindingSchema;
+            pristine ??= structuredClone(schema);
+            expect(schema).toEqual(pristine);
+            requests.push(review);
+            if (annotated === undefined) {
+              annotated = schema.properties.title;
+              previous = Object.getOwnPropertyDescriptor(
+                annotated,
+                "description",
+              );
+              annotated["description"] = "Host-local adapter annotation.";
+            }
+            return answer(review);
+          },
+        },
+      });
+      expect(result.status).toBe("completed");
+      expect(
+        result.groups.map(({ observationIds }) => [...observationIds].sort()),
+      ).toEqual([["a", "b"]]);
+      expect(result.unresolved).toEqual([]);
+    }
+    expect(requests.map(({ stage }) => stage)).toEqual([
+      "screening",
+      "pair-review",
+      "screening",
+      "pair-review",
+    ]);
+  } finally {
+    if (annotated !== undefined) {
+      if (previous) Object.defineProperty(annotated, "description", previous);
+      else delete annotated["description"];
+    }
+  }
+});

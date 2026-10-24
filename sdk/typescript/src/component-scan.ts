@@ -1,9 +1,10 @@
 import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
+  DEFAULT_DEPENDENCIES,
   scanAuthentication,
   selectedScanEnvironment,
   type CodexSecuritySurface,
@@ -193,9 +194,14 @@ export async function runComponentScans(
       const security = (
         options.createSecurity ??
         ((config) =>
-          new CodexSecurity(config, undefined, {
-            surface: options.surface ?? "sdk",
-          }))
+          new CodexSecurity(
+            config,
+            {
+              ...DEFAULT_DEPENDENCIES,
+              environment: options.environment ?? process.env,
+            },
+            { surface: options.surface ?? "sdk" },
+          ))
       )(options.config ?? {});
       try {
         while (!options.signal?.aborted) {
@@ -224,7 +230,7 @@ export async function runComponentScans(
               ...options.scanOptions,
               ...observers,
               mode: options.scanOptions?.mode ?? "standard",
-              target: receipt.paths,
+              target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
               signal: options.signal,
             });

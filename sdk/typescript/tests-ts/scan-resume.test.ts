@@ -1,5 +1,6 @@
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
+import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
@@ -49,6 +50,7 @@ async function interruptedScan(
   resolvedDeep = false,
   modelProvider?: string,
   knowledgeState: "saved" | "legacy" = "saved",
+  separateSetupCommands = false,
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -67,6 +69,7 @@ async function interruptedScan(
     const git = (...args: string[]) =>
       gitText(["-C", repository, ...args]).trim();
     git("init", "-q");
+    git("config", "--local", "core.autocrlf", "false");
     git("add", ".");
     git(
       "-c",
@@ -201,13 +204,9 @@ async function interruptedScan(
   if (knowledgeSnapshot !== undefined)
     await saveScanKnowledge(scanDir, knowledgeSnapshot);
   const threadId = randomUUID();
-  await command([
-    "set-scan-thread",
-    "--scan-id",
-    scanId,
-    "--thread-id",
-    threadId,
-  ]);
+  const setupCommands = [
+    ["set-scan-thread", "--scan-id", scanId, "--thread-id", threadId],
+  ];
   const sessionPath = join(codexHome, "sessions", `rollout-${threadId}.jsonl`);
   await writeFile(
     sessionPath,
@@ -217,7 +216,7 @@ async function interruptedScan(
     }) + "\n",
   );
   if (mode === "deep") {
-    await command([
+    setupCommands.push([
       "begin-deep-scan",
       "--scan-id",
       scanId,
@@ -232,7 +231,7 @@ async function interruptedScan(
     const prompt = join(scanDir, "setup-prompt.md");
     await writeFile(prompt, "Saved setup prompt.\n");
     for (const status of ["running", "succeeded"]) {
-      await command([
+      setupCommands.push([
         "upsert-deep-scan-worker",
         "--scan-id",
         scanId,
@@ -248,6 +247,11 @@ async function interruptedScan(
         scanDir,
       ]);
     }
+  }
+  if (separateSetupCommands) {
+    for (const args of setupCommands) await command(args);
+  } else {
+    await runWorkbenchFixtureCommands(python, environment, setupCommands);
   }
   const checkpoint = join(scanDir, "checkpoint.json");
   await writeFile(checkpoint, '{"completed":"setup"}\n');
@@ -270,7 +274,16 @@ async function interruptedScan(
 }
 
 test("resume resolves an interrupted scan without changing its ID, recipe, or completed workers", async () => {
-  const f = await interruptedScan();
+  // Retain the separate-process setup contract alongside the batched fixtures.
+  const f = await interruptedScan(
+    "deep",
+    false,
+    {},
+    false,
+    undefined,
+    "saved",
+    true,
+  );
   const before = await f.command([
     "get-deep-scan",
     "--scan-id",
@@ -371,6 +384,16 @@ test.each([
 
 test("CLI resumes through native execution with current permissions and preserves interrupted state", async () => {
   const f = await interruptedScan();
+  const feedbackPath = join(
+    f.scanDir,
+    "artifacts",
+    "01_context",
+    "false_positive_feedback.json",
+  );
+  const originalFeedback =
+    JSON.stringify([{ reason: "Original reviewer rationale." }]) + "\n";
+  await mkdir(join(f.scanDir, "artifacts", "01_context"), { recursive: true });
+  await writeFile(feedbackPath, originalFeedback, { mode: 0o600 });
   const originalHome = join(f.root, "original-codex-home");
   await appendFile(
     f.sessionPath,
@@ -415,7 +438,16 @@ test("CLI resumes through native execution with current permissions and preserve
           ),
         }),
         resolvePluginPython: async () => f.python,
-        runWorkbench,
+        runWorkbench: (options, args, input) =>
+          args[0] === "get-scan-feedback"
+            ? Promise.resolve({
+                scanId: f.scanId,
+                targetId: f.registration["targetId"]!,
+                falsePositives: Array.from({ length: 55 }, (_, index) => ({
+                  reason: `New reviewer rationale ${index}`,
+                })),
+              })
+            : runWorkbench(options, args, input),
         runDeepScan: async function* () {
           throw new Error("Resumed scans must refresh native permissions.");
         },
@@ -447,6 +479,9 @@ test("CLI resumes through native execution with current permissions and preserve
             return {
               id: threadId,
               async runStreamed(prompt) {
+                expect(await readFile(feedbackPath, "utf8")).toBe(
+                  originalFeedback,
+                );
                 expect(prompt).toContain(f.scanId);
                 expect(prompt).toContain(
                   "Keep the original scan instructions.",
@@ -488,6 +523,7 @@ test("CLI resumes through native execution with current permissions and preserve
     (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
   ).toMatchObject({ progress: { status: "running" } });
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+  expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
 });
 
 test("resumed Bedrock scans retain provider context for the account advisory", async () => {
@@ -988,6 +1024,7 @@ test.each([
     const selected = {
       model: `synthetic-${auth ?? "auto"}-model`,
       model_reasoning_effort: "high",
+      daybreak: auth === "api-key",
       features: { goals: false },
     };
     const settings = {
@@ -1066,7 +1103,10 @@ test.each([
                       max_discovery_runs: 5,
                       max_time_hours: 1.5,
                     },
-                    worker_runtime: { features: { goals: false } },
+                    worker_runtime: {
+                      daybreak: selected.daybreak,
+                      features: { goals: false },
+                    },
                   });
                   const workerConfigPath =
                     options.env?.["CODEX_SECURITY_CONFIG_PATH"];
@@ -1077,6 +1117,7 @@ test.each([
                     await readFile(workerConfigPath!, "utf8"),
                   );
                   expect(workerConfig).toMatchObject({
+                    daybreak: selected.daybreak,
                     codex_security: {
                       cyber_access_program: settings.cyberAccessProgram,
                     },
@@ -1394,3 +1435,50 @@ test("resume requires an explicit scan ID", async () => {
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");
 });
+
+test.each([false, true])(
+  "unfinished empty artifact list does not pin producer on resume (empty=%p)",
+  async (empty) => {
+    const f = await interruptedScan("deep");
+    await finishDiscovery(f);
+    const manifestPath = join(f.scanDir, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.scan.sealedAt;
+    manifest.scan.producer.version = f.recipe.pluginVersion;
+    if (empty) manifest.scan.artifacts = [];
+    else delete manifest.scan.artifacts;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const resume = await f.command([
+      "get-cli-scan-resume",
+      "--scan-id",
+      f.scanId,
+    ]);
+    expect(resume["sealedProducerVersion"]).toBeUndefined();
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+    );
+    expect(code, stderr.text()).toBe(0);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "complete" } });
+    const sealed = JSON.parse(await readFile(manifestPath, "utf8"));
+    const plugin = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".codex-plugin/plugin.json"), "utf8"),
+    );
+    expect(sealed.scan.producer.version).toBe(plugin.version);
+    expect(sealed.scan.artifacts.length).toBeGreaterThan(0);
+  },
+);

@@ -16,12 +16,22 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
-from workbench_scan_usage import TOKEN_FIELDS
+from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
 from workbench_scan_usage import (
     _reject_nonstandard_json_number as reject_nonstandard_json_number,
 )
+from workbench_scan_usage import _timestamp as usage_timestamp
 
 reject_non_finite_json = finalizer._reject_non_finite_json
+
+
+def javascript_utf8(value: str) -> bytes:
+    """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
+    return (
+        value.encode("utf-16-le", errors="surrogatepass")
+        .decode("utf-16-le", errors="replace")
+        .encode("utf-8")
+    )
 
 
 def timestamp_key(value: str) -> datetime:
@@ -68,16 +78,19 @@ SCAN_USAGE_TOKEN_KEYS = tuple(TOKEN_FIELDS.values())
 
 def _valid_legacy_scan_cost(cost: object) -> bool:
     token_keys = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens")
-    return (
-        isinstance(cost, dict)
-        and isinstance(cost.get("model"), str)
-        and bool(cost["model"])
-        and all(type(cost.get(key)) is int and cost[key] >= 0 for key in token_keys)
-        and cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] <= cost["inputTokens"]
-        and type(cost.get("estimatedUsd")) in (int, float)
-        and math.isfinite(cost["estimatedUsd"])
-        and cost["estimatedUsd"] >= 0
-    )
+    try:
+        return (
+            isinstance(cost, dict)
+            and isinstance(cost.get("model"), str)
+            and bool(cost["model"])
+            and all(type(cost.get(key)) is int and cost[key] >= 0 for key in token_keys)
+            and cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] <= cost["inputTokens"]
+            and type(cost.get("estimatedUsd")) in (int, float)
+            and math.isfinite(cost["estimatedUsd"])
+            and cost["estimatedUsd"] >= 0
+        )
+    except OverflowError:
+        return False
 
 
 def _valid_measured_scan_usage(usage: object) -> bool:
@@ -86,10 +99,23 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     coverage = usage.get("coverage")
     thread_count = usage.get("threadCount")
     if (
-        coverage not in {"complete", "partial", "unavailable"}
+        coverage not in ("complete", "partial", "unavailable")
         or usage.get("source") != "codex_rollout"
         or type(thread_count) is not int
         or thread_count < 0
+    ):
+        return False
+    completion = usage.get("completion")
+    if "completion" in usage and (
+        not isinstance(completion, dict)
+        or set(completion) != {"threadId", "turnId", "finalized"}
+        or not isinstance(completion["threadId"], str)
+        or not completion["threadId"]
+        or not isinstance(completion["turnId"], str)
+        or not completion["turnId"]
+        or type(completion["finalized"]) is not bool
+        or not completion["finalized"]
+        and coverage == "complete"
     ):
         return False
     warnings = usage.get("warnings", [])
@@ -103,9 +129,15 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         or len(set(warnings)) != len(warnings)
     ):
         return False
+    if "accountRateLimits" in usage:
+        limits = usage["accountRateLimits"]
+        if not isinstance(limits, list) or not all(
+            valid_account_rate_limit(limit) for limit in limits
+        ):
+            return False
     if coverage == "unavailable":
         return thread_count == 0 and set(usage).issubset(
-            {"coverage", "source", "threadCount", "warnings"}
+            {"coverage", "source", "threadCount", "warnings", "completion", "accountRateLimits"}
         )
 
     allowed_keys = {
@@ -114,6 +146,12 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "completion",
+        "byRole",
+        "window",
+        "observedAt",
+        "tokensUpdatedAt",
+        "accountRateLimits",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
@@ -130,14 +168,36 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         return False
     if coverage == "partial" and not (warnings or missing):
         return False
+    for field in ("observedAt", "tokensUpdatedAt"):
+        if field in usage and usage_timestamp(usage[field]) is None:
+            return False
+    if "window" in usage:
+        window = usage["window"]
+        if not isinstance(window, dict) or set(window) != {"startedAt", "endedAt"}:
+            return False
+        start, end = (usage_timestamp(window[key]) for key in ("startedAt", "endedAt"))
+        if start is None or end is None or start > end:
+            return False
+    if "byRole" in usage:
+        roles = usage["byRole"]
+        keys = {*SCAN_USAGE_TOKEN_KEYS, "threadCount"}
+        if not isinstance(roles, dict) or set(roles) != {"parent", "workers"}:
+            return False
+        if any(
+            not isinstance(role, dict)
+            or set(role) != keys
+            or any(type(role[key]) is not int or role[key] < 0 for key in keys)
+            for role in roles.values()
+        ):
+            return False
+        if any(sum(role[key] for role in roles.values()) != usage[key] for key in keys):
+            return False
     return True
 
 
 def parse_scan_cost(value: str | None) -> str | None:
     if value is None:
         return None
-    if len(value.encode("utf-8")) > 8192:
-        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     try:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:

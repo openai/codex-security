@@ -64,24 +64,7 @@ export class DiffTarget {
     this.kind = options.kind;
     this.base = options.base;
     this.head = options.head;
-    if (this.kind !== "refs" && this.kind !== "working_tree") {
-      throw new InvalidTargetError(
-        `Unsupported diff target kind: ${String(this.kind)}`,
-      );
-    }
-    if (!isNonEmptyString(this.base)) {
-      throw new InvalidTargetError("The diff base ref must be non-empty.");
-    }
-    if (this.kind === "refs" && !isNonEmptyString(this.head)) {
-      throw new InvalidTargetError(
-        "Git diff refs must include a non-empty head ref.",
-      );
-    }
-    if (this.kind === "working_tree" && this.head !== undefined) {
-      throw new InvalidTargetError(
-        "Working-tree targets cannot specify a head ref.",
-      );
-    }
+    requireValidDiffTarget(this);
     Object.freeze(this);
   }
 
@@ -99,6 +82,30 @@ export class DiffTarget {
     base = "HEAD",
   }: { base?: string } = {}): DiffTarget {
     return new DiffTarget({ kind: "working_tree", base });
+  }
+}
+
+function requireValidDiffTarget(target: DiffTargetOptions): void {
+  if (target.kind !== "refs" && target.kind !== "working_tree") {
+    throw new InvalidTargetError(
+      `Unsupported diff target kind: ${String(target.kind)}`,
+    );
+  }
+  if (typeof target.base !== "string" || target.base.length === 0) {
+    throw new InvalidTargetError("The diff base ref must be non-empty.");
+  }
+  if (
+    target.kind === "refs" &&
+    (typeof target.head !== "string" || target.head.length === 0)
+  ) {
+    throw new InvalidTargetError(
+      "Git diff refs must include a non-empty head ref.",
+    );
+  }
+  if (target.kind === "working_tree" && target.head !== undefined) {
+    throw new InvalidTargetError(
+      "Working-tree targets cannot specify a head ref.",
+    );
   }
 }
 
@@ -515,27 +522,7 @@ export async function normalizeTarget(
   }
 
   if (target instanceof DiffTarget) {
-    if (target.kind !== "refs" && target.kind !== "working_tree") {
-      throw new InvalidTargetError(
-        `Unsupported diff target kind: ${String(target.kind)}`,
-      );
-    }
-    if (typeof target.base !== "string" || target.base.length === 0) {
-      throw new InvalidTargetError("The diff base ref must be non-empty.");
-    }
-    if (
-      target.kind === "refs" &&
-      (typeof target.head !== "string" || target.head.length === 0)
-    ) {
-      throw new InvalidTargetError(
-        "Git diff refs must include a non-empty head ref.",
-      );
-    }
-    if (target.kind === "working_tree" && target.head !== undefined) {
-      throw new InvalidTargetError(
-        "Working-tree targets cannot specify a head ref.",
-      );
-    }
+    requireValidDiffTarget(target);
     await requireGitRepository(root, signal);
     const base = await resolveGitRef(root, target.base, signal);
     const kind = target.kind === "refs" ? "refs" : "working_tree";
@@ -770,6 +757,9 @@ export function gitOutput(
   signal?: AbortSignal,
   environment?: NodeJS.ProcessEnv,
   workingDirectory?: string,
+  encoding?: "utf8",
+  protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
 ): Promise<string>;
 export function gitOutput(
   repository: string,
@@ -778,6 +768,8 @@ export function gitOutput(
   environment: NodeJS.ProcessEnv | undefined,
   workingDirectory: string | undefined,
   encoding: "buffer",
+  protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
 ): Promise<Buffer>;
 export async function gitOutput(
   repository: string,
@@ -786,14 +778,27 @@ export async function gitOutput(
   environment: NodeJS.ProcessEnv = {},
   workingDirectory = repository,
   encoding: "utf8" | "buffer" = "utf8",
+  protectedRoots: string | readonly string[] = [],
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
     isolatedGitEnvironment(
-      args[0] === "rev-parse" || args[0] === "config" || args[0] === "ls-files",
+      args[0] === "rev-parse" ||
+        args[0] === "config" ||
+        args[0] === "ls-files" ||
+        (args[0] === "remote" &&
+          (args.length === 1 ||
+            (args[1] === "get-url" && args[2] === "--all"))),
+      sourceEnvironment,
     ),
-    (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");
@@ -919,7 +924,10 @@ export async function abortable<T>(
         settle(value);
       };
     void Promise.resolve()
-      .then(operation)
+      .then(() => {
+        throwIfAborted(signal);
+        return operation();
+      })
       .then(finish(resolvePromise), finish(reject));
   });
 }

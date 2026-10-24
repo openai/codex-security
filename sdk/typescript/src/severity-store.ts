@@ -26,6 +26,7 @@ export class SeverityStore {
     private readonly environment: NodeJS.ProcessEnv,
     private readonly scanDirectory: string,
     private readonly signal?: AbortSignal,
+    private readonly protectedRoots: readonly string[] = [],
   ) {}
 
   checkpoint(
@@ -40,6 +41,7 @@ export class SeverityStore {
           scanId,
           findingIds,
           assessedAt: result.assessedAt,
+          classificationRuns: result.classificationRuns,
           rubricSha256: result.rubricSha256,
           knowledgeBaseSha256: result.knowledgeBaseSha256,
         });
@@ -57,6 +59,7 @@ export class SeverityStore {
           finding,
           assessment: {
             ...assessment,
+            classificationRuns: result.classificationRuns,
             rubricSha256: result.rubricSha256,
             knowledgeBaseSha256: result.knowledgeBaseSha256,
           },
@@ -84,6 +87,8 @@ export class SeverityStore {
       {
         schemaVersion: 1,
         assessedAt: saved["assessedAt"] as string,
+        classificationRuns: (saved["classificationRuns"] ?? undefined) as
+          number | undefined,
         rubricSha256: saved["rubricSha256"] as string | null,
         knowledgeBaseSha256: saved["knowledgeBaseSha256"] as string | null,
       },
@@ -119,6 +124,7 @@ export class SeverityStore {
       environment,
       protectedRoot: [
         this.scanDirectory,
+        ...this.protectedRoots,
         ...(await gitProtectionRoots(process.cwd(), this.signal)),
         ...(await gitProtectionRoots(this.scanDirectory, this.signal)),
       ],
@@ -137,12 +143,15 @@ function matchingClassification(
     assessments: stored
       .filter(
         (row) =>
+          (row["classificationRuns"] ?? undefined) ===
+            result.classificationRuns &&
           row["rubricSha256"] === result.rubricSha256 &&
           row["knowledgeBaseSha256"] === result.knowledgeBaseSha256,
       )
       .map(
         ({
           assessedAt: _assessedAt,
+          classificationRuns: _runs,
           rubricSha256: _rubric,
           knowledgeBaseSha256: _knowledge,
           ...assessment

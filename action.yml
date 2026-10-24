@@ -1,4 +1,4 @@
-name: Codex Security
+name: OpenAI Codex Security
 description: Scan code with Codex Security, enforce findings policy, and produce JSON, coverage, and SARIF reports.
 branding:
   icon: shield
@@ -17,13 +17,15 @@ inputs:
   mode:
     description: 'standard or deep. Deep supports repository scans, including selected paths; not diff scans.'
     default: standard
+  provider:
+    description: "Inference provider, matching scan --provider: openai, openrouter, fireworks, or amazon-bedrock. Supply the selected provider's credentials to the step."
+    default: openai
   model:
-    description: Model with access through your API key. Cost limits require CLI pricing support for the model.
-    default: gpt-5.6-sol
+    description: Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.
   cyber-access-program:
     description: 'Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately.'
   effort:
-    description: 'Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).'
+    description: 'Reasoning effort passed to Codex; supported values depend on the model and provider.'
     default: xhigh
   max-cost:
     description: Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.

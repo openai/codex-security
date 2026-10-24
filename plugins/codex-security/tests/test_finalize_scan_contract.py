@@ -9,21 +9,20 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from unittest import main, mock, skipIf, skipUnless
+from unittest import main, mock, skipIf
 
 import pytest
-from workbench_test_support import ScanFixtureTestCase, load_script, windows_file_backend
+from finalize_sarif_cases import FINALIZER, FinalizerSarifCases
+from workbench_test_support import ScanFixtureTestCase, windows_file_backend
 
-FINALIZER = load_script("finalize_scan_contract")
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
 
 
-class FinalizeScanContractTest(ScanFixtureTestCase):
+class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.scan_dir = Path(self.temp_dir.name).resolve()
@@ -82,7 +81,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
     @skipIf(os.name == "nt", "POSIX source filenames")
     def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
         source_root = self.scan_dir / "source"
-        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md"):
+        for name in ("aux.c", "con.py", "src/a:b.c", "é:helper.ts", "what?.md", " ", "\u00a0"):
             with self.subTest(name=name):
                 source = source_root / name
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -155,10 +154,7 @@ The extraction root is not enforced.
                 "targetId": "target_sha256_example",
                 "displayName": "example/repo",
                 "revision": "deadbeef",
-                "snapshotDigest": (
-                    "codex-security-snapshot/v1:sha256:"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                ),
+                "snapshotDigest": "codex-security-snapshot/v1:sha256:" + "0" * 64,
             },
             "allowedTargetKinds": ["git_worktree"],
             "scope": {"includePaths": ["src/"], "excludePaths": []},
@@ -201,6 +197,11 @@ The extraction root is not enforced.
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
         return source_root
+
+    def sarif_result(self, finding: dict, source_root: Path) -> dict:
+        return FINALIZER.build_sarif(self.manifest, {"findings": [finding]}, source_root)["runs"][
+            0
+        ]["results"][0]
 
     def export_csv(self) -> csv.DictReader:
         self.findings["findings"] = [copy.deepcopy(self.finding)]
@@ -400,13 +401,12 @@ The extraction root is not enforced.
         _, _, coverage = self.write_sealed_scan()
         coverage["completeness"] = "partial"
         self.rewrite_sealed_artifact("coverage.json", coverage)
-        names = ("scan-manifest.json", "findings.json", "coverage.json")
-        original = {name: (self.scan_dir / name).read_bytes() for name in names}
+        original = self.scan_file_bytes(*CANONICAL_FILES)
 
         _, _, retained = FINALIZER.finalize_scan(self.scan_dir)
 
         self.assertEqual(retained["completeness"], "partial")
-        self.assertEqual({name: (self.scan_dir / name).read_bytes() for name in names}, original)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
@@ -702,12 +702,10 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
-        sealed_files = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        sealed_files = self.scan_file_bytes(*CANONICAL_FILES)
         with self.assertRaises(FINALIZER.ContractError):
             FINALIZER._prepare_scan_finalization(self.scan_dir, allow_missing_writeups=True)
-        self.assertEqual(
-            {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}, sealed_files
-        )
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), sealed_files)
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -874,6 +872,26 @@ The extraction root is not enforced.
                 self.assertIn("candidate_id", reader.fieldnames or [])
                 self.assertEqual(next(reader)["candidate_id"], f"legacy-{field}")
 
+    def test_deep_csv_candidate_selection_preserves_precedence_and_unicode_whitespace(self) -> None:
+        self.coverage["mode"] = "deep_repository"
+        for provenance, candidate, report, ledger, identity, exported in (
+            ("provenance", "candidate", "report", "ledger", "provenance", "provenance"),
+            ("\ufeff", "candidate", "report", "ledger", "candidate", "candidate"),
+            ("\ufeff", "\ufeff", "report", "ledger", "report", "report"),
+            ("\ufeff", "\ufeff", "\ufeff", "ledger", "ledger", "ledger"),
+            ("\ufeff", "\ufeff", "\ufeff", "\ufeff", None, "\ufeff"),
+            ("\u0085", "candidate", "report", "ledger", "\u0085", "\u0085"),
+        ):
+            with self.subTest(identity=identity, exported=exported):
+                self.finding["provenance"]["candidateId"] = provenance
+                self.finding["extensions"] = {
+                    "candidateId": candidate,
+                    "reportId": report,
+                    "ledgerRowId": ledger,
+                }
+                self.assertEqual(FINALIZER.finding_candidate_id(self.finding), identity)
+                self.assertEqual(next(self.export_csv())["candidate_id"], exported)
+
     def test_scoped_csv_export_does_not_classify_ordinary_ledger_ids_as_deep(self) -> None:
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}
@@ -967,6 +985,59 @@ The extraction root is not enforced.
                     result.stderr,
                 )
                 self.assertEqual(output.read_bytes(), sealed_export)
+
+    @pytest.mark.cross_platform
+    def test_finalization_preserves_sealed_projection_aliases_and_distinct_paths(self) -> None:
+        root = self.scan_dir
+        for relative, alias, media_type in (
+            ("report.md", "Report.md", "text/markdown"),
+            ("report.html", "REPORT.HTML", "text/html"),
+            ("exports/results.sarif", "Exports/Results.SARIF", "application/sarif+json"),
+        ):
+            for hardlink in (False, True):
+                with self.subTest(relative=relative, hardlink=hardlink):
+                    with tempfile.TemporaryDirectory(dir=root) as directory:
+                        self.scan_dir = Path(directory)
+                        self.write_sealed_scan()
+                        output = self.scan_dir / relative
+                        artifact = self.scan_dir / alias
+                        artifact.parent.mkdir(exist_ok=True)
+                        contents = b"Sealed authored projection.\n"
+                        output.write_bytes(contents)
+                        # Probe native case lookup before creating any hardlink alias.
+                        case_alias = artifact.exists()
+                        if not case_alias:
+                            if hardlink:
+                                os.link(output, artifact)
+                            else:
+                                artifact.write_bytes(contents)
+                        same_file = output.samefile(artifact)
+                        self.assertEqual(same_file, case_alias or hardlink)
+                        manifest = self.read_json("scan-manifest.json")
+                        manifest["scan"]["artifacts"].append(
+                            {
+                                "path": alias,
+                                "mediaType": media_type,
+                                "sha256": hashlib.sha256(contents).hexdigest(),
+                            }
+                        )
+                        self.write_json("scan-manifest.json", manifest)
+                        sealed_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        for _ in range(2):
+                            FINALIZER.finalize_scan(self.scan_dir)
+                            self.assertEqual(artifact.read_bytes(), contents)
+                            self.assertEqual(
+                                (self.scan_dir / "scan-manifest.json").read_bytes(),
+                                sealed_manifest,
+                            )
+                            if same_file:
+                                self.assertTrue(output.samefile(artifact))
+                                self.assertEqual(output.read_bytes(), contents)
+                            elif relative == "report.html":
+                                self.assertFalse(output.exists())
+                            else:
+                                self.assertNotEqual(output.read_bytes(), contents)
+        self.scan_dir = root
 
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
         self.write_sealed_scan()
@@ -1343,6 +1414,35 @@ The extraction root is not enforced.
 
         self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
 
+    @pytest.mark.cross_platform
+    def test_optional_sarif_failure_does_not_abort_first_or_repeated_finalization(self) -> None:
+        root = self.scan_dir
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                with tempfile.TemporaryDirectory(dir=root) as directory:
+                    self.scan_dir = Path(directory)
+                    if sealed:
+                        self.write_sealed_scan()
+                        (self.scan_dir / "exports" / "results.sarif").unlink()
+                        (self.scan_dir / "exports").rmdir()
+                    else:
+                        self.write_scan()
+                    contents = b"Saved optional export destination.\n"
+                    (self.scan_dir / "exports").write_bytes(contents)
+                    errors = io.StringIO()
+                    with mock.patch.object(FINALIZER.sys, "stderr", errors):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                        manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertIn("automatic SARIF export failed", errors.getvalue())
+                    self.assertEqual((self.scan_dir / "exports").read_bytes(), contents)
+                    self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), manifest)
+                    self.assertEqual(
+                        self.read_json("scan-manifest.json")["scan"]["status"], "completed"
+                    )
+                    self.assertEqual(len(self.read_json("findings.json")["findings"]), 1)
+        self.scan_dir = root
+
     def test_sarif_output_fails_closed_without_secure_file_backend(self) -> None:
         with mock.patch.object(FINALIZER.os, "supports_dir_fd", set()):
             with self.assertRaisesRegex(FINALIZER.ContractError, "descriptor-relative"):
@@ -1603,6 +1703,26 @@ The extraction root is not enforced.
         self.assertIn(r"archive entry -\> filesystem write", report)
 
     @pytest.mark.cross_platform
+    def test_finalize_renders_embedded_evidence_with_null_end_line(self) -> None:
+        self.findings["findings"][0]["validation"] = {
+            "codeEvidence": [
+                {
+                    "label": "Source control",
+                    "path": "src/evidence.py",
+                    "startLine": 37,
+                    "endLine": None,
+                    "code": "handle(request)",
+                }
+            ]
+        }
+        self.write_scan()
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:37`\n", report)
+
+    @pytest.mark.cross_platform
     def test_report_projection_preserves_data_flow_aliases_and_scalar_reachability(self) -> None:
         for data_flow_key in ("dataFlow", "data_flow", "dataflow"):
             with self.subTest(data_flow_key=data_flow_key):
@@ -1750,6 +1870,26 @@ The extraction root is not enforced.
         findings["findings"][0]["root_cause"] = ""
         with self.preserving_sealed_findings(findings):
             pass
+
+    @pytest.mark.cross_platform
+    def test_sealed_rerun_renders_legacy_evidence_with_reversed_bounds(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        finding = findings["findings"][0]
+        finding["code_evidence"] = [
+            {
+                "id": "legacy-source",
+                "label": "Source control",
+                "location": {"path": "src/evidence.py", "startLine": 48, "endLine": 47},
+                "code": "handle(request)",
+            }
+        ]
+        finding["validation"] = {"evidenceRefs": ["legacy-source"]}
+        with self.preserving_sealed_findings(findings):
+            pass
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:48`\n", report)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:
@@ -2301,6 +2441,55 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_unsupported_port(self) -> None:
+        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_unsafe_authority(self) -> None:
+        for remote in (
+            "https://exa mple.com/repo",
+            "https://example.com>/repo",
+            "https://exa^mple.com/repo",
+            "https://exa|mple.com/repo",
+            "https://:8022/repo",
+            "https://a:b:80/repo",
+            "https://[::1/repo",
+            "https://[example]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_bare_userinfo_separator(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_seals_remote_port_and_ipv6_authority(self) -> None:
+        for remote in (
+            "https://example.com:8022/repo",
+            "https://example.com:/repo",
+            "https://[::1]:8022/repo",
+            "https://[::ffff:1.2.3.4]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                manifest = self.read_json("scan-manifest.json")
+                self.assertEqual(manifest["scan"]["target"]["remote"], remote)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()
@@ -2317,6 +2506,43 @@ The extraction root is not enforced.
         self.assertEqual(
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
+
+    def test_preserves_literal_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py", "é:helper.ts"):
+            with self.subTest(path=path):
+                self.manifest["scan"]["scope"]["includePaths"] = [path]
+                self.coverage["includePaths"] = [path]
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Repository-relative evidence.",
+                    }
+                ]
+                self.write_scan()
+                manifest, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(manifest["scan"]["scope"]["includePaths"], [path])
+                self.assertEqual(coverage["includePaths"], [path])
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
+                self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+                if path.isascii() and path.isspace():
+                    self.assertIn(
+                        f'- Included paths: `"{path}"`',
+                        (self.scan_dir / "report.md").read_text(encoding="utf-8"),
+                    )
+
+    def test_rejects_whitespace_only_artifact_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0"):
+            with self.subTest(path=path), self.assertRaises(FINALIZER.ContractError):
+                FINALIZER._require_portable_relative_path(path, "artifact")
 
     def test_rejects_missing_coverage_receipt(self) -> None:
         self.coverage["surfaces"][0]["receiptRefs"] = ["artifacts/02_discovery/work_ledger.jsonl"]
@@ -2378,38 +2604,60 @@ The extraction root is not enforced.
         self.assertEqual(coverage["deferred"], self.coverage["deferred"])
         self.assertEqual(coverage["surfaces"][0]["disposition"], "needs_follow_up")
 
+    def write_code_evidence_scan(self, path: str) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": path,
+                "startLine": 1,
+                "code": "source()",
+                "explanation": "Synthetic source evidence.",
+            }
+        ]
+        self.write_scan()
+
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
             with self.subTest(path=path):
-                self.findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "source",
-                        "label": "Source",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "source()",
-                        "explanation": "Synthetic source evidence.",
-                    }
-                ]
-                self.write_scan()
+                self.write_code_evidence_scan(path)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
                     r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_unsafe_deferred_paths(self) -> None:
-
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+    def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
+        for path in ("src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
+                self.write_code_evidence_scan(path)
+                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        for path in (
+            "",
+            "../../outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "/outside.ts",
+            "//server/share",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            "src/\u0000outside.ts",
+            "src/\u0001outside.ts",
+            "src/\toutside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "src/\u2028/../outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]
                 self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-                ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"coverage.*deferred"):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
@@ -2424,7 +2672,27 @@ The extraction root is not enforced.
             }
         ]
 
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+        for path in (
+            ".",
+            "./",
+            "././",
+            "src",
+            "src/parser.ts",
+            "./src/parser.ts",
+            "src/./parser.ts",
+            "src//parser.ts",
+            "src/",
+            "src:parser.ts",
+            "src/a:b.py",
+            "src/.hidden",
+            "src/na\u00efve file.ts",
+            "src/\u007fparser.ts",
+            "src/\u2028parser.ts",
+            "src/\u2029parser.ts",
+            " ",
+            "\u0085",
+            "\ufeff",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
@@ -2671,469 +2939,6 @@ The extraction root is not enforced.
         self.write_scan()
         with self.assertRaisesRegex(FINALIZER.ContractError, "requires artifact records"):
             FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_sarif_encodes_location_as_relative_uri(self) -> None:
-        self.finding["locations"][0]["path"] = "src/archive handlers/extract.py"
-        sarif_finding = self.sarif_finding("fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0)
-        location = result["locations"][0]["physicalLocation"]["artifactLocation"]
-        uri = location["uri"]
-        self.assertEqual(uri, "src/archive%20handlers/extract.py")
-        self.assertNotIn("uriBaseId", location)
-
-    def test_sarif_omits_unresolved_source_root_metadata(self) -> None:
-        sarif = FINALIZER.build_sarif(self.manifest, {"findings": []})
-
-        self.assertNotIn("originalUriBaseIds", sarif["runs"][0])
-
-    def test_sarif_keeps_root_first_and_preserves_sink_and_evidence_locations(self) -> None:
-        sarif_finding = self.sarif_finding("fingerprint")
-        sarif_finding["locations"] = [
-            {"path": "src/route.py", "startLine": 10, "role": "entrypoint/wrapper"},
-            {"path": "src/control.py", "startLine": 20, "role": "root_control"},
-            {"path": "src/write.py", "startLine": 30, "role": "sink"},
-        ]
-        sarif_finding["codeEvidence"] = [
-            {
-                "id": "template-sink",
-                "label": "Template sink",
-                "path": "src/template.html",
-                "startLine": 44,
-                "endLine": 45,
-                "code": "{{ user_input|safe }}",
-                "explanation": "The vulnerable template occurrence.",
-            },
-            {
-                "id": "duplicate-sink",
-                "label": "Duplicate sink",
-                "path": "src/write.py",
-                "startLine": 30,
-                "code": "write(user_input)",
-                "explanation": "Already present in locations.",
-            },
-        ]
-
-        result = FINALIZER._sarif_result(sarif_finding, 0)
-
-        self.assertEqual(
-            result["locations"],
-            [
-                {
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": "src/control.py"},
-                        "region": {"startLine": 20, "endLine": 20},
-                    },
-                    "message": {"text": "root_control"},
-                },
-                {
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": "src/route.py"},
-                        "region": {"startLine": 10, "endLine": 10},
-                    },
-                    "message": {"text": "entrypoint/wrapper"},
-                },
-                {
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": "src/write.py"},
-                        "region": {"startLine": 30, "endLine": 30},
-                    },
-                    "message": {"text": "sink"},
-                },
-                {
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": "src/template.html"},
-                        "region": {"startLine": 44, "endLine": 45},
-                    },
-                    "message": {"text": "evidence:template-sink"},
-                },
-            ],
-        )
-        self.assertNotIn("relatedLocations", result)
-
-    @pytest.mark.cross_platform
-    def test_sarif_includes_legacy_code_evidence_locations(self) -> None:
-        sarif_finding = self.sarif_finding("fingerprint")
-        sarif_finding["codeEvidence"] = [
-            {
-                "id": "canonical-source",
-                "label": "Canonical source",
-                "path": "src/canonical.py",
-                "startLine": 12,
-                "code": "canonical_source()",
-                "explanation": "Canonical evidence.",
-            }
-        ]
-        sarif_finding["code_evidence"] = [
-            {
-                "id": "legacy-sink",
-                "path": "src/legacy.py",
-                "startLine": 37,
-                "endLine": 39,
-                "code": "legacy_sink()",
-            }
-        ]
-
-        result = FINALIZER._sarif_result(sarif_finding, 0)
-
-        locations = {
-            location["physicalLocation"]["artifactLocation"]["uri"]: location
-            for location in result["locations"]
-        }
-        self.assertEqual(
-            locations["src/canonical.py"]["physicalLocation"]["region"],
-            {"startLine": 12, "endLine": 12},
-        )
-        self.assertEqual(
-            locations["src/legacy.py"],
-            {
-                "physicalLocation": {
-                    "artifactLocation": {"uri": "src/legacy.py"},
-                    "region": {"startLine": 37, "endLine": 39},
-                },
-                "message": {"text": "evidence:legacy-sink"},
-            },
-        )
-
-    @pytest.mark.cross_platform
-    def test_sarif_normalizes_invalid_legacy_code_evidence_bounds(self) -> None:
-        sarif_finding = self.sarif_finding("fingerprint")
-        sarif_finding["code_evidence"] = [
-            {
-                "id": "legacy-null-end",
-                "path": "src/null_end.py",
-                "startLine": 37,
-                "endLine": None,
-                "code": "null_end()",
-            },
-            {
-                "id": "legacy-reversed-end",
-                "path": "src/reversed_end.py",
-                "startLine": 48,
-                "endLine": 47,
-                "code": "reversed_end()",
-            },
-            {
-                "id": "legacy-text-end",
-                "path": "src/text_end.py",
-                "startLine": 59,
-                "endLine": "60",
-                "code": "text_end()",
-            },
-        ]
-
-        result = FINALIZER._sarif_result(sarif_finding, 0)
-
-        regions = {
-            location["physicalLocation"]["artifactLocation"]["uri"]: location["physicalLocation"][
-                "region"
-            ]
-            for location in result["locations"]
-        }
-        self.assertEqual(regions["src/null_end.py"], {"startLine": 37, "endLine": 37})
-        self.assertEqual(regions["src/reversed_end.py"], {"startLine": 48, "endLine": 48})
-        self.assertEqual(regions["src/text_end.py"], {"startLine": 59, "endLine": 59})
-
-    @pytest.mark.cross_platform
-    def test_sarif_omits_invalid_legacy_code_evidence_locations(self) -> None:
-        sarif_finding = self.sarif_finding("fingerprint")
-        sarif_finding["code_evidence"] = [
-            {
-                "id": "legacy-zero-start",
-                "path": "src/zero.py",
-                "startLine": 0,
-                "code": "zero_start()",
-            },
-            {
-                "id": "legacy-negative-start",
-                "path": "src/negative.py",
-                "startLine": -1,
-                "code": "negative_start()",
-            },
-            {
-                "id": "legacy-unsafe-path",
-                "path": "../outside.py",
-                "startLine": 81,
-                "code": "unsafe_path()",
-            },
-        ]
-
-        result = FINALIZER._sarif_result(sarif_finding, 0)
-
-        uris = {
-            location["physicalLocation"]["artifactLocation"]["uri"]
-            for location in result["locations"]
-        }
-        self.assertNotIn("src/zero.py", uris)
-        self.assertNotIn("src/negative.py", uris)
-        self.assertNotIn("../outside.py", uris)
-
-    def test_sarif_only_emits_provenance_for_immutable_revision(self) -> None:
-        sarif = FINALIZER.build_sarif(self.manifest, {"findings": []})
-        self.assertNotIn("versionControlProvenance", sarif["runs"][0])
-
-        self.manifest["scan"]["target"]["kind"] = "git_revision"
-        sarif = FINALIZER.build_sarif(self.manifest, {"findings": []})
-        self.assertEqual(
-            sarif["runs"][0]["versionControlProvenance"],
-            [{"repositoryUri": "https://github.com/example/repo", "revisionId": "deadbeef"}],
-        )
-
-    def test_sarif_emits_github_line_hash_when_source_is_available(self) -> None:
-        source_root = self.write_line_hash_source()
-        sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
-        fingerprints = result["partialFingerprints"]
-        self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
-        self.assertEqual(fingerprints["primaryLocationLineHash"], "614150a715d5311d:1")
-
-    def test_sarif_emits_github_line_hash_through_windows_backend(self) -> None:
-        source_root = self.write_line_hash_source()
-        sarif_finding = self.sarif_finding("semantic-fingerprint")
-        backend = windows_file_backend()
-
-        with (
-            mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),
-            mock.patch.object(FINALIZER, "_is_windows", return_value=True),
-            mock.patch.object(FINALIZER, "_windows_scan_local_files", return_value=backend),
-        ):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
-
-        backend.open_read_fd.assert_called_once_with(
-            source_root, "src/extract.py", "source file src/extract.py"
-        )
-        self.assertEqual(
-            result["partialFingerprints"]["primaryLocationLineHash"],
-            "614150a715d5311d:1",
-        )
-
-    def test_sarif_line_hash_uses_root_control_location(self) -> None:
-        source_root = self.scan_dir / "source"
-        entrypoint_path = source_root / "src" / "route.py"
-        control_path = source_root / "src" / "control.py"
-        entrypoint_path.parent.mkdir(parents=True)
-        entrypoint_path.write_text("entrypoint\n", encoding="utf-8")
-        control_path.write_text("root control\n", encoding="utf-8")
-        sarif_finding = self.sarif_finding("semantic-fingerprint")
-        sarif_finding["locations"] = [
-            {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
-            {"path": "src/control.py", "startLine": 1, "role": "root_control"},
-        ]
-
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
-
-        self.assertEqual(
-            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "src/control.py",
-        )
-        self.assertEqual(
-            result["partialFingerprints"]["primaryLocationLineHash"], "41499a4b14756ba2:1"
-        )
-
-    def test_sarif_line_hash_tolerates_non_utf8_source(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
-        sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
-        self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
-
-    def test_sarif_line_hash_skips_symlink_source(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        with tempfile.TemporaryDirectory() as external_dir:
-            external_path = Path(external_dir) / "extract.py"
-            external_path.write_text(
-                "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
-            )
-            source_path.symlink_to(external_path)
-            sarif_finding = self.sarif_finding("semantic-fingerprint")
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
-        self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
-
-    @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
-    def test_sarif_line_hash_skips_fifo_source_without_blocking(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_root.mkdir()
-        source_path = source_root / "named-pipe"
-        os.mkfifo(source_path)
-        results: list[object] = []
-
-        thread = threading.Thread(
-            target=lambda: results.append(FINALIZER._open_source_file(source_root, "named-pipe")),
-            daemon=True,
-        )
-        thread.start()
-        thread.join(1)
-        blocked = thread.is_alive()
-        if blocked:
-            with source_path.open("w", encoding="utf-8"):
-                pass
-            thread.join(1)
-        for handle in results:
-            if handle is not None:
-                handle.close()
-
-        self.assertFalse(blocked)
-        self.assertEqual(results, [None])
-
-    def test_sarif_line_hash_skips_nul_source_path(self) -> None:
-        source_root = self.scan_dir / "source"
-        (source_root / "src").mkdir(parents=True)
-
-        self.assertIsNone(FINALIZER._open_source_file(source_root, "src/bad\0.py"))
-
-    def test_sarif_line_hash_uses_opened_source_file(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_path = source_root / "src" / "extract.py"
-        source_path.parent.mkdir(parents=True)
-        source_path.write_text(
-            "\n".join(f"inside {index}" for index in range(1, 60)), encoding="utf-8"
-        )
-        with tempfile.TemporaryDirectory() as external_dir:
-            external_path = Path(external_dir) / "extract.py"
-            external_path.write_text(
-                "\n".join(f"outside {index}" for index in range(1, 60)), encoding="utf-8"
-            )
-            handle = FINALIZER._open_source_file(source_root, "src/extract.py")
-            self.assertIsNotNone(handle)
-            source_path.unlink()
-            source_path.symlink_to(external_path)
-            with handle:
-                line_hashes = FINALIZER._github_line_hashes(handle)
-            with external_path.open("r", encoding="utf-8") as external_handle:
-                external_hashes = FINALIZER._github_line_hashes(external_handle)
-        self.assertNotEqual(line_hashes[41], external_hashes[41])
-
-    def test_sarif_line_hash_skips_source_read_error(self) -> None:
-        source_root = self.write_line_hash_source()
-        sarif_finding = self.sarif_finding("semantic-fingerprint")
-        with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
-        self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
-
-    def test_sarif_line_hash_streams_source(self) -> None:
-        source_path = self.scan_dir / "extract.py"
-        source_path.write_text("line 1\nline 2\n", encoding="utf-8")
-        with mock.patch.object(Path, "read_text", side_effect=AssertionError("not streamed")):
-            with source_path.open("r", encoding="utf-8") as handle:
-                line_hashes = FINALIZER._github_line_hashes(handle)
-        self.assertEqual(line_hashes[1], "a4060029c94de37e:1")
-
-    def test_sarif_line_hash_includes_lines_beyond_previous_limit(self) -> None:
-        source = io.StringIO("line\n" * 100_001)
-
-        self.assertIn(100_001, FINALIZER._github_line_hashes(source, {100_001}))
-
-    def test_sarif_line_hashes_every_source_file(self) -> None:
-        source_root = self.scan_dir / "source"
-        source_dir = source_root / "src"
-        source_dir.mkdir(parents=True)
-        findings = []
-        for index in range(2):
-            relative_path = f"src/extract-{index}.py"
-            (source_root / relative_path).write_text(" " * (6 * 1024 * 1024) + "x")
-            finding = self.sarif_finding(f"fingerprint-{index}", str(index))
-            finding["locations"][0] = {"path": relative_path, "startLine": 1}
-            findings.append(finding)
-
-        sarif = FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
-
-        results = sarif["runs"][0]["results"]
-        for result in results:
-            self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
-
-    def test_sarif_caches_line_hashes_per_source_file(self) -> None:
-        source_root = self.write_line_hash_source()
-        findings = []
-        for index in range(2):
-            finding = self.sarif_finding(f"fingerprint-{index}", str(index))
-            finding["locations"][0]["startLine"] += index
-            finding["locations"][0]["endLine"] += index
-            findings.append(finding)
-
-        with mock.patch.object(
-            FINALIZER, "_github_line_hashes", wraps=FINALIZER._github_line_hashes
-        ) as line_hashes:
-            FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
-
-        self.assertEqual(line_hashes.call_count, 1)
-
-
-@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
-def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
-    schema = {"type": expected}
-    FINALIZER._validate_schema_node(value, schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
-        FINALIZER._validate_schema_node(True, schema, "value")
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file permissions")
-@pytest.mark.parametrize(
-    "kind", ["unsafe", "symlink", "dangling-symlink", "parent-symlink", "directory", "unreadable"]
-)
-def test_missing_writeup_recovery_rejects_other_file_errors(tmp_path, kind):
-    scan_dir = tmp_path / "scan"
-    scan_dir.mkdir()
-    report = scan_dir / "findings" / "report.md"
-    report.parent.mkdir()
-    outside = tmp_path / "outside.md"
-    outside.write_text("# Outside the scan\n")
-    report_path = "findings/report.md"
-    if kind == "unsafe":
-        report_path = "../outside.md"
-    elif kind == "symlink":
-        report.symlink_to(outside)
-    elif kind == "dangling-symlink":
-        report.symlink_to(report.parent / "missing.md")
-    elif kind == "parent-symlink":
-        report.parent.rmdir()
-        report.parent.symlink_to(tmp_path, target_is_directory=True)
-    elif kind == "directory":
-        report.mkdir()
-    else:
-        if os.geteuid() == 0:
-            pytest.skip("root can read files without permission bits")
-        report.write_text("# Unreadable writeup\n")
-        report.chmod(0)
-    findings = {"findings": [{"writeup": {"reportPath": report_path}}]}
-    original = copy.deepcopy(findings)
-    with pytest.raises(FINALIZER.ContractError):
-        FINALIZER._prepare_derived_writeups(scan_dir, findings, allow_missing=True)
-    assert findings == original
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("error_code", [2, 3, 5, 22, 32, 33])
-def test_windows_writeup_recovery_only_omits_missing_files(tmp_path, monkeypatch, error_code):
-    backend = windows_file_backend()
-    windows_error = load_script("windows_scan_local_files").WindowsScanLocalFileError
-    backend.open_read_fd.side_effect = windows_error(error_code, "Synthetic Windows file error")
-    monkeypatch.setattr(FINALIZER.os, "supports_dir_fd", set())
-    monkeypatch.setattr(FINALIZER, "_is_windows", lambda: True)
-    monkeypatch.setattr(FINALIZER, "_windows_scan_local_files", lambda: backend)
-    findings = {"findings": [{"writeup": {"reportPath": "findings/report.md"}}]}
-    if error_code in {2, 3}:
-        warnings = FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert findings == {"findings": [{}]}
-        assert len(warnings) == 1
-    else:
-        with pytest.raises(FINALIZER.ContractError):
-            FINALIZER._prepare_derived_writeups(tmp_path, findings, allow_missing=True)
-        assert "writeup" in findings["findings"][0]
-
-
-def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
-    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
-    reference = {"$ref": "#/$defs/text"}
-    FINALIZER._validate_schema_node("yes", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
-        FINALIZER._validate_schema_node("", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
-    with pytest.raises(RecursionError):
-        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
 if __name__ == "__main__":

@@ -293,6 +293,90 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
 
 
 @pytest.mark.parametrize(
+    "link_kind",
+    [
+        pytest.param("absolute", marks=pytest.mark.cross_platform),
+        pytest.param("relative", marks=pytest.mark.cross_platform),
+        pytest.param(
+            "junction",
+            marks=[
+                pytest.mark.native_windows,
+                pytest.mark.skipif(os.name != "nt", reason="requires native Windows junctions"),
+            ],
+        ),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested"])
+@pytest.mark.parametrize("unrelated_change", [False, True], ids=["reviewed", "unrelated"])
+def test_reviewed_patch_does_not_copy_through_indexed_directory_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_kind: str,
+    nested: bool,
+    unrelated_change: bool,
+) -> None:
+    import workbench_db
+
+    repository = tmp_path / "source" / "repository"
+    repository.parent.mkdir()
+    revision = initialize_git_repository(repository)
+    source = repository / "component"
+    link = source / ("linked/nested" if nested else "linked")
+    link.mkdir(parents=True)
+    (link / "file.txt").write_text("indexed child\n")
+    (source / "app.txt").write_text("before\n")
+    subprocess.run(["git", "add", "component"], cwd=repository, check=True)
+    shutil.rmtree(link)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("original outside contents\n")
+    if link_kind == "junction":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True)
+    else:
+        link_target = (
+            "../" * (4 if nested else 3) + "outside" if link_kind == "relative" else str(outside)
+        )
+        link.symlink_to(link_target, target_is_directory=True)
+    original_link = os.readlink(link)
+
+    staging = tmp_path / "staging"
+    sentinel = staging / "outside"
+    sentinel.mkdir(parents=True)
+    (sentinel / "file.txt").write_text("staged outside sentinel\n")
+    # A relative link resolves to this different directory after materialization.
+    monkeypatch.setattr(workbench_db.tempfile, "tempdir", str(staging))
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": revision,
+        "scan_dir": str(scan_dir),
+    }
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": workbench_db.worktree_content_digest(source),
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / "app.txt").write_text("after\n")
+    if unrelated_change:
+        (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+        with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    else:
+        assert workbench_db.require_reviewed_patch_applied(
+            scan, remediation, "reviewed.patch"
+        ) == workbench_db.worktree_content_digest(source)
+    assert (outside / "file.txt").read_text() == "original outside contents\n"
+    assert (sentinel / "file.txt").read_text() == "staged outside sentinel\n"
+    assert (source / "app.txt").read_text() == "after\n"
+    assert os.readlink(link) == original_link
+    assert list(staging.iterdir()) == [sentinel]
+
+
+@pytest.mark.parametrize(
     "case",
     [
         "ordering",
@@ -586,6 +670,82 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize("git", [False, True])
+def test_directory_snapshots_exclude_svn_metadata(tmp_path: Path, git: bool) -> None:
+    target = tmp_path / "target"
+    if git:
+        initialize_unborn_git_repository(target)
+    else:
+        target.mkdir()
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "pristine" / "base"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    if git:
+        subprocess.run(["git", "add", "--force", "."], cwd=target, check=True)
+
+    original = directory_content_digest(target)
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target) == 1
+    for path in metadata:
+        path.write_text("metadata changed\n")
+    assert directory_content_digest(target) == original
+    assert count_files(target) == 1
+    source.write_text("source changed\n")
+    assert directory_content_digest(target) != original
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("scope", [".", "nested[scope]"])
+def test_worktree_snapshots_exclude_svn_metadata(tmp_path: Path, tracked: bool, scope: str) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    target = repository / scope
+    target.mkdir(exist_ok=True)
+    source = target / ".svn-backup" / "app.py"
+    source.parent.mkdir()
+    source.write_text("source\n")
+    metadata = [target / ".svn" / "wc.db", target / "nested" / ".svn" / "entries"]
+    for path in metadata:
+        path.parent.mkdir(parents=True)
+        path.write_text("metadata\n")
+    subprocess.run(["git", "add", str(source)], cwd=repository, check=True)
+    if tracked:
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "Synthetic source and metadata"], cwd=repository, check=True
+    )
+
+    original = worktree_content_digest(target)
+    for path in metadata:
+        path.write_text("updated metadata\n")
+    assert worktree_content_digest(target) == original
+    source.write_text("updated source\n")
+    assert worktree_content_digest(target) != original
+
+
+@pytest.mark.parametrize("scope", [".svn", "nested/.svn"])
+def test_git_directory_snapshots_exclude_svn_junctions(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None], scope: str
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    source = target / "app.py"
+    source.write_text("source\n")
+    metadata = target / scope
+    metadata.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state").write_text("metadata\n")
+    junction_factory(metadata / "linked", outside)
+
+    assert workbench_target.git_directory_snapshot_paths(target) == [source]
+
+
 def test_windows_inventory_batches_wide_untracked_trees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -810,6 +970,28 @@ def test_git_blob_samples_reject_git_failure(
     assert git_blob_samples(tmp_path, ["HEAD:source"]) == [None]
 
 
+def test_git_blob_samples_work_with_git_before_2_38(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    git_blob_samples = WORKBENCH_TARGET["git_blob_samples"]
+    git_command = git_blob_samples.__globals__["git_command"]
+
+    def git_before_2_38(*args: Any, **kwargs: Any):
+        # Git before 2.38 rejects cat-file -z with a usage error.
+        if "-z" in args:
+            return subprocess.CompletedProcess(args, 129)
+        return git_command(*args, **kwargs)
+
+    monkeypatch.setitem(git_blob_samples.__globals__, "git_command", git_before_2_38)
+
+    assert git_blob_samples(target, ["HEAD:README.md", "HEAD:missing"]) == [
+        (b"fixture\n", False),
+        None,
+    ]
+
+
 @pytest.mark.parametrize(
     ("log_encoding", "subject"),
     [
@@ -837,6 +1019,31 @@ def test_git_metadata_preserves_unicode_commit_subject(
     assert WORKBENCH_TARGET["git_bytes"](
         target, "show", "-s", "--format=%s", "HEAD"
     ) == f"{subject}\n".encode("utf-8")
+
+
+@pytest.mark.cross_platform
+def test_git_metadata_ignores_signature_output_in_commit_subject(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    headers = subprocess.check_output(["git", "cat-file", "commit", "HEAD"], cwd=target).split(
+        b"\n\n", 1
+    )[0]
+    # A synthetic signature reproduces Git's extra output without a signing tool.
+    commit = headers + (
+        b"\ngpgsig -----BEGIN SSH SIGNATURE-----\n synthetic\n -----END SSH SIGNATURE-----"
+        b"\n\nSigned subject\n"
+    )
+    revision = (
+        subprocess.check_output(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=target, input=commit
+        )
+        .decode()
+        .strip()
+    )
+    subprocess.run(["git", "update-ref", "HEAD", revision], cwd=target, check=True)
+    subprocess.run(["git", "config", "log.showSignature", "true"], cwd=target, check=True)
+
+    assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == "Signed subject"
 
 
 @pytest.mark.parametrize("encoding", ["cp932", "cp949"])
@@ -1127,7 +1334,7 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
     def require_streamed_diff(
         repository: Path, *args: str, **kwargs: object
     ) -> subprocess.CompletedProcess[Any]:
-        if args and args[0] == "diff":
+        if "diff" in args:
             assert kwargs.get("stdout_file") is not None
         return git_command(repository, *args, **kwargs)
 

@@ -1,11 +1,15 @@
 {
   "extends": "../plugins/codex-security/mcp-app/tsconfig.json",
   "compilerOptions": {
+    "lib": ["esnext", "dom", "dom.iterable"],
     "typeRoots": ["../sdk/typescript/node_modules/@types"]
   },
   "include": [
+    "../plugins/codex-security/mcp-app/src/assets.d.ts",
     "deep-reducer/*.mts",
     "secret-discovery/*.mts",
+    "standard-time-budget/*.mts",
+    "workflow-routing/*.mts",
     "triage-finding/assertions/*.mts",
     "triage-finding/scripts/*.mts",
     "triage-finding/sastbench/assertions/*.mts",

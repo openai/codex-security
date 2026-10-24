@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -13,6 +14,8 @@ import type {
   ScanProgress,
   ScanWorkerStatus,
   SeverityLevel,
+  ValidationOptions,
+  ValidationResult,
 } from "../src/index.js";
 import { CodexSecurityError, ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
@@ -208,9 +211,11 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
+    onValidate?: (options: ValidationOptions) => Promise<ValidationResult>;
     onCodex?: OnCodex;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
@@ -219,6 +224,7 @@ export function dependencies(
       input?: string,
       signal?: AbortSignal,
     ) => JsonObject | Promise<JsonObject>;
+    readSavedFindings?: MainDependencies["readSavedFindings"];
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -234,8 +240,10 @@ export function dependencies(
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
   const result = options.result ?? fakeResult();
+  let scannedRepository: string | undefined;
   const security = {
     run: async (repository: string, runOptions: ScanOptions) => {
+      scannedRepository = repository;
       options.onTurn?.(repository, runOptions);
       const signal = runOptions.signal;
       signal?.addEventListener("abort", () => options.onInterrupt?.(), {
@@ -261,8 +269,15 @@ export function dependencies(
     },
     preflight: async (repository: string) =>
       options.preflight ?? fakePreflight(repository),
+    validate: async (validationOptions: ValidationOptions) =>
+      options.onValidate?.(validationOptions) ?? {
+        disposition: "deferred",
+        report: "Additional evidence is needed.",
+        outputDir: "/tmp/validation",
+        threadId: "validation-thread",
+      },
     close: async () => await options.onClose?.(),
-  } as Pick<CodexSecurity, "run" | "preflight" | "close">;
+  } as Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   return {
     createSecurity: (config) => {
       options.onConfig?.(config);
@@ -290,11 +305,21 @@ export function dependencies(
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
+    ...(options.importGitHubAdvisories === undefined
+      ? {}
+      : { importGitHubAdvisories: options.importGitHubAdvisories }),
     ...(options.importGitHubAlerts === undefined
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input, signal) =>
-      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+      (await options.onWorkbench?.(args, input, signal)) ??
+      (args[0] === "get-scan" &&
+      args.includes("--check-target") &&
+      scannedRepository !== undefined
+        ? { scan: { targetPath: await realpath(scannedRepository) } }
+        : { scans: [] }),
+    readSavedFindings:
+      options.readSavedFindings ?? (async () => result.findings.findings),
     matchFindings: async (input, comparisonOptions) =>
       (await options.onMatch?.(input, comparisonOptions)) ?? {
         matches: [],
@@ -314,7 +339,11 @@ export function dependencies(
 export const mustNotInitializeCodex = throwing("must not initialize Codex");
 
 export function fakeSecurity(run: CodexSecurity["run"]) {
-  return { run, preflight: async () => fakePreflight(), close: async () => {} };
+  return {
+    ...dependencies().createSecurity({}),
+    run,
+    preflight: async () => fakePreflight(),
+  };
 }
 
 export function failingSecurity(message: string) {

@@ -488,6 +488,17 @@ describe("scan cost", () => {
     ).toBe(0.0042);
   });
 
+  test.each(Object.getOwnPropertyNames(Object.prototype))(
+    "does not inherit prices for unknown model %s",
+    (model) => {
+      for (const selected of [model, `openai.${model}`]) {
+        expect(
+          estimateScanCost(selected, { input_tokens: 1, output_tokens: 1 }),
+        ).toBeNull();
+      }
+    },
+  );
+
   test("does not invent prices for unknown models or incomplete usage", () => {
     for (const [model, usage] of [
       ["unknown-model", { input_tokens: 1, output_tokens: 1 }],
@@ -1789,7 +1800,7 @@ describe("live scan cost tracking", () => {
       threadId: childUuid7Thread,
       codexHome: home,
     });
-    const ownedEvents = [rollout[0]!, ...rollout.slice(-2)];
+    const ownedEvents = [rollout[0]!, ...rollout.slice(-3)];
     expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
     expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });
@@ -2603,6 +2614,99 @@ describe("live scan cost tracking", () => {
         outputTokens: 20,
         estimatedUsd: 0.000224,
       },
+    });
+  });
+
+  test("reports budget subtotals until missing worker usage becomes measured", async () => {
+    const home = await codexHome();
+    const parentUsage = { input_tokens: 1_000_000, output_tokens: 100_000 };
+    await writeSession(home, "scan-thread", parentUsage);
+    const costs: Array<[number, boolean]> = [];
+    const usages: unknown[] = [];
+    const tracker = costTracker(home, {
+      onCost: (cost, complete) => costs.push([cost.estimatedUsd, complete]),
+      onUsage: (usage) => usages.push(usage),
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
+
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      {
+        parent: "scan-thread",
+      },
+    );
+    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(costs.at(-1)).toEqual([6, false]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([legacyUsageRecord({ input_tokens: 0, output_tokens: 0 })]) +
+        "\n",
+    );
+    expect((await tracker.refresh()).usage).toMatchObject({
+      ...parentUsage,
+      total_tokens: 1_100_000,
+    });
+    expect(costs.at(-1)).toEqual([6, true]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([
+        legacyUsageRecord({ input_tokens: 500_000, output_tokens: 50_000 }),
+      ]) + "\n",
+    );
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 1_500_000,
+      output_tokens: 150_000,
+      total_tokens: 1_650_000,
+    });
+    expect(costs).toEqual([
+      [6, true],
+      [6, false],
+      [6, true],
+      [9, true],
+    ]);
+    expect(usages).toHaveLength(2);
+  });
+
+  test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", parentUsage, {
+      cwd: scanDirectory,
+      timestamp: "2026-07-26T12:00:00Z",
+    });
+    await writeSession(
+      home,
+      "deep-worker",
+      {},
+      {
+        cwd: join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        timestamp: "2026-07-26T12:01:00Z",
+      },
+    );
+    const tracker = costTracker(home, { scanDirectory });
+    tracker.start("scan-thread");
+    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+
+    tracker.recordUsage({ input_tokens: 50, output_tokens: 5 }, "deep-worker");
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 150,
+      output_tokens: 15,
+      total_tokens: 165,
     });
   });
 

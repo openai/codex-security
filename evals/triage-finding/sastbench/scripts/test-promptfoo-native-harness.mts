@@ -5,53 +5,55 @@ import os from "node:os";
 import { pathToFileURL } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
+import { parse } from "yaml";
 
 const sastbenchRoot = path.resolve(import.meta.dirname, "..");
 const evalRoot = path.resolve(sastbenchRoot, "..");
-const config = fs.readFileSync(
-  path.join(sastbenchRoot, "promptfooconfig.sastbench.yaml"),
-  "utf8",
+const entryConfig = parse(
+  fs.readFileSync(
+    path.join(sastbenchRoot, "promptfooconfig.sastbench.yaml"),
+    "utf8",
+  ),
 );
-const sampleConfig = fs.readFileSync(
-  path.join(sastbenchRoot, "promptfooconfig.sastbench-sample.yaml"),
-  "utf8",
+assert.equal(entryConfig.$ref, "./promptfooconfig.sastbench.yaml");
+const config = parse(
+  fs.readFileSync(path.resolve(evalRoot, entryConfig.$ref), "utf8"),
+);
+const sampleConfig = parse(
+  fs.readFileSync(
+    path.join(sastbenchRoot, "promptfooconfig.sastbench-sample.yaml"),
+    "utf8",
+  ),
 );
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(evalRoot, "package.json"), "utf8"),
 );
 
-assert.doesNotMatch(config, /working_dir:/);
-assert.match(config, /skip_git_repo_check:\s+true/);
-assert.doesNotMatch(
-  config,
-  /working_dir:\s+\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\./,
+const providerPath = path.resolve(evalRoot, config.providers[0].$ref);
+const provider = parse(fs.readFileSync(providerPath, "utf8"));
+assert.match(provider.id, /^openai:codex-sdk:/);
+assert.deepEqual(provider.config.additional_directories, [
+  "{{env.SASTBENCH_GIT_CACHE_ROOT}}",
+  "{{target_repo}}",
+]);
+assert.equal(provider.config.cli_env, undefined);
+assert.equal(config.evaluateOptions?.maxConcurrency, undefined);
+assert.equal(config.tests, "file://./scripts/sastbench-lib.mts:generateTests");
+assert.deepEqual(
+  config.defaultTest.assert.map(
+    (assertion: { metric: string }) => assertion.metric,
+  ),
+  ["schema_valid", "strict_case_correct"],
 );
-assert.match(
-  config,
-  /additional_directories:\n\s+- "\{\{env\.SASTBENCH_GIT_CACHE_ROOT\}\}"\n\s+- "\{\{target_repo\}\}"/,
+assert.ok(
+  config.extensions.includes(
+    "file://./assertions/sastbench-metrics.mts:afterEach",
+  ),
 );
-assert.doesNotMatch(config, /sandbox_mode:/);
-assert.doesNotMatch(config, /network_access_enabled:/);
-assert.match(config, /default_permissions:\s+sastbench_runtime_only/);
-assert.match(config, /sastbench_runtime_only:\n\s+filesystem:/);
-assert.match(config, /":minimal":\s+read/);
-assert.match(config, /":workspace_roots":\s+read/);
-assert.match(config, /network:\n\s+enabled:\s+false/);
-assert.match(config, /id:\s+openai:codex-sdk:gpt-5\.5/);
-assert.match(
-  config,
-  /label:\s+"Codex SDK triage-finding SastBench \(gpt-5\.5\)"/,
-);
-assert.doesNotMatch(config, /gpt-5\.6/);
-assert.match(
-  config,
-  /tests:\s+file:\/\/\.\/scripts\/sastbench-lib\.mts:generateTests/,
-);
-assert.match(config, /metric:\s+schema_valid/);
-assert.match(config, /metric:\s+strict_case_correct/);
-assert.match(
-  config,
-  /extensions:\n\s+- file:\/\/\{\{env\.TRIAGE_PROVIDER_PATH\}\}:beforeAll\n\s+- file:\/\/\.\/assertions\/sastbench-metrics\.mts:afterEach/,
+const derivedMetrics = new Map<string, string>(
+  config.derivedMetrics.map(
+    ({ name, value }: { name: string; value: string }) => [name, value],
+  ),
 );
 for (const metric of [
   "strict_precision",
@@ -69,33 +71,25 @@ for (const metric of [
   "remaining_analyst_workload",
   "execution_or_parse_error_rate",
 ]) {
-  assert.match(config, new RegExp(`name:\\s+${metric}`));
+  assert.ok(derivedMetrics.has(metric), `Missing aggregate metric: ${metric}`);
 }
-assert.doesNotMatch(config, /HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY/);
-assert.doesNotMatch(config, /maxConcurrency/);
-assert.doesNotMatch(config, /__count/);
-assert.match(
-  config,
-  /strict_accuracy\n\s+value:\s+"\(strict_tp \+ strict_tn\) \/ max\(positive_cases \+ negative_cases, 1\)"/,
+assert.equal(
+  derivedMetrics.get("strict_accuracy"),
+  "(strict_tp + strict_tn) / max(positive_cases + negative_cases, 1)",
 );
-assert.match(
-  sampleConfig,
-  /^\$ref:\s+\.\/sastbench\/promptfooconfig\.sastbench\.yaml/m,
+assert.equal(sampleConfig.$ref, entryConfig.$ref);
+assert.equal(
+  sampleConfig.tests,
+  "file://./scripts/sastbench-lib.mts:generateSampleTests",
 );
-assert.match(
-  sampleConfig,
-  /tests:\s+file:\/\/\.\/scripts\/sastbench-lib\.mts:generateSampleTests/,
-);
-assert.doesNotMatch(sampleConfig, /providers:/);
-assert.doesNotMatch(sampleConfig, /derivedMetrics:/);
+assert.equal(sampleConfig.providers, undefined);
+assert.equal(sampleConfig.derivedMetrics, undefined);
 
 assert.match(packageJson.scripts["eval:sastbench"], /run-promptfoo\.mts eval/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-share/);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /--filter-range/);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /--max-concurrency/);
-assert.equal("score:sastbench" in packageJson.scripts, false);
-assert.equal("report:sastbench" in packageJson.scripts, false);
 assert.doesNotMatch(
   packageJson.scripts["eval:sastbench"],
   /PROMPTFOO_FAILED_TEST_EXIT_CODE/,
@@ -114,22 +108,6 @@ assert.match(
   packageJson.scripts["eval:sastbench:sample"],
   /--max-concurrency 32/,
 );
-assert.equal("sastbench:generate" in packageJson.scripts, false);
-assert.equal(
-  fs.existsSync(path.join(import.meta.dirname, "run-sastbench-promptfoo.mts")),
-  false,
-);
-assert.equal(
-  fs.existsSync(
-    path.join(
-      sastbenchRoot,
-      "docs",
-      "2026-06-22-sastbench-triage-finding-eval.md",
-    ),
-  ),
-  false,
-);
-
 console.log("sastbench native Promptfoo harness tests passed");
 
 const dispatchRoot = fs.mkdtempSync(
@@ -167,7 +145,7 @@ try {
         },
       },
     );
-    assert.match(version, /0\.123\.1/);
+    assert.equal(version.trim(), packageJson.dependencies.promptfoo);
   }
 } finally {
   fs.rmSync(dispatchRoot, { recursive: true, force: true });

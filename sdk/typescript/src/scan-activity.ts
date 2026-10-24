@@ -74,12 +74,12 @@ export function scanActivityFromEvent(
     item["type"] === "command_execution" &&
     typeof item["command"] === "string"
   ) {
-    const command = displayCommand(item["command"]);
+    const command = unwrapCommand(item["command"]);
     return {
       id: item["id"],
       kind: "command",
       status,
-      description: command,
+      description: command.replaceAll(/\s+/gu, " "),
       paths: commandRepositoryPaths(command, repository),
     };
   }
@@ -87,14 +87,14 @@ export function scanActivityFromEvent(
   if (item["type"] === "mcp_tool_call" && typeof item["tool"] === "string") {
     const arguments_ = isRecord(item["arguments"]) ? item["arguments"] : {};
     const value = arguments_["cmd"] ?? arguments_["command"];
-    const command = typeof value === "string" ? displayCommand(value) : null;
+    const command = typeof value === "string" ? unwrapCommand(value) : null;
     return {
       id: item["id"],
       kind: "tool",
       status,
       description:
         item["tool"] === "exec" && command !== null
-          ? command
+          ? command.replaceAll(/\s+/gu, " ")
           : toolDescription(item["tool"], arguments_, item["arguments"]),
       paths:
         item["tool"] === "exec" && command !== null
@@ -118,11 +118,11 @@ export function scanActivityFromEvent(
   return null;
 }
 
-function displayCommand(command: string): string {
-  const normalized = command.replaceAll(/\s+/gu, " ").trim();
+function unwrapCommand(command: string): string {
+  const normalized = command.trim();
   const powershell =
     process.platform === "win32"
-      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/iu.exec(
+      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/isu.exec(
           normalized,
         )
       : null;
@@ -135,7 +135,7 @@ function displayCommand(command: string): string {
     return powershell[4]!;
   }
   const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/u.exec(
+    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
       normalized,
     );
   if (match === null) return normalized;

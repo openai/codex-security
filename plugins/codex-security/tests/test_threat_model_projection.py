@@ -80,13 +80,47 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         self.assertIn(b"tmp/\\*", document)
         self.assertIn(b"Service boundaries.", document)
 
+    def test_scope_paths_keep_ambiguous_literals_distinct(self) -> None:
+        scope = {"includePaths": ["a,b.ts", "a  b", "src"], "excludePaths": [" "]}
+        document = FINALIZER._render_threat_model(
+            {"summary": "Existing structured model.", "scope": scope}, {"scanScope": scope}
+        )
+        for label in (b"Model scope", b"Scan scope"):
+            self.assertIn(label + b': `"a,b.ts"`, `"a  b"`, src\n', document)
+            self.assertIn(label + b' exclusions: `" "`\n', document)
+
+    def test_legacy_empty_scope_paths_keep_none_placeholder(self) -> None:
+        scope = {"includePaths": [""], "excludePaths": [""]}
+        document = FINALIZER._render_threat_model(
+            {"summary": "Existing structured model.", "scope": scope}, {"scanScope": scope}
+        )
+        for label in (b"Model scope", b"Scan scope"):
+            self.assertIn(label + b": none\n", document)
+            self.assertIn(label + b" exclusions: none\n", document)
+
+    def test_quoted_scope_paths_use_version_independent_unicode_escapes(self) -> None:
+        scope = {"includePaths": ["Résumé.md", "Résumé, final.md", "\U0001fae9,notes.md"]}
+        document = FINALIZER._render_threat_model(
+            {"summary": "Existing structured model.", "scope": scope}, {"scanScope": scope}
+        ).decode()
+        for label in ("Model scope", "Scan scope"):
+            self.assertIn(
+                f'- {label}: Résumé.md, `"R\\u00e9sum\\u00e9, final.md"`, '
+                '`"\\ud83e\\udee9,notes.md"`\n',
+                document,
+            )
+
     def test_exports_legacy_structured_model_extensions(self) -> None:
-        for extensions in (
-            {"format": "markdown"},
-            {"format": "markdown", "content": " \n"},
-            {"scope": "Repository-wide", "origin": "legacy-import"},
-            {"scope": {"includePaths": 42}, "origin": {"tool": "legacy"}},
-            {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+        for extensions, expected_origin in (
+            ({"format": "markdown"}, "not recorded"),
+            ({"format": "markdown", "content": " \n"}, "not recorded"),
+            ({"scope": "Repository-wide", "origin": "legacy-import"}, "legacy-import"),
+            ({"scope": {"includePaths": 42}, "origin": {"tool": "legacy"}}, "not recorded"),
+            (
+                {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+                "not recorded",
+            ),
+            ({"origin": ["generated"]}, "not recorded"),
         ):
             with self.subTest(extensions=extensions):
                 model = {"summary": "Existing structured model.", **extensions}
@@ -94,10 +128,10 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                 self.write_scan()
                 FINALIZER.finalize_scan(self.scan_dir)
                 self.assertEqual(self.read_json("scan-manifest.json")["scan"]["threatModel"], model)
-                self.assertIn(
-                    b"Existing structured model.",
-                    FINALIZER.build_threat_model_export(self.scan_dir),
-                )
+                document = FINALIZER.build_threat_model_export(self.scan_dir)
+                self.assertIn(b"Existing structured model.", document)
+                self.assertIn(f"- Model origin: {expected_origin}".encode(), document.splitlines())
+                self.assertEqual((self.scan_dir / "threatmodel.md").read_bytes(), document)
                 self.assertEqual(
                     FINALIZER.build_findings_export(self.scan_dir, "json"),
                     (self.scan_dir / "findings.json").read_bytes(),
@@ -117,11 +151,14 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
 
     def test_exports_legacy_metadata_with_markdown_content(self) -> None:
         body = "# Saved model\n\nKeep **authored** detail.\n"
-        for metadata in (
-            {"origin": "legacy-import", "scope": "Repository-wide"},
-            {"origin": {"tool": "legacy"}, "scope": {"includePaths": 42}},
-            {"origin": None, "scope": None},
-            {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+        for metadata, expected_origin in (
+            ({"origin": "legacy-import", "scope": "Repository-wide"}, "legacy-import"),
+            ({"origin": {"tool": "legacy"}, "scope": {"includePaths": 42}}, "not recorded"),
+            ({"origin": None, "scope": None}, "not recorded"),
+            (
+                {"scope": {"includePaths": ["src"], "excludePaths": 42, "summary": []}},
+                "not recorded",
+            ),
         ):
             with self.subTest(metadata=metadata):
                 model = {
@@ -139,6 +176,8 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                 document = FINALIZER.build_threat_model_export(self.scan_dir)
                 self.assertTrue(document.startswith(body.encode()))
                 self.assertNotIn(b"Existing structured model.", document)
+                self.assertIn(f"- Model origin: {expected_origin}".encode(), document.splitlines())
+                self.assertEqual((self.scan_dir / "threatmodel.md").read_bytes(), document)
                 self.assertEqual(
                     FINALIZER.describe_threat_model(self.scan_dir)["threatModel"], model
                 )

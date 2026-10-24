@@ -21,11 +21,7 @@ Read `references/ticket-intake.md` for issue URLs, identifiers, queries, or sear
 
 ### GitHub intake
 
-Read `references/github-rest-intake.md` for repository intake. Resolve the repository from an explicit locator, then the current Codex project's GitHub attachment, then the local GitHub remote. Ask when none resolves.
-
-If the finding source is unspecified, ask for code scanning, Dependabot vulnerabilities and malware, security advisories and private vulnerability reports, or all of those. Wait for selection before querying GitHub, inspecting code, or emitting the contract. Query only selected sources. GitHub Issues require an explicit issue or request and are excluded from default and all-source intake.
-
-Use REST by default and the connector when explicitly selected. Follow the reference's credential handling and ask before changing transport, account, or credential source. Connector retrieval does not require REST credentials. Preserve source/local revision differences as evidence or proof gaps; assess the current local code without changing revisions.
+Read `references/github-rest-intake.md` before repository intake. It owns repository and source selection, authorized transport and credentials, retrieval, and revision alignment. Retrieve the selected findings before inspecting code or emitting the contract.
 
 ## Normalize the inputs
 
@@ -36,11 +32,7 @@ Read `references/triage-result-contract.md` and normalize the supplied collectio
 - supplied evidence, counterevidence, and code references;
 - source provenance, including ticket or alert URL, identifiers, query, state, package, and reported revision when present.
 
-Use the contract's source types: `sarif`, `cve`, `advisory`, `scanner_ticket`, `bug_bounty`, `codex_security_finding`, `freeform`, or `unknown`.
-
-The completed-scan `../../schemas/findings.schema.json` is not the triage input shape. Extract available fields from a supplied Codex Security artifact and retain its original identifiers. Do not invent scanner fields, scan ids, severity, remediation, or locations to satisfy that schema.
-
-Resolve the local repository path and revision when available. Keep one result per selected finding; do not deduplicate, merge, or drop inputs.
+Resolve the local repository path and revision when available. Follow the contract's source types and artifact mapping; preserve missing facts instead of inventing completed-scan fields.
 
 ## Review the security policy
 
@@ -59,9 +51,7 @@ Record the policy statement and source that support each material boundary or sc
 
 ## Assess the specific claim
 
-Use `../../references/static-finding-assessment.md` for evidence search, source/control/sink tracing, boundary assessment, counterevidence, and static confidence. Inspect the smallest useful evidence set for the supplied claim.
-
-Establish the product surface and reachable path from entrypoints, callers, exports, package metadata, deployment evidence, and documentation. Record the actor, input provenance, privilege difference, supported preconditions, security property, and boundary assessed against the reviewed policy.
+Read `../../references/static-finding-assessment.md` for evidence search, source/control/sink tracing, boundary assessment, counterevidence, and static confidence. Apply it to the supplied claim and reviewed policy, recording the actor's privilege difference and the security property at issue.
 
 Trace the claimed actor and source through every material transformation and control to the exact consequence. Evaluate what controls enforce, what happens after denial or failure, and whether later parsing, decoding, binding, dispatch, or rendering restores a dangerous interpretation. A control's name, encoding, exception handling, authentication, or dangerous sink alone does not settle the claim.
 
@@ -79,13 +69,13 @@ Trusted-operator choices, insecure opt-ins, disabled mitigations, and build-depe
 
 ## Rank and route
 
-Assign unique, contiguous positive ranks from `1` separately within the `confirmed` and `needs_review` queues. Rank by attacker reachability, required privileges, preconditions, control over the path, guard strength, and evidence quality. Use impact or scanner severity only as a final tiebreaker. Set `not_actionable` queue and rank to `null`. Keep results in input order.
+Rank by attacker reachability, required privileges, preconditions, control over the path, guard strength, and evidence quality. Use impact or scanner severity only as a final tiebreaker. Apply the result contract's queue and rank rules.
 
 For confirmed findings, add an owner hint when CODEOWNERS, OWNERS, or other local evidence makes ownership clear. Omit guesses. Ownership does not affect the verdict, confidence, boundary assessment, or rank. The contract has no owner field; use existing evidence or next-step text, or Markdown.
 
 ## Return the result
 
-Build a valid `triage-finding/v0` result using `references/triage-result-contract.md`. Include one result per input, `source_type`, `boundary_assessment`, and `exploitability_stack_rank`, including unknown values where required.
+Build a valid `triage-finding/v0` result using `references/triage-result-contract.md`.
 
 Respond with a concise Markdown summary covering verdicts, confidence, ranks, affected locations, reachable paths and boundaries, evidence, counterevidence, proof gaps, and next steps. Include the full fenced JSON only when the user asks for raw or copyable results. For imported collections, follow the intake reference's collection summary.
 
