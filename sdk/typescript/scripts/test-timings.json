@@ -1,33 +1,33 @@
 {
   "action-release-workflow.test.ts": {
-    "linux": 2.9,
-    "darwin": 10.7,
-    "win32": 53.4
+    "linux": 3.5,
+    "darwin": 10.9,
+    "win32": 42.6
   },
   "api-attribution-concurrency.test.ts": {
-    "linux": 1.9,
-    "darwin": 5.5,
-    "win32": 134.7
+    "linux": 2,
+    "darwin": 4.8,
+    "win32": 106.9
   },
   "api-audit-admission.test.ts": {
     "linux": 0.2,
     "darwin": 0.2,
-    "win32": 0.6
+    "win32": 0.5
   },
   "api-credentials.test.ts": {
-    "linux": 2.0,
-    "darwin": 4.5,
-    "win32": 142.5
+    "linux": 1.9,
+    "darwin": 3.5,
+    "win32": 141.5
   },
   "api-cyber-access.test.ts": {
     "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 1.7
+    "darwin": 0.2,
+    "win32": 1.6
   },
   "api-deep-scan-advisory-routing.test.ts": {
-    "linux": 0.2,
-    "darwin": 0.1,
-    "win32": 4.4
+    "linux": 0.1,
+    "darwin": 0.2,
+    "win32": 3.9
   },
   "api-deep-scan-runtime-routing.test.ts": {
     "linux": 0.1,
@@ -35,9 +35,9 @@
     "win32": 0.6
   },
   "api-direct-deep-scan.test.ts": {
-    "linux": 0.5,
-    "darwin": 1.7,
-    "win32": 12.6
+    "linux": 0.8,
+    "darwin": 1,
+    "win32": 13.1
   },
   "api-environment.test.ts": {
     "linux": 0.1,
@@ -45,9 +45,9 @@
     "win32": 0.1
   },
   "api-events.test.ts": {
-    "linux": 6.3,
-    "darwin": 11.2,
-    "win32": 17.9
+    "linux": 8,
+    "darwin": 8.3,
+    "win32": 18.3
   },
   "api-integration.test.ts": {
     "linux": 0.1,
@@ -57,7 +57,7 @@
   "api-login.test.ts": {
     "linux": 0.1,
     "darwin": 0.1,
-    "win32": 2.7
+    "win32": 2.5
   },
   "api-operation-registration.test.ts": {
     "linux": 0.1,
@@ -67,82 +67,82 @@
   "api-patch.test.ts": {
     "linux": 0.2,
     "darwin": 0.4,
-    "win32": 6.7
+    "win32": 5.3
   },
   "api-policy.test.ts": {
-    "linux": 25.3,
-    "darwin": 26.8,
-    "win32": 191.6
+    "linux": 21.9,
+    "darwin": 37.6,
+    "win32": 176.4
   },
   "api-post-scan.test.ts": {
-    "linux": 10.2,
-    "darwin": 12.8,
-    "win32": 25.5
+    "linux": 10.1,
+    "darwin": 16.3,
+    "win32": 26
   },
   "api-preflight-config.test.ts": {
     "linux": 0.1,
-    "darwin": 0.2,
-    "win32": 0.9
+    "darwin": 0.1,
+    "win32": 1.2
   },
   "api-provider-isolation.test.ts": {
-    "linux": 3.6,
-    "darwin": 5.4,
-    "win32": 150.2
+    "linux": 3.3,
+    "darwin": 6.9,
+    "win32": 129.6
   },
   "api-runtime-storage.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 62.8
+    "linux": 0.2,
+    "darwin": 0.2,
+    "win32": 61.3
   },
   "api-time-budget.test.ts": {
-    "linux": 0.5,
-    "darwin": 0.7,
-    "win32": 2.1
+    "linux": 0.8,
+    "darwin": 0.8,
+    "win32": 1.5
   },
   "api-usage-finalization.test.ts": {
-    "linux": 0.4,
-    "darwin": 0.4,
+    "linux": 0.3,
+    "darwin": 0.3,
     "win32": 1.9
   },
   "api-usage.test.ts": {
-    "linux": 0.7,
+    "linux": 0.9,
     "darwin": 1.1,
-    "win32": 2.1
+    "win32": 2
   },
   "api-validation.test.ts": {
-    "linux": 145.3,
-    "darwin": 248.7,
-    "win32": 368.2
+    "linux": 190.4,
+    "darwin": 197.1,
+    "win32": 319.2
   },
   "api-workflow.test.ts": {
-    "linux": 28.2,
-    "darwin": 45.0,
-    "win32": 70.3
+    "linux": 27.1,
+    "darwin": 36.2,
+    "win32": 67.8
   },
   "api.test.ts": {
-    "linux": 49.4,
-    "darwin": 93.9,
-    "win32": 376.7
+    "linux": 54,
+    "darwin": 63.1,
+    "win32": 347.6
   },
   "artifact-export.test.ts": {
-    "linux": 3.5,
-    "darwin": 3.5,
-    "win32": 2.5
+    "linux": 4.7,
+    "darwin": 4.6,
+    "win32": 3.9
   },
   "attack-path-tool-name.test.ts": {
-    "linux": 0.1,
+    "linux": 0.2,
     "darwin": 0.2,
     "win32": 0.2
   },
   "auth-status-concurrency.test.ts": {
-    "linux": 1.5,
-    "darwin": 2.8,
-    "win32": 62.8
+    "linux": 2,
+    "darwin": 2,
+    "win32": 52.6
   },
   "auth.test.ts": {
     "linux": 1.9,
-    "darwin": 2.6,
-    "win32": 3.7
+    "darwin": 2.7,
+    "win32": 3.8
   },
   "azure-pipelines-example.test.ts": {
     "linux": 0.1,
@@ -150,14 +150,14 @@
     "win32": 0.7
   },
   "bind-repo-scopes.test.ts": {
-    "linux": 3.0,
-    "darwin": 4.5,
-    "win32": 9.5
+    "linux": 3.1,
+    "darwin": 3.6,
+    "win32": 8.7
   },
   "build-plugin.test.ts": {
-    "linux": 10.6,
-    "darwin": 8.7,
-    "win32": 15.9
+    "linux": 9.3,
+    "darwin": 12.2,
+    "win32": 14
   },
   "bulk-scan-discovery.test.ts": {
     "linux": 0.1,
@@ -165,19 +165,19 @@
     "win32": 0.1
   },
   "candidate-normalizer.test.ts": {
-    "linux": 11.3,
-    "darwin": 19.4,
-    "win32": 17.3
+    "linux": 17.3,
+    "darwin": 18.1,
+    "win32": 18.2
   },
   "check-markdown.test.ts": {
-    "linux": 2.3,
-    "darwin": 2.4,
-    "win32": 4.7
+    "linux": 2.2,
+    "darwin": 1.7,
+    "win32": 4
   },
   "classify-scan-severity.test.ts": {
-    "linux": 33.0,
-    "darwin": 48.0,
-    "win32": 74.4
+    "linux": 37.5,
+    "darwin": 42.5,
+    "win32": 81.3
   },
   "classify-severity-records.test.ts": {
     "linux": 0.1,
@@ -190,18 +190,18 @@
     "win32": 0.1
   },
   "cli-authentication.test.ts": {
-    "linux": 12.3,
-    "darwin": 17.2,
-    "win32": 308.7
+    "linux": 13.7,
+    "darwin": 12.5,
+    "win32": 233.6
   },
   "cli-classify-severity.test.ts": {
     "linux": 0.1,
-    "darwin": 0.1,
+    "darwin": 0.2,
     "win32": 0.2
   },
   "cli-cloud-publish.test.ts": {
-    "linux": 1.5,
-    "darwin": 0.7,
+    "linux": 1.3,
+    "darwin": 1,
     "win32": 1.9
   },
   "cli-daybreak.test.ts": {
@@ -210,7 +210,7 @@
     "win32": 0.1
   },
   "cli-dedupe.test.ts": {
-    "linux": 0.2,
+    "linux": 0.3,
     "darwin": 0.2,
     "win32": 0.3
   },
@@ -221,28 +221,28 @@
   },
   "cli-diagnostics.test.ts": {
     "linux": 0.4,
-    "darwin": 0.4,
-    "win32": 0.5
+    "darwin": 0.3,
+    "win32": 0.6
   },
   "cli-error-diagnostics.test.ts": {
-    "linux": 0.4,
-    "darwin": 0.7,
-    "win32": 1.0
+    "linux": 0.6,
+    "darwin": 0.4,
+    "win32": 1
   },
   "cli-export.test.ts": {
-    "linux": 7.6,
-    "darwin": 6.2,
-    "win32": 16.0
+    "linux": 6,
+    "darwin": 9,
+    "win32": 12.6
   },
   "cli-feedback.test.ts": {
-    "linux": 1.3,
-    "darwin": 2.4,
-    "win32": 4.4
+    "linux": 1.9,
+    "darwin": 1.9,
+    "win32": 4.3
   },
   "cli-help.test.ts": {
-    "linux": 0.2,
-    "darwin": 0.3,
-    "win32": 0.4
+    "linux": 0.4,
+    "darwin": 0.4,
+    "win32": 0.5
   },
   "cli-history-paths.test.ts": {
     "linux": 0.1,
@@ -250,49 +250,54 @@
     "win32": 0.1
   },
   "cli-launcher.test.ts": {
-    "linux": 1.5,
-    "darwin": 2.2,
-    "win32": 2.0
+    "linux": 2,
+    "darwin": 1.6,
+    "win32": 2
+  },
+  "cli-local-import.test.ts": {
+    "linux": 1.4,
+    "darwin": 1.2,
+    "win32": 3.7
   },
   "cli-patch-results.test.ts": {
-    "linux": 3.2,
-    "darwin": 8.7,
-    "win32": 89.9
+    "linux": 3,
+    "darwin": 7.5,
+    "win32": 77.1
   },
   "cli-patch-trust.test.ts": {
-    "linux": 1.0,
-    "darwin": 2.4,
-    "win32": 4.7
+    "linux": 1.2,
+    "darwin": 1.9,
+    "win32": 5.5
   },
   "cli-patch.test.ts": {
-    "linux": 2.7,
-    "darwin": 8.9,
-    "win32": 23.3
+    "linux": 3.6,
+    "darwin": 5.8,
+    "win32": 28.8
   },
   "cli-policy.test.ts": {
-    "linux": 4.6,
-    "darwin": 5.9,
-    "win32": 23.6
+    "linux": 5.2,
+    "darwin": 6.9,
+    "win32": 22
   },
   "cli-project-config.test.ts": {
-    "linux": 0.9,
-    "darwin": 1.7,
-    "win32": 4.2
+    "linux": 1.1,
+    "darwin": 1.5,
+    "win32": 5.5
   },
   "cli-publish.test.ts": {
-    "linux": 1.1,
-    "darwin": 1.8,
+    "linux": 1.4,
+    "darwin": 1,
     "win32": 1.7
   },
   "cli-saved-finding-evidence.test.ts": {
-    "linux": 6.2,
-    "darwin": 6.7,
-    "win32": 14.7
+    "linux": 7,
+    "darwin": 5.9,
+    "win32": 16.8
   },
   "cli-scan-failures.test.ts": {
-    "linux": 1.1,
-    "darwin": 0.8,
-    "win32": 1.6
+    "linux": 1.2,
+    "darwin": 1,
+    "win32": 1.8
   },
   "cli-scan-import.test.ts": {
     "linux": 0.2,
@@ -300,94 +305,99 @@
     "win32": 0.3
   },
   "cli-scan-logs.test.ts": {
-    "linux": 6.4,
-    "darwin": 5.7,
-    "win32": 8.8
+    "linux": 8.1,
+    "darwin": 5.3,
+    "win32": 8.4
   },
   "cli-scan-navigation.test.ts": {
-    "linux": 2.8,
-    "darwin": 2.7,
+    "linux": 3.7,
+    "darwin": 2.4,
     "win32": 5.9
   },
   "cli-scan-patch-settings.test.ts": {
-    "linux": 1.5,
-    "darwin": 1.9,
+    "linux": 2,
+    "darwin": 1.2,
     "win32": 3.4
   },
   "cli-scan-prompts.test.ts": {
     "linux": 0.3,
-    "darwin": 0.4,
-    "win32": 1.1
+    "darwin": 0.3,
+    "win32": 1.2
+  },
+  "cli-scan-validation.test.ts": {
+    "linux": 24.1,
+    "darwin": 27.1,
+    "win32": 62.5
   },
   "cli-show-cost.test.ts": {
     "linux": 0.3,
     "darwin": 0.3,
-    "win32": 0.5
+    "win32": 0.3
   },
   "cli-signals.test.ts": {
     "linux": 0.1,
     "darwin": 0.1,
-    "win32": 0.1
+    "win32": 0.2
   },
   "cli-skill-chatgpt-provider-auth.test.ts": {
-    "linux": 2.3,
-    "darwin": 2.7,
-    "win32": 271.3
+    "linux": 0.5,
+    "darwin": 0.5,
+    "win32": 47.6
   },
   "cli-skill-native-config.test.ts": {
-    "linux": 16.3,
-    "darwin": 27.2,
-    "win32": 223.9
+    "linux": 15.4,
+    "darwin": 27.9,
+    "win32": 283.8
   },
   "cli-skills.test.ts": {
-    "linux": 4.3,
-    "darwin": 5.2,
-    "win32": 5.1
+    "linux": 4.4,
+    "darwin": 4.3,
+    "win32": 5.4
   },
   "cli-suggest-owners.test.ts": {
-    "linux": 0.3,
-    "darwin": 0.2,
-    "win32": 0.4
-  },
-  "cli-verify-fix.test.ts": {
     "linux": 0.4,
     "darwin": 0.2,
-    "win32": 0.7
+    "win32": 0.5
+  },
+  "cli-verify-fix.test.ts": {
+    "linux": 0.5,
+    "darwin": 0.4,
+    "win32": 0.8
   },
   "cli-workbench.test.ts": {
-    "linux": 0.6,
-    "darwin": 0.6,
-    "win32": 1.1
+    "linux": 0.8,
+    "darwin": 0.4,
+    "win32": 0.9
   },
   "cli.test.ts": {
-    "linux": 5.8,
-    "darwin": 5.9,
-    "win32": 13.0
+    "linux": 5.5,
+    "darwin": 7,
+    "win32": 10.6
   },
   "cloud-publish.test.ts": {
-    "linux": 1.8,
-    "darwin": 1.6,
-    "win32": 6.9
+    "linux": 2.5,
+    "darwin": 1.5,
+    "win32": 8.7
   },
   "codeowners.test.ts": {
     "linux": 0.1,
-    "darwin": 0.3,
+    "darwin": 0.2,
     "win32": 0.2
   },
   "codex-process-cancellation.test.ts": {
     "linux": 2.2,
-    "darwin": 3.8,
-    "win32": 3.0
+    "darwin": 3.6,
+    "win32": 2.7
   },
   "codex-review.test.ts": {
-    "linux": 4.7,
-    "darwin": 6.7,
-    "win32": 12.7
+    "linux": 5.9,
+    "darwin": 5.6,
+    "win32": 11.9
   },
   "compact-diff-scan.test.ts": {
-    "linux": 12.7,
-    "darwin": 29.1,
-    "win32": 47.2
+    "linux": 13.8,
+    "darwin": 20.4,
+    "win32": 34.1
   },
   "completed-scan-handoff.test.ts": {
     "linux": 0.1,
@@ -395,9 +405,9 @@
     "win32": 0.1
   },
   "component-scan.test.ts": {
-    "linux": 13.2,
-    "darwin": 17.2,
-    "win32": 88.6
+    "linux": 15.6,
+    "darwin": 16.1,
+    "win32": 78.8
   },
   "config-approval-policy.test.ts": {
     "linux": 0.1,
@@ -406,28 +416,28 @@
   },
   "config.test.ts": {
     "linux": 0.5,
-    "darwin": 3.3,
-    "win32": 27.1
+    "darwin": 3.5,
+    "win32": 28.2
   },
   "container-ci-workflow.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.2,
-    "win32": 2.0
+    "linux": 0.2,
+    "darwin": 0.5,
+    "win32": 0.5
   },
   "container-entrypoint.test.ts": {
-    "linux": 0.1,
+    "linux": 0.2,
     "darwin": 0.5,
     "win32": 0.1
   },
   "container-release-workflow.test.ts": {
-    "linux": 0.5,
-    "darwin": 2.4,
-    "win32": 14.6
+    "linux": 0.7,
+    "darwin": 2.5,
+    "win32": 14.7
   },
   "contract.test.ts": {
-    "linux": 12.2,
-    "darwin": 11.2,
-    "win32": 21.5
+    "linux": 15.4,
+    "darwin": 19.6,
+    "win32": 19.2
   },
   "cost-context.test.ts": {
     "linux": 0.1,
@@ -440,28 +450,33 @@
     "win32": 0.1
   },
   "cost.test.ts": {
-    "linux": 1.3,
+    "linux": 1.4,
     "darwin": 1.5,
-    "win32": 2.1
+    "win32": 3.3
+  },
+  "coverage-presentation.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.1,
+    "win32": 0.1
   },
   "custom-publish.test.ts": {
     "linux": 0.4,
-    "darwin": 0.5,
-    "win32": 0.7
+    "darwin": 0.4,
+    "win32": 0.6
   },
   "custom-validation-example.test.ts": {
     "linux": 0.2,
-    "darwin": 0.6,
-    "win32": 0.3
+    "darwin": 0.7,
+    "win32": 0.5
   },
   "custom-validation.test.ts": {
-    "linux": 16.1,
-    "darwin": 19.0,
-    "win32": 44.7
+    "linux": 24.8,
+    "darwin": 24.6,
+    "win32": 51.3
   },
   "dedupe-records.test.ts": {
-    "linux": 0.7,
-    "darwin": 1.2,
+    "linux": 0.8,
+    "darwin": 1.4,
     "win32": 1.4
   },
   "deduplication-retry.test.ts": {
@@ -480,9 +495,9 @@
     "win32": 0.1
   },
   "deep-review-input.test.ts": {
-    "linux": 6.2,
-    "darwin": 9.4,
-    "win32": 14.6
+    "linux": 7.4,
+    "darwin": 8.9,
+    "win32": 12.7
   },
   "deep-scan-parent-denials.test.ts": {
     "linux": 0.1,
@@ -500,14 +515,14 @@
     "win32": 0.1
   },
   "deep-scan-workbench.test.ts": {
-    "linux": 13.8,
-    "darwin": 19.2,
-    "win32": 38.0
+    "linux": 19.6,
+    "darwin": 24.2,
+    "win32": 37.5
   },
   "deep-scan-worker-shutdown.test.ts": {
-    "linux": 32.1,
-    "darwin": 72.1,
-    "win32": 33.8
+    "linux": 34.5,
+    "darwin": 56.7,
+    "win32": 37.7
   },
   "devcontainer-cooldown.test.ts": {
     "linux": 0.1,
@@ -515,19 +530,29 @@
     "win32": 0.1
   },
   "diff-rank-input.test.ts": {
-    "linux": 0.8,
-    "darwin": 1.7,
-    "win32": 3.4
+    "linux": 0.7,
+    "darwin": 1.6,
+    "win32": 3.1
   },
   "direct-deep-scan.test.ts": {
     "linux": 0.1,
-    "darwin": 0.4,
-    "win32": 10.5
+    "darwin": 0.3,
+    "win32": 11.7
   },
   "effort-forwarding.test.ts": {
     "linux": 0.1,
-    "darwin": 0.2,
+    "darwin": 0.3,
     "win32": 0.2
+  },
+  "endor-findings-local.test.ts": {
+    "linux": 4.6,
+    "darwin": 3.7,
+    "win32": 8.8
+  },
+  "endor-findings.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.1,
+    "win32": 0.1
   },
   "errors.property.test.ts": {
     "linux": 0.1,
@@ -539,50 +564,65 @@
     "darwin": 0.1,
     "win32": 0.1
   },
+  "external-findings-import.test.ts": {
+    "linux": 11.8,
+    "darwin": 11.2,
+    "win32": 24.6
+  },
+  "external-findings-local-limits.test.ts": {
+    "linux": 9.5,
+    "darwin": 8,
+    "win32": 22
+  },
+  "external-findings-local.test.ts": {
+    "linux": 11.2,
+    "darwin": 14.5,
+    "win32": 70.2
+  },
   "external-findings-publish.test.ts": {
-    "linux": 6.0,
-    "darwin": 10.5,
-    "win32": 25.7
+    "linux": 8.8,
+    "darwin": 9.5,
+    "win32": 26.7
   },
   "feedback.test.ts": {
-    "linux": 0.4,
+    "linux": 0.5,
     "darwin": 0.5,
-    "win32": 1.8
+    "win32": 1.5
   },
   "finding-catalogue.test.ts": {
-    "linux": 21.4,
-    "darwin": 10.3,
-    "win32": 11.7
+    "linux": 21.9,
+    "darwin": 13.6,
+    "win32": 11.3
   },
   "finding-deduplication.test.ts": {
-    "linux": 6.2,
-    "darwin": 5.6,
-    "win32": 6.5
+    "linux": 6.1,
+    "darwin": 6.6,
+    "win32": 7
   },
   "finding-embeddings.test.ts": {
-    "linux": 2.6,
-    "darwin": 2.5,
+    "linux": 3.6,
+    "darwin": 2.8,
     "win32": 3.3
   },
   "finding-preview.test.ts": {
-    "linux": 8.9,
-    "darwin": 16.1,
-    "win32": 50.4
+    "linux": 9.2,
+    "darwin": 18,
+    "win32": 57
   },
   "finding-workflow-integration.test.ts": {
-    "linux": 76.6,
-    "darwin": 151.4,
-    "win32": 163.6
+    "linux": 107.1,
+    "darwin": 108.6,
+    "win32": 250.7
   },
   "finding-workflow-publication.test.ts": {
-    "linux": 11.1,
+    "linux": 11.5,
     "darwin": 10.2,
-    "win32": 14.3
+    "win32": 13.1
   },
   "finding-workflow.test.ts": {
-    "linux": 0.6,
-    "darwin": 0.9,
-    "win32": 4.6
+    "linux": 0.4,
+    "darwin": 0.7,
+    "win32": 2.3
   },
   "findings-client-retry.test.ts": {
     "linux": 0.1,
@@ -597,17 +637,17 @@
   "findings-import-record-endings.test.ts": {
     "linux": 0.2,
     "darwin": 0.2,
-    "win32": 0.6
+    "win32": 0.3
   },
   "findings-import.test.ts": {
     "linux": 1.7,
-    "darwin": 3.2,
-    "win32": 3.6
+    "darwin": 2.7,
+    "win32": 3.5
   },
   "findings-store.test.ts": {
-    "linux": 9.0,
-    "darwin": 12.8,
-    "win32": 16.0
+    "linux": 12.4,
+    "darwin": 10.8,
+    "win32": 24.7
   },
   "git-remote.test.ts": {
     "linux": 0.1,
@@ -619,40 +659,55 @@
     "darwin": 0.1,
     "win32": 0.4
   },
+  "github-advisories.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.2,
+    "win32": 0.2
+  },
+  "github-findings-local.test.ts": {
+    "linux": 5.5,
+    "darwin": 4.4,
+    "win32": 12.3
+  },
+  "github-findings.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.1,
+    "win32": 0.1
+  },
   "github.test.ts": {
     "linux": 0.2,
-    "darwin": 0.4,
-    "win32": 0.4
+    "darwin": 0.3,
+    "win32": 0.3
   },
   "host-protocol-node.test.ts": {
-    "linux": 7.5,
-    "darwin": 6.2,
-    "win32": 12.8
+    "linux": 6.8,
+    "darwin": 8.7,
+    "win32": 10.2
   },
   "hosted-remediation.test.ts": {
-    "linux": 1.2,
-    "darwin": 3.3,
-    "win32": 7.4
+    "linux": 1.8,
+    "darwin": 2.3,
+    "win32": 8
   },
   "hosted-scan.test.ts": {
-    "linux": 39.7,
-    "darwin": 76.2,
-    "win32": 174.1
+    "linux": 54,
+    "darwin": 78.4,
+    "win32": 195
   },
   "import-scan.test.ts": {
-    "linux": 30.5,
-    "darwin": 34.4,
-    "win32": 55.5
+    "linux": 36.2,
+    "darwin": 44.1,
+    "win32": 78
   },
   "invoice-desk-workflow.test.ts": {
-    "linux": 0.2,
-    "darwin": 0.5,
-    "win32": 1.4
+    "linux": 0.3,
+    "darwin": 0.4,
+    "win32": 1.3
   },
   "knowledge-base.test.ts": {
-    "linux": 1.7,
-    "darwin": 2.0,
-    "win32": 8.6
+    "linux": 2.2,
+    "darwin": 4.2,
+    "win32": 8.5
   },
   "linear-comment-pagination.test.ts": {
     "linux": 0.1,
@@ -670,24 +725,29 @@
     "win32": 0.1
   },
   "local-dedupe.test.ts": {
-    "linux": 71.6,
-    "darwin": 75.9,
-    "win32": 143.2
+    "linux": 86.1,
+    "darwin": 94.8,
+    "win32": 147.9
   },
   "mcp-launcher.test.ts": {
-    "linux": 1.3,
-    "darwin": 2.6,
-    "win32": 7.6
+    "linux": 1.4,
+    "darwin": 2.2,
+    "win32": 8.8
   },
   "mock-scan.test.ts": {
-    "linux": 10.8,
-    "darwin": 17.6,
-    "win32": 44.1
+    "linux": 11.5,
+    "darwin": 14.9,
+    "win32": 30.3
   },
   "multiscan.test.ts": {
-    "linux": 42.9,
-    "darwin": 67.3,
-    "win32": 216.6
+    "linux": 42.1,
+    "darwin": 94.1,
+    "win32": 200.7
+  },
+  "native-artifact-cache.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.2,
+    "win32": 2.1
   },
   "package-provenance.test.ts": {
     "linux": 0.1,
@@ -695,8 +755,8 @@
     "win32": 0.1
   },
   "package-public-content.test.ts": {
-    "linux": 0.9,
-    "darwin": 1.2,
+    "linux": 1.2,
+    "darwin": 1.1,
     "win32": 1.1
   },
   "package-smoke-timeouts.test.ts": {
@@ -710,9 +770,9 @@
     "win32": 0.1
   },
   "package-tar-listing.test.ts": {
-    "linux": 19.8,
-    "darwin": 45.3,
-    "win32": 91.7
+    "linux": 21.3,
+    "darwin": 36.5,
+    "win32": 133.5
   },
   "patch-publication.test.ts": {
     "linux": 0.1,
@@ -720,14 +780,14 @@
     "win32": 0.9
   },
   "patch-risk-contract.test.ts": {
-    "linux": 14.4,
-    "darwin": 29.8,
-    "win32": 48.1
+    "linux": 22.5,
+    "darwin": 21,
+    "win32": 53
   },
   "patch-tui.test.ts": {
-    "linux": 2.0,
-    "darwin": 3.1,
-    "win32": 16.2
+    "linux": 2.6,
+    "darwin": 2.4,
+    "win32": 6.4
   },
   "plugin-apps.test.ts": {
     "linux": 0.1,
@@ -735,19 +795,19 @@
     "win32": 0.1
   },
   "plugin-finding-detail-contract.test.ts": {
-    "linux": 0.2,
+    "linux": 0.3,
     "darwin": 0.3,
     "win32": 0.5
   },
   "plugin-report-limits.test.ts": {
-    "linux": 0.5,
-    "darwin": 0.7,
-    "win32": 0.7
+    "linux": 0.6,
+    "darwin": 0.6,
+    "win32": 0.8
   },
   "project-config.test.ts": {
     "linux": 0.1,
     "darwin": 0.1,
-    "win32": 0.1
+    "win32": 0.2
   },
   "prompt-only-start-timeout.test.ts": {
     "linux": 0.1,
@@ -755,9 +815,9 @@
     "win32": 0.1
   },
   "provider-profile.test.ts": {
-    "linux": 1.5,
-    "darwin": 2.9,
-    "win32": 9.9
+    "linux": 1.9,
+    "darwin": 2.6,
+    "win32": 11.4
   },
   "publication-check.test.ts": {
     "linux": 0.1,
@@ -770,34 +830,34 @@
     "win32": 0.1
   },
   "publication-integration.test.ts": {
-    "linux": 15.1,
-    "darwin": 21.4,
-    "win32": 31.7
+    "linux": 14.7,
+    "darwin": 19.1,
+    "win32": 33.8
   },
   "publication-store.test.ts": {
-    "linux": 22.2,
-    "darwin": 25.1,
-    "win32": 44.6
+    "linux": 18,
+    "darwin": 23.8,
+    "win32": 40.9
   },
   "publication.test.ts": {
-    "linux": 2.1,
-    "darwin": 2.0,
-    "win32": 2.6
+    "linux": 1.9,
+    "darwin": 2.1,
+    "win32": 3.4
   },
   "publish.test.ts": {
     "linux": 3.5,
-    "darwin": 4.9,
-    "win32": 6.5
+    "darwin": 5,
+    "win32": 6.6
   },
   "published-install-smoke.test.ts": {
-    "linux": 0.2,
+    "linux": 0.1,
     "darwin": 0.2,
     "win32": 0.6
   },
   "release-automation.test.ts": {
-    "linux": 3.6,
-    "darwin": 11.6,
-    "win32": 25.3
+    "linux": 4.8,
+    "darwin": 13.6,
+    "win32": 24.1
   },
   "release-cut-workflow.test.ts": {
     "linux": 0.1,
@@ -805,19 +865,24 @@
     "win32": 0.1
   },
   "release-pr.test.ts": {
-    "linux": 27.5,
-    "darwin": 53.6,
-    "win32": 226.9
+    "linux": 27.6,
+    "darwin": 54.8,
+    "win32": 238.3
+  },
+  "release-progress-workflow.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.1,
+    "win32": 0.1
   },
   "repository-findings.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 0.4
+    "linux": 0.2,
+    "darwin": 0.2,
+    "win32": 2.1
   },
   "request-metadata.test.ts": {
     "linux": 0.1,
-    "darwin": 0.8,
-    "win32": 0.7
+    "darwin": 0.5,
+    "win32": 1.1
   },
   "result.test.ts": {
     "linux": 0.1,
@@ -825,19 +890,19 @@
     "win32": 0.1
   },
   "runtime-plugin-reuse.test.ts": {
-    "linux": 0.4,
-    "darwin": 1.9,
-    "win32": 1.4
+    "linux": 0.5,
+    "darwin": 1.3,
+    "win32": 1.1
   },
   "runtime-zip-descriptor.test.ts": {
-    "linux": 0.4,
-    "darwin": 0.5,
+    "linux": 0.5,
+    "darwin": 0.4,
     "win32": 0.7
   },
   "runtime.test.ts": {
-    "linux": 39.7,
-    "darwin": 41.6,
-    "win32": 195.4
+    "linux": 73.9,
+    "darwin": 89.5,
+    "win32": 220
   },
   "sandbox-probe.test.ts": {
     "linux": 0.1,
@@ -846,13 +911,13 @@
   },
   "sarif.test.ts": {
     "linux": 0.8,
-    "darwin": 1.2,
-    "win32": 1.2
+    "darwin": 1,
+    "win32": 2.8
   },
   "saved-scan-bootstrap.test.ts": {
-    "linux": 118.8,
-    "darwin": 119.0,
-    "win32": 103.7
+    "linux": 97.2,
+    "darwin": 172.6,
+    "win32": 121.7
   },
   "scan-activity.test.ts": {
     "linux": 0.1,
@@ -860,19 +925,29 @@
     "win32": 0.1
   },
   "scan-comparison.property.test.ts": {
-    "linux": 0.4,
+    "linux": 0.5,
     "darwin": 0.3,
     "win32": 0.5
   },
   "scan-comparison.test.ts": {
-    "linux": 4.6,
-    "darwin": 5.0,
-    "win32": 127.7
+    "linux": 4.9,
+    "darwin": 5.5,
+    "win32": 135.6
   },
   "scan-dashboard.test.ts": {
-    "linux": 4.5,
-    "darwin": 21.5,
-    "win32": 40.1
+    "linux": 27.2,
+    "darwin": 16.7,
+    "win32": 39.6
+  },
+  "scan-directory-identity.test.ts": {
+    "linux": 2.1,
+    "darwin": 1.6,
+    "win32": 4.2
+  },
+  "scan-file-identity.test.ts": {
+    "linux": 0.2,
+    "darwin": 0.3,
+    "win32": 0.6
   },
   "scan-history-renderer.test.ts": {
     "linux": 0.1,
@@ -885,24 +960,24 @@
     "win32": 0.2
   },
   "scan-logs.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 0.3
+    "linux": 0.2,
+    "darwin": 0.1,
+    "win32": 0.5
   },
   "scan-matching-e2e.test.ts": {
     "linux": 7.4,
-    "darwin": 12.4,
-    "win32": 17.5
+    "darwin": 10.5,
+    "win32": 19.8
   },
   "scan-mcp-startup.test.ts": {
-    "linux": 1.9,
-    "darwin": 2.1,
-    "win32": 8.7
+    "linux": 1.8,
+    "darwin": 2.3,
+    "win32": 4.9
   },
   "scan-owner-suggestions.test.ts": {
-    "linux": 0.3,
-    "darwin": 1.3,
-    "win32": 9.4
+    "linux": 0.7,
+    "darwin": 1.9,
+    "win32": 14.8
   },
   "scan-progress.test.ts": {
     "linux": 0.1,
@@ -910,19 +985,19 @@
     "win32": 0.1
   },
   "scan-recipe.test.ts": {
-    "linux": 12.2,
-    "darwin": 12.5,
-    "win32": 35.5
+    "linux": 15.1,
+    "darwin": 15.1,
+    "win32": 40.5
   },
   "scan-recovery.test.ts": {
-    "linux": 15.2,
-    "darwin": 32.8,
-    "win32": 66.1
+    "linux": 22.5,
+    "darwin": 28.4,
+    "win32": 66.8
   },
   "scan-resume.test.ts": {
-    "linux": 97.0,
-    "darwin": 164.8,
-    "win32": 231.9
+    "linux": 80.8,
+    "darwin": 140.9,
+    "win32": 167.9
   },
   "scan-skill-paths.test.ts": {
     "linux": 0.1,
@@ -935,19 +1010,19 @@
     "win32": 0.1
   },
   "script-entrypoints.test.ts": {
-    "linux": 3.1,
-    "darwin": 6.1,
-    "win32": 7.0
+    "linux": 2.9,
+    "darwin": 5.2,
+    "win32": 6.1
   },
   "sdk-project-config.test.ts": {
     "linux": 0.2,
-    "darwin": 0.3,
-    "win32": 1.4
+    "darwin": 0.2,
+    "win32": 1.6
   },
   "sdk-scan-prompts.test.ts": {
-    "linux": 0.9,
-    "darwin": 1.1,
-    "win32": 3.3
+    "linux": 1.1,
+    "darwin": 1,
+    "win32": 3.6
   },
   "security-policy-diff.test.ts": {
     "linux": 0.1,
@@ -955,14 +1030,24 @@
     "win32": 0.1
   },
   "security-policy-helper.test.ts": {
-    "linux": 8.3,
-    "darwin": 9.5,
-    "win32": 9.7
+    "linux": 11.1,
+    "darwin": 8.2,
+    "win32": 13.3
   },
   "security-policy.test.ts": {
-    "linux": 8.4,
-    "darwin": 24.5,
-    "win32": 82.5
+    "linux": 10.4,
+    "darwin": 18.2,
+    "win32": 77.7
+  },
+  "semgrep-findings-local.test.ts": {
+    "linux": 23.7,
+    "darwin": 19,
+    "win32": 55.3
+  },
+  "semgrep-findings.test.ts": {
+    "linux": 0.2,
+    "darwin": 0.2,
+    "win32": 0.2
   },
   "severity-review.test.ts": {
     "linux": 0.1,
@@ -979,35 +1064,50 @@
     "darwin": 0.1,
     "win32": 0.4
   },
+  "snyk-findings-local.test.ts": {
+    "linux": 4.9,
+    "darwin": 4.5,
+    "win32": 11.1
+  },
+  "snyk-findings.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.1,
+    "win32": 0.2
+  },
   "stopped-scan-results.test.ts": {
-    "linux": 8.0,
-    "darwin": 10.9,
-    "win32": 19.3
+    "linux": 11.8,
+    "darwin": 8.4,
+    "win32": 19.2
   },
   "suggest-owners.test.ts": {
-    "linux": 2.9,
-    "darwin": 11.8,
-    "win32": 70.5
+    "linux": 3.2,
+    "darwin": 12,
+    "win32": 47.7
   },
   "targets-large-output.test.ts": {
     "linux": 0.4,
-    "darwin": 1.3,
-    "win32": 4.8
+    "darwin": 1,
+    "win32": 5.9
   },
   "targets.test.ts": {
-    "linux": 0.8,
-    "darwin": 3.9,
-    "win32": 12.0
+    "linux": 1.1,
+    "darwin": 2.2,
+    "win32": 12.3
   },
   "test-reports.test.ts": {
-    "linux": 3.1,
-    "darwin": 4.6,
-    "win32": 6.0
+    "linux": 4.5,
+    "darwin": 6.7,
+    "win32": 9.9
   },
   "test-shards.test.ts": {
-    "linux": 2.3,
-    "darwin": 5.3,
-    "win32": 6.1
+    "linux": 4.5,
+    "darwin": 6.1,
+    "win32": 10.1
+  },
+  "test-timings.test.ts": {
+    "linux": 0.1,
+    "darwin": 0.1,
+    "win32": 0.1
   },
   "trusted-executable.test.ts": {
     "linux": 0.6,
@@ -1016,23 +1116,28 @@
   },
   "update-notice.test.ts": {
     "linux": 0.1,
-    "darwin": 0.1,
+    "darwin": 0.2,
     "win32": 0.1
   },
   "validation-records.test.ts": {
     "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 0.3
+    "darwin": 0.2,
+    "win32": 0.1
   },
   "windows-scan-output.test.ts": {
     "linux": 0.1,
     "darwin": 0.1,
-    "win32": 16.6
+    "win32": 19.2
+  },
+  "wiz-findings-local.test.ts": {
+    "linux": 2.9,
+    "darwin": 4.3,
+    "win32": 11.5
   },
   "wiz-findings.test.ts": {
-    "linux": 4.4,
-    "darwin": 5.4,
-    "win32": 10.6
+    "linux": 4.7,
+    "darwin": 5.6,
+    "win32": 12
   },
   "workbench-arguments.test.ts": {
     "linux": 0.1,
@@ -1040,29 +1145,29 @@
     "win32": 0.1
   },
   "workbench-canonical-paths.test.ts": {
-    "linux": 0.8,
-    "darwin": 2.3,
-    "win32": 4.9
+    "linux": 1.1,
+    "darwin": 1.7,
+    "win32": 4.8
   },
   "workbench-nested-git-utf8.test.ts": {
     "linux": 0.1,
-    "darwin": 0.2,
+    "darwin": 0.4,
     "win32": 1.6
   },
   "workbench-scan-history.test.ts": {
-    "linux": 1.5,
-    "darwin": 2.3,
-    "win32": 3.9
+    "linux": 1.9,
+    "darwin": 2.5,
+    "win32": 5.5
   },
   "workbench-scan-root-alias.test.ts": {
-    "linux": 0.2,
-    "darwin": 0.3,
-    "win32": 0.6
+    "linux": 0.3,
+    "darwin": 0.4,
+    "win32": 0.7
   },
   "workbench-windows-compatibility.test.ts": {
-    "linux": 0.5,
-    "darwin": 1.1,
-    "win32": 2.0
+    "linux": 0.6,
+    "darwin": 0.8,
+    "win32": 1.8
   },
   "worker-progress.property.test.ts": {
     "linux": 0.1,
@@ -1076,7 +1181,7 @@
   },
   "workflow-quality.test.ts": {
     "linux": 0.1,
-    "darwin": 0.2,
-    "win32": 0.1
+    "darwin": 0.3,
+    "win32": 0.8
   }
 }
