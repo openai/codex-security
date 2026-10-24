@@ -31,12 +31,18 @@ const USAGE_LIMIT_MESSAGES = new Set([
   "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
 ]);
 
+// Codex reports failures from remote context compaction with this prefix.
+const REMOTE_COMPACTION_ERROR_PREFIX = "Error running remote compact task: ";
+
 // Codex exec exposes only text for failed turns. Match its native quota messages here.
 export function codexWorkerTurnError(message: string): Error {
+  const reason = message.startsWith(REMOTE_COMPACTION_ERROR_PREFIX)
+    ? message.slice(REMOTE_COMPACTION_ERROR_PREFIX.length)
+    : message;
   if (
-    USAGE_LIMIT_MESSAGES.has(message) ||
-    message.startsWith("You’ve hit your usage limit.") ||
-    message.startsWith("You’ve hit your usage limit for ")
+    USAGE_LIMIT_MESSAGES.has(reason) ||
+    reason.startsWith("You’ve hit your usage limit.") ||
+    reason.startsWith("You’ve hit your usage limit for ")
   ) {
     return new DeepScanNonRetryableError(message);
   }
