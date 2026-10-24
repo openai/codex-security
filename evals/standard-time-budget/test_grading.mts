@@ -3,12 +3,16 @@ import test from "node:test";
 import { createFixture, type Fixture, type SourceCase } from "./fixtures.mts";
 import { gradeResult, type SourceLocation } from "./grade.mts";
 
-function findingFor(fixture: Fixture, expected: SourceCase) {
+function findingFor(
+  fixture: Fixture,
+  expected: SourceCase,
+  role = "root_control",
+) {
   return {
     title: expected.id,
     taxonomy: { cwe: [expected.cwes[0]] },
     locations: [
-      { path: expected.path, startLine: expected.line, role: "root_control" },
+      { path: expected.path, startLine: expected.line, role },
     ] as SourceLocation[],
     codeEvidence: [
       {
@@ -30,26 +34,64 @@ function completeResult(fixture: Fixture) {
   };
 }
 
-test("authentic source evidence matches all four vulnerability families", () => {
+test("authentic source evidence matches every vulnerability family", () => {
   const fixture = createFixture();
   const result = completeResult(fixture);
   result.findings[1].locations[0].role = "sink";
   const report = gradeResult(result, fixture);
   assert.equal(report.passed, true);
   assert.equal(report.recall, 1);
-  assert.equal(report.expectedCount, 4);
-  assert.equal(report.foundCount, 4);
+  assert.equal(report.expectedCount, fixture.positives.length);
+  assert.equal(report.foundCount, fixture.positives.length);
   assert.deepEqual(report.evidenceErrors, []);
 });
 
-test("a missed bug reduces recall", () => {
+test("missing SSRF reduces recall even when every other case is found", () => {
   const fixture = createFixture();
-  const result = completeResult(fixture);
-  result.findings.pop();
-  const report = gradeResult(result, fixture);
-  assert.equal(report.recall, 0.75);
+  const findings = completeResult(fixture).findings.filter(
+    (finding) => !finding.taxonomy.cwe.includes("CWE-918"),
+  );
+  const report = gradeResult({ findings }, fixture);
+  assert.deepEqual(
+    report.cases.filter((entry) => !entry.found),
+    [{ id: "partner-status-ssrf", found: false }],
+  );
+  assert.equal(report.recall, 4 / 5);
   assert.equal(report.passed, false);
   assert.deepEqual(report.unmatchedFindings, []);
+});
+
+test("SSRF earns credit at the user-selected destination and flags the allowlisted destination for review", () => {
+  const fixture = createFixture();
+  const path = "src/partners.py";
+  function findingAt(sink: string) {
+    const line =
+      fixture.files[path].split("\n").findIndex((row) => row.includes(sink)) +
+      1;
+    assert.ok(line > 0, `Missing sink: ${sink}`);
+    return findingFor(
+      fixture,
+      { id: "Outbound status request", path, line, cwes: ["CWE-918"] },
+      "sink",
+    );
+  }
+  const positive = gradeResult(
+    { findings: [findingAt('requests.head(request.args["url"]')] },
+    fixture,
+  );
+  assert.deepEqual(positive.matchedIds, ["partner-status-ssrf"]);
+  assert.equal(positive.safeControlFindings, 0);
+
+  const control = gradeResult(
+    { findings: [findingAt("requests.head(url,")] },
+    fixture,
+  );
+  assert.deepEqual(control.matchedIds, []);
+  assert.deepEqual(
+    control.safeControlDetails.map((entry) => entry.controlIds),
+    [["partner-status-allowlist"]],
+  );
+  assert.equal(control.needsAdjudication, true);
 });
 
 test("additional fabricated locations invalidate an otherwise grounded finding", () => {
@@ -65,7 +107,7 @@ test("additional fabricated locations invalidate an otherwise grounded finding",
       result.findings[0].locations.push({ ...location, role });
       const report = gradeResult(result, fixture);
       assert.equal(report.passed, false);
-      assert.equal(report.recall, 0.75);
+      assert.equal(report.foundCount, fixture.positives.length - 1);
       assert.equal(report.needsAdjudication, true);
       assert.deepEqual(report.evidenceErrors, [
         {
@@ -84,7 +126,7 @@ test("duplicate reports cannot increase recall", () => {
   result.findings.push(structuredClone(result.findings[0]));
   const report = gradeResult(result, fixture);
   assert.equal(report.recall, 1);
-  assert.equal(report.foundCount, 4);
+  assert.equal(report.foundCount, fixture.positives.length);
   assert.equal(report.duplicateFindings, 1);
 });
 
@@ -116,7 +158,7 @@ test("a different CWE, source line, or non-primary role does not earn a gold mat
     const result = completeResult(fixture);
     alter(result.findings[0]);
     const report = gradeResult(result, fixture);
-    assert.equal(report.recall, 0.75);
+    assert.equal(report.foundCount, fixture.positives.length - 1);
     assert.equal(report.unmatchedFindings.length, 1);
     assert.equal(report.needsAdjudication, true);
     assert.equal(report.safeControlFindings, 0);
@@ -153,7 +195,7 @@ test("missing, fabricated, misplaced, or unrelated evidence cannot earn recall",
     const result = completeResult(fixture);
     alter(result.findings[0]);
     const report = gradeResult(result, fixture);
-    assert.equal(report.recall, 0.75);
+    assert.equal(report.foundCount, fixture.positives.length - 1);
     assert.equal(report.passed, false);
     assert.ok(report.evidenceErrors.length > 0);
   }

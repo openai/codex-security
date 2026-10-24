@@ -45,10 +45,13 @@ child processes before cleaning temporary state.
 
 ## Fixture and isolation
 
-The synthetic application has tenant authorization, SQL injection, file
-traversal, and reflected HTML bugs, each with a safe control. Source and
-deployment context go to the model; gold labels and expected locations stay
-in the evaluator.
+The synthetic application covers tenant authorization, SQL injection, file
+traversal, reflected HTML, and server-side request forgery (SSRF). Each case
+has a safe control. The SSRF pair checks whether a tenant can choose the
+destination of a server-side status request. The billing route accepts only
+the two approved URLs. Both routes return the status of the first response,
+including redirects. The model receives source and deployment context. The
+evaluator holds the gold labels and locations.
 
 Each arm runs in an opaque temporary directory outside the artifact tree; pair
 and variant labels appear only in evaluator reports and archives. After the
@@ -97,6 +100,9 @@ workers, even when completion or grading fails. Missing usage stays unknown,
 cached input is a subset of input tokens, and no dollar cost is inferred.
 
 ## Interpretation and checks
+
+Use the `fixtures.mts` hash in `experiment.json` to identify the corpus revision.
+If two runs have different revisions, compare their results on the shared case IDs.
 
 Two pairs are a smoke comparison, not statistical evidence. Review findings
 without variant labels and compare grounded recall, adjudicated false
