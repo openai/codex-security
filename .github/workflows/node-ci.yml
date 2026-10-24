@@ -125,8 +125,7 @@ jobs:
           persist-credentials: false
       - name: Check plugin source boundary
         run: node sdk/typescript/scripts/check-plugin-source.mjs
-      - &download-native
-        name: Prepare native runtime
+      - name: Prepare native runtime
         uses: ./.github/actions/download-native
       - *set-up-typescript-tools
       - *install-dependencies
@@ -158,7 +157,6 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
       - *checkout-repository
-      - *download-native
       - *set-up-typescript-tools
       - &set-up-bun
         name: Set up Bun
@@ -172,8 +170,12 @@ jobs:
         with:
           name: package-${{ github.sha }}
           path: dist
-      - name: Restore bundled plugin
-        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - &restore-sdk-test-plugin
+        name: Restore bundled plugin
+        shell: bash
+        run: |
+          tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+          cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -507,14 +509,11 @@ jobs:
     steps:
       - *checkout-repository
       - *set-up-python
-      - *download-native
       - *set-up-typescript-tools
       - *set-up-bun
       - *install-dependencies
       - *download-package-for-this-commit
-      - name: Restore bundled plugin
-        shell: bash
-        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - *restore-sdk-test-plugin
       - name: Prepare private Windows test root
         id: windows-temp
         shell: pwsh

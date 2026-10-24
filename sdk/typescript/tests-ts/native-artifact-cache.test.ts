@@ -86,13 +86,32 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     const initial = key();
     expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
     writeSource(repository, "README.md", "updated documentation\n");
+    writeSource(
+      repository,
+      ".github/scripts/invoice-desk-target.mjs",
+      "invoice\n",
+    );
+    writeSource(
+      repository,
+      "plugins/codex-security/mcp-app/tests/support/new.ts",
+      "fixture\n",
+    );
     commit();
     expect(key()).toBe(initial);
+
+    writeSource(
+      repository,
+      ".github/scripts/new-proof-input.mts",
+      "compile me\n",
+    );
+    commit();
+    const changedCompilerInput = key();
+    expect(changedCompilerInput).not.toBe(initial);
 
     writeSource(repository, source, "updated native source\n");
     commit();
     const changedNative = key();
-    expect(changedNative).not.toBe(initial);
+    expect(changedNative).not.toBe(changedCompilerInput);
 
     writeSource(repository, helper, "updated helper source\n");
     commit();
