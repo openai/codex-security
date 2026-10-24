@@ -6,24 +6,20 @@ which should prompt the user for a finding in a supported format instead of retu
 
 The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The common runner stages the checkout's triage skill and policy helper in a throwaway directory, with ambient plugins and memory disabled. The default suite can also read the synthetic fixtures; calibration cases can read their own hydrated checkout. Dataset labels, assertions, and calibration Git history stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
-Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
-
-The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling type checks use the SDK’s TypeScript dependencies.
-
-Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner and check the TypeScript tooling:
+Use Node.js 22.22.0 or newer and install the [native build prerequisites](../../plugins/codex-security/native/README.md). From the repository root, install the SDK dependencies and set up the eval. Setup installs the eval and MCP app dependencies, type-checks the eval sources, and builds the host policy helper.
 
 ```bash
+pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir evals/triage-finding run setup
 ```
 
-After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It prepares the SDK and type-checks the eval sources. Node and Promptfoo execute the TypeScript sources directly; package commands enable type stripping for Node 22.13.
-
-Before running the eval commands, prepare the native policy helper (requires the [native build prerequisites](../../plugins/codex-security/native/README.md)):
+To reproduce the deterministic triage checks that CI runs, execute this command from the repository root. It covers intake assertions, calibration, SastBench, and the Promptfoo provider using fixtures without making model calls.
 
 ```bash
-pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-node plugins/codex-security/mcp-app/scripts/build_native.mjs
+(cd evals/triage-finding && node --run test:deterministic)
 ```
+
+After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals` to prepare the SDK and type-check the eval sources. Node and Promptfoo execute the TypeScript sources directly.
 
 The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. Separate YAML files under `providers/` retain the native Codex provider IDs and each suite's settings. The suite's `$ref` entries expand these settings into saved evaluation snapshots, so later edits to the provider files do not change an existing run's retry, resume, or replay settings. The runner uses Node's `--import` to preload the runtime adapter into the Promptfoo child process, so it can bind the staged runtime during evaluation, retry, resume, and viewer replay without a Promptfoo patch. Native provider loading preserves authentication precedence.
 
