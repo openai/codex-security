@@ -375,7 +375,8 @@ describe("canonical scan contract", () => {
     ).resolves.toBe(false);
   });
 
-  test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+  // macOS can reject the unreadable path before the checked open.
+  test.skipIf(process.platform !== "linux" || process.geteuid?.() === 0)(
     "reports the permission error when opening an unreadable scan file",
     async () => {
       const scanDir = await realpath(await temporaryDirectory());
