@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { jsonLines } from "./support/json.js";
 import { createServer, type Socket } from "node:net";
 import {
   appendFile,
@@ -18,7 +19,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -27,7 +28,14 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test as nativeTest,
+} from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -58,7 +66,11 @@ import {
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
-import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanCost,
+} from "../src/cost.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
@@ -93,7 +105,12 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
-import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
+import {
+  progressMarker,
+  nativeCommand,
+  completedCommand,
+  writeSession as writeUsageSession,
+} from "./support/usage-rollout.js";
 import { importScan } from "../src/import-scan.js";
 import { restoreScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { VERSION } from "../src/version.js";
@@ -101,6 +118,59 @@ import { createProviderProfile } from "../src/provider-profile.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
+
+function traceApiTest(
+  register: typeof nativeTest,
+  table?: readonly unknown[],
+): typeof nativeTest {
+  return new Proxy(register, {
+    apply(target, receiver, argumentsList) {
+      const [name, callback] = argumentsList;
+      if (typeof callback === "function") {
+        // Bun requires a real callback function and uses its arity for done.
+        const traced = function (this: unknown, ...parameters: unknown[]) {
+          const rows = table?.flatMap((row, index) => {
+            const values = Array.isArray(row) ? row : [row];
+            return values.every((value, column) =>
+              Object.is(value, parameters[column]),
+            )
+              ? [index]
+              : [];
+          });
+          writeSync(
+            2,
+            `[api test] start: ${name}${rows === undefined ? "" : ` (each rows: ${rows.join(",")})`}\n`,
+          );
+          return Reflect.apply(callback, this, parameters);
+        };
+        Object.defineProperty(traced, "length", { value: callback.length });
+        Object.defineProperty(traced, "name", { value: callback.name });
+        argumentsList[1] = traced;
+      }
+      return Reflect.apply(target, receiver, argumentsList);
+    },
+    get(target, property) {
+      const value = Reflect.get(target, property);
+      if (property === "each" || property === "skipIf") {
+        return (...parameters: unknown[]) =>
+          traceApiTest(
+            Reflect.apply(value, target, parameters),
+            property === "each" ? (parameters[0] as readonly unknown[]) : table,
+          );
+      }
+      return value;
+    },
+  });
+}
+
+const test = traceApiTest(nativeTest);
+
+// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
+const commandHead = "h".repeat(32_743);
+const commandTail = "t".repeat(32_743);
+const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+const commandOutput = (middle: string) =>
+  `${commandHead}\n${middle}\n${commandTail}`;
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
@@ -3250,6 +3320,7 @@ describe("CodexSecurity orchestration", () => {
           if (scenario === "late marker") {
             expect(updates.at(-1)).toEqual({
               ...updates[1]!,
+              phase: "discovery",
               filesCompleted: 3,
             });
           }
@@ -3837,20 +3908,14 @@ describe("CodexSecurity orchestration", () => {
                   );
                 });
                 if (itemType === "command_execution") {
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: "inventory-command",
-                      type: "command_execution",
-                      command: "review the files in the inventory",
-                      aggregated_output: [
-                        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":5000}',
-                        ...texts,
-                      ].join("\n"),
-                      exit_code: 0,
-                      status: "completed",
-                    },
-                  };
+                  yield completedCommand(
+                    "review the files in the inventory",
+                    [
+                      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":5000}',
+                      ...texts,
+                    ].join("\n"),
+                    "inventory-command",
+                  );
                 } else {
                   for (const [index, text] of texts.entries()) {
                     yield {
@@ -4009,7 +4074,7 @@ describe("CodexSecurity orchestration", () => {
           filesTotal: 1_258,
           reviewItems: { completed: 0, total: 0 },
         },
-        ...[3, 1_249, 1_249].map<ScanProgress>((filesCompleted) => ({
+        ...[3, 1_249].map<ScanProgress>((filesCompleted) => ({
           phase: parentDispatch ? "validation" : "discovery",
           filesCompleted,
           filesTotal: 1_258,
@@ -4034,6 +4099,11030 @@ describe("CodexSecurity orchestration", () => {
       ).toEqual(new Set([1]));
       expect(observerErrors).toEqual(["onSessionEvent"]);
       await client.close();
+    },
+  );
+
+  test.each([
+    [
+      "both phases streamed",
+      [0, 1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0, 1],
+      false,
+    ],
+    [
+      "newer phase omitted from the preview",
+      [0, 1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0],
+      false,
+    ],
+    [
+      "multipart native marker",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0],
+      false,
+    ],
+    [
+      "older tool phase",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+        { phase: "attack_path", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0, 1, 2],
+      false,
+    ],
+    [
+      "older inventory",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
+        { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
+      ],
+      [0, 1, 2],
+      false,
+    ],
+    [
+      "truncated streamed marker",
+      [0],
+      [
+        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 2, filesTotal: 8 },
+      ],
+      [1],
+      false,
+    ],
+    [
+      "truncated streamed inventory",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
+        { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
+      ],
+      [0, 2],
+      false,
+    ],
+    [
+      "worker already reported the parent phase",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0, 1],
+      true,
+    ],
+  ] as const)(
+    "retains the latest progress across stream and rollout delivery: %s",
+    async (_scenario, streamed, progress, persisted, workerFirst) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const sessionEvents: ScanSessionEvent[] = [];
+      const workerReady = Promise.withResolvers<void>();
+      const markerTexts = progress.map(
+        (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {
+            input_tokens: 100,
+            output_tokens: 10,
+          });
+          if (workerFirst) {
+            const worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {
+                input_tokens: 100,
+                output_tokens: 10,
+              },
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: [{ type: "input_text", text: markerTexts[1] }],
+                },
+              }) + "\n",
+            );
+          }
+          async function* markers(): AsyncGenerator<ThreadEvent> {
+            if (workerFirst) await workerReady.promise;
+            for (const index of streamed) {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: `parent-progress-${index}`,
+                  type: "agent_message",
+                  text: markerTexts[index]!,
+                },
+              };
+            }
+            // Native item completions retain the order even when the separate
+            // response-item preview omits a streamed marker.
+            const saved = progress.flatMap((_update, index) => [
+              ...(streamed.includes(index as never)
+                ? [
+                    {
+                      type: "event_msg",
+                      payload: {
+                        type: "item_completed",
+                        item: {
+                          type: "AgentMessage",
+                          id: `native-${index}`,
+                          content:
+                            _scenario === "multipart native marker"
+                              ? [
+                                  {
+                                    type: "Text",
+                                    text: markerTexts[index]!.slice(0, 35),
+                                  },
+                                  {
+                                    type: "Text",
+                                    text: markerTexts[index]!.slice(35),
+                                  },
+                                ]
+                              : [{ type: "Text", text: markerTexts[index] }],
+                        },
+                      },
+                    },
+                  ]
+                : []),
+              ...(persisted.includes(index as never)
+                ? [
+                    {
+                      type: "response_item",
+                      payload: {
+                        type: "custom_tool_call_output",
+                        status: "completed",
+                        output: [
+                          { type: "input_text", text: markerTexts[index] },
+                        ],
+                      },
+                    },
+                  ]
+                : []),
+            ]);
+            await appendFile(
+              rollout,
+              saved.map((event) => JSON.stringify(event)).join("\n") + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", markers()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            // Worker counts arrive before this fixture releases the parent phase.
+            if (update.filesCompleted === 8 && update.filesTotal === 8)
+              workerReady.resolve();
+          },
+          onSessionEvent: (event) => sessionEvents.push(event),
+        });
+        expect(updates[0]).toEqual({
+          phase: "preflight",
+          filesCompleted: 0,
+          filesTotal: 8,
+        });
+        expect(updates.at(-1)).toEqual(progress.at(-1));
+        for (let index = 1; index < updates.length; index++) {
+          expect(updates[index]).not.toEqual(updates[index - 1]);
+          expect(updates[index]!.filesCompleted).toBeGreaterThanOrEqual(
+            updates[index - 1]!.filesCompleted,
+          );
+        }
+        expect(
+          sessionEvents.filter(
+            ({ threadId, event }) =>
+              threadId === "thread-1" &&
+              (event["payload"] as Record<string, unknown> | undefined)?.[
+                "type"
+              ] === "custom_tool_call_output",
+          ),
+        ).toHaveLength(persisted.length);
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    (["legacy", "paginated"] as const).flatMap((mode) =>
+      [false, true].map(
+        (savedReviewFirst) => [mode, savedReviewFirst] as const,
+      ),
+    ),
+  )(
+    "retains repeated inventory before saved review (%s, saved review first: %p)",
+    async (mode, savedReviewFirst) => {
+      const total = 8;
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const expanded = Promise.withResolvers<void>(),
+        inventory = Promise.withResolvers<void>(),
+        review = Promise.withResolvers<void>(),
+        workerSeen = Promise.withResolvers<void>();
+      const marker = (count: number, filesTotal: number) =>
+        `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase: "discovery", filesCompleted: count, filesTotal })}`;
+      const saved = (id: string, text: string) => [
+        {
+          type: "event_msg",
+          payload:
+            mode === "legacy"
+              ? { type: "agent_message", message: text }
+              : {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    id,
+                    content: [{ type: "Text", text }],
+                  },
+                },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            id,
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          },
+        },
+      ];
+      const live = (id: string, text: string): ThreadEvent => ({
+        type: "item.completed",
+        item: { type: "agent_message", id, text },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const append = async (...rows: unknown[]) =>
+            appendFile(
+              parent,
+              rows
+                .flat()
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            yield live("first-inventory", marker(0, 8));
+            await append(
+              saved("first-inventory", marker(0, 8)),
+              saved("expanded-inventory", marker(0, 9)),
+            );
+            await expanded.promise;
+            // The SDK can deliver a review while older persisted inventory is still
+            // being flushed. Its saved position becomes known only in the next poll.
+            yield live("parent-review", marker(1, total));
+            await append(
+              saved("final-inventory", marker(0, total)),
+              ...(savedReviewFirst
+                ? [saved("parent-review", marker(1, total))]
+                : []),
+            );
+            await inventory.promise;
+            if (!savedReviewFirst)
+              await append(saved("parent-review", marker(1, total)));
+            await review.promise;
+            const worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "oversized-worker",
+                  output: marker(9, 9),
+                },
+              }) + "\n",
+            );
+            await workerSeen.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const p = event["payload"] as { id?: string; call_id?: string };
+            if (p?.id === "expanded-inventory") expanded.resolve();
+            if (p?.id === "final-inventory") inventory.resolve();
+            if (p?.id === "parent-review") review.resolve();
+            if (p?.call_id === "oversized-worker") workerSeen.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 1,
+          filesTotal: total,
+        });
+        expect(updates.some((update) => update.filesCompleted === 9)).toBe(
+          false,
+        );
+      } finally {
+        clearInterval(keepAlive);
+        expanded.resolve();
+        inventory.resolve();
+        review.resolve();
+        workerSeen.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    (["legacy", "paginated"] as const).flatMap((mode) =>
+      (
+        [
+          "live-first",
+          "saved-first",
+          "poll-between",
+          "omitted-inventory-saved-review",
+          "omitted-inventory-live-review",
+          "later-inventory",
+          "oversized-review",
+          "saved-only",
+          "saved-only-stale-live",
+          "inventory-phase",
+          "shrink-saved-review",
+          "shrink-delayed-inventory",
+        ] as const
+      ).map((delivery) => [mode, delivery] as const),
+    ),
+  )(
+    "preserves proven inventory across legacy delivery gaps (%s, %s)",
+    async (mode, delivery) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const inventoryRead = Promise.withResolvers<void>();
+      const boundaryRead = Promise.withResolvers<void>();
+      const completeRead = Promise.withResolvers<void>();
+      const savedFirst = delivery !== "live-first";
+      const completeFirst = delivery === "omitted-inventory-live-review";
+      const shrinking = delivery.startsWith("shrink-");
+      const inventoryPhase = delivery === "inventory-phase";
+      const currentTotal = shrinking ? 7 : 9;
+      const total =
+        delivery === "later-inventory" || shrinking
+          ? 7
+          : delivery === "oversized-review"
+            ? 10
+            : 9;
+      const old = progressMarker(
+        inventoryPhase ? "threat_model" : "discovery",
+        0,
+        8,
+      );
+      const current = progressMarker("discovery", 0, currentTotal);
+      const savedOnly = delivery.startsWith("saved-only");
+      const finalPhase =
+        delivery === "saved-only-stale-live" || shrinking
+          ? "validation"
+          : "discovery";
+      const complete = progressMarker(
+        shrinking ? "discovery" : finalPhase,
+        total,
+        total,
+      );
+      const stale = progressMarker("attack_path", 9, 9);
+      const savedMessage = (text: string) => [
+        {
+          type: "event_msg",
+          payload:
+            mode === "legacy"
+              ? { type: "agent_message", message: text }
+              : {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    content: [{ type: "Text", text }],
+                  },
+                },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          },
+        },
+      ];
+      const liveMessage = (id: string, text: string): ThreadEvent => ({
+        type: "item.completed",
+        item: { id, type: "agent_message", text },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          const persisted = [
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "inventory",
+                output: old,
+              },
+            },
+            ...(mode === "paginated" ? [nativeCommand("inventory", old)] : []),
+            // Legacy saves the agent-message event before its raw response copy,
+            // and does not save the command completion delivered to the SDK.
+            ...savedMessage(current),
+          ];
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (inventoryPhase) {
+              await appendFile(rollout, jsonLines(savedMessage(old)) + "\n");
+              yield liveMessage("earlier-phase", old);
+              await boundaryRead.promise;
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage(current)) + "\n",
+              );
+              await inventoryRead.promise;
+              yield liveMessage("current-inventory", current);
+              return;
+            }
+            if (savedFirst) {
+              await appendFile(rollout, jsonLines(persisted) + "\n");
+              await inventoryRead.promise;
+            }
+            yield completedCommand("inventory", old);
+            if (delivery === "poll-between") {
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage("Synthetic poll boundary.")) + "\n",
+              );
+              await boundaryRead.promise;
+            }
+            if (
+              ["live-first", "saved-first", "poll-between"].includes(delivery)
+            )
+              yield liveMessage("current-inventory", current);
+            if (!savedFirst)
+              await appendFile(rollout, jsonLines(persisted) + "\n");
+            if (delivery === "later-inventory")
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage(progressMarker("discovery", 0, 7))) +
+                  "\n",
+              );
+            if (completeFirst) yield liveMessage("review-complete", complete);
+            await appendFile(
+              rollout,
+              jsonLines([
+                ...(delivery === "saved-only-stale-live"
+                  ? savedMessage(stale)
+                  : []),
+                ...savedMessage(complete),
+              ]) + "\n",
+            );
+            if (savedOnly) {
+              await completeRead.promise;
+              if (delivery === "saved-only-stale-live")
+                yield liveMessage("older-review", stale);
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage("Scan finished.")) + "\n",
+              );
+              yield liveMessage("final-summary", "Scan finished.");
+            } else if (!completeFirst) {
+              if (delivery === "omitted-inventory-saved-review" || shrinking)
+                await completeRead.promise;
+              if (shrinking) {
+                if (delivery === "shrink-delayed-inventory")
+                  yield liveMessage("current-inventory", current);
+                const final = progressMarker(finalPhase, total, total);
+                await appendFile(
+                  rollout,
+                  jsonLines(savedMessage(final)) + "\n",
+                );
+                yield liveMessage("final-review", final);
+              } else yield liveMessage("review-complete", complete);
+            }
+            if (delivery === "later-inventory") {
+              await completeRead.promise;
+              const oversized = progressMarker("discovery", 9, 9);
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage(oversized)) + "\n",
+              );
+              yield liveMessage("oversized-review", oversized);
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              content?: { text?: string }[];
+            };
+            const text = payload?.content?.[0]?.text;
+            if (text === complete) completeRead.resolve();
+            if (
+              text === "Synthetic poll boundary." ||
+              (inventoryPhase && text === old)
+            )
+              boundaryRead.resolve();
+          },
+          onProgress: (update) => {
+            updates.push(update);
+            if (
+              update.filesTotal === currentTotal &&
+              update.filesCompleted === 0
+            )
+              inventoryRead.resolve();
+          },
+        });
+        if (delivery === "oversized-review") {
+          expect(updates.some((update) => update.filesCompleted === 10)).toBe(
+            false,
+          );
+          expect(updates.at(-1)?.filesCompleted).toBe(0);
+        } else
+          expect(updates.at(-1)).toEqual({
+            phase: finalPhase,
+            filesCompleted: inventoryPhase ? 0 : total,
+            filesTotal: total,
+          });
+        if (delivery === "saved-only-stale-live") {
+          const recovered = updates.findIndex(
+            (update) => update.phase === "validation",
+          );
+          expect(recovered).toBeGreaterThanOrEqual(0);
+          expect(
+            updates
+              .slice(recovered)
+              .every((update) => update.phase !== "attack_path"),
+          ).toBe(true);
+        }
+      } finally {
+        clearInterval(keepAlive);
+        inventoryRead.resolve();
+        boundaryRead.resolve();
+        completeRead.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    (
+      [
+        "admitted",
+        "selected-live",
+        "active-batch",
+        "fresh-batch",
+        "parent-only",
+        "accepted-eligibility",
+      ] as const
+    ).flatMap((family) =>
+      [false, true].flatMap((early) =>
+        (
+          [
+            ["validation", "discovery"],
+            ["discovery", "attack_path"],
+          ] as const
+        ).map(
+          ([parentPhase, workerPhase]) =>
+            [family, early, parentPhase, workerPhase] as const,
+        ),
+      ),
+    ),
+  )(
+    "retains parent facts across admission and batch boundaries (%s, early: %p, parent: %s, worker: %s)",
+    async (family, early, parentPhase, workerPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const seen = new Map<
+        string,
+        ReturnType<typeof Promise.withResolvers<void>>
+      >();
+      const wait = (id: string) => {
+        if (!seen.has(id)) seen.set(id, Promise.withResolvers<void>());
+        return seen.get(id)!;
+      };
+      let path = "",
+        pause = false;
+      const closeEntered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const file = await originalOpen(...args);
+        if (String(args[0]) !== path || !pause) return file;
+        const close = file.close.bind(file);
+        file.close = async () => {
+          if (pause) {
+            pause = false;
+            closeEntered.resolve();
+            await release.promise;
+          }
+          await close();
+        };
+        return file;
+      }) as typeof originalOpen);
+
+      const custom = (id: string, text: string) => ({
+        type: "response_item",
+        payload: { type: "custom_tool_call_output", call_id: id, output: text },
+      });
+      const native = (command: string, output: string) =>
+        nativeCommand(command, output);
+      const live = (command: string, output: string): ThreadEvent =>
+        completedCommand(command, output);
+      const append = async (file: string, rows: readonly unknown[]) => {
+        await appendFile(
+          file,
+          rows.map((x) => JSON.stringify(x)).join("\n") + "\n",
+        );
+      };
+      const worker = async (id: string, count: number, total: number) => {
+        const file = await writeUsageSession(
+          codexHome,
+          id,
+          {},
+          { parent: "thread-1" },
+        );
+        await append(file, [
+          custom(id, progressMarker(workerPhase, count, total)),
+        ]);
+        await wait(id).promise;
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? {
+                ...mockScanRegistration(args, input),
+                scopeFileCount:
+                  family === "parent-only"
+                    ? 9
+                    : family === "selected-live"
+                      ? 4
+                      : 8,
+              }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          path = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await wait("metadata").promise;
+            if (family === "accepted-eligibility") {
+              await worker("first", 4, 4);
+              const prefix = [
+                native("inventory", progressMarker("discovery", 0, 5)),
+                native("eligible", progressMarker(parentPhase, 4, 5)),
+              ];
+              if (early) {
+                await append(path, prefix);
+                await wait("eligible").promise;
+              }
+              // Native can deliver events after a persistence error, then retry
+              // buffered writes. Recover a prefix before the next live receipt
+              // gains saved provenance. Later retries must also remain eligible.
+              yield live("eligible", progressMarker(parentPhase, 4, 5));
+              yield live("ineligible", progressMarker(workerPhase, 4, 7));
+              yield live("last-parent", progressMarker(parentPhase, 8, 8));
+              if (!early) {
+                await append(path, prefix);
+                await wait("eligible").promise;
+              }
+              await append(path, [
+                native("ineligible", progressMarker(workerPhase, 4, 7)),
+              ]);
+              await wait("ineligible").promise;
+              await append(path, [
+                native("last-parent", progressMarker(parentPhase, 8, 8)),
+              ]);
+              await wait("last-parent").promise;
+            } else if (family === "parent-only") {
+              // Inventory may be absent from SDK delivery; all native records
+              // are durable before either review is delivered live.
+              // Start a real read: unchanged logs are skipped by the tracker.
+              pause = !early;
+              if (!early) {
+                await appendFile(path, "\n");
+                await closeEntered.promise;
+              }
+              await append(path, [
+                native("inventory", progressMarker("discovery", 0, 8)),
+                native("eligible", progressMarker(parentPhase, 4, 8)),
+                native("last-parent", progressMarker(workerPhase, 6, 9)),
+              ]);
+              if (early) await wait("last-parent").promise;
+              yield live("eligible", progressMarker(parentPhase, 4, 8));
+              yield live("last-parent", progressMarker(workerPhase, 6, 9));
+              release.resolve();
+              await wait("last-parent").promise;
+            } else if (family === "fresh-batch") {
+              await worker("first", 3, 3);
+              await worker("second", 1, 8);
+              pause = !early;
+              if (!early) {
+                await appendFile(path, "\n");
+                await closeEntered.promise;
+              }
+              await append(path, [
+                custom("inventory6", progressMarker("discovery", 0, 6)),
+                custom("eligible", progressMarker(parentPhase, 3, 6)),
+              ]);
+              if (early) await wait("eligible").promise;
+              await append(path, [
+                native("last-parent", progressMarker(workerPhase, 4, 8)),
+              ]);
+              yield live("last-parent", progressMarker(workerPhase, 4, 8));
+              release.resolve();
+              await wait("last-parent").promise;
+            } else if (family === "admitted") {
+              await append(path, [native("inventory", persistedCommandOutput)]);
+              if (early) {
+                yield live(
+                  "inventory",
+                  commandOutput(progressMarker("discovery", 0, 6)),
+                );
+                await wait("scope6").promise;
+              }
+              await worker("first", 3, 3);
+              await append(path, [
+                custom("eligible", progressMarker(parentPhase, 3, 6)),
+              ]);
+              await wait("eligible").promise;
+              await append(path, [
+                custom("oversized", progressMarker(parentPhase, 4, 8)),
+              ]);
+              await wait("oversized").promise;
+              if (!early)
+                yield live(
+                  "inventory",
+                  commandOutput(progressMarker("discovery", 0, 6)),
+                );
+            } else if (family === "selected-live") {
+              const inventories = [
+                custom("inventory8", progressMarker("discovery", 0, 8)),
+                custom("inventory6", progressMarker("discovery", 0, 6)),
+              ];
+              if (early) {
+                await append(path, inventories);
+                await wait("inventory6").promise;
+                await wait("scope6").promise;
+              } else {
+                pause = true;
+                await appendFile(path, "\n");
+                await closeEntered.promise;
+              }
+              await append(path, [
+                ...(early ? [] : inventories),
+                native("first-parent", persistedCommandOutput),
+                native("last-parent", persistedCommandOutput),
+              ]);
+              yield live(
+                "first-parent",
+                commandOutput(progressMarker(workerPhase, 3, 8)),
+              );
+              yield live(
+                "last-parent",
+                commandOutput(progressMarker(parentPhase, 3, 6)),
+              );
+              release.resolve();
+              await wait("last-parent").promise;
+            } else {
+              if (early) {
+                await append(path, [
+                  custom("inventory6", progressMarker("discovery", 0, 6)),
+                ]);
+                await wait("scope6").promise;
+              }
+              await worker("first", 3, 3);
+              await worker("second", 1, 8);
+              pause = !early;
+              await append(path, [
+                ...(early
+                  ? []
+                  : [custom("inventory6", progressMarker("discovery", 0, 6))]),
+                custom("eligible", progressMarker(parentPhase, 3, 6)),
+              ]);
+              if (!early) await closeEntered.promise;
+              else await wait("eligible").promise;
+              await append(path, [
+                native("last-parent", progressMarker(parentPhase, 4, 8)),
+              ]);
+              yield live("last-parent", progressMarker(parentPhase, 4, 8));
+              release.resolve();
+              await wait("last-parent").promise;
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1000);
+      try {
+        await client.run(repository, {
+          onProgress: (p) => {
+            updates.push(p);
+            if (p.filesTotal === 6 && p.filesCompleted === 0)
+              wait("scope6").resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              wait("metadata").resolve();
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { command?: string[] };
+            };
+            const id = payload?.call_id ?? payload?.item?.command?.[0];
+            if (id) wait(id).resolve();
+          },
+        });
+        if (family === "accepted-eligibility") {
+          const recovered = updates.findIndex(
+            (p) =>
+              p.filesTotal === 5 &&
+              p.filesCompleted === 4 &&
+              p.phase === parentPhase,
+          );
+          expect(recovered).toBeGreaterThanOrEqual(0);
+          // Worker fallback before parent recovery remains valid. Later replay
+          // must not replace the recovered phase with an ineligible receipt.
+          expect(
+            updates
+              .slice(recovered)
+              .filter((p) => p.filesTotal === 5 && p.filesCompleted === 4)
+              .every((p) => p.phase === parentPhase),
+          ).toBe(true);
+        }
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted:
+            family === "parent-only" || family === "accepted-eligibility"
+              ? 4
+              : 3,
+          filesTotal:
+            family === "parent-only"
+              ? 8
+              : family === "accepted-eligibility"
+                ? 5
+                : 6,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        release.resolve();
+        for (const p of seen.values()) p.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    (["command", "paginated message", "legacy message"] as const).flatMap(
+      (projection) =>
+        (
+          ["intact", "gap", "delayed suffix", "repeated signature"] as const
+        ).map((delivery) => [projection, delivery] as const),
+    ),
+  )(
+    "correlates parent completions across notification gaps (%s, %s)",
+    async (projection, delivery) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = delivery === "delayed suffix";
+      const originalOpen = fsPromises.open;
+      const originalReaddir = fsPromises.readdir;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const append = async (id: string, phase: ScanProgress["phase"]) => {
+        const text =
+          "CODEX_SECURITY_SCAN_PROGRESS " +
+          JSON.stringify({
+            phase,
+            filesCompleted: 4,
+            filesTotal: 8,
+          });
+        const native =
+          projection === "command"
+            ? {
+                type: "CommandExecution",
+                id,
+                command: ["review"],
+                aggregated_output: text,
+              }
+            : { type: "AgentMessage", id, content: [{ type: "Text", text }] };
+        await appendFile(
+          parentPath,
+          [
+            {
+              type: "event_msg",
+              payload:
+                projection === "legacy message"
+                  ? { type: "agent_message", message: text }
+                  : { type: "item_completed", item: native },
+            },
+            {
+              type: "response_item",
+              payload:
+                projection === "command"
+                  ? {
+                      type: "custom_tool_call_output",
+                      call_id: id,
+                      output: "done",
+                    }
+                  : {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text }],
+                    },
+            },
+          ]
+            .map((row) => JSON.stringify(row))
+            .join("\n") + "\n",
+        );
+        return {
+          type: "item.completed",
+          item:
+            projection === "command"
+              ? {
+                  type: "command_execution",
+                  id,
+                  command: "review",
+                  aggregated_output: text,
+                  status: "completed",
+                  exit_code: 0,
+                }
+              : { type: "agent_message", id, text },
+        } as ThreadEvent;
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            const first = await append("first", "discovery");
+            if (delivery === "delayed suffix") {
+              pollAllowed.resolve();
+              await closeEntered.promise;
+            }
+            const second = await append("second", "validation");
+            // Native queue backpressure can omit an ordinary start/completion.
+            // Every saved completion here precedes its corresponding live copy.
+            if (delivery === "intact") yield first;
+            yield second;
+            if (delivery === "repeated signature")
+              yield await append("third", "discovery");
+            closeReleased.resolve();
+            pollAllowed.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: delivery === "repeated signature" ? "discovery" : "validation",
+          filesCompleted: 4,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        closeReleased.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    ["below worker", true, false, 7],
+    ["below worker", true, false, 8],
+    ["below worker", true, true, 7],
+    ["below worker", true, true, 8],
+    ["across frontier", false, true, 7],
+    ["across frontier", true, true, 7],
+    ["across frontier", false, true, 8],
+    ["across frontier", true, true, 8],
+    ["across frontier", false, true, 9],
+    ["across frontier", true, true, 9],
+    ["inventory phase", false, false, 0],
+    ["inventory phase", true, false, 0],
+  ] as const)(
+    "retains eligible live facts through inventory admission (%s, early: %p, truncated: %p, count: %p)",
+    async (scenario, early, truncated, count) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const pollAllowed = Promise.withResolvers<void>();
+      let pausePoll = scenario === "inventory phase";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (pausePoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+
+      const receipt = (id: string, text: string) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output: text,
+        },
+      });
+      const command = (id: string, text: string, truncate = false) => ({
+        saved: nativeCommand(id, truncate ? persistedCommandOutput : text, id),
+        live: completedCommand(id, text) as ThreadEvent,
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (scenario !== "inventory phase") {
+              const worker = await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              );
+              const workerCount = scenario === "below worker" ? count : 8;
+              await appendFile(
+                worker,
+                JSON.stringify(
+                  receipt(
+                    "worker-reviewed",
+                    progressMarker("discovery", workerCount, workerCount),
+                  ),
+                ) + "\n",
+              );
+              await workerRead.promise;
+            }
+            pausePoll = true;
+            const commands =
+              scenario === "across frontier"
+                ? [
+                    command(
+                      "inventory",
+                      commandOutput(progressMarker("discovery", 0, 9)),
+                      true,
+                    ),
+                    command(
+                      "review",
+                      commandOutput(progressMarker("validation", count, 9)),
+                      true,
+                    ),
+                    command(
+                      "parent-boundary",
+                      progressMarker("discovery", 8, 8),
+                    ),
+                  ]
+                : [
+                    command(
+                      "parent-boundary",
+                      scenario === "below worker"
+                        ? truncated
+                          ? commandOutput(progressMarker("validation", 3, 7))
+                          : progressMarker("validation", 3, 7)
+                        : progressMarker("validation", 5, 8),
+                      truncated,
+                    ),
+                  ];
+            const inventories =
+              scenario === "across frontier"
+                ? []
+                : [
+                    receipt("old-inventory", progressMarker("discovery", 0, 7)),
+                    ...(scenario === "inventory phase"
+                      ? [
+                          receipt(
+                            "new-inventory",
+                            progressMarker("discovery", 0, 8),
+                          ),
+                        ]
+                      : []),
+                  ];
+            // All canonical records precede every corresponding SDK item. Only
+            // observer delivery/poll placement differs between paired controls.
+            await appendFile(
+              parent,
+              [...inventories, ...commands.map((item) => item.saved)]
+                .map((item) => JSON.stringify(item))
+                .join("\n") + "\n",
+            );
+            if (early) for (const item of commands) yield item.live;
+            pausePoll = false;
+            pollAllowed.resolve();
+            await parentRead.promise;
+            if (!early) for (const item of commands) yield item.live;
+            if (scenario === "inventory phase") {
+              const next = command("next", progressMarker("reporting", 6, 8));
+              await appendFile(parent, JSON.stringify(next.saved) + "\n");
+              yield next.live;
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.call_id === "worker-reviewed") workerRead.resolve();
+            if (payload?.item?.id === "parent-boundary") parentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual(
+          scenario === "below worker"
+            ? {
+                phase: count === 7 ? "preflight" : "validation",
+                filesCompleted: count === 7 ? 7 : 3,
+                filesTotal: 7,
+              }
+            : scenario === "across frontier"
+              ? {
+                  phase: count > 8 ? "validation" : "discovery",
+                  filesCompleted: Math.max(count, 8),
+                  filesTotal: 9,
+                }
+              : { phase: "reporting", filesCompleted: 6, filesTotal: 8 },
+        );
+      } finally {
+        clearInterval(keepAlive);
+        pausePoll = false;
+        pollAllowed.resolve();
+        workerRead.resolve();
+        parentRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, false, 7],
+    [false, true, 7],
+    [true, false, 7],
+    [true, true, 7],
+    [false, false, 8],
+    [false, true, 8],
+    [true, false, 8],
+    [true, true, 8],
+  ] as const)(
+    "keeps the newest proven inventory ahead of saved zeros (split: %p, truncated: %p, worker: %p)",
+    async (split, truncated, workerCount) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const oldRead = Promise.withResolvers<void>();
+      const newRead = Promise.withResolvers<void>();
+      const pollAllowed = Promise.withResolvers<void>();
+      let pausePoll = false;
+      let parentPath = "";
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const read = handle.read.bind(handle);
+        handle.read = (async (...readArgs: Parameters<typeof read>) => {
+          if (pausePoll) await pollAllowed.promise;
+          const result = await read(...readArgs);
+          // A parent read may already be past directory enumeration when the
+          // fixture pauses. Hold its bytes until both inventories are queued.
+          if (pausePoll) await pollAllowed.promise;
+          return result;
+        }) as typeof handle.read;
+        return handle;
+      }) as typeof originalOpen);
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (pausePoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          parentPath = parent;
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const step = async (
+            id: string,
+            phase: ScanProgress["phase"],
+            count: number,
+            total: number,
+            truncate = false,
+          ): Promise<ThreadEvent> => {
+            const text = truncate
+              ? commandOutput(progressMarker(phase, count, total))
+              : progressMarker(phase, count, total);
+            // Every native record is durable before its corresponding SDK item;
+            // neither the old nor the new live inventory occurrence is omitted.
+            await appendFile(
+              parent,
+              JSON.stringify(
+                nativeCommand(id, truncate ? persistedCommandOutput : text, id),
+              ) + "\n",
+            );
+            return completedCommand(id, text);
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "worker-reviewed",
+                  output: progressMarker(
+                    "validation",
+                    workerCount,
+                    workerCount,
+                  ),
+                },
+              }) + "\n",
+            );
+            await workerRead.promise;
+            pausePoll = !split;
+            yield await step("old-inventory", "discovery", 0, 7);
+            if (split) await oldRead.promise;
+            pausePoll = true;
+            yield await step("new-inventory", "discovery", 0, 8, truncated);
+            pausePoll = false;
+            pollAllowed.resolve();
+            await newRead.promise;
+            yield await step("review", "discovery", 5, 8);
+            yield await step("done", "validation", 8, 8);
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.call_id === "worker-reviewed") workerRead.resolve();
+            if (payload?.item?.id === "old-inventory") oldRead.resolve();
+            if (payload?.item?.id === "new-inventory") newRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 8,
+          filesTotal: 8,
+        });
+        if (!split)
+          expect(updates.every((update) => update.filesTotal === 8)).toBe(true);
+      } finally {
+        clearInterval(keepAlive);
+        pausePoll = false;
+        pollAllowed.resolve();
+        workerRead.resolve();
+        oldRead.resolve();
+        newRead.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "recovers parent coverage suppressed by a provisional worker (worker remains eligible: %p)",
+    async (eligibleWorker) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          // The inventory is already durable; its full SDK projection is delayed
+          // until after the provisional worker and lower parent count are polled.
+          await appendFile(
+            parent,
+            JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
+              "\n",
+          );
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            const workerCount = eligibleWorker ? 7 : 8;
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "worker-review",
+                  output: progressMarker("discovery", workerCount, workerCount),
+                },
+              }) + "\n",
+            );
+            await workerRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "parent-review",
+                  output: progressMarker("validation", 4, 7),
+                },
+              }) + "\n",
+            );
+            await parentRead.promise;
+            yield completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 7)),
+              "live-inventory",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "worker-review") workerRead.resolve();
+            if (id === "parent-review") parentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: eligibleWorker ? "preflight" : "validation",
+          filesCompleted: eligibleWorker ? 7 : 4,
+          filesTotal: 7,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    [
+      "legacy receipts use completion-order fallback",
+      true,
+      false,
+      false,
+      8,
+      9,
+      1,
+      1,
+    ],
+    [
+      "missing earlier native occurrence preserves a later anchor",
+      true,
+      true,
+      false,
+      8,
+      9,
+      1,
+      1,
+    ],
+    ["complete native occurrences", true, true, false, 8, 9, 1, 1],
+    ["tool-only old inventory", false, true, false, 8, 9, 1, 1],
+    ["late upward inventory proof", false, true, true, 8, 9, 1, 1],
+    [
+      "pending worker coverage remains newer than inventory proof",
+      false,
+      true,
+      true,
+      8,
+      9,
+      9,
+      9,
+    ],
+    ["live inventory readmits pending worker", false, true, true, 8, 9, 9, 9],
+    [
+      "late proof admits a previously oversized worker",
+      false,
+      true,
+      true,
+      8,
+      9,
+      9,
+      9,
+    ],
+    ["late downward inventory proof", false, true, true, 9, 8, 1, 1],
+    [
+      "late proof excludes an oversized worker shard",
+      false,
+      true,
+      true,
+      9,
+      8,
+      9,
+      9,
+    ],
+  ] as const)(
+    "reconciles inventory receipts and worker progress: %s",
+    async (
+      _scenario,
+      streamOld,
+      nativeCompletion,
+      delayNative,
+      originalTotal,
+      correctedTotal,
+      workerCount,
+      workerTotal,
+    ) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      let proofIndex = 0;
+      const parentRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      const marker = (
+        filesCompleted: number,
+        filesTotal: number,
+        phase: ScanProgress["phase"] = "discovery",
+      ) => progressMarker(phase, filesCompleted, filesTotal);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? {
+                ...mockScanRegistration(args, input),
+                scopeFileCount: originalTotal,
+              }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* markers(): AsyncGenerator<ThreadEvent> {
+            for (const filesTotal of streamOld
+              ? [originalTotal, correctedTotal]
+              : [correctedTotal]) {
+              yield completedCommand(
+                `scan-inventory ${filesTotal}`,
+                commandOutput(marker(0, filesTotal)),
+                `inventory-${filesTotal}`,
+              );
+            }
+            const saved: unknown[] = [
+              {
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "old-preview",
+                  output: marker(0, originalTotal),
+                },
+              },
+            ];
+            if (nativeCompletion)
+              saved.push(
+                nativeCommand(
+                  ["scan-inventory", String(correctedTotal)],
+                  persistedCommandOutput,
+                  "native-inventory",
+                ),
+              );
+            if (_scenario === "complete native occurrences")
+              saved.unshift(
+                nativeCommand(
+                  ["scan-inventory", String(originalTotal)],
+                  persistedCommandOutput,
+                  "native-original-inventory",
+                ),
+              );
+            await appendFile(
+              rollout,
+              saved
+                .slice(0, delayNative ? 1 : saved.length)
+                .map((event) => JSON.stringify(event))
+                .join("\n") + "\n",
+            );
+            await parentRead.promise;
+            const worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker(
+                    workerCount,
+                    workerTotal,
+                    _scenario === "live inventory readmits pending worker" ||
+                      _scenario ===
+                        "pending worker coverage remains newer than inventory proof"
+                      ? "validation"
+                      : "discovery",
+                  ),
+                },
+              }) + "\n",
+            );
+            await workerRead.promise;
+            if (_scenario === "live inventory readmits pending worker")
+              yield completedCommand(
+                `scan-inventory ${correctedTotal}`,
+                commandOutput(marker(0, correctedTotal)),
+                "restored-inventory",
+              );
+            if (delayNative)
+              await appendFile(
+                rollout,
+                saved
+                  .slice(1)
+                  .map((event) => JSON.stringify(event))
+                  .join("\n") + "\n",
+              );
+            await appendFile(
+              rollout,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker(2, correctedTotal),
+                },
+              }) + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", markers()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => {
+            updates.push(progress);
+            if (progress.filesCompleted === workerCount) workerRead.resolve();
+          },
+          onSessionEvent: ({ threadId, event }) => {
+            if (threadId === "worker-thread") workerRead.resolve();
+            if (
+              (event["payload"] as { item?: { id?: string } } | undefined)?.item
+                ?.id === "native-inventory"
+            )
+              proofIndex = updates.length;
+            if (
+              threadId === "thread-1" &&
+              (event["payload"] as Record<string, unknown> | undefined)?.[
+                "call_id"
+              ] === "old-preview"
+            )
+              parentRead.resolve();
+          },
+        });
+        const uncorrelated = streamOld && !nativeCompletion;
+        if (uncorrelated) {
+          // The outer tool output may be a fresh inventory or a copied preview.
+          // Missing completion identity cannot distinguish these histories.
+          expect(
+            updates.some((update) => update.filesTotal === correctedTotal),
+          ).toBe(true);
+          expect(updates.at(-1)).toEqual({
+            phase: "discovery",
+            filesCompleted: workerCount,
+            filesTotal: originalTotal,
+          });
+          return;
+        }
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: Math.max(
+            2,
+            workerTotal <= correctedTotal ? workerCount : 0,
+          ),
+          filesTotal: correctedTotal,
+        });
+        const corrected = updates.findIndex(
+          (progress) => progress.filesTotal === correctedTotal,
+        );
+        expect(corrected).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(delayNative ? proofIndex : corrected)
+            .every((progress) => progress.filesTotal === correctedTotal),
+        ).toBe(true);
+        expect(
+          updates.every(
+            (progress) => progress.filesCompleted <= progress.filesTotal,
+          ),
+        ).toBe(true);
+        if (workerTotal > correctedTotal) {
+          expect(updates.slice(proofIndex)).toContainEqual({
+            phase: "discovery",
+            filesCompleted: 0,
+            filesTotal: correctedTotal,
+          });
+        }
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "retains saved parent coverage across idle polls (split inventory: %p)",
+    async (split) => {
+      const stage = (name: string) =>
+        writeSync(2, `[saved parent progress] split=${split}: ${name}\n`);
+      stage("fixtures begin");
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      stage("fixtures ready");
+      const updates: ScanProgress[] = [];
+      const inventoryRead = Promise.withResolvers<void>();
+      const completeRead = Promise.withResolvers<void>();
+      const idleRead = Promise.withResolvers<void>();
+      const receipt = (id: string, count?: number) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output:
+            count === undefined
+              ? "Inspection continues."
+              : "CODEX_SECURITY_SCAN_PROGRESS " +
+                JSON.stringify({
+                  phase: "discovery",
+                  filesCompleted: count,
+                  filesTotal: 9,
+                }),
+        },
+      });
+      stage("construct client");
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          stage("runStreamed entry");
+          stage("copy scan begin");
+          await copyCompletedScan(root);
+          stage("copy scan end");
+          stage("write session begin");
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          stage("write session end");
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            stage("generator entry");
+            if (split) {
+              stage("inventory append begin");
+              await appendFile(
+                rollout,
+                JSON.stringify(receipt("inventory", 0)) + "\n",
+              );
+              stage("inventory append end");
+              stage("inventory wait begin");
+              await inventoryRead.promise;
+              stage("inventory wait resolved");
+            }
+            stage("complete append begin");
+            await appendFile(
+              rollout,
+              [
+                ...(split ? [] : [receipt("inventory", 0)]),
+                receipt("complete", 7),
+              ]
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+            stage("complete append end");
+            stage("complete wait begin");
+            await completeRead.promise;
+            stage("complete wait resolved");
+            stage("idle append begin");
+            await appendFile(rollout, JSON.stringify(receipt("idle")) + "\n");
+            stage("idle append end");
+            stage("idle wait begin");
+            await idleRead.promise;
+            stage("idle wait resolved");
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        stage("client.run begin");
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "inventory") {
+              stage("inventory observed");
+              inventoryRead.resolve();
+            }
+            if (id === "complete") {
+              stage("complete observed");
+              completeRead.resolve();
+            }
+            if (id === "idle") {
+              stage("idle observed");
+              idleRead.resolve();
+            }
+          },
+        });
+        stage("client.run end");
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 7,
+          filesTotal: 9,
+        });
+        const reviewed = updates.findIndex(
+          (update) => update.filesCompleted === 7,
+        );
+        expect(reviewed).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(reviewed)
+            .every(
+              (update) =>
+                update.filesCompleted === 7 && update.filesTotal === 9,
+            ),
+        ).toBe(true);
+      } finally {
+        clearInterval(keepAlive);
+        stage("client.close begin");
+        await client.close();
+        stage("client.close end");
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "applies saved inventory before reconsidering live receipts (split correction: %p)",
+    async (split) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const staleRead = Promise.withResolvers<void>();
+      const correctedRead = Promise.withResolvers<void>();
+      const marker = (count: number, total: number) =>
+        progressMarker("discovery", count, total);
+      const receipt = (id: string, total: number) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output: marker(0, total),
+        },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 9 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await appendFile(
+              rollout,
+              JSON.stringify(receipt("stale", 8)) + "\n",
+            );
+            await staleRead.promise;
+            yield completedCommand(
+              "inspect-source",
+              commandOutput(marker(9, 9)),
+              "completed-review",
+            );
+            if (split) {
+              await appendFile(
+                rollout,
+                JSON.stringify(receipt("corrected", 9)) + "\n",
+              );
+              await correctedRead.promise;
+            }
+            const completion = nativeCommand(
+              "inspect-source",
+              persistedCommandOutput,
+            );
+            await appendFile(
+              rollout,
+              [...(split ? [] : [receipt("corrected", 9)]), completion]
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "stale") staleRead.resolve();
+            if (id === "corrected") correctedRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 9,
+          filesTotal: 9,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test.each([0, 3])(
+    "keeps the latest accepted inventory when only older proof arrives (%p reviewed)",
+    async (count) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const marker = (completed: number, total: number) =>
+        progressMarker("discovery", completed, total);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            for (const [completed, total] of [
+              [0, 8],
+              [0, 9],
+              ...(count ? [[count, 9]] : []),
+            ])
+              yield completedCommand(
+                `report-progress ${completed} ${total}`,
+                commandOutput(marker(completed!, total!)),
+                `progress-${completed}-${total}`,
+              );
+            await appendFile(
+              rollout,
+              JSON.stringify(
+                nativeCommand(
+                  ["report-progress", "0", "8"],
+                  persistedCommandOutput,
+                ),
+              ) + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: count,
+          filesTotal: 9,
+        });
+        const corrected = updates.findIndex(
+          (update) => update.filesTotal === 9,
+        );
+        expect(
+          updates.slice(corrected).every((update) => update.filesTotal === 9),
+        ).toBe(true);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    ["rejected completion", 8, 9, 9],
+    ["inventory followed by an accepted count", 9, 8, 1],
+  ] as const)(
+    "reconsiders parent receipts after inventory proof: %s",
+    async (_scenario, oldTotal, total, count) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const previewRead = Promise.withResolvers<void>();
+      const marker = (completed: number, inventory: number) =>
+        progressMarker("discovery", completed, inventory);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: oldTotal }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            const live = (completed: number): ThreadEvent =>
+              completedCommand(
+                `report-progress ${completed}`,
+                commandOutput(marker(completed, total)),
+                `live-${completed}`,
+              );
+            yield live(0);
+            await appendFile(
+              rollout,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "old-preview",
+                  output: marker(0, oldTotal),
+                },
+              }) + "\n",
+            );
+            await previewRead.promise;
+            yield live(count);
+            for (const completed of [0, count])
+              await appendFile(
+                rollout,
+                JSON.stringify(
+                  nativeCommand(
+                    ["report-progress", String(completed)],
+                    persistedCommandOutput,
+                    `native-${completed}`,
+                  ),
+                ) + "\n",
+              );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { call_id?: string })?.call_id ===
+              "old-preview"
+            )
+              previewRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: count,
+          filesTotal: total,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    ["saved first", false, false, false, ["discovery", "validation"]],
+    [
+      "saved first with a later tool receipt",
+      false,
+      true,
+      false,
+      ["discovery", "validation"],
+    ],
+    [
+      "ambiguous truncated preview uses the later receipt",
+      false,
+      true,
+      true,
+      ["discovery", "validation"],
+    ],
+    [
+      "live first with a later tool receipt",
+      true,
+      true,
+      false,
+      ["discovery", "validation"],
+    ],
+    [
+      "repeated phases in a truncated completion",
+      false,
+      false,
+      true,
+      ["discovery", "validation", "discovery", "attack_path"],
+    ],
+  ] as const)(
+    "orders markers within one native completion: %s",
+    async (_scenario, liveFirst, preview, truncated, phases) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const read = Promise.withResolvers<void>();
+      const marker = (phase: string) => progressMarker(phase, 8, 8);
+      const text = commandOutput(phases.map(marker).join("\n"));
+      const event: ThreadEvent = completedCommand(
+        "scan-batch",
+        text,
+        "live-command",
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (liveFirst) yield event;
+            const saved: unknown[] = [
+              nativeCommand(
+                "scan-batch",
+                truncated ? persistedCommandOutput : text,
+                "native-batch",
+              ),
+            ];
+            if (preview)
+              saved.push({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker("discovery"),
+                },
+              });
+            await appendFile(
+              rollout,
+              saved.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+            );
+            await read.promise;
+            if (!liveFirst) yield event;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { item?: { id?: string } } | undefined)?.item
+                ?.id === "native-batch"
+            )
+              read.resolve();
+          },
+        });
+        expect(
+          updates
+            .filter((progress) => progress.filesCompleted === 8)
+            .map((progress) => progress.phase),
+        ).toEqual(
+          // A separate tool completion has no nested-origin identity. Its
+          // completion order wins even when it could be a copied preview.
+          preview
+            ? liveFirst || !truncated
+              ? [...phases, "discovery"]
+              : ["discovery"]
+            : [...phases],
+        );
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test("advances parent provenance after equal worker progress", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+    const first = Promise.withResolvers<void>();
+    const workerRead = Promise.withResolvers<void>();
+    const latest = Promise.withResolvers<void>();
+    const marker = (phase: string) => progressMarker(phase, 8, 8);
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ): Promise<JsonObject> =>
+        args[0] === "register-cli-scan"
+          ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+          : mockWorkbench(args, input),
+      createCodex: codexFactory(async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        const native = (id: string, phase: string) =>
+          JSON.stringify(
+            nativeCommand(["scan-phase", phase], marker(phase), id),
+          ) + "\n";
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await appendFile(rollout, native("first", "discovery"));
+          await first.promise;
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: marker("validation"),
+              },
+            }) + "\n",
+          );
+          await workerRead.promise;
+          await appendFile(rollout, native("latest", "validation"));
+          await latest.promise;
+          yield completedCommand(
+            "scan-phase discovery",
+            marker("discovery"),
+            "old-stream",
+          );
+        }
+        return { events: completedEvents("thread-1", events()) };
+      }),
+    });
+    // The fake stream has no process handle to keep the unref'ed poll alive.
+    const keepAlive = setInterval(() => {}, 1_000);
+    try {
+      await client.run(repository, {
+        onProgress: (progress) => {
+          updates.push(progress);
+          if (progress.phase === "discovery") first.resolve();
+        },
+        onSessionEvent: ({ event, threadId }) => {
+          if (threadId === "worker-thread" && event["type"] === "response_item")
+            workerRead.resolve();
+          if (
+            (event["payload"] as { item?: { id?: string } } | undefined)?.item
+              ?.id === "latest"
+          )
+            latest.resolve();
+        },
+      });
+      expect(
+        updates
+          .filter((progress) => progress.filesCompleted === 8)
+          .map((progress) => progress.phase),
+      ).toEqual(["discovery", "validation"]);
+    } finally {
+      clearInterval(keepAlive);
+      await client.close();
+    }
+  });
+
+  test.each([
+    [false, "discovery", "validation"],
+    [true, "discovery", "validation"],
+    [false, "attack_path", "discovery"],
+    [true, "attack_path", "discovery"],
+  ] as const)(
+    "orders parked parent completions by source position (poll first: %p, first: %s, last: %s)",
+    async (pollFirst, firstPhase, lastPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const initialRead = Promise.withResolvers<void>();
+      const nextRead = Promise.withResolvers<void>();
+      if (pollFirst) pollAllowed.resolve();
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const marker = (phase: ScanProgress["phase"], count: number) =>
+        progressMarker(phase, count, 9);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const text = [
+            commandOutput(marker("discovery", 0)),
+            marker(firstPhase, 4),
+            marker(lastPhase, 4),
+          ];
+          await appendFile(
+            parent,
+            text
+              .map((output, index) =>
+                JSON.stringify(
+                  nativeCommand(
+                    `step-${index}`,
+                    index === 0 ? persistedCommandOutput : output,
+                    `step-${index}`,
+                  ),
+                ),
+              )
+              .join("\n") + "\n",
+          );
+          const item = (index: number): ThreadEvent =>
+            completedCommand(`step-${index}`, text[index]!, `live-${index}`);
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (pollFirst) await initialRead.promise;
+            yield item(0);
+            yield item(1);
+            pollAllowed.resolve();
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "next-poll",
+                  output: "Poll boundary",
+                },
+              }) + "\n",
+            );
+            await nextRead.promise;
+            yield item(2);
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              item?: { id?: string };
+              call_id?: string;
+            };
+            if (payload?.item?.id === "step-2") initialRead.resolve();
+            if (payload?.call_id === "next-poll") nextRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: lastPhase,
+          filesCompleted: 4,
+          filesTotal: 9,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        initialRead.resolve();
+        nextRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [true, [3]],
+    [false, [3]],
+    [true, [7]],
+    [false, [7]],
+    [true, [9]],
+    [false, [9]],
+    [true, [1, 2]],
+    [false, [1, 2]],
+    [true, [3, 4]],
+    [false, [3, 4]],
+    [true, [4, 4]],
+    [false, [4, 4]],
+  ] as const)(
+    "selects recovered worker phase by aggregate coverage (pending first: %p, shards: %p)",
+    async (pendingFirst, counts) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workersRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const seen = new Set<string>();
+
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          await appendFile(
+            parent,
+            JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
+              "\n",
+          );
+          const appendWorkers = async () => {
+            for (const [index, count] of counts.entries()) {
+              const worker = await writeUsageSession(
+                codexHome,
+                `worker-${index}`,
+                {},
+                { parent: "thread-1" },
+              );
+              await appendFile(
+                worker,
+                JSON.stringify({
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    call_id: `worker-${index}`,
+                    output: progressMarker("discovery", count, 9),
+                  },
+                }) + "\n",
+              );
+            }
+            await workersRead.promise;
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (pendingFirst) await appendWorkers();
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "parent-review",
+                  output: progressMarker("validation", 7, 8),
+                },
+              }) + "\n",
+            );
+            await parentRead.promise;
+            if (!pendingFirst) await appendWorkers();
+            yield completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 9)),
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.phase === "validation" && update.filesCompleted === 7)
+              parentRead.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id?.startsWith("worker-")) {
+              seen.add(id);
+              if (seen.size === counts.length) workersRead.resolve();
+            }
+          },
+        });
+        const workerCount = counts.reduce((sum, count) => sum + count, 0);
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: Math.max(7, workerCount),
+          filesTotal: 9,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        workersRead.resolve();
+        parentRead.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "preserves the selected parent receipt through a second inventory correction (delayed: %p)",
+    async (delayed) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const expanded = Promise.withResolvers<void>();
+      if (delayed) pollAllowed.resolve();
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const parts = ["Review: ", progressMarker("validation", 3, 8)];
+          const records = [
+            ...[9, 8].map((total) =>
+              nativeCommand(`inventory-${total}`, persistedCommandOutput),
+            ),
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: progressMarker("attack_path", 3, 9),
+              },
+            },
+            {
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "AgentMessage",
+                  content: [{ type: "Text", text: parts.join("") }],
+                },
+              },
+            },
+            {
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "assistant",
+                id: "newer-review",
+                content: parts.map((text) => ({ type: "output_text", text })),
+              },
+            },
+          ];
+          await appendFile(
+            parent,
+            records.map((row) => JSON.stringify(row)).join("\n") + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (delayed) await parentRead.promise;
+            for (const total of [9, 8]) {
+              yield completedCommand(
+                `inventory-${total}`,
+                commandOutput(progressMarker("discovery", 0, total)),
+              );
+              if (delayed && total === 9) await expanded.promise;
+            }
+            pollAllowed.resolve();
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                id: "newer-review",
+                text: parts.join(""),
+              },
+            };
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 3 && update.filesTotal === 9)
+              expanded.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            if ((event["payload"] as { id?: string })?.id === "newer-review")
+              parentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 3,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        parentRead.resolve();
+        expanded.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, 3],
+    [true, 3],
+    [false, 7],
+    [true, 7],
+    [false, 9],
+    [true, 9],
+  ] as const)(
+    "selects eligible parent and worker recovery candidates (split: %p, worker count: %p)",
+    async (split, workerCount) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const originalReaddir = fsPromises.readdir;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parentPath))
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === basename(parentPath)) -
+              Number(String(left.name) === basename(parentPath)),
+          );
+        return entries;
+      }) as typeof originalReaddir);
+      const marker = (phase: ScanProgress["phase"], count: number) =>
+        progressMarker(phase, count, 9);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          // Both paths exist before enumeration; this poll can read the newly
+          // appended worker receipt after its older parent snapshot closes.
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          pauseClose = split;
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (split) {
+              await appendFile(parentPath, "\n");
+              await closeEntered.promise;
+            }
+            await appendFile(
+              parentPath,
+              [
+                {
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    output: marker("discovery", 0),
+                  },
+                },
+                nativeCommand("review", persistedCommandOutput),
+              ]
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+            if (!split) await inventoryRead.promise;
+            yield completedCommand(
+              "review",
+              commandOutput(marker("validation", 7)),
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "worker-reviewed",
+                  output: marker("discovery", workerCount),
+                },
+              }) + "\n",
+            );
+            closeReleased.resolve();
+            await workerRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 9)
+              inventoryRead.resolve();
+          },
+          onWorkerEvent: () => workerRead.resolve(),
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: split && workerCount > 7 ? "preflight" : "validation",
+          filesCompleted: Math.max(7, workerCount),
+          filesTotal: 9,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pauseClose = false;
+        closeEntered.resolve();
+        closeReleased.resolve();
+        inventoryRead.resolve();
+        workerRead.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, "discovery", "validation"],
+    [true, "discovery", "validation"],
+    [false, "attack_path", "discovery"],
+    [true, "attack_path", "discovery"],
+  ] as const)(
+    "keeps newer parent phases across a session close (split: %p, first: %s, next: %s)",
+    async (split, firstPhase, nextPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const firstRead = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const marker = (phase: ScanProgress["phase"]) =>
+        progressMarker(phase, 8, 8);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            // Finish initial session association so this poll reads only its
+            // original snapshot, rather than replaying a newly associated file.
+            await metadataRead.promise;
+            pauseClose = split;
+            await appendFile(
+              parentPath,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "first-review",
+                  output: marker(firstPhase),
+                },
+              }) + "\n",
+            );
+            if (split) await closeEntered.promise;
+            else await firstRead.promise;
+            // The newer completion is durable before its SDK projection arrives,
+            // even when the older snapshot is still waiting for file.close.
+            await appendFile(
+              parentPath,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    content: [{ type: "Text", text: marker(nextPhase) }],
+                  },
+                },
+              }) + "\n",
+            );
+            yield {
+              type: "item.completed",
+              item: {
+                id: "next-review",
+                type: "agent_message",
+                text: marker(nextPhase),
+              },
+            };
+            closeReleased.resolve();
+            await firstRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            if (event["type"] === "session_meta") metadataRead.resolve();
+            if (
+              (event["payload"] as { call_id?: string })?.call_id ===
+              "first-review"
+            )
+              firstRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: nextPhase,
+          filesCompleted: 8,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pauseClose = false;
+        metadataRead.resolve();
+        firstRead.resolve();
+        closeEntered.resolve();
+        closeReleased.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [7, false, false, "validation", "discovery", "none"],
+    [7, false, true, "validation", "discovery", "none"],
+    [8, false, false, "validation", "discovery", "none"],
+    [8, false, true, "validation", "discovery", "none"],
+    [7, false, false, "discovery", "attack_path", "none"],
+    [7, false, true, "discovery", "attack_path", "none"],
+    [8, false, false, "discovery", "attack_path", "none"],
+    [8, false, true, "discovery", "attack_path", "none"],
+    [7, true, false, "validation", "discovery", "none"],
+    [8, true, true, "validation", "discovery", "none"],
+    [7, true, false, "discovery", "attack_path", "none"],
+    [8, true, true, "discovery", "attack_path", "none"],
+    [8, false, false, "validation", "discovery", "accepted"],
+    [8, false, false, "discovery", "attack_path", "accepted"],
+    [8, false, true, "validation", "discovery", "accepted"],
+    [8, false, true, "discovery", "attack_path", "accepted"],
+    [7, false, true, "validation", "discovery", "accepted"],
+    [8, false, true, "validation", "discovery", "mismatch"],
+  ] as const)(
+    "retains eligible worker phases through inventory correction (parent total: %p, worker first: %p, repeat: %p, parent: %s, worker: %s, next: %s)",
+    async (
+      parentTotal,
+      workerFirst,
+      repeat,
+      parentPhase,
+      workerPhase,
+      nextWorker,
+    ) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      const nextWorkerRead = Promise.withResolvers<void>();
+      const scopeChanged = Promise.withResolvers<void>();
+
+      const nextPhase =
+        workerPhase === "discovery" ? "attack_path" : "validation";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          let worker = "";
+          const workerReceipt = (
+            id: string,
+            phase: ScanProgress["phase"],
+            total = 3,
+          ) => ({
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: id,
+              output: progressMarker(phase, 3, total),
+            },
+          });
+          const appendWorker = async () => {
+            worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify(workerReceipt("worker-review", workerPhase)) +
+                "\n",
+            );
+            await workerRead.promise;
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify(
+                nativeCommand("inventory", persistedCommandOutput),
+              ) + "\n",
+            );
+            if (workerFirst) await appendWorker();
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    id: "parent-review",
+                    content: [
+                      {
+                        type: "Text",
+                        text: progressMarker(parentPhase, 3, parentTotal),
+                      },
+                    ],
+                  },
+                },
+              }) + "\n",
+            );
+            await parentRead.promise;
+            if (!workerFirst) await appendWorker();
+            if (nextWorker !== "none") {
+              await appendFile(
+                worker,
+                JSON.stringify(
+                  workerReceipt(
+                    "worker-next",
+                    nextPhase,
+                    nextWorker === "mismatch" ? 4 : 3,
+                  ),
+                ) + "\n",
+              );
+              await nextWorkerRead.promise;
+            }
+            // Both native parent completions precede their SDK projections.
+            // Let the full earlier inventory reconcile before its following item.
+            yield completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 7)),
+            );
+            await scopeChanged.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                id: "parent-review",
+                text: progressMarker(parentPhase, 3, parentTotal),
+              },
+            };
+            // A fresh worker receipt is still consumed without replacing the
+            // last admitted parent phase.
+            if (repeat)
+              await appendFile(
+                worker,
+                JSON.stringify(workerReceipt("worker-repeat", workerPhase)) +
+                  "\n",
+              );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 3 && update.filesTotal === 7)
+              scopeChanged.resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.item?.id === "parent-review") parentRead.resolve();
+            if (payload?.call_id === "worker-review") workerRead.resolve();
+            if (payload?.call_id === "worker-next") nextWorkerRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted: 3,
+          filesTotal: 7,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        parentRead.resolve();
+        workerRead.resolve();
+        nextWorkerRead.resolve();
+        scopeChanged.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    [false, "validation", "discovery"],
+    [true, "validation", "discovery"],
+    [false, "discovery", "attack_path"],
+    [true, "discovery", "attack_path"],
+  ] as const)(
+    "recovers deferred live parents through a saved scope correction (early: %p, parent: %s, worker: %s)",
+    async (early, parentPhase, workerPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const firstRead = Promise.withResolvers<void>();
+      const secondRead = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      const recovered = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+
+      const receipt = (id: string, output: string) => ({
+        type: "response_item",
+        payload: { type: "custom_tool_call_output", call_id: id, output },
+      });
+      const completion = (command: string, output: string) =>
+        nativeCommand(command, output);
+      const live = (command: string, output: string): ThreadEvent =>
+        completedCommand(command, output);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const inventory = receipt(
+            "inventory",
+            progressMarker("discovery", 0, 6),
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            if (early) {
+              await appendFile(parentPath, JSON.stringify(inventory) + "\n");
+              await inventoryRead.promise;
+            }
+            const first = await writeUsageSession(
+              codexHome,
+              "first-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              first,
+              JSON.stringify(
+                receipt("first", progressMarker(workerPhase, 3, 3)),
+              ) + "\n",
+            );
+            await firstRead.promise;
+            const second = await writeUsageSession(
+              codexHome,
+              "second-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              second,
+              JSON.stringify(
+                receipt("second", progressMarker(workerPhase, 1, 8)),
+              ) + "\n",
+            );
+            await secondRead.promise;
+            if (!early) {
+              pauseClose = true;
+              await appendFile(parentPath, "\n");
+              await closeEntered.promise;
+            }
+            // Native rows precede their ordered SDK completions, but an earlier
+            // read can finish closing before it observes those appended rows.
+            const rows = [
+              ...(early ? [] : [inventory]),
+              completion("eligible", persistedCommandOutput),
+              completion("oversized", progressMarker(parentPhase, 4, 8)),
+            ];
+            await appendFile(
+              parentPath,
+              rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+            );
+            yield live(
+              "eligible",
+              commandOutput(progressMarker(parentPhase, 3, 6)),
+            );
+            yield live("oversized", progressMarker(parentPhase, 4, 8));
+            closeReleased.resolve();
+            await recovered.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 6)
+              inventoryRead.resolve();
+            if (update.filesCompleted === 3 && update.filesTotal === 6)
+              recovered.resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "first") firstRead.resolve();
+            if (id === "second") secondRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted: 3,
+          filesTotal: 6,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        inventoryRead.resolve();
+        firstRead.resolve();
+        secondRead.resolve();
+        closeReleased.resolve();
+        recovered.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    (["validation", "discovery"] as const).flatMap((parentPhase) =>
+      [false, true].flatMap((early) =>
+        (
+          [
+            "no-frontier",
+            "immediate",
+            "idle",
+            "lower-parent",
+            "newer-parent",
+            "restore-scope",
+            "cycle-scope",
+          ] as const
+        ).map((scenario) => [early, parentPhase, scenario] as const),
+      ),
+    ),
+  )(
+    "recovers eligible deferred parents before worker fallback (early: %p, parent: %s, scenario: %s)",
+    async (early, parentPhase, scenario) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const workerPhase =
+        parentPhase === "validation" ? "discovery" : "attack_path";
+      const newerPhase =
+        parentPhase === "validation" ? "attack_path" : "validation";
+      const restoreScope =
+        scenario === "restore-scope" || scenario === "cycle-scope";
+      let narrowed = false;
+      let restoredCountSeen = false;
+      const parentCount = scenario === "lower-parent" ? 2 : 3;
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const recovered = Promise.withResolvers<void>();
+      const restored = Promise.withResolvers<void>();
+      const cycled = Promise.withResolvers<void>();
+      const receipts = new Map<
+        string,
+        ReturnType<typeof Promise.withResolvers<void>>
+      >();
+      for (const id of [
+        "first",
+        "second",
+        "eligible",
+        "newer",
+        "oversized",
+        "idle-1",
+        "idle-2",
+      ])
+        receipts.set(id, Promise.withResolvers<void>());
+
+      const inventory: ThreadEvent = completedCommand(
+        "inventory",
+        commandOutput(progressMarker("discovery", 0, 6)),
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const appendReceipt = async (
+            file: string,
+            id: string,
+            output: string,
+          ) => {
+            await appendFile(
+              file,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: id,
+                  output,
+                },
+              }) + "\n",
+            );
+            await receipts.get(id)!.promise;
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify(
+                nativeCommand("inventory", persistedCommandOutput),
+              ) + "\n",
+            );
+            const restoredInventory: ThreadEvent = completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 8)),
+              "inventory-restored",
+            );
+            if (restoreScope)
+              await appendFile(
+                parent,
+                JSON.stringify(
+                  nativeCommand("inventory", persistedCommandOutput),
+                ) + "\n",
+              );
+            const finalInventory: ThreadEvent = completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 6)),
+              "inventory-final",
+            );
+            if (scenario === "cycle-scope")
+              await appendFile(
+                parent,
+                JSON.stringify(
+                  nativeCommand("inventory", persistedCommandOutput),
+                ) + "\n",
+              );
+            if (early) {
+              yield inventory;
+              await inventoryRead.promise;
+              if (restoreScope) yield restoredInventory;
+              if (scenario === "cycle-scope") yield finalInventory;
+            }
+            const first = await writeUsageSession(
+              codexHome,
+              "first-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendReceipt(
+              first,
+              "first",
+              progressMarker(workerPhase, 3, 3),
+            );
+            const second = await writeUsageSession(
+              codexHome,
+              "second-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendReceipt(
+              second,
+              "second",
+              progressMarker(workerPhase, 1, 8),
+            );
+            await appendReceipt(
+              parent,
+              "eligible",
+              progressMarker(parentPhase, parentCount, 6),
+            );
+            if (scenario === "newer-parent")
+              await appendReceipt(
+                parent,
+                "newer",
+                progressMarker(newerPhase, parentCount, 6),
+              );
+            if (scenario !== "no-frontier")
+              await appendReceipt(
+                parent,
+                "oversized",
+                progressMarker(parentPhase, 4, 8),
+              );
+            if (scenario === "idle" || scenario === "newer-parent") {
+              // Each receipt requires another actual poll. Deferred facts must
+              // survive while the newer parent still fits the provisional scope.
+              await appendReceipt(parent, "idle-1", "done");
+              await appendReceipt(parent, "idle-2", "done");
+            }
+            if (!early) yield inventory;
+            if (restoreScope) {
+              if (!early) {
+                await recovered.promise;
+                // Keep the temporarily ineligible accepted fact across a poll.
+                await appendReceipt(parent, "idle-1", "done");
+                await appendReceipt(parent, "idle-2", "done");
+                yield restoredInventory;
+                await restored.promise;
+                if (scenario === "cycle-scope") yield finalInventory;
+              }
+              if (scenario === "cycle-scope") await cycled.promise;
+              else await restored.promise;
+            } else await recovered.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 6)
+              inventoryRead.resolve();
+            if (update.filesCompleted === 3 && update.filesTotal === 6) {
+              narrowed = true;
+              recovered.resolve();
+              if (early || restoredCountSeen) cycled.resolve();
+            }
+            if (
+              update.filesCompleted === 4 &&
+              update.filesTotal === 8 &&
+              (early || narrowed)
+            ) {
+              restoredCountSeen = true;
+              restored.resolve();
+            }
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id !== undefined) receipts.get(id)?.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase:
+            scenario === "newer-parent"
+              ? newerPhase
+              : scenario === "lower-parent" && early
+                ? "discovery"
+                : parentPhase,
+          filesCompleted: scenario === "restore-scope" ? 4 : 3,
+          filesTotal: scenario === "restore-scope" ? 8 : 6,
+        });
+        if (restoreScope && !early)
+          expect(
+            updates
+              .filter(
+                (update) =>
+                  update.filesTotal === 6 && update.filesCompleted === 3,
+              )
+              .at(-1),
+          ).toEqual({ phase: parentPhase, filesCompleted: 3, filesTotal: 6 });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        inventoryRead.resolve();
+        recovered.resolve();
+        restored.resolve();
+        cycled.resolve();
+        for (const receipt of receipts.values()) receipt.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    [false, "attack_path", "discovery", "validation"],
+    [true, "attack_path", "discovery", "validation"],
+    [false, "validation", "attack_path", "discovery"],
+    [true, "validation", "attack_path", "discovery"],
+  ] as const)(
+    "recovers worker phases when inventory uncaps accepted coverage (early: %p, parent: %s, first: %s, last: %s)",
+    async (early, parentPhase, firstPhase, lastPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const firstRead = Promise.withResolvers<void>();
+      const lastRead = Promise.withResolvers<void>();
+      const recovered = Promise.withResolvers<void>();
+
+      const inventory: ThreadEvent = completedCommand(
+        "inventory",
+        commandOutput(progressMarker("discovery", 0, 10)),
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 6 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const receipt = (
+            id: string,
+            phase: ScanProgress["phase"],
+            count: number,
+            total: number,
+          ) => ({
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: id,
+              output: progressMarker(phase, count, total),
+            },
+          });
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify(
+                nativeCommand("inventory", persistedCommandOutput),
+              ) + "\n",
+            );
+            if (early) {
+              yield inventory;
+              await inventoryRead.promise;
+            }
+            await appendFile(
+              parent,
+              JSON.stringify(receipt("parent-review", parentPhase, 6, 6)) +
+                "\n",
+            );
+            await parentRead.promise;
+            const first = await writeUsageSession(
+              codexHome,
+              "first-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              first,
+              JSON.stringify(receipt("first-worker", firstPhase, 4, 4)) + "\n",
+            );
+            await firstRead.promise;
+            const last = await writeUsageSession(
+              codexHome,
+              "last-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              last,
+              JSON.stringify(receipt("last-worker", lastPhase, 5, 5)) + "\n",
+            );
+            await lastRead.promise;
+            // Both workers were accepted under the provisional inventory. Its
+            // earlier full marker reveals their greater aggregate coverage.
+            if (!early) yield inventory;
+            await recovered.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 10)
+              inventoryRead.resolve();
+            if (update.filesCompleted === 9 && update.filesTotal === 10)
+              recovered.resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "parent-review") parentRead.resolve();
+            if (id === "first-worker") firstRead.resolve();
+            if (id === "last-worker") lastRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted: 9,
+          filesTotal: 10,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        inventoryRead.resolve();
+        parentRead.resolve();
+        firstRead.resolve();
+        lastRead.resolve();
+        recovered.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each(["command", "message"] as const)(
+    "keeps the current parent phase while polling observes equal workers (%s)",
+    async (kind) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      let parentPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parentPath))
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === basename(parentPath)) -
+              Number(String(left.name) === basename(parentPath)),
+          );
+        return entries;
+      }) as typeof originalReaddir);
+      const marker = (phase: ScanProgress["phase"]) =>
+        progressMarker(phase, 8, 8);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: marker("discovery"),
+              },
+            }) + "\n",
+          );
+          await appendFile(
+            parentPath,
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item:
+                  kind === "command"
+                    ? {
+                        type: "CommandExecution",
+                        command: ["review-phase"],
+                        aggregated_output: marker("validation"),
+                      }
+                    : {
+                        type: "AgentMessage",
+                        content: [{ type: "Text", text: marker("validation") }],
+                      },
+              },
+            }) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            // Both sources are durable. Parent-first enumeration can lead live
+            // delivery even though the worker emitted its receipt earlier.
+            pollAllowed.resolve();
+            await workerRead.promise;
+            yield {
+              type: "item.completed",
+              item:
+                kind === "command"
+                  ? {
+                      id: "live-parent",
+                      type: "command_execution",
+                      command: "review-phase",
+                      aggregated_output: marker("validation"),
+                      status: "completed",
+                      exit_code: 0,
+                    }
+                  : {
+                      id: "live-parent",
+                      type: "agent_message",
+                      text: marker("validation"),
+                    },
+            };
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (
+              threadId === "worker-thread" &&
+              event["type"] === "response_item"
+            )
+              workerRead.resolve();
+          },
+        });
+        expect(
+          updates
+            .filter((update) => update.filesCompleted === 8)
+            .map((update) => update.phase),
+        ).toEqual(["validation"]);
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        workerRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, false, "paginated"],
+    [true, false, "paginated"],
+    [false, true, "paginated"],
+    [true, true, "paginated"],
+    [false, false, "legacy"],
+    [true, false, "legacy"],
+    [false, true, "legacy"],
+    [true, true, "legacy"],
+    [false, false, "legacy-tool"],
+    [true, false, "legacy-tool"],
+    [false, true, "legacy-tool"],
+    [true, true, "legacy-tool"],
+  ] as const)(
+    "keeps inventory proof across a pending session close (split: %p, review already started: %p, mode: %s)",
+    async (split, reviewedEarlier, mode) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const workerAdmitted = Promise.withResolvers<void>();
+      const earlierReviewRead = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        // The read itself remains real. Delay only close after the snapshot EOF,
+        // so a later native completion can be durable before SDK delivery while
+        // still absent from this poll's already-read snapshot.
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+
+      const native = (id: string, text: string) => {
+        if (mode !== "paginated")
+          return (
+            JSON.stringify(
+              mode === "legacy-tool" || id.endsWith("inventory")
+                ? {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: id,
+                      output: text,
+                    },
+                  }
+                : {
+                    type: "event_msg",
+                    payload: { type: "agent_message", id, message: text },
+                  },
+            ) + "\n"
+          );
+        return JSON.stringify(nativeCommand(id, text, id)) + "\n";
+      };
+      const live = (id: string, text: string): ThreadEvent => ({
+        type: "item.completed",
+        item:
+          mode === "legacy" && !id.endsWith("inventory")
+            ? { type: "agent_message", id, text }
+            : {
+                type: "command_execution",
+                id,
+                command: id,
+                aggregated_output: text,
+                status: "completed",
+                exit_code: 0,
+              },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "worker-count",
+                output: progressMarker("discovery", 1, 9),
+              },
+            }) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await workerRead.promise;
+            const first = progressMarker("discovery", 0, 9);
+            await appendFile(parentPath, native("first-inventory", first));
+            yield live("first-inventory", first);
+            await workerAdmitted.promise;
+            if (reviewedEarlier) {
+              const earlier = progressMarker("validation", 3, 9);
+              await appendFile(parentPath, native("earlier-review", earlier));
+              yield live("earlier-review", earlier);
+              await earlierReviewRead.promise;
+            }
+            const inventory = progressMarker("discovery", 0, 7);
+            pauseClose = split;
+            await appendFile(
+              parentPath,
+              native("corrected-inventory", inventory),
+            );
+            if (split) await closeEntered.promise;
+            const review = progressMarker(
+              "validation",
+              7,
+              reviewedEarlier ? 9 : 7,
+            );
+            // Both records are persisted before their corresponding live items.
+            await appendFile(parentPath, native("final-review", review));
+            yield live("corrected-inventory", inventory);
+            yield live("final-review", review);
+            closeReleased.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 1 && update.filesTotal === 9)
+              workerAdmitted.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.call_id === "worker-count") workerRead.resolve();
+            if (
+              (payload?.item?.id ?? payload?.id ?? payload?.call_id) ===
+              "earlier-review"
+            )
+              earlierReviewRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 7,
+          filesTotal: reviewedEarlier ? 9 : 7,
+        });
+        if (reviewedEarlier)
+          expect(
+            updates.every(
+              (update) =>
+                update.filesTotal === 9 || update.filesCompleted === 0,
+            ),
+          ).toBe(true);
+      } finally {
+        clearInterval(keepAlive);
+        pauseClose = false;
+        workerRead.resolve();
+        workerAdmitted.resolve();
+        earlierReviewRead.resolve();
+        closeEntered.resolve();
+        closeReleased.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, 7, "validation", "attack_path", false, "worker"],
+    [true, 7, "validation", "attack_path", false, "worker"],
+    [false, 8, "validation", "attack_path", false, "worker"],
+    [true, 8, "validation", "attack_path", false, "worker"],
+    [false, 9, "validation", "attack_path", false, "worker"],
+    [true, 9, "validation", "attack_path", false, "worker"],
+    [false, 8, "attack_path", "discovery", false, "worker"],
+    [true, 8, "attack_path", "discovery", false, "worker"],
+    [false, 8, "validation", "attack_path", true, "worker"],
+    [true, 8, "validation", "attack_path", true, "worker"],
+    [false, 7, "validation", "attack_path", false, "parent"],
+    [true, 7, "validation", "attack_path", false, "parent"],
+    [false, 8, "validation", "attack_path", false, "parent"],
+    [true, 8, "validation", "attack_path", false, "parent"],
+    [false, 9, "validation", "attack_path", false, "parent"],
+    [true, 9, "validation", "attack_path", false, "parent"],
+    [false, 8, "attack_path", "discovery", false, "parent"],
+    [false, 8, "validation", "attack_path", true, "parent"],
+  ] as const)(
+    "reconciles deferred parent receipts with newer phases (live first: %p, count: %p, parent: %s, newer: %s, later parent: %p, source: %s)",
+    async (
+      liveFirst,
+      parentCount,
+      parentPhase,
+      workerPhase,
+      laterParent,
+      newerSource,
+    ) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      if (!liveFirst) pollAllowed.resolve();
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+
+      const receipt = (
+        callId: string,
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: callId,
+          output: progressMarker(phase, count, total),
+        },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          await appendFile(
+            parent,
+            [
+              nativeCommand("inventory", persistedCommandOutput),
+              receipt("parent-reviewed", parentPhase, parentCount, 9),
+            ]
+              .map((row) => JSON.stringify(row))
+              .join("\n") + "\n",
+          );
+          const inventory: ThreadEvent = completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 9)),
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (liveFirst) yield inventory;
+            await parentRead.promise;
+            const parts = [
+              "Review progress: ",
+              progressMarker(workerPhase, 8, 8),
+            ];
+            if (newerSource === "worker") {
+              const worker = await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              );
+              await appendFile(
+                worker,
+                JSON.stringify(receipt("worker-reviewed", workerPhase, 8, 8)) +
+                  "\n",
+              );
+            } else {
+              // Paginated persistence finalizes native text without separators,
+              // while the original response retains independently parsed parts.
+              await appendFile(
+                parent,
+                [
+                  {
+                    type: "event_msg",
+                    payload: {
+                      type: "item_completed",
+                      item: {
+                        type: "AgentMessage",
+                        content: [{ type: "Text", text: parts.join("") }],
+                      },
+                    },
+                  },
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "message",
+                      role: "assistant",
+                      id: "worker-reviewed",
+                      content: parts.map((text) => ({
+                        type: "output_text",
+                        text,
+                      })),
+                    },
+                  },
+                ]
+                  .map((row) => JSON.stringify(row))
+                  .join("\n") + "\n",
+              );
+            }
+            await workerRead.promise;
+            if (!liveFirst) yield inventory;
+            if (newerSource === "parent")
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "agent_message",
+                  id: "newer-message",
+                  text: parts.join(""),
+                },
+              };
+            if (laterParent)
+              await appendFile(
+                parent,
+                JSON.stringify(
+                  receipt("parent-later", parentPhase, parentCount, 9),
+                ) + "\n",
+              );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesTotal === 9 && update.filesCompleted === 0)
+              pollAllowed.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              id?: string;
+            };
+            const id = payload?.call_id ?? payload?.id;
+            if (id === "parent-reviewed") parentRead.resolve();
+            if (id === "worker-reviewed") workerRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase:
+            newerSource === "worker"
+              ? !liveFirst && parentCount < 8 && !laterParent
+                ? "preflight"
+                : parentPhase
+              : laterParent || parentCount > 8
+                ? parentPhase
+                : workerPhase,
+          filesCompleted: Math.max(parentCount, 8),
+          filesTotal: 9,
+        });
+        if (!liveFirst && !laterParent && parentCount <= 8) {
+          // Worker receipts retain the parent phase, so their public progress
+          // boundary is the accepted coverage count.
+          const coverage = updates.findIndex((update) =>
+            newerSource === "worker"
+              ? update.filesCompleted >= 8
+              : update.phase === workerPhase,
+          );
+          expect(coverage).toBeGreaterThanOrEqual(0);
+          expect(
+            updates
+              .slice(coverage)
+              .every(
+                (update) =>
+                  (newerSource === "worker" || update.phase === workerPhase) &&
+                  update.filesCompleted >= 8,
+              ),
+          ).toBe(true);
+        }
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        parentRead.resolve();
+        workerRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, 7, 3, false, false],
+    [true, 7, 3, false, false],
+    [false, 9, 4, false, false],
+    [true, 9, 4, false, false],
+    [false, 9, 3, true, false],
+    [false, 9, 4, true, true],
+  ] as const)(
+    "recovers inventory and saved counts when polling leads live delivery (live first: %p, total: %p, reviewed: %p, later inventory: %p, later count: %p)",
+    async (liveFirst, total, reviewed, laterInventory, laterCount) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const receiptRead = Promise.withResolvers<void>();
+      if (!liveFirst) pollAllowed.resolve();
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const marker = (phase: ScanProgress["phase"], count: number) =>
+        progressMarker(phase, count, laterInventory && count > 0 ? 8 : total);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          // Both records are durable before live delivery. Slow polling is the
+          // only difference between the two schedules, as in the native writer.
+          const records = [
+            nativeCommand("inventory", persistedCommandOutput),
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "review-count",
+                output: marker(
+                  "validation",
+                  laterCount ? reviewed - 1 : reviewed,
+                ),
+              },
+            },
+          ];
+          if (laterInventory) records.reverse();
+          if (laterCount)
+            records.push({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "later-count",
+                output: marker("validation", reviewed),
+              },
+            });
+          await appendFile(
+            rollout,
+            records.map((row) => JSON.stringify(row)).join("\n") + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (!liveFirst) await receiptRead.promise;
+            yield completedCommand(
+              "inventory",
+              commandOutput(marker("discovery", 0)),
+            );
+            if (liveFirst) await receiptRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesTotal === total && update.filesCompleted === 0)
+              pollAllowed.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { call_id?: string })?.call_id ===
+              "review-count"
+            )
+              receiptRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: reviewed,
+          filesTotal: laterInventory ? 8 : total,
+        });
+        const counted = updates.findIndex(
+          (update) => update.filesCompleted === reviewed,
+        );
+        expect(counted).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(counted)
+            .every(
+              (update) =>
+                update.filesCompleted === reviewed &&
+                update.phase === "validation",
+            ),
+        ).toBe(true);
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        receiptRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [true, 9],
+    [false, 9],
+    [true, 7],
+    [false, 7],
+  ] as const)(
+    "restores resumed parent inventory independently of workers (worker first: %p, total: %p)",
+    async (workerFirst, total) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const marker = (count: number) =>
+        progressMarker("discovery", count, total);
+      const parent = await writeUsageSession(
+        codexHome,
+        "thread-1",
+        {},
+        { cwd: scanDir },
+      );
+      const worker = await writeUsageSession(
+        codexHome,
+        "worker-thread",
+        {},
+        { parent: "thread-1" },
+      );
+      await appendFile(
+        parent,
+        [0, 4]
+          .map((count) =>
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: marker(count),
+              },
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      await appendFile(
+        worker,
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message:
+              "CODEX_SECURITY_SCAN_PROGRESS " +
+              JSON.stringify({
+                phase: "validation",
+                filesCompleted: 1,
+                filesTotal: 1,
+              }),
+          },
+        }) + "\n",
+      );
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parent)) {
+          return entries.toSorted((left, right) => {
+            const first = workerFirst ? basename(worker) : basename(parent);
+            return (
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first)
+            );
+          });
+        }
+        return entries;
+      }) as typeof originalReaddir);
+      const recipe = {
+        repository,
+        target: { kind: "repository", paths: [] },
+        repositoryRevision: "deadbeef",
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "get-cli-scan-resume"
+            ? {
+                ...mockScanRegistration(
+                  ["--registration-json-stdin", "--scan-dir", scanDir],
+                  JSON.stringify({ recipe }),
+                ),
+                threadId: "thread-1",
+                recipe,
+                scopeFileCount: 8,
+              }
+            : mockWorkbench(args, input),
+        createCodex: () => ({
+          startThread: () => {
+            throw new Error("Expected a resumed thread");
+          },
+          resumeThread: (id) => ({
+            id,
+            runStreamed: async () => {
+              await copyCompletedScan(root);
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                await appendFile(
+                  parent,
+                  JSON.stringify({
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      output: marker(5),
+                    },
+                  }) + "\n",
+                );
+                throw new Error("Synthetic stop after restored inventory");
+              }
+              return { events: completedEvents(id, events()) };
+            },
+          }),
+        }),
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            outputDir: scanDir,
+            resumeScanId: "scan_example_001",
+            onProgress: (update) => updates.push(update),
+          }),
+        ).rejects.toThrow("Synthetic stop after restored inventory");
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 5,
+          filesTotal: total,
+        });
+        const reviewed = updates.findIndex(
+          (update) => update.filesCompleted > 0,
+        );
+        expect(reviewed).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(reviewed)
+            .every(
+              (update) =>
+                update.filesCompleted > 0 &&
+                update.filesCompleted <= update.filesTotal,
+            ),
+        ).toBe(true);
+      } finally {
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "admits queued inventory before retained phases (projected: %p, raw copy: %p)",
+    async (projected, raw) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const phaseRead = Promise.withResolvers<void>();
+      const reviewRead = Promise.withResolvers<void>();
+      let held = true;
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (held && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const command = (
+        id: string,
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+        changed = false,
+      ) => {
+        const text = progressMarker(phase, count, total);
+        const argv = ["printf", "sk-" + "a".repeat(32)];
+        return {
+          rows: [
+            nativeCommand(argv, text, id),
+            ...(raw
+              ? [
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: id,
+                      output: text,
+                    },
+                  },
+                ]
+              : []),
+          ],
+          live: completedCommand(
+            changed ? "printf [REDACTED_SECRET]" : argv.join(" "),
+            text,
+            id,
+          ) as ThreadEvent,
+        };
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const first = command("initial", "discovery", 0, 10, projected);
+          const middle = command("middle", "discovery", 0, 9);
+          const inventory = command("inventory", "discovery", 0, 6, projected);
+          const phase = command("phase", "threat_model", 0, 6);
+          const review = command("review", "reporting", 6, 6);
+          const append = (rows: unknown[]) =>
+            appendFile(parent, jsonLines(rows) + "\n");
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await append([
+              ...first.rows,
+              ...middle.rows,
+              ...inventory.rows,
+              ...phase.rows,
+            ]);
+            yield first.live;
+            held = false;
+            pollAllowed.resolve();
+            await phaseRead.promise;
+            yield middle.live;
+            await append(review.rows);
+            await reviewRead.promise;
+            yield inventory.live;
+            yield phase.live;
+            yield review.live;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as { item?: { id?: string } };
+            if (payload?.item?.id === "phase") phaseRead.resolve();
+            if (payload?.item?.id === "review") reviewRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "reporting",
+          filesCompleted: 6,
+          filesTotal: 6,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        held = false;
+        pollAllowed.resolve();
+        phaseRead.resolve();
+        reviewRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    ["projected", 6],
+    ["unchanged command", 6],
+    ["complete output", 6],
+    ["newer inventory", 9],
+    ["newer inventory pending", 8],
+    ["repeated output", 8],
+    ["different review total", 8],
+  ] as const)(
+    "corroborates lost inventory with a positioned review (%s)",
+    async (scenario, expectedTotal) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const reviewRead = Promise.withResolvers<void>();
+      const parentReady = Promise.withResolvers<void>();
+      const workerAdmitted = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          return close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      let held = true;
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (held && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          parentPath = parent;
+          const argv = ["printf", "sk-" + "a".repeat(32)];
+          const inventory = progressMarker("discovery", 0, 6);
+          const review = progressMarker(
+            "validation",
+            1,
+            scenario === "different review total" ? 7 : 6,
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (scenario === "newer inventory pending") {
+              const worker = await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              );
+              await appendFile(
+                worker,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: "worker",
+                      output: progressMarker("discovery", 1, 8),
+                    },
+                  },
+                ]) + "\n",
+              );
+              await appendFile(
+                parent,
+                jsonLines([
+                  nativeCommand("ready", "Synthetic ready.", "ready"),
+                ]) + "\n",
+              );
+              held = false;
+              pollAllowed.resolve();
+              await Promise.all([parentReady.promise, workerAdmitted.promise]);
+              pauseClose = true;
+            }
+            await appendFile(
+              parent,
+              jsonLines([
+                nativeCommand(
+                  argv,
+                  scenario === "complete output"
+                    ? inventory
+                    : persistedCommandOutput,
+                  "inventory",
+                ),
+                ...(scenario === "newer inventory" ||
+                scenario === "newer inventory pending"
+                  ? [
+                      nativeCommand(
+                        "newer",
+                        progressMarker("discovery", 0, expectedTotal),
+                        "newer",
+                      ),
+                    ]
+                  : []),
+                ...(scenario === "repeated output"
+                  ? [nativeCommand("other", persistedCommandOutput, "other")]
+                  : []),
+                nativeCommand("review", review, "review"),
+              ]) + "\n",
+            );
+            held = false;
+            pollAllowed.resolve();
+            if (scenario === "newer inventory pending")
+              await closeEntered.promise;
+            else await reviewRead.promise;
+            yield completedCommand(
+              scenario === "unchanged command"
+                ? argv.join(" ")
+                : "printf [REDACTED_SECRET]",
+              scenario === "complete output"
+                ? inventory
+                : commandOutput(inventory),
+              "inventory",
+            ) as ThreadEvent;
+            yield completedCommand("review", review, "review") as ThreadEvent;
+            closeReleased.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 1 && update.filesTotal === 8)
+              workerAdmitted.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as { item?: { id?: string } };
+            if (payload?.item?.id === "review") reviewRead.resolve();
+            if (payload?.item?.id === "ready") parentReady.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 1,
+          filesTotal: expectedTotal,
+        });
+        const reviewed = updates.findIndex(
+          (update) => update.filesCompleted > 0,
+        );
+        expect(
+          updates.slice(reviewed).every((update) => update.filesCompleted > 0),
+        ).toBe(true);
+      } finally {
+        clearInterval(keepAlive);
+        pauseClose = false;
+        closeReleased.resolve();
+        parentReady.resolve();
+        workerAdmitted.resolve();
+        held = false;
+        pollAllowed.resolve();
+        reviewRead.resolve();
+        await client.close();
+        listing.mockRestore();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    ["initial-read", "replay", "all-batch"].flatMap((delivery) =>
+      [false, true].flatMap((truncated) =>
+        [false, true].map((worker) => ({ delivery, truncated, worker })),
+      ),
+    ),
+  )(
+    "keeps saved inventory behind live scope (delivery=$delivery, truncated=$truncated, worker=$worker)",
+    async ({ delivery, truncated, worker }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const parentEvents: string[] = [];
+      const replayClose = Promise.withResolvers<void>();
+      const releaseReplay = Promise.withResolvers<void>();
+      const currentRead = Promise.withResolvers<void>();
+      const pollAllowed = Promise.withResolvers<void>();
+      let holdPoll = true;
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      let parentPath = "";
+      let closes = 0;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (
+            ++closes === (delivery === "initial-read" ? 1 : 2) &&
+            delivery !== "all-batch"
+          ) {
+            replayClose.resolve();
+            await releaseReplay.promise;
+          }
+          return close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          await appendFile(
+            parentPath,
+            jsonLines([
+              nativeCommand("old", progressMarker("discovery", 0, 8), "old"),
+            ]) + "\n",
+          );
+          const workerPath = worker
+            ? await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              )
+            : undefined;
+          if (delivery !== "all-batch") {
+            holdPoll = false;
+            pollAllowed.resolve();
+          }
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            // Hold either the original read or the event-history replay after old EOF.
+            if (delivery !== "all-batch") await replayClose.promise;
+            const inventory = progressMarker("discovery", 0, 5);
+            const review = progressMarker("reporting", 1, 5);
+            const reviewRow = nativeCommand("review", review, "review");
+            await appendFile(
+              parentPath,
+              jsonLines([
+                nativeCommand(
+                  ["printf", "sk-" + "a".repeat(32)],
+                  truncated ? persistedCommandOutput : inventory,
+                  "current",
+                ),
+                ...(delivery === "all-batch" ? [reviewRow] : []),
+              ]) + "\n",
+            );
+            yield completedCommand(
+              "printf [REDACTED_SECRET]",
+              truncated ? commandOutput(inventory) : inventory,
+              "current",
+            ) as ThreadEvent;
+            // Admit the live inventory before publishing oversized worker coverage;
+            // directory enumeration must not decide this fixture's precondition.
+            expect(updates.at(-1)).toEqual({
+              phase: "discovery",
+              filesCompleted: 0,
+              filesTotal: 5,
+            });
+            if (workerPath !== undefined) {
+              await appendFile(
+                workerPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: "worker",
+                      output: progressMarker("discovery", 6, 8),
+                    },
+                  },
+                ]) + "\n",
+              );
+            }
+            if (delivery !== "all-batch") {
+              releaseReplay.resolve();
+              await currentRead.promise;
+              await appendFile(parentPath, jsonLines([reviewRow]) + "\n");
+            }
+            yield completedCommand("review", review, "review") as ThreadEvent;
+            holdPoll = false;
+            pollAllowed.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ threadId, event }) => {
+            const payload = event["payload"] as { item?: { id?: string } };
+            if (threadId === "thread-1" && payload?.item?.id !== undefined)
+              parentEvents.push(payload.item.id);
+            if (payload?.item?.id === "current") currentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "reporting",
+          filesCompleted: 1,
+          filesTotal: 5,
+        });
+        const current = updates.findIndex(
+          (update) => update.filesCompleted === 0 && update.filesTotal === 5,
+        );
+        expect(current).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(current)
+            .every(
+              (update) => update.filesTotal === 5 && update.filesCompleted <= 5,
+            ),
+        ).toBe(true);
+        expect(parentEvents).toEqual(["old", "current", "review"]);
+      } finally {
+        clearInterval(keepAlive);
+        holdPoll = false;
+        pollAllowed.resolve();
+        releaseReplay.resolve();
+        currentRead.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((changedDisplay) =>
+      [false, true].flatMap((rawCopy) =>
+        [false, true].map((pollAhead) => ({
+          changedDisplay,
+          rawCopy,
+          pollAhead,
+        })),
+      ),
+    ),
+  )(
+    "restores live parent phase across raw receipts (changed=$changedDisplay, raw=$rawCopy, pollAhead=$pollAhead)",
+    async ({ changedDisplay, rawCopy, pollAhead }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const savedRead = Promise.withResolvers<void>();
+      let holdPoll = true;
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const old = progressMarker("discovery", 3, 8);
+          const current = progressMarker("validation", 3, 8);
+          await appendFile(
+            parent,
+            jsonLines([
+              nativeCommand(["printf", "sk-" + "a".repeat(32)], old, "old"),
+              nativeCommand("validate", current, "current"),
+              ...(rawCopy
+                ? [
+                    {
+                      type: "response_item",
+                      payload: {
+                        type: "custom_tool_call_output",
+                        call_id: "current",
+                        output: current,
+                      },
+                    },
+                  ]
+                : []),
+            ]) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (pollAhead) {
+              holdPoll = false;
+              pollAllowed.resolve();
+              await savedRead.promise;
+            }
+            yield completedCommand(
+              changedDisplay
+                ? "printf [REDACTED_SECRET]"
+                : "printf sk-" + "a".repeat(32),
+              old,
+              "item_0",
+            );
+            yield completedCommand("validate", current, "item_1");
+            holdPoll = false;
+            pollAllowed.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              item?: { id?: string };
+              call_id?: string;
+            };
+            if (
+              rawCopy
+                ? payload.call_id === "current"
+                : payload.item?.id === "current"
+            )
+              savedRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 3,
+          filesTotal: 8,
+        });
+      } finally {
+        holdPoll = false;
+        pollAllowed.resolve();
+        savedRead.resolve();
+        clearInterval(keepAlive);
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  describe("partial parent source ordering", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    const phase = progress("threat_model", 0, 5);
+    type Step =
+      | readonly ["save" | "live", string, ScanProgress | string]
+      | readonly ["worker", ScanProgress]
+      | readonly ["poll"];
+    const scenarios: readonly {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+    }[] = [
+      {
+        name: "an earlier exact match before pending repeated inventory",
+        expected: progress("discovery", 5, 9),
+        steps: [
+          ["live", "first", inventory(9)],
+          ["save", "first", inventory(9)],
+          ["live", "current-display", inventory(9)],
+          ["save", "middle", inventory(8)],
+          ["poll"],
+          ["save", "current", inventory(9)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["worker", progress("attack_path", 5, 9)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "a delayed repeated inventory before a pending exact anchor",
+        expected: inventory(8),
+        steps: [
+          ["live", "first", inventory(8)],
+          ["live", "last changed", inventory(8)],
+          ["live", "anchor", "finished"],
+          ["save", "first", inventory(8)],
+          ["save", "middle", inventory(5)],
+          ["poll"],
+          ["save", "last", inventory(8)],
+          ["poll"],
+          ["save", "anchor", "finished"],
+        ],
+      },
+      {
+        name: "a dropped inventory before bounded zero-count phases",
+        expected: progress("reporting", 0, 5),
+        steps: [
+          ["save", "inventory", inventory(5)],
+          ["save", "phase", progress("validation", 0, 5)],
+          ["save", "later-phase", progress("reporting", 0, 5)],
+          ["live", "phase-display", progress("validation", 0, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["poll"],
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "parked inventory before an exact zero-count phase",
+        expected: phase,
+        steps: [
+          ["worker", progress("attack_path", 3, 8)],
+          ["live", "later-phase", phase],
+          ["poll"],
+          ["live", "anchor", "finished"],
+          ["save", "inventory", inventory(5)],
+          ["save", "earlier-phase", phase],
+          ["poll"],
+          ["save", "later-phase", phase],
+          ["poll"],
+          ["save", "anchor", "finished"],
+        ],
+      },
+      {
+        name: "source precedence after a delayed live scope correction",
+        expected: phase,
+        steps: [
+          ["save", "initial", inventory(9)],
+          ["live", "initial changed", inventory(9)],
+          ["worker", progress("attack_path", 3, 9)],
+          ["poll"],
+          ["save", "final", inventory(5)],
+          ["poll"],
+          ["save", "phase", phase],
+          ["poll"],
+          ["live", "final changed", inventory(5)],
+          ["live", "phase changed", phase],
+          ["save", "anchor", "finished"],
+          ["poll"],
+          ["live", "anchor", "finished"],
+        ],
+      },
+      {
+        name: "deferred live inventory ahead of an older saved row",
+        expected: progress("preflight", 2, 5),
+        steps: [
+          ["worker", progress("attack_path", 2, 5)],
+          ["poll"],
+          ["live", "current-changed", inventory(5)],
+          ["save", "older", inventory(10)],
+          ["poll"],
+          ["save", "current", inventory(5)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "inventory between an early zero phase and a later positive review",
+        expected: progress("validation", 5, 5),
+        steps: [
+          ["save", "initial-phase", progress("threat_model", 0, 8)],
+          ["live", "initial-phase", progress("threat_model", 0, 8)],
+          ["poll"],
+          ["worker", progress("attack_path", 3, 8)],
+          ["poll"],
+          ["save", "inventory", inventory(5)],
+          ["save", "review", progress("validation", 5, 5)],
+          ["live", "review", progress("validation", 5, 5)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "a repeated saved inventory beyond the resolved live boundary",
+        expected: progress("preflight", 2, 9),
+        steps: [
+          ["worker", progress("attack_path", 2, 5)],
+          ["poll"],
+          ["save", "first", inventory(9)],
+          ["live", "first-changed", inventory(9)],
+          ["poll"],
+          ["save", "second", inventory(8)],
+          ["live", "second-changed", inventory(8)],
+          ["poll"],
+          ["save", "third", inventory(9)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+    ];
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].map((workerFirst) => ({ ...scenario, workerFirst })),
+      ),
+    )(
+      "preserves $name (workers first=$workerFirst)",
+      async ({ steps, expected, workerFirst }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const text = (value: string | ScanProgress) =>
+          typeof value === "string"
+            ? value
+            : progressMarker(
+                value.phase,
+                value.filesCompleted,
+                value.filesTotal,
+              );
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              for (const [index, step] of steps.entries()) {
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates.at(-1)).toEqual(expected);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
+  test.each(
+    [
+      "unwritten growth",
+      "unwritten shrink",
+      "unwritten phase",
+      "delayed repeated inventory",
+      "delayed raw inventory",
+      "close growth",
+      "close shrink",
+      "live scope changed",
+      "live scope exact",
+      "live scope changed batch",
+      "live scope exact batch",
+    ].flatMap((scenario) =>
+      [false, true].flatMap((workerFirst) =>
+        [false, true].flatMap((pollFirst) =>
+          (scenario.startsWith("delayed") ? [false, true] : [false]).map(
+            (deliverLast) => ({
+              scenario,
+              workerFirst,
+              pollFirst,
+              deliverLast,
+            }),
+          ),
+        ),
+      ),
+    ),
+  )(
+    "preserves occurrence authority after dropped callbacks ($scenario, workers first=$workerFirst, read variant=$pollFirst, last live=$deliverLast)",
+    async ({ scenario, workerFirst, pollFirst, deliverLast }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      let tracker: ScanCostTracker | undefined;
+      const originalStart = ScanCostTracker.prototype.start;
+      const starting = spyOn(
+        ScanCostTracker.prototype,
+        "start",
+      ).mockImplementation(function (this: ScanCostTracker, threadId: string) {
+        originalStart.call(this, threadId);
+        if (threadId === "thread-1") tracker = this;
+      });
+      let parentPath = "";
+      let workerPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) !== dirname(parentPath)) return entries;
+        const first = basename(workerFirst ? workerPath : parentPath);
+        return entries.toSorted(
+          (left, right) =>
+            Number(String(right.name) === first) -
+            Number(String(left.name) === first),
+        );
+      }) as typeof originalReaddir);
+      const inventory = (total: number) =>
+        progressMarker("discovery", 0, total);
+      const expected: ScanProgress =
+        scenario === "unwritten growth" || scenario === "close growth"
+          ? { phase: "discovery", filesCompleted: 5, filesTotal: 9 }
+          : scenario === "unwritten phase"
+            ? { phase: "validation", filesCompleted: 3, filesTotal: 8 }
+            : scenario.startsWith("live scope")
+              ? { phase: "validation", filesCompleted: 1, filesTotal: 8 }
+              : {
+                  phase: "discovery",
+                  filesCompleted: 0,
+                  filesTotal: scenario.endsWith("shrink") ? 8 : 5,
+                };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          workerPath = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            {
+              parent: "thread-1",
+            },
+          );
+          const save = (command: string, output: string) =>
+            appendFile(
+              parentPath,
+              jsonLines([nativeCommand(command, output, command)]) + "\n",
+            );
+          const receipt = (path: string, output: string) =>
+            appendFile(
+              path,
+              jsonLines([
+                {
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    call_id: "synthetic-progress",
+                    output,
+                  },
+                },
+              ]) + "\n",
+            );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            expect(tracker).toBeDefined();
+            await tracker!.stop();
+            if (scenario.startsWith("close")) {
+              const total = scenario === "close growth" ? 9 : 8;
+              await save("old-first", inventory(total));
+              const older =
+                jsonLines([
+                  nativeCommand(
+                    "old-last",
+                    inventory(total === 9 ? 8 : 9),
+                    "old-last",
+                  ),
+                ]) + "\n";
+              // Cover both an incomplete older row at EOF and a whole older
+              // row appended during close, before the new live callback.
+              const split = pollFirst ? Math.floor(older.length / 2) : 0;
+              if (split !== 0)
+                await appendFile(parentPath, older.slice(0, split));
+              const closing = Promise.withResolvers<void>();
+              const release = Promise.withResolvers<void>();
+              const originalOpen = fsPromises.open;
+              let intercept = true;
+              const opening = spyOn(fsPromises, "open").mockImplementation(
+                async (...args: Parameters<typeof originalOpen>) => {
+                  const handle = await originalOpen(...args);
+                  if (String(args[0]) === parentPath && intercept) {
+                    intercept = false;
+                    const close = handle.close.bind(handle);
+                    handle.close = async () => {
+                      await appendFile(parentPath, older.slice(split));
+                      closing.resolve();
+                      await release.promise;
+                      await close();
+                    };
+                  }
+                  return handle;
+                },
+              );
+              const pending = tracker!.refresh();
+              try {
+                await closing.promise;
+                yield completedCommand(
+                  "current",
+                  inventory(total),
+                  "live-current",
+                );
+              } finally {
+                release.resolve();
+                await pending;
+                opening.mockRestore();
+              }
+            } else if (scenario.startsWith("unwritten")) {
+              const current =
+                scenario === "unwritten phase"
+                  ? progressMarker("validation", 3, 8)
+                  : inventory(scenario === "unwritten growth" ? 9 : 8);
+              await save("old-first", current);
+              await save(
+                "old-last",
+                scenario === "unwritten phase"
+                  ? progressMarker("reporting", 3, 8)
+                  : inventory(scenario === "unwritten growth" ? 8 : 9),
+              );
+              if (pollFirst) await tracker!.refresh();
+              // Earlier live callbacks were dropped. This different command
+              // has not been persisted, even though its output repeats a row.
+              yield completedCommand("current", current, "live-current");
+            } else if (scenario.startsWith("live scope")) {
+              const display = (command: string) =>
+                scenario.includes("changed") ? `${command} displayed` : command;
+              await save("first", inventory(9));
+              yield completedCommand(display("first"), inventory(9));
+              await tracker!.refresh();
+              await receipt(workerPath, progressMarker("attack_path", 5, 9));
+              await tracker!.refresh();
+              expect(updates.at(-1)).toEqual({
+                phase: "discovery",
+                filesCompleted: 5,
+                filesTotal: 9,
+              });
+              // Every parent callback arrives, but none needs an unchanged
+              // command display or a later message to replace worker coverage.
+              const batch = scenario.endsWith("batch");
+              const commands = [
+                ["current", inventory(8)],
+                ["review", progressMarker("validation", 1, 8)],
+              ] as const;
+              if (batch && pollFirst) {
+                for (const [command, output] of commands)
+                  await save(command, output);
+                await tracker!.refresh();
+              }
+              for (const [command, output] of commands) {
+                if (pollFirst && !batch) {
+                  await save(command, output);
+                  await tracker!.refresh();
+                }
+                yield completedCommand(display(command), output);
+                if (!pollFirst) await save(command, output);
+                if (!batch) await tracker!.refresh();
+              }
+            } else {
+              const middle = scenario === "delayed raw inventory" ? 9 : 8;
+              await save("first", inventory(8));
+              await save("middle", inventory(middle));
+              await save("current", inventory(5));
+              if (scenario === "delayed raw inventory")
+                await receipt(parentPath, inventory(5));
+              else await save("last", inventory(5));
+              if (pollFirst) await tracker!.refresh();
+              yield completedCommand(
+                "first displayed",
+                inventory(8),
+                "live-first",
+              );
+              await tracker!.refresh();
+              yield completedCommand(
+                "middle displayed",
+                inventory(middle),
+                "live-middle",
+              );
+              yield completedCommand("current", inventory(5), "live-current");
+              if (deliverLast) {
+                if (scenario === "delayed raw inventory")
+                  await save("last", inventory(5));
+                yield completedCommand("last", inventory(5), "live-last");
+              }
+            }
+            await tracker!.refresh();
+            await tracker!.refresh();
+            if (scenario !== "unwritten phase")
+              await receipt(
+                workerPath,
+                progressMarker(
+                  "attack_path",
+                  scenario.startsWith("delayed") ||
+                    scenario.startsWith("live scope")
+                    ? 6
+                    : 5,
+                  scenario === "delayed repeated inventory" ? 8 : 9,
+                ),
+              );
+            await tracker!.refresh();
+            await tracker!.stop();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual(expected);
+        await tracker!.refresh();
+        await tracker!.stop();
+        expect(updates.at(-1)).toEqual(expected);
+      } finally {
+        await client.close();
+        starting.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  describe("retained parent source evidence", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    type Step =
+      | readonly ["save" | "live", string, ScanProgress | string]
+      | readonly ["worker", ScanProgress]
+      | readonly ["message", "response" | "native", ScanProgress]
+      | readonly ["poll"];
+    const scenarios: readonly {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+    }[] = [
+      {
+        name: "duplicate inventory projections as evidence only",
+        expected: progress("validation", 1, 9),
+        steps: [
+          ["message", "response", progress("discovery", 0, 8)],
+          ["poll"],
+          ["live", "inventory changed", progress("discovery", 0, 6)],
+          ["save", "inventory", progress("discovery", 0, 6)],
+          ["save", "later inventory", progress("discovery", 0, 9)],
+          ["message", "native", progress("discovery", 0, 8)],
+          ["save", "review", progress("validation", 1, 6)],
+          ["live", "review", progress("validation", 1, 6)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "deferred inventory after greater coverage",
+        expected: progress("validation", 1, 7),
+        steps: [
+          ["live", "inventory changed", progress("discovery", 0, 8)],
+          ["save", "inventory", progress("discovery", 0, 8)],
+          ["save", "smaller", progress("discovery", 0, 7)],
+          ["poll"],
+          ["save", "review", progress("validation", 1, 7)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["worker", progress("attack_path", 5, 8)],
+        ],
+      },
+      {
+        name: "a repeated unbound phase copy",
+        expected: progress("reporting", 2, 8),
+        steps: [
+          ["live", "first", progress("reporting", 2, 8)],
+          ["save", "first", progress("reporting", 2, 8)],
+          ["poll"],
+          ["live", "last changed", progress("reporting", 2, 8)],
+          ["poll"],
+          ["save", "middle", progress("validation", 2, 8)],
+          ["poll"],
+          ["save", "last", progress("reporting", 2, 8)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "an accepted inventory after its own saved copy",
+        expected: progress("discovery", 0, 6),
+        steps: [
+          ["save", "first", progress("discovery", 0, 9)],
+          ["poll"],
+          ["live", "phase", progress("validation", 0, 9)],
+          ["live", "last changed", progress("discovery", 0, 6)],
+          ["save", "middle", progress("threat_model", 0, 9)],
+          ["poll"],
+          ["save", "phase", progress("validation", 0, 9)],
+          ["save", "last", progress("discovery", 0, 6)],
+          ["live", "anchor", "done"],
+          ["save", "anchor", "done"],
+          ["poll"],
+          ["worker", progress("attack_path", 5, 9)],
+        ],
+      },
+      {
+        name: "inventory before a pending reviewed boundary",
+        expected: progress("reporting", 2, 5),
+        steps: [
+          ["live", "initial", progress("discovery", 0, 5)],
+          ["save", "initial", progress("discovery", 0, 5)],
+          ["save", "phase", progress("threat_model", 0, 5)],
+          ["poll"],
+          ["save", "growth", progress("discovery", 0, 9)],
+          ["live", "report", progress("reporting", 2, 5)],
+          ["live", "anchor", "done"],
+          ["save", "final", progress("discovery", 0, 5)],
+          ["poll"],
+          ["save", "report", progress("reporting", 2, 5)],
+          ["save", "anchor", "done"],
+          ["poll"],
+          ["worker", progress("attack_path", 3, 6)],
+        ],
+      },
+      {
+        name: "worker phase after scope growth",
+        expected: progress("discovery", 1, 9),
+        steps: [
+          ["worker", progress("attack_path", 1, 7)],
+          ["save", "smaller", progress("discovery", 0, 5)],
+          ["poll"],
+          ["live", "phase", progress("threat_model", 0, 5)],
+          ["live", "final", progress("discovery", 0, 9)],
+          ["save", "oldphase", progress("validation", 0, 5)],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["save", "phase", progress("threat_model", 0, 5)],
+          ["poll"],
+          ["save", "final", progress("discovery", 0, 9)],
+          ["save", "anchor", "done"],
+        ],
+      },
+      {
+        name: "deferred inventory at a different total",
+        expected: progress("validation", 1, 8),
+        steps: [
+          ["live", "first changed", progress("discovery", 0, 9)],
+          ["save", "first", progress("discovery", 0, 9)],
+          ["poll"],
+          ["save", "second", progress("discovery", 0, 8)],
+          ["poll"],
+          ["save", "review", progress("validation", 1, 8)],
+          ["poll"],
+          ["live", "anchor", "done"],
+          ["save", "anchor", "done"],
+          ["poll"],
+          ["worker", progress("attack_path", 5, 9)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "inventory after a provisional zero boundary",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["live", "review", progress("validation", 1, 5)],
+          ["save", "initial", progress("discovery", 0, 9)],
+          ["save", "zero", progress("threat_model", 0, 9)],
+          ["save", "corrected", progress("discovery", 0, 5)],
+          ["poll"],
+          ["poll"],
+          ["save", "review", progress("validation", 1, 5)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "an unbound phase copy",
+        expected: progress("reporting", 2, 8),
+        steps: [
+          ["live", "current changed", progress("reporting", 2, 8)],
+          ["save", "earlier", progress("validation", 2, 8)],
+          ["poll"],
+          ["save", "current", progress("reporting", 2, 8)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+        ],
+      },
+      {
+        name: "a zero phase as scope evidence below worker coverage",
+        expected: progress("threat_model", 3, 5),
+        steps: [
+          ["live", "phase changed", progress("threat_model", 0, 5)],
+          ["live", "anchor", "done"],
+          ["worker", progress("attack_path", 3, 5)],
+          ["poll"],
+          ["save", "inventory", progress("discovery", 0, 5)],
+          ["save", "phase", progress("threat_model", 0, 5)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["poll"],
+        ],
+      },
+      {
+        name: "known inventory source bounds",
+        expected: progress("discovery", 5, 9),
+        steps: [
+          ["save", "initial", progress("discovery", 0, 8)],
+          ["poll"],
+          ["save", "old-phase", progress("threat_model", 0, 8)],
+          ["save", "inventory", progress("discovery", 0, 9)],
+          ["save", "anchor", "Done"],
+          ["live", "changed-inventory", progress("discovery", 0, 9)],
+          ["live", "anchor", "Done"],
+          ["poll"],
+          ["worker", progress("attack_path", 5, 9)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "the positive-review boundary after provisional scope",
+        expected: progress("validation", 3, 5),
+        steps: [
+          ["live", "changed-inventory", progress("discovery", 0, 9)],
+          ["live", "review", progress("validation", 3, 5)],
+          ["save", "old-phase", progress("threat_model", 0, 8)],
+          ["poll"],
+          ["save", "initial-inventory", progress("discovery", 0, 9)],
+          ["save", "new-inventory", progress("discovery", 0, 5)],
+          ["poll"],
+          ["save", "review", progress("validation", 3, 5)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "deferred inventory after a larger review",
+        expected: progress("validation", 3, 5),
+        steps: [
+          ["live", "changed-inventory", progress("discovery", 0, 8)],
+          ["save", "inventory", progress("discovery", 0, 8)],
+          ["save", "small", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 3, 5)],
+          ["poll"],
+          ["live", "anchor", "Done"],
+          ["save", "anchor", "Done"],
+          ["poll"],
+        ],
+      },
+      {
+        name: "an unbound phase at greater coverage",
+        expected: progress("reporting", 3, 8),
+        steps: [
+          ["live", "changed-current", progress("reporting", 3, 8)],
+          ["save", "old", progress("validation", 3, 8)],
+          ["poll"],
+          ["save", "current", progress("reporting", 3, 8)],
+          ["poll"],
+          ["live", "anchor", "Done"],
+          ["save", "anchor", "Done"],
+          ["poll"],
+        ],
+      },
+    ];
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].map((stopBeforeResolution) => ({
+            ...scenario,
+            workerFirst,
+            stopBeforeResolution,
+          })),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution)",
+      async ({ steps, expected, workerFirst, stopBeforeResolution }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const text = (value: string | ScanProgress) =>
+          typeof value === "string"
+            ? value
+            : progressMarker(
+                value.phase,
+                value.filesCompleted,
+                value.filesTotal,
+              );
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              const anchor = steps.findLastIndex(
+                (step) =>
+                  (step[0] === "save" || step[0] === "live") &&
+                  step[1] === "anchor",
+              );
+              const resolution =
+                anchor === -1
+                  ? steps.findLastIndex((step) => step[0] === "save")
+                  : anchor;
+              for (const [index, step] of steps.entries()) {
+                if (stopBeforeResolution && index === resolution) {
+                  await tracker!.stop();
+                  await tracker!.refresh();
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else if (step[0] === "message")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      step[1] === "native"
+                        ? {
+                            type: "event_msg",
+                            payload: {
+                              type: "item_completed",
+                              item: {
+                                type: "AgentMessage",
+                                content: [
+                                  { type: "Text", text: text(step[2]) },
+                                ],
+                              },
+                            },
+                          }
+                        : {
+                            type: "response_item",
+                            payload: {
+                              type: "message",
+                              role: "assistant",
+                              content: [
+                                { type: "output_text", text: text(step[2]) },
+                              ],
+                            },
+                          },
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
+  describe("command proof and inventory admission", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = progress("discovery", 0, 8);
+    const phase = progress("threat_model", 0, 8);
+    const commandProgress = [inventory, phase]
+      .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+      .join("\n");
+    type Step =
+      | readonly [
+          "save" | "live",
+          string,
+          ScanProgress | readonly ScanProgress[] | string,
+        ]
+      | readonly ["worker", ScanProgress]
+      | readonly ["poll"];
+    const scenarios: readonly {
+      name: string;
+      expected: ScanProgress;
+      unresolvedExpected?: ScanProgress;
+      steps: readonly Step[];
+    }[] = [
+      {
+        name: "a multi-marker command before a smaller inventory",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["live", "inventory", [inventory, phase]],
+          ["save", "inventory", [inventory, phase]],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "a multi-marker command before an oversized worker",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["live", "inventory", [inventory, phase]],
+          ["save", "inventory", [inventory, phase]],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["worker", progress("attack_path", 6, 8)],
+        ],
+      },
+      ...[5, 8].map((total) => ({
+        name: `retained inventory before reporting at ${total}`,
+        expected: progress("reporting", 3, total),
+        steps: [
+          ["live", "inventory", progress("discovery", 0, total)],
+          ["live", "report", progress("reporting", 3, total)],
+          ["save", "inventory", progress("discovery", 0, total)],
+          ["save", "validation", progress("validation", 3, total)],
+          ["poll"],
+          ["save", "report", progress("reporting", 3, total)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ] as const,
+      })),
+      {
+        name: "a truncated command without its final progress projection",
+        expected: progress("validation", 1, 5),
+        unresolvedExpected: progress("validation", 1, 8),
+        steps: [
+          ["live", "inventory", commandOutput(commandProgress)],
+          ["save", "inventory", persistedCommandOutput],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "a final zero marker below worker display coverage",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+          ["live", "inventory", [inventory, phase]],
+          ["save", "inventory", [inventory, phase]],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "an omitted final projection below worker coverage",
+        expected: progress("validation", 1, 5),
+        unresolvedExpected: progress("preflight", 6, 8),
+        steps: [
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+          ["live", "inventory", commandOutput(commandProgress)],
+          ["save", "inventory", persistedCommandOutput],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+    ];
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((stopBeforeResolution) =>
+            [false, true].map((changedDisplay) => ({
+              ...scenario,
+              workerFirst,
+              stopBeforeResolution,
+              changedDisplay,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "reconciles $name (workers first=$workerFirst, stop=$stopBeforeResolution, changed=$changedDisplay)",
+      async ({
+        steps,
+        expected,
+        unresolvedExpected,
+        workerFirst,
+        stopBeforeResolution,
+        changedDisplay,
+      }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const text = (
+          value: string | ScanProgress | readonly ScanProgress[],
+        ) =>
+          typeof value === "string"
+            ? value
+            : [value]
+                .flat()
+                .map((p) =>
+                  progressMarker(p.phase, p.filesCompleted, p.filesTotal),
+                )
+                .join("\n");
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              const anchor = steps.findLastIndex(
+                (step) =>
+                  (step[0] === "save" || step[0] === "live") &&
+                  step[1] === "anchor",
+              );
+              const resolution =
+                anchor === -1
+                  ? steps.findLastIndex((step) => step[0] === "save")
+                  : anchor;
+              for (const [index, step] of steps.entries()) {
+                if (stopBeforeResolution && index === resolution) {
+                  await tracker!.stop();
+                  await tracker!.refresh();
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    changedDisplay && step[1] !== "anchor"
+                      ? `${step[1]} visible`
+                      : step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(
+            changedDisplay ? (unresolvedExpected ?? expected) : expected,
+          );
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
+  type ProgressScenarioValue = string | ScanProgress | readonly ScanProgress[];
+  type ProgressScenarioStep =
+    | readonly [
+        (
+          | "save"
+          | "save-quiet"
+          | "live"
+          | "save-message"
+          | "live-message"
+          | "save-response"
+          | "live-changed"
+        ),
+        string,
+        ProgressScenarioValue,
+      ]
+    | readonly [
+        "worker" | "additional-worker" | "check" | "scope" | "receipt",
+        ScanProgress,
+      ]
+    | readonly ["poll"]
+    | readonly ["boundary"]
+    | readonly ["resolve"]
+    | readonly ["begin"];
+  async function runProgressScenario(
+    {
+      steps,
+      expected,
+      initialScope = 8,
+      workerFirst,
+      stopBeforeResolution,
+      split,
+      partition = split ? "each" : "batch",
+    }: {
+      steps: readonly ProgressScenarioStep[];
+      expected: ScanProgress;
+      initialScope?: number | null;
+      workerFirst: boolean;
+      stopBeforeResolution: boolean;
+      split?: boolean;
+      partition?: "batch" | "staged" | "each";
+    },
+    {
+      resolveAtLastAnchor = false,
+      pollReceipts = true,
+    }: {
+      resolveAtLastAnchor?: boolean;
+      pollReceipts?: boolean;
+    } = {},
+  ): Promise<void> {
+    const text = (value: ProgressScenarioValue) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+    const checkpoints: {
+      actual: ScanProgress | undefined;
+      expected: ScanProgress;
+      scopeOnly?: boolean;
+    }[] = [];
+    let tracker: ScanCostTracker | undefined;
+    const originalStart = ScanCostTracker.prototype.start;
+    const starting = spyOn(
+      ScanCostTracker.prototype,
+      "start",
+    ).mockImplementation(function (this: ScanCostTracker, threadId: string) {
+      originalStart.call(this, threadId);
+      if (threadId === "thread-1") tracker = this;
+    });
+    let parentPath = "",
+      workerPath = "";
+    const originalReaddir = fsPromises.readdir;
+    const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+      ...args: Parameters<typeof originalReaddir>
+    ) => {
+      const entries = await originalReaddir(...args);
+      if (String(args[0]) !== dirname(parentPath)) return entries;
+      const first = basename(workerFirst ? workerPath : parentPath);
+      return entries.toSorted(
+        (left, right) =>
+          Number(String(right.name) === first) -
+          Number(String(left.name) === first),
+      );
+    }) as typeof originalReaddir);
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ): Promise<JsonObject> =>
+        args[0] === "register-cli-scan"
+          ? {
+              ...mockScanRegistration(args, input),
+              scopeFileCount: initialScope,
+            }
+          : mockWorkbench(args, input),
+      createCodex: codexFactory(async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        workerPath = await writeUsageSession(
+          codexHome,
+          "worker-thread",
+          {},
+          { parent: "thread-1" },
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          expect(tracker).toBeDefined();
+          await tracker!.stop();
+          const resolution = resolveAtLastAnchor
+            ? steps.findLastIndex(
+                (step) =>
+                  (step[0] === "live" || step[0] === "live-message") &&
+                  step[1] === "anchor",
+              )
+            : -1;
+          for (const [index, step] of steps.entries()) {
+            if (stopBeforeResolution && index === resolution) {
+              await tracker!.stop();
+              await tracker!.refresh();
+            }
+            if (step[0] === "begin") {
+              tracker!.beginParentTurn(true);
+              continue;
+            }
+            if (step[0] === "resolve") {
+              if (stopBeforeResolution) {
+                await tracker!.stop();
+                await tracker!.refresh();
+              }
+              continue;
+            }
+            if (step[0] === "boundary") {
+              if (partition !== "batch") await tracker!.refresh();
+            } else if (step[0] === "poll") await tracker!.refresh();
+            else if (step[0] === "check" || step[0] === "scope")
+              checkpoints.push({
+                actual: updates.at(-1),
+                expected: step[1],
+                scopeOnly: step[0] === "scope",
+              });
+            else if (step[0] === "live-changed")
+              yield completedCommand(
+                `${step[1]} displayed`,
+                text(step[2]),
+                `item-${index}`,
+              );
+            else if (step[0] === "save-response")
+              await appendFile(
+                parentPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text: text(step[2]) }],
+                    },
+                  },
+                ]) + "\n",
+              );
+            else if (step[0] === "live-message")
+              yield {
+                type: "item.completed",
+                item: {
+                  id: `item-${index}`,
+                  type: "agent_message",
+                  text: text(step[2]),
+                },
+              };
+            else if (step[0] === "save-message")
+              await appendFile(
+                parentPath,
+                jsonLines([
+                  {
+                    type: "event_msg",
+                    payload: {
+                      type: "item_completed",
+                      item: {
+                        type: "AgentMessage",
+                        id: `native-${index}`,
+                        content: [{ type: "Text", text: text(step[2]) }],
+                      },
+                    },
+                  },
+                ]) + "\n",
+              );
+            else if (step[0] === "live")
+              yield completedCommand(step[1], text(step[2]), `item-${index}`);
+            else if (step[0] === "save" || step[0] === "save-quiet")
+              await appendFile(
+                parentPath,
+                jsonLines([
+                  nativeCommand(step[1], text(step[2]), `native-${index}`),
+                ]) + "\n",
+              );
+            else
+              await appendFile(
+                step[0] === "additional-worker"
+                  ? await writeUsageSession(
+                      codexHome,
+                      "followup-worker-thread",
+                      {},
+                      { parent: "thread-1" },
+                    )
+                  : step[0] === "receipt"
+                    ? parentPath
+                    : workerPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: `worker-${index}`,
+                      output: text(step[1]),
+                    },
+                  },
+                ]) + "\n",
+              );
+            if (
+              partition === "each" &&
+              step[0] !== "save-quiet" &&
+              (step[0].startsWith("save") ||
+                (pollReceipts && step[0] === "receipt"))
+            )
+              await tracker!.refresh();
+          }
+          await tracker!.refresh();
+          await tracker!.refresh();
+          await tracker!.stop();
+        }
+        return { events: completedEvents("thread-1", events()) };
+      }),
+    });
+    try {
+      await client.run(repository, {
+        onProgress: (update) => updates.push(update),
+      });
+      expect(updates.at(-1)).toEqual(expected);
+      for (const checkpoint of checkpoints)
+        if (checkpoint.scopeOnly)
+          expect(checkpoint.actual).toMatchObject({
+            filesCompleted: checkpoint.expected.filesCompleted,
+            filesTotal: checkpoint.expected.filesTotal,
+          });
+        else expect(checkpoint.actual).toEqual(checkpoint.expected);
+      const settled = [...updates];
+      await tracker!.refresh();
+      await tracker!.stop();
+      expect(updates).toEqual(settled);
+    } finally {
+      await client.close();
+      starting.mockRestore();
+      listing.mockRestore();
+    }
+  }
+
+  describe("displayed receipt eligibility after inventory recovery", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "save-quiet"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "scope" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["boundary"]
+      | readonly ["resolve"]
+      | readonly ["begin"];
+    type Scenario = {
+      name: string;
+      initialScope: number | null;
+      partitions?: readonly ("batch" | "each")[];
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    for (const mode of [
+      "changed",
+      "exact",
+      "omit latest",
+      "in scope",
+      "multi marker",
+      "truncated latest",
+      "live only latest",
+      "worker prior",
+      "unknown initial",
+    ] as const) {
+      const review = progress("validation", 2, mode === "in scope" ? 5 : 8);
+      const state =
+        mode === "in scope"
+          ? review
+          : mode === "worker prior"
+            ? progress("validation", 1, 5)
+            : inventory(5);
+      const next = progress("reporting", state.filesCompleted + 1, 5);
+      const latest = mode === "multi marker" ? [inventory(5), review] : review;
+      const liveText =
+        mode === "truncated latest" ? commandOutput(text(review)) : latest;
+      const savedText =
+        mode === "truncated latest" ? persistedCommandOutput : latest;
+      scenarios.push({
+        name: `displayed receipt (mode=${mode})`,
+        initialScope: mode === "unknown initial" ? null : 8,
+        expected: next,
+        steps: [
+          [mode === "exact" ? "live" : "live-changed", "first", review],
+          ["live", "inventory", inventory(5)],
+          ...(mode === "omit latest"
+            ? []
+            : ([["live", "latest", liveText]] as Step[])),
+          ...(mode === "worker prior"
+            ? ([["worker", progress("attack_path", 1, 5)], ["poll"]] as Step[])
+            : []),
+          ["save-quiet", "initial", inventory(5)],
+          ["save-quiet", "first", review],
+          ["save-quiet", "inventory", inventory(5)],
+          ["boundary"],
+          ["resolve"],
+          ...(mode === "live only latest"
+            ? []
+            : ([["save-quiet", "latest", savedText]] as Step[])),
+          ["poll"],
+          ["check", state],
+          ["save-quiet", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["poll"],
+          ["check", state],
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+          ["check", state],
+          ["save-quiet", "followup", next],
+          ["poll"],
+          ["check", next],
+        ],
+      });
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
+            (partition) =>
+              [false, true].map((stopBeforeResolution) => ({
+                ...scenario,
+                workerFirst,
+                partition,
+                stopBeforeResolution,
+              })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("recovered scope and phase authority", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "save-quiet"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "scope" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["boundary"]
+      | readonly ["resolve"]
+      | readonly ["begin"];
+    type Scenario = {
+      name: string;
+      initialScope: number | null;
+      partitions?: readonly ("batch" | "each")[];
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    for (const initialScope of [null, 8]) {
+      for (const multiple of [false, true]) {
+        scenarios.push({
+          name: `first recovered scope (initial=${initialScope}, multiple=${multiple})`,
+          initialScope,
+          expected: progress("reporting", 4, 5),
+          steps: [
+            ...(multiple
+              ? ([["save", "initial", inventory(8)]] as Step[])
+              : []),
+            ["save", "corrected", inventory(5)],
+            ["save", "review", progress("validation", 3, 5)],
+            ["live", "review", progress("validation", 3, 5)],
+            ["poll"],
+            ["check", progress("validation", 3, 5)],
+            ["resolve"],
+            ["poll"],
+            ["check", progress("validation", 3, 5)],
+            ["worker", progress("attack_path", 4, 6)],
+            ["poll"],
+            ["check", progress("validation", 3, 5)],
+            ["save", "followup", progress("reporting", 4, 5)],
+            ["poll"],
+            ["check", progress("reporting", 4, 5)],
+          ],
+        });
+      }
+      for (const mode of ["changed", "exact", "complete"] as const) {
+        const full = commandOutput(text(inventory(10)));
+        scenarios.push({
+          name: `unbounded admitted scope (initial=${initialScope}, mode=${mode})`,
+          initialScope,
+          expected: progress("reporting", 10, 10),
+          steps: [
+            [
+              "save",
+              "inventory",
+              mode === "complete" ? full : persistedCommandOutput,
+            ],
+            ["poll"],
+            [mode === "exact" ? "live" : "live-changed", "inventory", full],
+            ["receipt", progress("reporting", 10, 10)],
+            ["poll"],
+            ["check", progress("reporting", 10, 10)],
+            ["resolve"],
+            ["poll"],
+            ["check", progress("reporting", 10, 10)],
+          ],
+        });
+        scenarios.push({
+          name: `bounded admitted scope (initial=${initialScope}, mode=${mode})`,
+          initialScope,
+          expected: progress("reporting", 7, 10),
+          steps: [
+            [
+              "save-quiet",
+              "inventory",
+              mode === "complete" ? full : persistedCommandOutput,
+            ],
+            [mode === "exact" ? "live" : "live-changed", "inventory", full],
+            ["save", "early", progress("discovery", 1, 8)],
+            ["save", "review", progress("validation", 6, 10)],
+            ["live", "review", progress("validation", 6, 10)],
+            ["poll"],
+            ["check", progress("validation", 6, 10)],
+            ["resolve"],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+            ["poll"],
+            ["poll"],
+            ["check", progress("validation", 6, 10)],
+            ["save", "followup", progress("reporting", 7, 10)],
+            ["poll"],
+            ["check", progress("reporting", 7, 10)],
+          ],
+        });
+      }
+    }
+    for (const total of [6, 8, 10]) {
+      for (const mode of [
+        "changed",
+        "exact",
+        "complete",
+        "no later phase",
+      ] as const) {
+        const latest = progress("validation", 0, total);
+        const first = progress("threat_model", 0, total);
+        const expected = mode === "no later phase" ? first : latest;
+        scenarios.push({
+          name: `older scope preserves phase (total=${total}, mode=${mode})`,
+          initialScope: 8,
+          expected: progress("reporting", 3, total),
+          steps: [
+            ["live-changed", "inventory", inventory(total)],
+            ["save-quiet", "inventory", inventory(total)],
+            ["save-quiet", "first", first],
+            ["live", "first", first],
+            ...(mode === "no later phase"
+              ? []
+              : ([
+                  [
+                    mode === "exact" ? "live" : "live-changed",
+                    "latest",
+                    commandOutput(text(latest)),
+                  ],
+                ] as Step[])),
+            ["poll"],
+            ["check", expected],
+            ["resolve"],
+            ...(mode === "no later phase"
+              ? []
+              : ([
+                  [
+                    "save",
+                    "latest",
+                    mode === "complete"
+                      ? commandOutput(text(latest))
+                      : persistedCommandOutput,
+                  ],
+                ] as Step[])),
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+            ["poll"],
+            ["poll"],
+            ["check", expected],
+            ["worker", progress("attack_path", 2, total)],
+            ["poll"],
+            ["check", progress(expected.phase, 2, total)],
+            ["save", "followup", progress("reporting", 3, total)],
+            ["poll"],
+            ["check", progress("reporting", 3, total)],
+          ],
+        });
+      }
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
+            (partition) =>
+              [false, true].map((stopBeforeResolution) => ({
+                ...scenario,
+                workerFirst,
+                partition,
+                stopBeforeResolution,
+              })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("admitted inventory across truncated live copies", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "save-quiet"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "scope" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["boundary"]
+      | readonly ["resolve"]
+      | readonly ["begin"];
+    type Scenario = {
+      name: string;
+      initialScope: number | null;
+      partitions?: readonly ("batch" | "each")[];
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const outputs = (values: readonly ScanProgress[], visible: number) => {
+      const pre = values
+        .slice(0, visible)
+        .map((p) => text(p))
+        .join("\n");
+      const prefix =
+        (pre ? pre + "\n" : "") +
+        "h".repeat(32_743 - (pre ? pre.length + 1 : 0));
+      const rest =
+        values
+          .slice(visible)
+          .map((p) => text(p))
+          .join("\n") || "m".repeat(100);
+      return {
+        full: `${prefix}\n${rest}\n${commandTail}`,
+        saved: `${prefix}\n... command output truncated for persistence ...\n${commandTail}`,
+      };
+    };
+    const scenarios: Scenario[] = [];
+    for (const initialScope of [8, null]) {
+      for (const mode of [
+        "delayed",
+        "early",
+        "exact",
+        "untruncated",
+        "ambiguous",
+        "unadmitted",
+        "new turn",
+      ] as const) {
+        const old = outputs([inventory(9)], 0);
+        const current = outputs(
+          [inventory(8), progress("validation", 1, 8)],
+          1,
+        );
+        const unresolved = mode === "ambiguous" || mode === "new turn";
+        const reviewed = progress("reporting", 1, unresolved ? 9 : 8);
+        const settled = unresolved
+          ? progress(reviewed.phase, 6, 9)
+          : progress("reporting", 3, 8);
+        const currentText =
+          mode === "untruncated"
+            ? text([inventory(8), progress("validation", 1, 8)])
+            : current.full;
+        const currentSaved =
+          mode === "untruncated" ? currentText : current.saved;
+        scenarios.push({
+          name: `delayed inventory (mode=${mode}, initial=${initialScope})`,
+          initialScope,
+          partitions: mode === "unadmitted" ? ["batch"] : undefined,
+          expected: settled,
+          steps: [
+            ["save", "old", old.saved],
+            ["save", "current", currentSaved],
+            ...(mode === "ambiguous"
+              ? ([["save", "repeated current", currentSaved]] as Step[])
+              : []),
+            ...(mode === "unadmitted"
+              ? []
+              : ([
+                  ["poll"],
+                  [
+                    "scope",
+                    mode === "untruncated"
+                      ? progress("validation", 1, 8)
+                      : inventory(8),
+                  ],
+                ] as Step[])),
+            ...(mode === "new turn" ? ([["begin"]] as Step[]) : []),
+            ...(mode === "early"
+              ? ([["live-changed", "current", currentText]] as Step[])
+              : []),
+            ["save-quiet", "review", progress("reporting", 1, 8)],
+            ["live-changed", "old", old.full],
+            ["poll"],
+            ["resolve"],
+            ...(mode === "early"
+              ? []
+              : ([
+                  [
+                    mode === "exact" ? "live" : "live-changed",
+                    "current",
+                    currentText,
+                  ],
+                ] as Step[])),
+            ["live", "review", progress("reporting", 1, 8)],
+            ["poll"],
+            ["check", reviewed],
+            ["worker", progress("attack_path", 6, 9)],
+            ["poll"],
+            ["check", unresolved ? settled : reviewed],
+            ...(unresolved
+              ? []
+              : ([
+                  ["additional-worker", progress("attack_path", 2, 8)],
+                  ["poll"],
+                  ["check", progress(reviewed.phase, 2, 8)],
+                  ["save", "followup", progress("reporting", 3, 8)],
+                  ["poll"],
+                  ["check", settled],
+                ] as Step[])),
+          ],
+        });
+      }
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
+            (partition) =>
+              [false, true].map((stopBeforeResolution) => ({
+                ...scenario,
+                workerFirst,
+                partition,
+                stopBeforeResolution,
+              })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("saved inventory receipts and live prefix proof", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "scope" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["boundary"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    const add = (name: string, state: ScanProgress, steps: Step[]) => {
+      const next = progress(
+        state.filesCompleted === state.filesTotal ? "validation" : "reporting",
+        Math.min(state.filesCompleted + 1, state.filesTotal),
+        state.filesTotal,
+      );
+      scenarios.push({
+        name,
+        expected: next,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+        ],
+      });
+    };
+    for (const mode of [
+      "changed",
+      "exact",
+      "live first",
+      "inventory only",
+      "repeated source",
+    ] as const) {
+      const values =
+        mode === "inventory only"
+          ? [inventory(9)]
+          : [progress("validation", 1, 9), inventory(9)];
+      const live = mode === "exact" ? "live" : "live-changed";
+      add(
+        `saved inventory precedes its delayed copy (mode=${mode})`,
+        progress("reporting", 9, 9),
+        [
+          ...(mode === "live first"
+            ? ([[live, "batch", values]] as Step[])
+            : []),
+          ["save", "batch", values],
+          ["poll"],
+          ["scope", inventory(9)],
+          ["resolve"],
+          ...(mode === "live first"
+            ? []
+            : ([[live, "batch", values]] as Step[])),
+          ["save", "report", progress("reporting", 9, 9)],
+          ["live", "report", progress("reporting", 9, 9)],
+          ...(mode === "repeated source"
+            ? ([
+                ["poll"],
+                ["check", progress("reporting", 9, 9)],
+                ["save", "batch", values],
+                ["save", "late expansion", inventory(10)],
+              ] as Step[])
+            : []),
+        ],
+      );
+    }
+    for (const mode of [
+      "omitted",
+      "truncated",
+      "complete",
+      "exact",
+      "message",
+      "unproved prefix",
+    ] as const) {
+      const first = progress("validation", 1, 8);
+      const last = progress("reporting", 3, 5);
+      add(
+        `earlier source proof precedes later live coverage (mode=${mode})`,
+        last,
+        [
+          [
+            mode === "unproved prefix" ? "live-changed" : "live",
+            "first",
+            first,
+          ],
+          [
+            mode === "message"
+              ? "live-message"
+              : mode === "exact"
+                ? "live"
+                : "live-changed",
+            "latest",
+            mode === "truncated" ? commandOutput(text(last)) : last,
+          ],
+          ["save", "inventory", inventory(5)],
+          ["save", "first", first],
+          ...(mode === "truncated"
+            ? ([["save", "latest", persistedCommandOutput]] as Step[])
+            : mode === "complete" || mode === "exact"
+              ? ([["save", "latest", last]] as Step[])
+              : []),
+          ["poll"],
+          ...(mode === "unproved prefix"
+            ? ([
+                ["check", progress("reporting", 3, 8)],
+                ["resolve"],
+                ["save", "latest", last],
+                ["live", "latest", last],
+              ] as Step[])
+            : ([
+                ["check", last],
+                ["resolve"],
+                ["save", "anchor", "done"],
+                ["live", "anchor", "done"],
+              ] as Step[])),
+          ["worker", progress("attack_path", 5, 8)],
+          ["poll"],
+          ["check", last],
+        ],
+      );
+    }
+    scenarios.push({
+      name: "prefix proof does not replace independent unresolved inventory",
+      expected: progress("reporting", 3, 9),
+      steps: [
+        ["live-changed", "independent", inventory(9)],
+        ["live", "first", progress("validation", 1, 8)],
+        ["live-changed", "latest", progress("reporting", 3, 5)],
+        ["save", "inventory", inventory(5)],
+        ["save", "first", progress("validation", 1, 8)],
+        ["poll"],
+        ["check", progress("reporting", 3, 9)],
+        ["resolve"],
+        ["save", "anchor", "done"],
+        ["live", "anchor", "done"],
+      ],
+    });
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (["batch", "each"] as const).flatMap((partition) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              partition,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("source eligibility and durable inventory proof", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "scope" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["boundary"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const scenarios: Scenario[] = [];
+    const add = (name: string, state: ScanProgress, steps: Step[]) => {
+      const next = progress(
+        "reporting",
+        state.filesCompleted + 1,
+        state.filesTotal,
+      );
+      scenarios.push({
+        name,
+        expected: next,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+        ],
+      });
+    };
+    for (const changed of [false, true]) {
+      for (const eligible of [false, true]) {
+        const review = progress("validation", 3, 10);
+        const state = eligible ? review : progress("discovery", 2, 5);
+        add(
+          `accepted coverage after recovered scope (changed=${changed}, eligible=${eligible})`,
+          state,
+          [
+            ["live", "initial", inventory(10)],
+            [changed ? "live-changed" : "live", "review", review],
+            ["save", "initial", inventory(10)],
+            ["save", "correction", inventory(eligible ? 10 : 8)],
+            ["save", "review", review],
+            ["save", "repeated", inventory(10)],
+            ["resolve"],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+            ["boundary"],
+            ["save", "final-inventory", inventory(5)],
+            ["poll"],
+            ["scope", eligible ? review : inventory(5)],
+            ["worker", progress("attack_path", 6, eligible ? 12 : 8)],
+            ["poll"],
+            ["scope", eligible ? review : inventory(5)],
+            ["additional-worker", progress("attack_path", 2, 5)],
+          ],
+        );
+      }
+    }
+    for (const variant of [
+      "discovery",
+      "validation",
+      "zero reporting",
+    ] as const) {
+      for (const mode of [
+        "exact",
+        "changed",
+        "omit rejected",
+        "after anchor",
+      ] as const) {
+        const zero = variant === "zero reporting";
+        const total = zero ? 3 : 5;
+        const review = progress(
+          zero ? "validation" : variant,
+          zero ? 6 : variant === "discovery" ? 1 : 3,
+          8,
+        );
+        const rejected = progress(
+          "reporting",
+          zero ? 0 : variant === "discovery" ? 3 : 4,
+          zero ? 3 : 10,
+        );
+        const live = mode === "exact" ? "live" : "live-changed";
+        add(
+          `inventory witness survives ${variant} (mode=${mode})`,
+          progress(zero ? "reporting" : "discovery", 2, total),
+          [
+            ...(zero
+              ? ([
+                  ["live", "initial", inventory(8)],
+                  ["save", "initial", inventory(8)],
+                ] as Step[])
+              : []),
+            [live, "review", review],
+            ...(mode === "omit rejected" || mode === "after anchor"
+              ? []
+              : ([[live, "rejected", rejected]] as Step[])),
+            ["save", "correction", inventory(total)],
+            ["save", "review", review],
+            ["save", "rejected", rejected],
+            ["boundary"],
+            ["resolve"],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+            ...(mode === "after anchor"
+              ? ([["poll"], [live, "rejected", rejected]] as Step[])
+              : []),
+            ["poll"],
+            ["scope", inventory(total)],
+            ["worker", progress("attack_path", 6, 8)],
+            ["poll"],
+            ["scope", inventory(total)],
+            ["additional-worker", progress("attack_path", 2, total)],
+          ],
+        );
+      }
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (["batch", "staged", "each"] as const).flatMap((partition) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              partition,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("review eligibility and ordered projections", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+      partitions?: readonly boolean[];
+    };
+    const scenarios: Scenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: Step[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
+    for (const mode of ["exact", "changed", "after inventory"] as const) {
+      for (const eligible of [false, true]) {
+        const initialTotal = eligible ? 7 : 6;
+        const review = progress("discovery", 1, 7);
+        add(
+          `accepted review after scope correction (mode=${mode}, eligible=${eligible})`,
+          eligible ? review : progress("threat_model", 9, 10),
+          [
+            ...(mode !== "after inventory"
+              ? ([
+                  [
+                    mode === "changed" ? "live-changed" : "live",
+                    "review",
+                    review,
+                  ],
+                ] as Step[])
+              : []),
+            ["save", "initial", inventory(initialTotal)],
+            ...(mode === "after inventory"
+              ? ([["poll"], ["live", "review", review]] as Step[])
+              : []),
+            ["save", "review", review],
+            ["poll"],
+            ["resolve"],
+            ["live", "growth", inventory(10)],
+            ["save", "growth", inventory(10)],
+            ["poll"],
+            ["live", "valid", progress("threat_model", 9, 10)],
+            ["save", "valid", progress("threat_model", 9, 10)],
+          ],
+        );
+      }
+    }
+    for (const mode of [
+      "changed",
+      "exact",
+      "no repeat",
+      "review exact",
+    ] as const) {
+      const live = mode === "exact" ? "live" : "live-changed";
+      add(
+        `repeated inventories around review (mode=${mode})`,
+        progress("reporting", 3, 8),
+        [
+          [live, "first", inventory(10)],
+          ["save", "first", inventory(10)],
+          [
+            mode === "exact" || mode === "review exact"
+              ? "live"
+              : "live-changed",
+            "review",
+            progress("reporting", 3, 8),
+          ],
+          ...(mode === "no repeat"
+            ? []
+            : ([[live, "last", inventory(10)]] as Step[])),
+          ["save", "middle", inventory(8)],
+          ["save", "review", progress("reporting", 3, 8)],
+          ...(mode === "no repeat"
+            ? []
+            : ([["save", "last", inventory(10)]] as Step[])),
+          ["save", "anchor", "done"],
+          ["resolve"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["worker", progress("attack_path", 6, 9)],
+        ],
+      );
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("inventory authority before scope projection", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+      partitions?: readonly boolean[];
+    };
+    const scenarios: Scenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: Step[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
+    for (const persisted of ["late", "early", "absent"] as const) {
+      for (const phase of ["reporting", "attack_path"] as const) {
+        add(
+          `saved authority before fallback (persisted=${persisted}, phase=${phase})`,
+          progress("validation", 3, 5),
+          [
+            ["worker", progress("attack_path", 5, 8)],
+            ["poll"],
+            ["live", "late-inventory", inventory(5)],
+            ["save", "initial-inventory", inventory(5)],
+            ["live", "late-parent", progress(phase, 6, 8)],
+            ["save", "review", progress("validation", 3, 5)],
+            ...(persisted === "early"
+              ? ([
+                  ["save", "late-inventory", inventory(5)],
+                  ["save", "late-parent", progress(phase, 6, 8)],
+                ] as Step[])
+              : []),
+            ["poll"],
+            ["check", progress("validation", 3, 5)],
+            ["resolve"],
+            ...(persisted === "late"
+              ? ([
+                  ["save", "late-inventory", inventory(5)],
+                  ["save", "late-parent", progress(phase, 6, 8)],
+                ] as Step[])
+              : []),
+          ],
+        );
+      }
+    }
+    for (const mode of [
+      "bounded",
+      "exact",
+      "review delivered",
+      "prior inventory",
+    ] as const) {
+      add(
+        `bounded inventory after review (mode=${mode})`,
+        mode === "prior inventory"
+          ? progress("validation", 3, 5)
+          : progress("validation", 7, 8),
+        [
+          ["save", "initial", inventory(mode === "prior inventory" ? 5 : 8)],
+          [
+            "save",
+            "review",
+            progress("validation", 3, mode === "prior inventory" ? 5 : 8),
+          ],
+          ["save", "late", inventory(5)],
+          ["save", "final", inventory(8)],
+          ...(mode === "review delivered"
+            ? ([["live", "review", progress("validation", 3, 8)]] as Step[])
+            : []),
+          [mode === "exact" ? "live" : "live-changed", "late", inventory(5)],
+          ["resolve"],
+          ["live", "final", inventory(8)],
+          ["poll"],
+          ["worker", progress("attack_path", 7, 8)],
+        ],
+      );
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("inventory proof across completion intervals", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+      partitions?: readonly boolean[];
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: Step[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
+    for (const total of [9, 10]) {
+      for (const tail of ["same", "shrink", "none"] as const) {
+        for (const exact of [false, true]) {
+          const reviewed = total === 9 ? 3 : 1;
+          const markers = [
+            inventory(total),
+            progress("validation", reviewed, total),
+            ...(tail === "none"
+              ? []
+              : [inventory(tail === "same" ? total : 5)]),
+          ];
+          add(
+            `eligible inventory before trailing zero (total=${total}, tail=${tail}, exact=${exact})`,
+            progress("reporting", reviewed + 1, total),
+            [
+              [
+                exact ? "live" : "live-changed",
+                "inventory",
+                commandOutput(text(markers)),
+              ],
+              ["save", "inventory", persistedCommandOutput],
+              ["poll"],
+              ["save", "anchor", "done"],
+              ["resolve"],
+              ["live", "anchor", "done"],
+              ["poll"],
+              ["save", "report", progress("reporting", reviewed + 1, total)],
+            ],
+          );
+        }
+      }
+    }
+    for (const exact of [false, true]) {
+      for (const intermediate of ["complete", "omitted"] as const) {
+        const review = progress("validation", 1, 10);
+        add(
+          `intermediate completion bound (exact=${exact}, review=${intermediate})`,
+          progress("reporting", 3, 10),
+          [
+            ["live-changed", "inventory", commandOutput(text(inventory(10)))],
+            [
+              exact ? "live" : "live-changed",
+              "review",
+              intermediate === "complete"
+                ? review
+                : commandOutput(text(review)),
+            ],
+            ["save", "inventory", persistedCommandOutput],
+            [
+              "save",
+              "review",
+              intermediate === "complete" ? review : persistedCommandOutput,
+            ],
+            ...(intermediate === "complete"
+              ? ([["save", "report", progress("reporting", 3, 10)]] as Step[])
+              : []),
+            ["save", "anchor", "done"],
+            ["resolve"],
+            ["live", "anchor", "done"],
+            ["poll"],
+            ...(intermediate === "omitted"
+              ? ([["save", "report", progress("reporting", 3, 10)]] as Step[])
+              : []),
+          ],
+        );
+      }
+    }
+    for (const exact of [false, true]) {
+      for (const zero of [false, true]) {
+        for (const eligible of [false, true]) {
+          const review = progress("validation", 1, eligible ? 5 : 8);
+          add(
+            `projection witness across zero phase (exact=${exact}, zero=${zero}, eligible=${eligible})`,
+            eligible
+              ? review
+              : progress(zero ? "threat_model" : "discovery", 0, 5),
+            [
+              ["save", "inventory", inventory(5)],
+              [exact ? "live" : "live-changed", "review", review],
+              ["save", "review", review],
+              ...(zero
+                ? ([["save", "zero", progress("threat_model", 0, 5)]] as Step[])
+                : []),
+              ["save", "anchor", "done"],
+              ["resolve"],
+              ["live", "anchor", "done"],
+            ],
+          );
+        }
+      }
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("bounded inventory marker evidence", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+      partitions?: readonly boolean[];
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: Step[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
+    for (const command of ["changed", "exact"] as const) {
+      const live = command === "changed" ? "live-changed" : "live";
+      add(
+        `bounded inventory after saved review (${command})`,
+        progress(command === "exact" ? "preflight" : "validation", 7, 8),
+        [
+          ["worker", progress("attack_path", 7, 8)],
+          ["poll"],
+          ["save", "review", progress("validation", 2, 5)],
+          ["save", "late", inventory(5)],
+          ["save", "final", inventory(8)],
+          ["poll"],
+          [live, "review", progress("validation", 2, 5)],
+          ["poll"],
+          [live, "late", inventory(5)],
+          ["poll"],
+          [live, "final", inventory(8)],
+          ["save", "anchor", "done"],
+          ["resolve"],
+          ["live", "anchor", "done"],
+        ],
+      );
+    }
+    for (const total of [9, 5]) {
+      for (const delayed of [true, false]) {
+        const markers = [progress("threat_model", 0, 8), inventory(total)];
+        add(
+          `scope-setting phase (total=${total}, delayed=${delayed})`,
+          inventory(total),
+          [
+            ["save", "old", inventory(8)],
+            ["save", "anchor", inventory(8)],
+            ["save", "current", markers],
+            ["poll"],
+            ...(delayed
+              ? ([["live-changed", "old", inventory(8)]] as Step[])
+              : []),
+            ["live", "anchor", inventory(8)],
+            ["poll"],
+            ["resolve"],
+            ["live", "current", markers],
+          ],
+        );
+      }
+      const messageTotal = total === 9 ? 10 : total;
+      for (const kind of [
+        "omitted message",
+        "persisted message",
+        "command",
+      ] as const) {
+        add(
+          `bounded inventory evidence (${kind}, total=${messageTotal})`,
+          progress("validation", messageTotal - 1, messageTotal),
+          [
+            [
+              kind === "command" ? "live" : "live-message",
+              "inventory",
+              inventory(messageTotal),
+            ],
+            ...(kind === "persisted message"
+              ? ([
+                  ["save-message", "inventory", inventory(messageTotal)],
+                ] as Step[])
+              : []),
+            ["save", "anchor", "done"],
+            ["resolve"],
+            ["live", "anchor", "done"],
+            ["poll"],
+            [
+              "save",
+              "review",
+              progress("validation", messageTotal - 1, messageTotal),
+            ],
+          ],
+        );
+      }
+    }
+    for (const command of ["changed", "exact"] as const) {
+      for (const before of [true, false]) {
+        const markers = before
+          ? [inventory(9), progress("discovery", 1, 9)]
+          : [progress("discovery", 1, 8), inventory(9)];
+        const total = before ? 9 : 8;
+        add(
+          `omitted command marker order (${command}, inventory before=${before})`,
+          progress(before ? "reporting" : "validation", before ? 4 : 3, total),
+          [
+            [
+              command === "exact" ? "live" : "live-changed",
+              "inventory",
+              commandOutput(text(markers)),
+            ],
+            ["save", "inventory", persistedCommandOutput],
+            ["poll"],
+            ["save", "review", progress("validation", 3, total)],
+            ["resolve"],
+            ["live", "review", progress("validation", 3, total)],
+            ["poll"],
+            ["save", "report", progress("reporting", 4, 9)],
+          ],
+        );
+      }
+    }
+    for (const kind of ["message", "command"] as const) {
+      const live = kind === "message" ? "live-message" : "live-changed";
+      add(
+        `separate inventory after omitted review (${kind})`,
+        progress("validation", 3, 8),
+        [
+          [
+            live,
+            "early-review",
+            commandOutput(text(progress("discovery", 1, 8))),
+          ],
+          [live, "late-inventory", commandOutput(text(inventory(9)))],
+          ...(kind === "command"
+            ? ([
+                ["save", "early-review", persistedCommandOutput],
+                ["save", "late-inventory", persistedCommandOutput],
+              ] as Step[])
+            : []),
+          ["save", "anchor", progress("validation", 3, 8)],
+          ["resolve"],
+          ["live", "anchor", progress("validation", 3, 8)],
+          ["poll"],
+          ["save", "report", progress("reporting", 4, 9)],
+        ],
+      );
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("inventory occurrence and cutoff revalidation", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+      partitions?: readonly boolean[];
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: Step[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
+    for (const control of ["dropped", "delivered", "eligible"] as const) {
+      const review = progress("validation", 3, control === "eligible" ? 8 : 10);
+      add(
+        `repeated native inventory (${control})`,
+        control === "eligible" ? review : progress("reporting", 8, 10),
+        [
+          ["save", "initial", inventory(8)],
+          ["live", "initial", inventory(8)],
+          ["save", "expanded", inventory(10)],
+          ["live", "expanded", inventory(10)],
+          ["save", "restored", inventory(8)],
+          ...(control === "delivered"
+            ? ([["live", "restored", inventory(8)]] as Step[])
+            : []),
+          ["save", "review", review],
+          ["poll"],
+          ["live", "review", review],
+          ["live", "final-inventory", inventory(10)],
+          ["live", "final-report", progress("reporting", 8, 10)],
+          ["save", "final-inventory", inventory(10)],
+          ["poll"],
+          ["resolve"],
+          ["save", "final-report", progress("reporting", 8, 10)],
+        ],
+      );
+    }
+    for (const control of ["staged", "exact", "single batch"] as const) {
+      add(
+        `review cutoff after stronger inventory proof (${control})`,
+        progress("reporting", 4, 4),
+        [
+          ["save", "old", inventory(5)],
+          ["save", "note", "done"],
+          [control === "exact" ? "live" : "live-changed", "old", inventory(5)],
+          ["live", "final-inventory", inventory(4)],
+          ["live", "final-report", progress("reporting", 4, 4)],
+          ["save", "review", progress("discovery", 3, 7)],
+          ...(control !== "single batch" ? ([["poll"]] as Step[]) : []),
+          ...(control !== "single batch" ? ([["resolve"]] as Step[]) : []),
+          ["save", "final-inventory", inventory(4)],
+          ["save", "final-report", progress("reporting", 4, 4)],
+          ["save", "anchor", "done"],
+          ...(control === "single batch" ? ([["resolve"]] as Step[]) : []),
+          ["live", "anchor", "done"],
+        ],
+        control === "single batch" ? [false] : undefined,
+      );
+    }
+    for (const control of [
+      "delayed anchor",
+      "early anchor",
+      "eligible",
+    ] as const) {
+      const review = progress("discovery", 3, control === "eligible" ? 5 : 7);
+      add(
+        `omitted inventory changes review eligibility (${control})`,
+        progress("reporting", 4, control === "eligible" ? 5 : 4),
+        [
+          ["save", "old", persistedCommandOutput],
+          ["save", "note", "done"],
+          ["live-changed", "old", commandOutput(text(inventory(5)))],
+          ...(control === "early anchor"
+            ? ([["live", "note", "done"]] as Step[])
+            : []),
+          ["save", "review", review],
+          ["poll"],
+          ["resolve"],
+          ...(control !== "early anchor"
+            ? ([["live", "note", "done"]] as Step[])
+            : []),
+          ["live", "final-inventory", inventory(4)],
+          ["live", "final-report", progress("reporting", 4, 4)],
+          ["save", "final-inventory", inventory(4)],
+          ["save", "final-report", progress("reporting", 4, 4)],
+          ["save", "anchor", "finished"],
+          ["live", "anchor", "finished"],
+        ],
+      );
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("inventory cutoffs from retained source proof", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    for (const control of [false, true]) {
+      const finish = (state: ScanProgress, next: ScanProgress): Step[] => [
+        ["poll"],
+        ["check", state],
+        [
+          "worker",
+          progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+        ],
+        ["poll"],
+        ["check", state],
+        ["save", "followup", next],
+        ["poll"],
+        ["check", next],
+        [
+          "additional-worker",
+          progress("attack_path", state.filesTotal, state.filesTotal),
+        ],
+        ["poll"],
+        ["check", progress(next.phase, state.filesTotal, state.filesTotal)],
+      ];
+      scenarios.push(
+        {
+          name: `restore scope after rejecting a provisional inventory (saved baseline=${control})`,
+          expected: progress("reporting", 8, 8),
+          steps: [
+            ...(control
+              ? ([["save", "initial", inventory(8)], ["poll"]] as Step[])
+              : []),
+            ["worker", progress("attack_path", 2, 5)],
+            ["poll"],
+            ["live", "inventory", inventory(9)],
+            ["poll"],
+            ["save", "review", progress("validation", 3, 8)],
+            ["poll"],
+            ["resolve"],
+            ["save", "inventory", inventory(9)],
+            ...finish(
+              progress("validation", 3, 8),
+              progress("reporting", 4, 8),
+            ),
+          ],
+        },
+        {
+          name: `copy retains admitted source scope (native copy=${control})`,
+          expected: progress("reporting", 6, 6),
+          steps: [
+            ["receipt", inventory(5)],
+            ["live-message", "inventory", inventory(6)],
+            ["live", "review", progress("discovery", 1, 6)],
+            ["resolve"],
+            [
+              control ? "save-message" : "save-response",
+              "inventory",
+              inventory(6),
+            ],
+            ["poll"],
+            ["receipt", progress("reporting", 2, 6)],
+            ...finish(progress("reporting", 2, 6), progress("reporting", 3, 6)),
+          ],
+        },
+        {
+          name: `later live inventory cannot rescope native history (persisted early=${control})`,
+          expected: progress("reporting", 8, 8),
+          steps: [
+            ["save", "oversized", progress("validation", 9, 10)],
+            ["live", "oversized", progress("validation", 9, 10)],
+            ["poll"],
+            ["worker", progress("attack_path", 5, 5)],
+            ["live", "batch", [inventory(10), progress("threat_model", 0, 8)]],
+            ...(control
+              ? ([
+                  [
+                    "save",
+                    "batch",
+                    [inventory(10), progress("threat_model", 0, 8)],
+                  ],
+                ] as Step[])
+              : []),
+            ["poll"],
+            ["live", "current", inventory(8)],
+            ["resolve"],
+            ...(!control
+              ? ([
+                  [
+                    "save",
+                    "batch",
+                    [inventory(10), progress("threat_model", 0, 8)],
+                  ],
+                ] as Step[])
+              : []),
+            ["live", "phase", progress("discovery", 3, 8)],
+            ["save", "current", inventory(8)],
+            ["save", "phase", progress("discovery", 3, 8)],
+            ...finish(
+              progress("threat_model", 5, 8),
+              progress("reporting", 6, 8),
+            ),
+          ],
+        },
+        {
+          name: `bounded omitted review closes inventory admission (exact review=${control})`,
+          expected: progress("reporting", 5, 5),
+          steps: [
+            ["save", "initial", inventory(5)],
+            ["live", "initial", inventory(5)],
+            ["poll"],
+            [
+              control ? "live" : "live-changed",
+              "review",
+              commandOutput(text(progress("validation", 3, 5))),
+            ],
+            ["live", "later", [inventory(8), progress("reporting", 3, 8)]],
+            ["save", "review", persistedCommandOutput],
+            ["resolve"],
+            ["save", "later", [inventory(8), progress("reporting", 3, 8)]],
+            ...finish(
+              progress("validation", 3, 5),
+              progress("reporting", 4, 5),
+            ),
+          ],
+        },
+        {
+          name: `inventory after a known review is excluded through bounds (exact inventory=${control})`,
+          expected: progress("reporting", 8, 8),
+          steps: [
+            ["save", "initial", inventory(8)],
+            ["live", "initial", inventory(8)],
+            ["poll"],
+            ["save", "first", progress("attack_path", 6, 8)],
+            ["save", "before", "before"],
+            ["live", "before", "before"],
+            ["save", "late", inventory(10)],
+            [control ? "live" : "live-changed", "late", inventory(10)],
+            ["save", "last", progress("attack_path", 6, 8)],
+            ["live-changed", "last", progress("attack_path", 6, 8)],
+            ["save", "after", "after"],
+            ["resolve"],
+            ["live", "after", "after"],
+            ...finish(
+              progress("attack_path", 6, 8),
+              progress("reporting", 7, 8),
+            ),
+          ],
+        },
+        {
+          name: `earlier eligible review precedes provisional scope (review polled early=${control})`,
+          expected: progress("reporting", 8, 8),
+          steps: [
+            ["save", "initial", inventory(8)],
+            ["poll"],
+            ["worker", progress("attack_path", 2, 5)],
+            ["poll"],
+            ...(control
+              ? ([
+                  ["save", "review", progress("validation", 3, 8)],
+                  ["poll"],
+                ] as Step[])
+              : []),
+            ["live", "inventory", inventory(6)],
+            ["poll"],
+            ...(!control
+              ? ([
+                  ["save", "review", progress("validation", 3, 8)],
+                  ["poll"],
+                ] as Step[])
+              : []),
+            ["resolve"],
+            ["save", "inventory", inventory(6)],
+            ...finish(
+              progress("validation", 3, 8),
+              progress("reporting", 4, 8),
+            ),
+          ],
+        },
+      );
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
+  });
+
+  describe("source proof before inventory admission", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    for (const exact of [false, true]) {
+      const live = exact ? "live" : "live-changed";
+      const finish = (state: ScanProgress, next: ScanProgress): Step[] => [
+        ["poll"],
+        ["check", state],
+        [
+          "worker",
+          progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+        ],
+        ["poll"],
+        ["check", state],
+        ["save", "followup", next],
+        ["poll"],
+        ["check", next],
+        [
+          "additional-worker",
+          progress(
+            "attack_path",
+            Math.min(next.filesCompleted + 1, next.filesTotal),
+            next.filesTotal,
+          ),
+        ],
+        ["poll"],
+        [
+          "check",
+          next.filesCompleted === next.filesTotal
+            ? next
+            : progress(next.phase, next.filesCompleted + 1, next.filesTotal),
+        ],
+      ];
+      scenarios.push(
+        {
+          name: `newer inventory after an older truncated bound (exact=${exact})`,
+          expected: progress("reporting", 5, 9),
+          steps: [
+            ["live-changed", "older", commandOutput(text(inventory(5)))],
+            [live, "newer", inventory(9)],
+            ["save", "older", persistedCommandOutput],
+            ["save", "newer", inventory(9)],
+            ["save", "anchor", progress("validation", 2, 9)],
+            ["live", "anchor", progress("validation", 2, 9)],
+            ["poll"],
+            ["save", "report", progress("reporting", 3, 9)],
+            ...finish(progress("reporting", 3, 9), progress("reporting", 4, 9)),
+          ],
+        },
+        {
+          name: `review cutoff before a queued later inventory (split callback=${exact})`,
+          expected: progress("reporting", 3, 5),
+          steps: [
+            ["save", "initial", inventory(8)],
+            ["live-changed", "initial", inventory(8)],
+            ["worker", progress("attack_path", 4, 7)],
+            ["poll"],
+            ["save", "scope", inventory(5)],
+            ["save", "review", progress("validation", 1, 5)],
+            ["poll"],
+            ["save", "late", inventory(9)],
+            ["live", "review", progress("validation", 1, 5)],
+            ...(exact ? [["poll"] as Step] : []),
+            ["live", "late", inventory(9)],
+            ...finish(
+              progress("validation", 1, 5),
+              progress("reporting", 2, 5),
+            ),
+          ],
+        },
+        {
+          name: `count-rejected inventory before a matched review (exact=${exact})`,
+          expected: progress("reporting", 3, 5),
+          steps: [
+            ["save", "initial", persistedCommandOutput],
+            ["save", "current", inventory(5)],
+            ["save", "anchor", progress("validation", 1, 5)],
+            ["live-changed", "initial", commandOutput(text(inventory(8)))],
+            ["poll"],
+            [live, "current", inventory(5)],
+            ["live", "anchor", progress("validation", 1, 5)],
+            ...finish(
+              progress("validation", 1, 5),
+              progress("reporting", 2, 5),
+            ),
+          ],
+        },
+        {
+          name: `count-rejected inventory inside a complete projection (exact=${exact})`,
+          expected: progress("reporting", 4, 5),
+          steps: [
+            ["live-changed", "initial", commandOutput(text(inventory(9)))],
+            ["save", "initial", persistedCommandOutput],
+            ["poll"],
+            ["save", "current", [inventory(5), progress("validation", 2, 5)]],
+            ["poll"],
+            [live, "current", [inventory(5), progress("validation", 2, 5)]],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+            ...finish(
+              progress("validation", 2, 5),
+              progress("reporting", 3, 5),
+            ),
+          ],
+        },
+        {
+          name: `deferred expansion supersedes a truncated bound (exact=${exact})`,
+          expected: progress("reporting", 8, 8),
+          steps: [
+            ["worker", progress("attack_path", 2, 5)],
+            ["live-changed", "initial", commandOutput(text(inventory(5)))],
+            ["save", "initial", persistedCommandOutput],
+            ["poll"],
+            [live, "expansion", [inventory(8), progress("validation", 2, 5)]],
+            ["save", "expansion", [inventory(8), progress("validation", 2, 5)]],
+            ["save", "anchor", progress("reporting", 5, 8)],
+            ["live", "anchor", progress("reporting", 5, 8)],
+            ["poll"],
+            ["save", "report", progress("reporting", 6, 8)],
+            ...finish(progress("reporting", 6, 8), progress("reporting", 7, 8)),
+          ],
+        },
+        {
+          name: `separate rejected completion after scope correction (exact=${exact})`,
+          expected: progress("reporting", 3, 3),
+          steps: [
+            ["save", "initial", inventory(5)],
+            ["poll"],
+            ["worker", progress("attack_path", 4, 5)],
+            ["save", "scope", inventory(3)],
+            ["save", "review", progress("validation", 1, 3)],
+            ["live-changed", "initial", inventory(5)],
+            ["poll"],
+            ["save", "report", persistedCommandOutput],
+            ["save", "anchor", "done"],
+            ["live-changed", "scope", inventory(3)],
+            ["poll"],
+            ["live-changed", "review", progress("validation", 1, 3)],
+            [live, "report", commandOutput(text(progress("reporting", 2, 3)))],
+            ["live", "anchor", "done"],
+            ...finish(progress("reporting", 2, 3), progress("reporting", 3, 3)),
+          ],
+        },
+        {
+          name: `late inventory proof after saved reporting (exact=${exact})`,
+          expected: progress("reporting", 5, 5),
+          steps: [
+            ["save", "older", persistedCommandOutput],
+            ["save", "newer", inventory(5)],
+            ["live-changed", "older", commandOutput(text(inventory(8)))],
+            ["save", "anchor", progress("reporting", 3, 5)],
+            ["poll"],
+            [live, "newer", inventory(5)],
+            ["live", "anchor", progress("reporting", 3, 5)],
+            ...finish(progress("reporting", 3, 5), progress("reporting", 4, 5)),
+          ],
+        },
+      );
+    }
+    scenarios.push(
+      {
+        name: "inventory proof after review cannot expand admitted scope",
+        expected: progress("reporting", 2, 5),
+        steps: [
+          ["save", "initial", inventory(5)],
+          ["live", "initial", inventory(5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["live", "review", progress("validation", 1, 5)],
+          ["poll"],
+          ["live-changed", "late", inventory(9)],
+          ["save", "late", inventory(9)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["check", progress("validation", 1, 5)],
+          ["worker", progress("attack_path", 6, 9)],
+          ["poll"],
+          ["check", progress("validation", 1, 5)],
+          ["save", "followup", progress("reporting", 2, 5)],
+        ],
+      },
+      {
+        name: "an omitted rejected phase cannot replace later exact progress",
+        expected: progress("reporting", 3, 3),
+        steps: [
+          ["save", "initial", inventory(5)],
+          ["poll"],
+          ["worker", progress("attack_path", 4, 5)],
+          ["poll"],
+          ["save", "scope", inventory(3)],
+          ["live-changed", "scope", inventory(3)],
+          [
+            "live-changed",
+            "old-report",
+            commandOutput(text(progress("reporting", 2, 3))),
+          ],
+          ["save", "old-report", persistedCommandOutput],
+          ["save", "anchor", progress("validation", 2, 3)],
+          ["live", "anchor", progress("validation", 2, 3)],
+          ["poll"],
+          ["check", progress("validation", 2, 3)],
+          ["save", "followup", progress("reporting", 3, 3)],
+        ],
+      },
+    );
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) =>
+        runProgressScenario(scenario, {
+          resolveAtLastAnchor: true,
+          pollReceipts: false,
+        }),
+    );
+  });
+
+  describe("inventory authority through stronger source proof", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly ["worker" | "check" | "receipt", ScanProgress]
+      | readonly ["poll"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [
+      ...[false, true].map((exact): Scenario => ({
+        name: `bounded omitted inventory expansion (exact=${exact})`,
+        expected: progress("reporting", 10, 10),
+        steps: [
+          [
+            exact ? "live" : "live-changed",
+            "inventory",
+            commandOutput(text(inventory(10))),
+          ],
+          ["save", "inventory", persistedCommandOutput],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["save", "review", progress("validation", 9, 10)],
+          ["poll"],
+          ["check", progress("validation", 9, 10)],
+          ["worker", progress("attack_path", 10, 11)],
+          ["poll"],
+          ["check", progress("validation", 9, 10)],
+          ["save", "report", progress("reporting", 10, 10)],
+        ],
+      })),
+      ...[false, true].map((exact): Scenario => ({
+        name: `newer inventory during older-scope corroboration (exact=${exact})`,
+        expected: progress("validation", 5, 9),
+        steps: [
+          [exact ? "live" : "live-changed", "older", inventory(3)],
+          ["save", "older", inventory(3)],
+          [exact ? "live" : "live-changed", "newer", inventory(9)],
+          ["save", "newer", inventory(9)],
+          ["save", "review", progress("validation", 1, 3)],
+          ["live", "review", progress("validation", 1, 3)],
+          ["poll"],
+          ["check", progress("validation", 1, 9)],
+          ["save", "followup", progress("validation", 2, 9)],
+          ["poll"],
+          ["check", progress("validation", 2, 9)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["worker", progress("attack_path", 5, 9)],
+        ],
+      })),
+      ...["bounded", "exact", "eligible", "discovery"].map(
+        (control): Scenario => {
+          const review = progress(
+            control === "discovery" ? "discovery" : "validation",
+            2,
+            control === "eligible" ? 3 : 8,
+          );
+          const settled =
+            control === "eligible"
+              ? progress("validation", 2, 3)
+              : inventory(3);
+          return {
+            name: `preceding inventory before bounded review (${control})`,
+            expected: progress("reporting", 3, 3),
+            steps: [
+              ["save", "inventory", inventory(3)],
+              [control === "exact" ? "live" : "live-changed", "review", review],
+              ["save", "review", review],
+              ["save", "anchor", "done"],
+              ["live", "anchor", "done"],
+              ["poll"],
+              ["check", settled],
+              ["worker", progress("attack_path", 6, 8)],
+              ["poll"],
+              ["check", settled],
+              ["save", "followup", progress("reporting", 3, 3)],
+            ],
+          };
+        },
+      ),
+      ...[false, true].map((withoutOversized): Scenario => {
+        const first = withoutOversized
+          ? [inventory(8)]
+          : [inventory(8), progress("validation", 2, 10)];
+        const next = [inventory(10), progress("reporting", 5, 10)];
+        return {
+          name: `exact inventory before a newer live scope (without oversized=${withoutOversized})`,
+          expected: progress("validation", 7, 10),
+          steps: [
+            ["live", "first", first],
+            ["save", "first", first],
+            ["live", "next", next],
+            ["poll"],
+            ["save", "next", next],
+            ["poll"],
+            ["check", progress("reporting", 5, 10)],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+            ["save", "followup", progress("validation", 6, 10)],
+            ["poll"],
+            ["check", progress("validation", 6, 10)],
+            ["worker", progress("attack_path", 7, 10)],
+          ],
+        };
+      }),
+      ...[false, true].map((nativeInventory): Scenario => {
+        const steps: Step[] = [
+          ["live-message", "inventory", inventory(8)],
+          ["save-response", "inventory", inventory(8)],
+        ];
+        if (nativeInventory)
+          steps.push(["save-message", "inventory", inventory(8)]);
+        steps.push(
+          ["poll"],
+          ["save-response", "corrected", inventory(10)],
+          ["save-response", "report", progress("reporting", 3, 10)],
+          ["poll"],
+          ["check", progress("reporting", 3, 10)],
+          ["save-message", "anchor", "Done."],
+          ["live-message", "anchor", "Done."],
+          ["poll"],
+          ["check", progress("reporting", 3, 10)],
+          ["save-response", "followup", progress("validation", 5, 10)],
+          ["poll"],
+          ["check", progress("validation", 5, 10)],
+          ["worker", progress("attack_path", 7, 10)],
+        );
+        return {
+          name: `response-only authority after an anchor (native inventory=${nativeInventory})`,
+          expected: progress("validation", 7, 10),
+          steps,
+        };
+      }),
+    ];
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) =>
+        runProgressScenario(scenario, {
+          resolveAtLastAnchor: true,
+          pollReceipts: false,
+        }),
+    );
+  });
+
+  describe("inventory authority across source partitions", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          "save" | "live" | "save-message" | "live-message",
+          string,
+          Value,
+        ]
+      | readonly ["worker" | "check" | "receipt", ScanProgress]
+      | readonly ["poll"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const partitioned: Scenario[] = [6, 7].flatMap((total) =>
+      ["oversized", "without-oversized", "eligible-review"].flatMap((control) =>
+        Array.from({ length: 8 }, (_, partition) => {
+          const final = progress(
+            total === 6 ? "validation" : "reporting",
+            total === 6 ? 3 : 2,
+            total,
+          );
+          const rows = [
+            inventory(5),
+            progress("validation", 3, control === "eligible-review" ? 5 : 8),
+            inventory(total),
+            final,
+          ];
+          const steps: Step[] = [["worker", progress("attack_path", 6, 8)]];
+          for (const [index, row] of rows.entries()) {
+            if (!(control === "without-oversized" && index === 1))
+              steps.push(["save", `row-${index}`, row]);
+            if (index === rows.length - 1 || (partition & (1 << index)) !== 0)
+              steps.push(["poll"]);
+          }
+          return {
+            name: `${total}-file prefix (${control}, partition=${partition})`,
+            expected:
+              control === "eligible-review"
+                ? progress("validation", 3, 5)
+                : final,
+            steps,
+          };
+        }),
+      ),
+    );
+    const delayed: Scenario[] = [
+      {
+        name: "an exact message uses each source prefix once",
+        expected: progress("reporting", 2, 8),
+        steps: [
+          ["save", "initial", inventory(5)],
+          ["live", "initial", inventory(5)],
+          ["poll"],
+          [
+            "live-message",
+            "message",
+            [
+              progress("validation", 3, 8),
+              inventory(8),
+              progress("reporting", 2, 8),
+            ],
+          ],
+          [
+            "save-message",
+            "message",
+            [
+              progress("validation", 3, 8),
+              inventory(8),
+              progress("reporting", 2, 8),
+            ],
+          ],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ] as const,
+      },
+      {
+        name: "bounded raw review uses its preceding scope",
+        expected: progress("validation", 2, 6),
+        steps: [
+          ["save", "initial", inventory(8)],
+          ["live", "initial", inventory(8)],
+          ["poll"],
+          [
+            "live",
+            "displayed",
+            [progress("threat_model", 0, 5), progress("validation", 3, 8)],
+          ],
+          ["save", "preceding", inventory(5)],
+          [
+            "save",
+            "original",
+            [progress("threat_model", 0, 5), progress("validation", 3, 8)],
+          ],
+          ["save", "later", inventory(6)],
+          ["save", "review", progress("validation", 2, 6)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ] as const,
+      },
+      {
+        name: "admitted saved coverage before an unresolved command boundary",
+        expected: progress("reporting", 4, 8),
+        steps: [
+          ["live", "displayed", progress("validation", 3, 8)],
+          ["receipt", progress("reporting", 4, 8)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["save", "late inventory", inventory(5)],
+          ["save", "late review", progress("validation", 1, 5)],
+        ] as const,
+      },
+      ...[
+        { older: 5, current: 8, count: 1 },
+        { older: 8, current: 10, count: 3 },
+      ].flatMap(({ older, current, count }) =>
+        [false, true].map((reviewLocated) => {
+          const review = progress("validation", count, current);
+          const steps: Step[] = [
+            ["live", "older displayed", inventory(older)],
+            ["save", "older", inventory(older)],
+            ["poll"],
+            ["live", "current", inventory(current)],
+            ["live", reviewLocated ? "review" : "review displayed", review],
+            ["save", "current", inventory(current)],
+          ];
+          if (reviewLocated) steps.push(["save", "review", review]);
+          steps.push(["poll"], ["check", review]);
+          if (!reviewLocated) steps.push(["save", "review", review]);
+          steps.push(["save", "anchor", "done"], ["live", "anchor", "done"]);
+          return {
+            name: `accepted ${older}-to-${current} growth (review located=${reviewLocated})`,
+            expected: review,
+            steps,
+          };
+        }),
+      ),
+      ...["provisional", "without-zero", "exact-review"].map((control) => {
+        const review = progress("reporting", 3, 8);
+        const steps: Step[] = [
+          [
+            "live",
+            control === "exact-review" ? "review" : "review displayed",
+            review,
+          ],
+          ["save", "smaller", inventory(5)],
+        ];
+        if (control !== "without-zero")
+          steps.push(["save", "zero", progress("threat_model", 0, 5)]);
+        steps.push(
+          ["save", "current", inventory(8)],
+          ["poll"],
+          ["save", "review", review],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        );
+        return {
+          name: `unpositioned review (${control})`,
+          expected: review,
+          steps,
+        };
+      }),
+      ...[
+        "repeated-zero",
+        "without-repeat",
+        "full-prefix",
+        "full-output",
+        "exact-command",
+      ].map((control) => {
+        const first = text(inventory(9));
+        const review = progress("validation", 3, 9);
+        const markers = [first, text(review)];
+        if (control !== "without-repeat") markers.push(first);
+        const prefixMarkers =
+          control === "full-prefix" ? markers.join("\n") : first;
+        const prefix =
+          prefixMarkers + "\n" + "h".repeat(32_743 - prefixMarkers.length - 1);
+        const middle =
+          control === "full-prefix"
+            ? "details" + "m".repeat(128)
+            : markers.slice(1).join("\n");
+        const output =
+          control === "full-output"
+            ? markers.join("\n")
+            : `${prefix}\n${middle}\n${commandTail}`;
+        const persisted = `${prefix}\n... command output truncated for persistence ...\n${commandTail}`;
+        return {
+          name: `command progress sequence (${control})`,
+          expected: review,
+          steps: [
+            [
+              "live",
+              control === "exact-command" ? "original" : "displayed",
+              output,
+            ],
+            [
+              "save",
+              "original",
+              control === "full-output" ? output : persisted,
+            ],
+            ["save", "smaller", inventory(5)],
+            ["save", "later", progress("reporting", 1, 5)],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+          ] as const,
+        };
+      }),
+    ].flatMap((scenario) =>
+      [false, true].map((stopBeforeResolution) => ({
+        ...scenario,
+        stopBeforeResolution,
+      })),
+    );
+    test.each(
+      [...partitioned, ...delayed].flatMap((scenario) =>
+        [false, true].map((workerFirst) => ({ ...scenario, workerFirst })),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution)",
+      async ({ steps, expected, workerFirst, stopBeforeResolution }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        const checkpoints: {
+          actual: ScanProgress | undefined;
+          expected: ScanProgress;
+        }[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              const resolution = steps.findLastIndex(
+                (step) => step[0] === "live" && step[1] === "anchor",
+              );
+              for (const [index, step] of steps.entries()) {
+                if (stopBeforeResolution && index === resolution) {
+                  await tracker!.stop();
+                  await tracker!.refresh();
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "check")
+                  checkpoints.push({
+                    actual: updates.at(-1),
+                    expected: step[1],
+                  });
+                else if (step[0] === "live-message")
+                  yield {
+                    type: "item.completed",
+                    item: {
+                      id: `item-${index}`,
+                      type: "agent_message",
+                      text: text(step[2]),
+                    },
+                  };
+                else if (step[0] === "save-message")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      {
+                        type: "event_msg",
+                        payload: {
+                          type: "item_completed",
+                          item: {
+                            type: "AgentMessage",
+                            id: `native-${index}`,
+                            content: [{ type: "Text", text: text(step[2]) }],
+                          },
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    step[0] === "receipt" ? parentPath : workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          for (const checkpoint of checkpoints)
+            expect(checkpoint.actual).toEqual(checkpoint.expected);
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
+  describe("source eligibility and applied progress", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    const initial: readonly Step[] = [
+      ["save", "initial", inventory(8)],
+      ["live", "initial", inventory(8)],
+      ["poll"],
+    ];
+    const multi = [inventory(5), progress("validation", 0, 5)];
+    type Step =
+      | readonly [
+          "save" | "live",
+          string,
+          ScanProgress | readonly ScanProgress[] | string,
+        ]
+      | readonly ["worker", ScanProgress]
+      | readonly ["poll"];
+    const scenarios: readonly {
+      name: string;
+      expected: ScanProgress;
+      control?: "oversized" | "late-inventory" | "changed";
+      steps: readonly Step[];
+    }[] = [
+      ...[false, true].map((matched) => ({
+        name: `rejected inventory inside ${matched ? "an exact" : "a bounded"} completion`,
+        expected: progress("threat_model", 0, 5),
+        steps: [
+          ...initial,
+          [
+            "live",
+            matched ? "original" : "changed",
+            [
+              progress("threat_model", 0, 5),
+              progress("validation", 3, 8),
+              inventory(4),
+            ],
+          ],
+          ["save", "earlier inventory", inventory(5)],
+          [
+            "save",
+            "original",
+            [
+              progress("threat_model", 0, 5),
+              progress("validation", 3, 8),
+              inventory(4),
+            ],
+          ],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+        ] as const,
+      })),
+      {
+        name: "scope-ineligible saved validation",
+        expected: progress("reporting", 3, 5),
+        control: "oversized",
+        steps: [
+          ["live", "review", progress("reporting", 3, 5)],
+          ["save", "oversized", progress("validation", 3, 9)],
+          ["poll"],
+          ["save", "inventory", inventory(5)],
+          ["save", "review", progress("reporting", 3, 5)],
+          ["poll"],
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "scope-ineligible saved positive discovery",
+        expected: progress("validation", 1, 5),
+        control: "oversized",
+        steps: [
+          ...initial,
+          ["save", "oversized", progress("discovery", 1, 10)],
+          ["save", "smaller", inventory(5)],
+          ["live", "review", progress("validation", 1, 5)],
+          ["poll"],
+          ["save", "review", progress("validation", 1, 5)],
+          ["poll"],
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "scope-ineligible live validation before source matching",
+        expected: progress("validation", 3, 5),
+        control: "oversized",
+        steps: [
+          ["live", "oversized", progress("validation", 9, 10)],
+          ["save", "oversized", progress("validation", 9, 10)],
+          ["save", "inventory", inventory(5)],
+          ["live", "review", progress("validation", 3, 5)],
+          ["save", "review", progress("validation", 3, 5)],
+          ["poll"],
+          ["worker", progress("attack_path", 7, 8)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "a rejected inventory after admitted review",
+        expected: progress("validation", 2, 8),
+        control: "late-inventory",
+        steps: [
+          ...initial,
+          ["save", "first", progress("discovery", 1, 8)],
+          ["poll"],
+          ["save", "late-inventory", inventory(5)],
+          ["poll"],
+          ["save", "second", progress("validation", 2, 8)],
+          ["live", "second", progress("validation", 2, 8)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "the pending final marker after worker exclusion",
+        expected: progress("validation", 0, 5),
+        control: "changed",
+        steps: [
+          ["worker", progress("attack_path", 5, 8)],
+          ["poll"],
+          ["live", "changed", multi],
+          ["poll"],
+          ["save", "original", multi],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+        ],
+      },
+      {
+        name: "inventory before the first admitted review",
+        expected: progress("validation", 2, 5),
+        steps: [
+          ...initial,
+          ["save", "inventory", inventory(5)],
+          ["save", "first", progress("discovery", 1, 5)],
+          ["poll"],
+          ["save", "second", progress("validation", 2, 5)],
+          ["live", "second", progress("validation", 2, 5)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "a rejected positive marker after legitimate scope growth",
+        expected: progress("validation", 9, 10),
+        steps: [
+          ...initial,
+          ["live", "review", progress("validation", 9, 10)],
+          ["save", "inventory", inventory(10)],
+          ["save", "review", progress("validation", 9, 10)],
+          ["poll"],
+        ],
+      },
+      {
+        name: "eligible worker coverage ahead of a zero marker",
+        expected: progress("preflight", 5, 5),
+        steps: [
+          ["worker", progress("attack_path", 5, 5)],
+          ["poll"],
+          ["live", "changed", multi],
+          ["poll"],
+          ["save", "original", multi],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+        ],
+      },
+      {
+        name: "an oversized final marker that remains unaccepted",
+        expected: inventory(5),
+        steps: [
+          ["worker", progress("attack_path", 5, 8)],
+          ["poll"],
+          ["live", "changed", [inventory(5), progress("validation", 9, 10)]],
+          ["poll"],
+          ["save", "original", [inventory(5), progress("validation", 9, 10)]],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+        ],
+      },
+    ];
+    test.each(
+      scenarios.flatMap((scenario) =>
+        (scenario.control === undefined ? [false] : [false, true]).flatMap(
+          (causalControl) =>
+            [false, true].flatMap((workerFirst) =>
+              [false, true].map((stopBeforeResolution) => ({
+                ...scenario,
+                causalControl,
+                workerFirst,
+                stopBeforeResolution,
+              })),
+            ),
+        ),
+      ),
+    )(
+      "reconciles $name (workers first=$workerFirst, stop=$stopBeforeResolution, control=$causalControl)",
+      async ({
+        steps: originalSteps,
+        expected,
+        control,
+        causalControl,
+        workerFirst,
+        stopBeforeResolution,
+      }) => {
+        const steps: readonly Step[] = !causalControl
+          ? originalSteps
+          : control === "changed"
+            ? originalSteps.map((step) =>
+                step[0] === "live" && step[1] === "changed"
+                  ? (["live", "original", step[2]] as const)
+                  : step,
+              )
+            : originalSteps.filter((step) => step[1] !== control);
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const text = (
+          value: string | ScanProgress | readonly ScanProgress[],
+        ) =>
+          typeof value === "string"
+            ? value
+            : [value]
+                .flat()
+                .map((p) =>
+                  progressMarker(p.phase, p.filesCompleted, p.filesTotal),
+                )
+                .join("\n");
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              const anchor = steps.findLastIndex(
+                (step) =>
+                  (step[0] === "save" || step[0] === "live") &&
+                  step[1] === "anchor",
+              );
+              const resolution =
+                anchor === -1
+                  ? steps.findLastIndex((step) => step[0] === "save")
+                  : anchor;
+              for (const [index, step] of steps.entries()) {
+                if (stopBeforeResolution && index === resolution) {
+                  await tracker!.stop();
+                  await tracker!.refresh();
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
+  test.each(
+    [
+      "drained phase",
+      "drained growth",
+      "drained shrink",
+      "omitted phase",
+      "omitted growth",
+      "omitted shrink",
+      "pending inventory",
+      "pending phase",
+    ].flatMap((scenario) =>
+      [false, true].flatMap((changedDisplay) =>
+        [false, true].map((workerFirst) => ({
+          scenario,
+          changedDisplay,
+          workerFirst,
+        })),
+      ),
+    ),
+  )(
+    "orders persisted command evidence through repeated polls ($scenario, changed=$changedDisplay, workers first=$workerFirst)",
+    async ({ scenario, changedDisplay, workerFirst }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      let tracker: ScanCostTracker | undefined;
+      const originalStart = ScanCostTracker.prototype.start;
+      const starting = spyOn(
+        ScanCostTracker.prototype,
+        "start",
+      ).mockImplementation(function (this: ScanCostTracker, threadId: string) {
+        originalStart.call(this, threadId);
+        if (threadId === "thread-1") tracker = this;
+      });
+      let parentPath = "";
+      let workerPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) !== dirname(parentPath)) return entries;
+        const first = basename(workerFirst ? workerPath : parentPath);
+        return entries.toSorted(
+          (left, right) =>
+            Number(String(right.name) === first) -
+            Number(String(left.name) === first),
+        );
+      }) as typeof originalReaddir);
+      const initial: ScanProgress = scenario.endsWith("phase")
+        ? { phase: "validation", filesCompleted: 3, filesTotal: 8 }
+        : {
+            phase: "discovery",
+            filesCompleted: 0,
+            filesTotal: scenario.endsWith("shrink") ? 9 : 8,
+          };
+      const expected: ScanProgress =
+        scenario === "pending phase"
+          ? initial
+          : scenario.endsWith("phase")
+            ? { ...initial, phase: "reporting" }
+            : { ...initial, filesTotal: scenario.endsWith("growth") ? 9 : 8 };
+      const text = (progress: ScanProgress) =>
+        progressMarker(
+          progress.phase,
+          progress.filesCompleted,
+          progress.filesTotal,
+        );
+      const display = (command: string) =>
+        changedDisplay ? `${command} displayed` : command;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          workerPath = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const save = (command: string, output: string) =>
+            appendFile(
+              parentPath,
+              jsonLines([nativeCommand(command, output, command)]) + "\n",
+            );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            expect(tracker).toBeDefined();
+            // Control polling through the real tracker while keeping the API's
+            // source, inventory, and count admission callback in the loop.
+            await tracker!.stop();
+            if (scenario.startsWith("pending")) {
+              yield completedCommand(
+                display("first"),
+                text(initial),
+                "live-first",
+              );
+              await save("first", text(initial));
+              await tracker!.refresh();
+              yield completedCommand(
+                display("last"),
+                text(initial),
+                "live-last",
+              );
+              await tracker!.refresh();
+              await save(
+                "middle",
+                scenario === "pending phase"
+                  ? progressMarker("reporting", 3, 8)
+                  : progressMarker("discovery", 0, 9),
+              );
+              await tracker!.refresh();
+              await save("last", text(initial));
+              if (scenario === "pending phase") {
+                await save("anchor", "Batch finished.");
+                yield completedCommand(
+                  "anchor",
+                  "Batch finished.",
+                  "live-anchor",
+                );
+              }
+              await tracker!.refresh();
+            } else {
+              await save(
+                "initial",
+                scenario.startsWith("omitted")
+                  ? persistedCommandOutput
+                  : text(initial),
+              );
+              await save("anchor", "Batch finished.");
+              await tracker!.refresh();
+              yield completedCommand(
+                display("initial"),
+                scenario.startsWith("omitted")
+                  ? commandOutput(text(initial))
+                  : text(initial),
+                "live-initial",
+              );
+              yield completedCommand(
+                "anchor",
+                "Batch finished.",
+                "live-anchor",
+              );
+              await save("final", text(expected));
+            }
+            if (scenario.endsWith("shrink") || scenario === "pending inventory")
+              await appendFile(
+                workerPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: "worker-progress",
+                      output: progressMarker("attack_path", 5, 9),
+                    },
+                  },
+                ]) + "\n",
+              );
+            await tracker!.refresh();
+            await tracker!.refresh();
+            await tracker!.stop();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual(expected);
+        await tracker!.refresh();
+        await tracker!.stop();
+        expect(updates.at(-1)).toEqual(expected);
+      } finally {
+        await client.close();
+        starting.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "restores saved scope after a delayed live inventory fails the API count guard (workers first: %p)",
+    async (workerFirst) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const initialRead = Promise.withResolvers<void>();
+      const finalRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      const workerSeen = Promise.withResolvers<void>();
+      let holdPoll = true;
+      let parentPath = "";
+      let workerPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) !== dirname(parentPath)) return entries;
+        const first = basename(workerFirst ? workerPath : parentPath);
+        return entries.toSorted(
+          (left, right) =>
+            Number(String(right.name) === first) -
+            Number(String(left.name) === first),
+        );
+      }) as typeof originalReaddir);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          workerPath = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const initial = progressMarker("discovery", 0, 8);
+          const larger = progressMarker("discovery", 0, 9);
+          await appendFile(
+            parentPath,
+            jsonLines([nativeCommand("initial", initial, "initial")]) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            yield completedCommand("initial changed", initial, "live-initial");
+            holdPoll = false;
+            pollAllowed.resolve();
+            await initialRead.promise;
+            await appendFile(
+              parentPath,
+              jsonLines([
+                nativeCommand("larger", larger, "larger"),
+                nativeCommand("final", initial, "final"),
+              ]) + "\n",
+            );
+            await appendFile(
+              workerPath,
+              jsonLines([
+                {
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    call_id: "worker-progress",
+                    output: progressMarker("attack_path", 5, 9),
+                  },
+                },
+              ]) + "\n",
+            );
+            await Promise.all([finalRead.promise, workerRead.promise]);
+            expect(updates.at(-1)).toEqual({
+              phase: "discovery",
+              filesCompleted: 0,
+              filesTotal: 8,
+            });
+            yield completedCommand("larger changed", larger, "live-larger");
+            await workerSeen.promise;
+            yield completedCommand("final", initial, "live-final");
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (
+              update.phase === "discovery" &&
+              update.filesCompleted === 5 &&
+              update.filesTotal === 9
+            )
+              workerSeen.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              item?: { id?: string };
+              call_id?: string;
+            };
+            if (payload.item?.id === "initial") initialRead.resolve();
+            if (payload.item?.id === "final") finalRead.resolve();
+            if (payload.call_id === "worker-progress") workerRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 0,
+          filesTotal: 8,
+        });
+      } finally {
+        holdPoll = false;
+        pollAllowed.resolve();
+        initialRead.resolve();
+        finalRead.resolve();
+        workerRead.resolve();
+        workerSeen.resolve();
+        clearInterval(keepAlive);
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    ["older-snapshot", "later-inventory"].flatMap((scenario) =>
+      [false, true].flatMap((workerFirst) =>
+        [false, true].map((changedDisplay) => ({
+          scenario,
+          workerFirst,
+          changedDisplay,
+        })),
+      ),
+    ),
+  )(
+    "retains and resolves inventory through old snapshots (scenario=$scenario, workerFirst=$workerFirst, changed=$changedDisplay)",
+    async ({ scenario, workerFirst, changedDisplay }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      const currentRead = Promise.withResolvers<void>();
+      let holdPoll = true;
+      let pauseClose = true;
+      let parentPath = "";
+      let workerPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parentPath)) {
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }
+        return entries;
+      }) as typeof originalReaddir);
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          return close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          workerPath = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const inventory = progressMarker("discovery", 0, 9);
+          const current = nativeCommand(
+            ["printf", "sk-" + "a".repeat(32)],
+            inventory,
+            "current",
+          );
+          const other = nativeCommand(
+            "other-inventory",
+            progressMarker("discovery", 0, 8),
+            "other",
+          );
+          const workerReceipt = (count: number) => ({
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: `worker-${count}`,
+              output: progressMarker("attack_path", count, 9),
+            },
+          });
+          await appendFile(
+            parentPath,
+            jsonLines(
+              scenario === "older-snapshot" ? [other] : [current, other],
+            ) + "\n",
+          );
+          await appendFile(workerPath, jsonLines([workerReceipt(5)]) + "\n");
+          holdPoll = false;
+          pollAllowed.resolve();
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await closeEntered.promise;
+            if (scenario === "older-snapshot")
+              await appendFile(parentPath, jsonLines([current]) + "\n");
+            yield completedCommand(
+              changedDisplay
+                ? "printf [REDACTED_SECRET]"
+                : "printf sk-" + "a".repeat(32),
+              inventory,
+              "item_current",
+            );
+            expect(updates.at(-1)).toEqual({
+              phase: "discovery",
+              filesCompleted: 0,
+              filesTotal: 9,
+            });
+            closeReleased.resolve();
+            await currentRead.promise;
+            const total = scenario === "older-snapshot" ? 9 : 8;
+            const review = progressMarker("validation", 5, total);
+            await appendFile(
+              parentPath,
+              jsonLines([nativeCommand("review", review, "review")]) + "\n",
+            );
+            yield completedCommand("review", review, "item_review");
+            await appendFile(workerPath, jsonLines([workerReceipt(6)]) + "\n");
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { item?: { id?: string } }).item?.id ===
+              "current"
+            )
+              currentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual(
+          scenario === "older-snapshot"
+            ? { phase: "validation", filesCompleted: 6, filesTotal: 9 }
+            : { phase: "validation", filesCompleted: 5, filesTotal: 8 },
+        );
+        if (scenario === "older-snapshot") {
+          const accepted = updates.findIndex(
+            (update) => update.filesTotal === 9,
+          );
+          expect(accepted).toBeGreaterThanOrEqual(0);
+          expect(
+            updates.slice(accepted).every((update) => update.filesTotal === 9),
+          ).toBe(true);
+        }
+      } finally {
+        holdPoll = false;
+        pauseClose = false;
+        pollAllowed.resolve();
+        closeReleased.resolve();
+        currentRead.resolve();
+        clearInterval(keepAlive);
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "recovers worker coverage when a newer saved inventory returns to a live total (changed=%s)",
+    async (changedDisplay) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const workerSeen = Promise.withResolvers<void>();
+      const smallerSeen = Promise.withResolvers<void>();
+      const latestRead = Promise.withResolvers<void>();
+      let holdPoll = true;
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const inventory = progressMarker("discovery", 0, 9);
+          const workerReceipt = (count: number) => ({
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: `worker-${count}`,
+              output: progressMarker("attack_path", count, 9),
+            },
+          });
+          await appendFile(
+            parent,
+            jsonLines([
+              nativeCommand(
+                ["printf", "sk-" + "a".repeat(32)],
+                inventory,
+                "initial-nine",
+              ),
+            ]) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            yield completedCommand(
+              changedDisplay
+                ? "printf [REDACTED_SECRET]"
+                : "printf sk-" + "a".repeat(32),
+              inventory,
+              "item_initial_nine",
+            );
+            await appendFile(worker, jsonLines([workerReceipt(5)]) + "\n");
+            holdPoll = false;
+            pollAllowed.resolve();
+            await workerSeen.promise;
+            // A later exact message bounds the changed command's source
+            // interval without assigning an equal-output inventory occurrence.
+            const anchor = "Inventory batch finished.";
+            await appendFile(
+              parent,
+              jsonLines([
+                {
+                  type: "event_msg",
+                  payload: {
+                    type: "item_completed",
+                    item: {
+                      type: "AgentMessage",
+                      id: "inventory-anchor",
+                      content: [{ type: "Text", text: anchor }],
+                    },
+                  },
+                },
+              ]) + "\n",
+            );
+            yield {
+              type: "item.completed",
+              item: { type: "agent_message", id: "item_anchor", text: anchor },
+            };
+            await appendFile(
+              parent,
+              jsonLines([
+                nativeCommand(
+                  "later-eight",
+                  progressMarker("discovery", 0, 8),
+                  "later-eight",
+                ),
+              ]) + "\n",
+            );
+            await smallerSeen.promise;
+            await appendFile(
+              parent,
+              jsonLines([
+                nativeCommand("latest-nine", inventory, "latest-nine"),
+              ]) + "\n",
+            );
+            await latestRead.promise;
+            await appendFile(worker, jsonLines([workerReceipt(6)]) + "\n");
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 5 && update.filesTotal === 9)
+              workerSeen.resolve();
+            if (
+              update.phase === "discovery" &&
+              update.filesCompleted === 0 &&
+              update.filesTotal === 8
+            )
+              smallerSeen.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { item?: { id?: string } }).item?.id ===
+              "latest-nine"
+            )
+              latestRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 6,
+          filesTotal: 9,
+        });
+        const smaller = updates.findIndex(
+          (update) =>
+            update.phase === "discovery" &&
+            update.filesCompleted === 0 &&
+            update.filesTotal === 8,
+        );
+        expect(smaller).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(smaller + 1)
+            .some(
+              (update) =>
+                update.filesCompleted === 5 && update.filesTotal === 9,
+            ),
+        ).toBe(true);
+      } finally {
+        holdPoll = false;
+        pollAllowed.resolve();
+        workerSeen.resolve();
+        smallerSeen.resolve();
+        latestRead.resolve();
+        clearInterval(keepAlive);
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test("does not match a resumed live inventory to a historical truncated command", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+
+    const rollout = await writeUsageSession(
+      codexHome,
+      "thread-1",
+      {},
+      { cwd: scanDir },
+    );
+    const native = (id: string) =>
+      nativeCommand("scan-inventory", persistedCommandOutput, id);
+    await appendFile(
+      rollout,
+      [
+        native("historical"),
+        {
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "AgentMessage",
+              id: "historical-phase",
+              content: [
+                { type: "Text", text: progressMarker("threat_model", 0, 8) },
+              ],
+            },
+          },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    );
+    const recipe = {
+      repository,
+      target: { kind: "repository", paths: [] },
+      repositoryRevision: "deadbeef",
+    };
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ): Promise<JsonObject> =>
+        args[0] === "get-cli-scan-resume"
+          ? {
+              ...mockScanRegistration(
+                ["--registration-json-stdin", "--scan-dir", scanDir],
+                JSON.stringify({ recipe }),
+              ),
+              threadId: "thread-1",
+              recipe,
+              scopeFileCount: 8,
+            }
+          : mockWorkbench(args, input),
+      createCodex: () => ({
+        startThread: () => {
+          throw new Error("Expected a resumed thread");
+        },
+        resumeThread: (id) => ({
+          id,
+          runStreamed: async () => {
+            await copyCompletedScan(root);
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              yield completedCommand(
+                "scan-inventory",
+                commandOutput(progressMarker("discovery", 0, 9)),
+                "new-live-inventory",
+              );
+              await appendFile(
+                rollout,
+                JSON.stringify(native("current")) +
+                  "\n" +
+                  JSON.stringify({
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      output: progressMarker("discovery", 1, 9),
+                    },
+                  }) +
+                  "\n",
+              );
+              throw new Error("Synthetic stop after resumed progress");
+            }
+            return { events: completedEvents(id, events()) };
+          },
+        }),
+      }),
+    });
+    try {
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          outputDir: scanDir,
+          resumeScanId: "scan_example_001",
+          onProgress: (progress) => updates.push(progress),
+        }),
+      ).rejects.toThrow("Synthetic stop after resumed progress");
+      expect(updates.at(-1)).toEqual({
+        phase: "discovery",
+        filesCompleted: 1,
+        filesTotal: 9,
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("matches a progress command after an identical retained non-progress completion", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+    const historyRead = Promise.withResolvers<void>();
+
+    const native = (id: string) =>
+      nativeCommand("scan-inventory", persistedCommandOutput, id);
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ): Promise<JsonObject> =>
+        args[0] === "register-cli-scan"
+          ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+          : mockWorkbench(args, input),
+      createCodex: codexFactory(async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        await appendFile(
+          rollout,
+          [
+            native("first-command"),
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "prior-tool-progress",
+                output: progressMarker("threat_model", 0, 8),
+              },
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join("\n") + "\n",
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await historyRead.promise;
+          for (const [index, text] of [
+            commandOutput("no progress marker"),
+            commandOutput(progressMarker("discovery", 0, 9)),
+          ].entries()) {
+            yield completedCommand("scan-inventory", text, `command-${index}`);
+          }
+          await appendFile(
+            rollout,
+            JSON.stringify(native("second-command")) +
+              "\n" +
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: progressMarker("discovery", 1, 9),
+                },
+              }) +
+              "\n",
+          );
+        }
+        return { events: completedEvents("thread-1", events()) };
+      }),
+    });
+    // The fake stream has no process handle to keep the unref'ed poll alive.
+    const keepAlive = setInterval(() => {}, 1_000);
+    try {
+      await client.run(repository, {
+        onProgress: (progress) => updates.push(progress),
+        onSessionEvent: ({ event }) => {
+          if (
+            (event["payload"] as Record<string, unknown> | undefined)?.[
+              "call_id"
+            ] === "prior-tool-progress"
+          )
+            historyRead.resolve();
+        },
+      });
+      expect(updates.at(-1)).toEqual({
+        phase: "discovery",
+        filesCompleted: 1,
+        filesTotal: 9,
+      });
+    } finally {
+      clearInterval(keepAlive);
+      await client.close();
+    }
+  });
+
+  test.each(
+    (["custom", "function", "notification"] as const).flatMap((kind) =>
+      (
+        [
+          ["validation", "discovery"],
+          ["discovery", "attack_path"],
+        ] as const
+      ).map(
+        ([firstPhase, secondPhase]) => [kind, firstPhase, secondPhase] as const,
+      ),
+    ),
+  )(
+    "preserves fresh worker receipts after another shard advances (%s, %s, %s)",
+    async (kind, firstPhase, secondPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const firstRead = Promise.withResolvers<void>();
+      const secondRead = Promise.withResolvers<void>();
+      const lastRead = Promise.withResolvers<void>();
+      const receipt = (
+        id: string,
+        phase: string,
+        count: number,
+        total: number,
+      ) => ({
+        type: "response_item",
+        payload: {
+          type:
+            kind === "function"
+              ? "function_call_output"
+              : "custom_tool_call_output",
+          call_id: id,
+          output:
+            "CODEX_SECURITY_SCAN_PROGRESS " +
+            JSON.stringify({ phase, filesCompleted: count, filesTotal: total }),
+        },
+      });
+      const append = (file: string, row: unknown) =>
+        appendFile(file, JSON.stringify(row) + "\n");
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          await writeUsageSession(codexHome, "thread-1", {});
+          const first = await writeUsageSession(
+            codexHome,
+            "worker-first",
+            {},
+            { parent: "thread-1" },
+          );
+          const second = await writeUsageSession(
+            codexHome,
+            "worker-second",
+            {},
+            { parent: "thread-1" },
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await append(first, receipt("first", firstPhase, 2, 2));
+            await firstRead.promise;
+            await append(second, receipt("second", secondPhase, 1, 6));
+            await secondRead.promise;
+            // Notifications may share their call ID; each appended output is
+            // still a fresh receipt with the same worker-local coverage.
+            await append(
+              first,
+              receipt(
+                kind === "notification" ? "first" : "next",
+                firstPhase,
+                2,
+                2,
+              ),
+            );
+            await append(first, {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "observed-last",
+                output: "done",
+              },
+            });
+            await lastRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "first") firstRead.resolve();
+            if (id === "second") secondRead.resolve();
+            if (id === "observed-last") lastRead.resolve();
+          },
+        });
+        // The final receipt was consumed, but unchanged parent-phase coverage
+        // is deduplicated even when the worker's own phase changes.
+        expect(updates.filter((p) => p.filesCompleted > 0)).toEqual([
+          { phase: "preflight", filesCompleted: 2, filesTotal: 8 },
+          { phase: "preflight", filesCompleted: 3, filesTotal: 8 },
+        ]);
+      } finally {
+        clearInterval(keepAlive);
+        firstRead.resolve();
+        secondRead.resolve();
+        lastRead.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((workerFirst) =>
+      [false, true].map((split) => [workerFirst, split] as const),
+    ),
+  )(
+    "keeps global parent phase through a delayed completion read (worker first: %p, split: %p)",
+    async (workerFirst, split) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadata = Promise.withResolvers<void>();
+      const workerMetadata = Promise.withResolvers<void>();
+      const listingEntered = Promise.withResolvers<void>();
+      const listingReleased = Promise.withResolvers<void>();
+      let holdListing = false;
+      const closeEntered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const validationRead = Promise.withResolvers<void>();
+      let parentPath = "",
+        pauseClose = false;
+      const originalOpen = fsPromises.open,
+        originalReaddir = fsPromises.readdir;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const read = handle.read.bind(handle),
+          close = handle.close.bind(handle);
+        let discoveryRead = false;
+        handle.read = (async (...readArgs: Parameters<typeof read>) => {
+          const result = await read(...readArgs);
+          if (
+            Buffer.isBuffer(result.buffer) &&
+            result.buffer
+              .toString("utf8", 0, result.bytesRead)
+              .includes('"id":"old-discovery"')
+          )
+            discoveryRead = true;
+          return result;
+        }) as typeof handle.read;
+        handle.close = async () => {
+          if (pauseClose && discoveryRead) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await release.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdListing && String(args[0]) === join(codexHome, "sessions")) {
+          holdListing = false;
+          listingEntered.resolve();
+          await listingReleased.promise;
+        }
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) !== dirname(parentPath)) return entries;
+        return entries.toSorted(
+          (left, right) =>
+            (workerFirst ? 1 : -1) *
+            (Number(String(left.name) === basename(parentPath)) -
+              Number(String(right.name) === basename(parentPath))),
+        );
+      }) as typeof originalReaddir);
+      const marker = (phase: string) => progressMarker(phase, 8, 8);
+      const completion = (id: string, phase: string) =>
+        nativeCommand(id, marker(phase), id);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadata.promise;
+            await workerMetadata.promise;
+            // Finish initial association before holding a fresh poll, so the
+            // buffered worker receipt and parent EOF belong to the same pass.
+            holdListing = true;
+            await listingEntered.promise;
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker("attack_path"),
+                },
+              }) + "\n",
+            );
+            await appendFile(
+              parentPath,
+              JSON.stringify(completion("old-discovery", "discovery")) + "\n",
+            );
+            pauseClose = split;
+            if (split) {
+              listingReleased.resolve();
+              await closeEntered.promise;
+            }
+            // Discovery was omitted from live delivery. Both completed commands
+            // are durably appended before validation reaches the live stream.
+            await appendFile(
+              parentPath,
+              JSON.stringify(completion("new-validation", "validation")) + "\n",
+            );
+            yield completedCommand("new-validation", marker("validation"));
+            release.resolve();
+            listingReleased.resolve();
+            await validationRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadata.resolve();
+            if (
+              event["type"] === "session_meta" &&
+              threadId === "worker-thread"
+            )
+              workerMetadata.resolve();
+            if (
+              (event["payload"] as { item?: { id?: string } })?.item?.id ===
+              "new-validation"
+            )
+              validationRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 8,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        release.resolve();
+        listingReleased.resolve();
+        metadata.resolve();
+        workerMetadata.resolve();
+        validationRead.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "ignores worker duplicate projections after a newer parent phase (multiple markers: %p)",
+    async (multiple) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const marker = (phase: string) => progressMarker(phase, 8, 8);
+      const workerPhases = multiple
+        ? (["discovery", "validation"] as const)
+        : (["discovery"] as const);
+      const workerText = workerPhases.map(marker).join("\n");
+      const parentPhase = multiple ? "attack_path" : "validation";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "event_msg",
+              payload: { type: "agent_message", message: workerText },
+            }) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await workerRead.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                id: "parent-validation",
+                text: marker(parentPhase),
+              },
+            };
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: workerText }],
+                },
+              }) + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => {
+            updates.push(progress);
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (threadId === "worker-thread" && event["type"] === "event_msg")
+              workerRead.resolve();
+          },
+        });
+        expect(
+          updates
+            .filter((progress) => progress.filesCompleted === 8)
+            .map((progress) => progress.phase),
+        ).toEqual(["preflight", parentPhase]);
+      } finally {
+        clearInterval(keepAlive);
+        await client.close();
+      }
     },
   );
 

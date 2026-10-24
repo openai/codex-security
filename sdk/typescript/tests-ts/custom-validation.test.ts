@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  appendFile,
   mkdir,
   readFile,
   rename,
@@ -12,6 +13,8 @@ import {
 import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
+import type { ScanSessionEvent } from "../src/cost.js";
+import { progressMarker, writeSession } from "./support/usage-rollout.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
@@ -716,6 +719,9 @@ describe("custom validation", () => {
     "empty",
     "incomplete",
     "dismissed",
+    "late-progress",
+    "live-progress",
+    "late-progress-observer-error",
     "unfinished-source",
   ];
   test.each(completionScenarios)(
@@ -766,6 +772,33 @@ describe("custom validation", () => {
       const workingDirectories: Array<string | undefined> = [];
       const commands: string[] = [];
       const activities: ScanActivity[] = [];
+      const progressScenario =
+        scenario !== "progress" && scenario.includes("progress");
+      const progressUpdates: Array<
+        ScanProgress & { validationStarted: boolean }
+      > = [];
+      const observerErrors: string[] = [];
+      let validationStarted = false;
+      let parentRollout = "";
+      const parentSeen = Promise.withResolvers<void>();
+      const parentMessage = (
+        id: string,
+        phase: ScanProgress["phase"],
+        filesCompleted: number,
+      ) => ({
+        type: "response_item",
+        payload: {
+          type: "message",
+          id,
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: progressMarker(phase, filesCompleted, 1),
+            },
+          ],
+        },
+      });
       const progress: ScanProgress[] = [];
       const validationActivity = "Synthetic validation activity.";
       const profileDisabledTools =
@@ -883,6 +916,39 @@ describe("custom validation", () => {
                       );
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
+                      if (progressScenario) {
+                        parentRollout = await writeSession(
+                          codexHome,
+                          "thread-1",
+                          { input_tokens: 10, output_tokens: 3 },
+                        );
+                        const messages = [
+                          parentMessage("inventory", "discovery", 0),
+                          parentMessage("review", "discovery", 1),
+                        ];
+                        if (scenario === "live-progress")
+                          messages.push(
+                            parentMessage("parent-final", "reporting", 1),
+                          );
+                        await appendFile(
+                          parentRollout,
+                          jsonLines(messages) + "\n",
+                        );
+                        async function* progressEvents(): AsyncGenerator<ThreadEvent> {
+                          for (const message of messages)
+                            yield {
+                              type: "item.completed",
+                              item: {
+                                id: message.payload.id,
+                                type: "agent_message",
+                                text: message.payload.content[0]!.text,
+                              },
+                            };
+                        }
+                        return {
+                          events: completedEvents("thread-1", progressEvents()),
+                        };
+                      }
                       if (scenario === "progress") {
                         return {
                           events:
@@ -993,6 +1059,26 @@ describe("custom validation", () => {
                         );
                       }
                     }
+                    if (progressScenario) {
+                      validationStarted = true;
+                      if (scenario !== "live-progress") {
+                        await appendFile(
+                          parentRollout,
+                          JSON.stringify(
+                            parentMessage("parent-final", "reporting", 1),
+                          ) + "\n",
+                        );
+                        // The observer fires during the same synchronous batch that
+                        // processes progress, so this awaits the actual saved receipt.
+                        await parentSeen.promise;
+                      }
+                      expect(progressUpdates.at(-1)?.phase).toBe("validation");
+                      expect(
+                        progressUpdates
+                          .filter((update) => update.validationStarted)
+                          .every((update) => update.phase === "validation"),
+                      ).toBe(true);
+                    }
                     return {
                       events: responseEvents(
                         output,
@@ -1017,6 +1103,10 @@ describe("custom validation", () => {
           },
         },
       );
+      // Keep the synthetic validation turn alive while it awaits an unref'ed poll.
+      const keepAlive = progressScenario
+        ? setInterval(() => {}, 1_000)
+        : undefined;
       try {
         const pending = client.run(repository, {
           cyberAccessProgram: "daybreak_blue",
@@ -1025,6 +1115,27 @@ describe("custom validation", () => {
             ? { validationPromptFile: workflowFile }
             : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
+          ...(progressScenario
+            ? {
+                onProgress: (progress: ScanProgress) => {
+                  progressUpdates.push({ ...progress, validationStarted });
+                  if (
+                    scenario === "late-progress-observer-error" &&
+                    progress.phase === "validation"
+                  )
+                    throw new Error("Synthetic optional progress failure.");
+                },
+                onSessionEvent: ({ event }: ScanSessionEvent) => {
+                  if (
+                    (event["payload"] as { id?: string } | undefined)?.id ===
+                    "parent-final"
+                  )
+                    parentSeen.resolve();
+                },
+                onObserverError: (observer: string) =>
+                  observerErrors.push(observer),
+              }
+            : {}),
           ...(scenario === "progress"
             ? { onProgress: (update: ScanProgress) => progress.push(update) }
             : {}),
@@ -1077,6 +1188,18 @@ describe("custom validation", () => {
           return;
         }
         const completed = await pending;
+        if (progressScenario) {
+          expect(observerErrors).toEqual(
+            scenario === "late-progress-observer-error" ? ["onProgress"] : [],
+          );
+          if (scenario === "live-progress")
+            expect(
+              progressUpdates.some(
+                (update) =>
+                  update.phase === "reporting" && !update.validationStarted,
+              ),
+            ).toBe(true);
+        }
         if (scenario === "standard") {
           const report = await readFile(join(scanDir, "report.md"), "utf8");
           expect(report).toContain(
@@ -1124,6 +1247,7 @@ describe("custom validation", () => {
           count === 0 ? "No findings" : "Fixture 0",
         );
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
