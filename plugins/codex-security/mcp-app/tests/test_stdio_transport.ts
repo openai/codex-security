@@ -125,6 +125,46 @@ test("aborting before or during a backpressured send leaves the result unacknowl
   }
 });
 
+test("a failed or disconnected stdout write leaves the result unacknowledged", async (t) => {
+  for (const disconnect of [false, true]) {
+    let finishWrite!: (error?: Error | null) => void;
+    const lines: string[] = [];
+    const stdout = new Writable({
+      highWaterMark: disconnect ? 1 : 1024,
+      write(chunk: Buffer, _encoding, callback) {
+        lines.push(chunk.toString("utf8"));
+        finishWrite = callback;
+      },
+    });
+    const transport = new CodexSecurityStdioTransport(
+      new PassThrough(),
+      stdout,
+    );
+    const acknowledge = t.mock.fn(async () => {});
+    transport.afterResultSent(1, new AbortController().signal, acknowledge);
+    const message: JSONRPCMessage = { jsonrpc: "2.0", id: 1, result: {} };
+    const sending = transport.send(message);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stdout.writableNeedDrain, disconnect);
+    assert.equal(acknowledge.mock.callCount(), 0);
+
+    const rejected = assert.rejects(
+      sending,
+      disconnect ? /close/i : /write failure/,
+    );
+    if (disconnect) {
+      stdout.destroy();
+      await rejected;
+      finishWrite();
+    } else {
+      finishWrite(new Error("write failure"));
+      await rejected;
+    }
+    assert.equal(acknowledge.mock.callCount(), 0);
+    assert.deepEqual(lines, [serializeMessage(message)]);
+  }
+});
+
 test("an oversized error keeps its request ID and the next response succeeds", async () => {
   const { transport, lines } = captureTransport();
   await transport.send({

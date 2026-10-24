@@ -7218,8 +7218,8 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt()).not.toContain("$codex-security:");
     expect(prompt()).not.toContain("record_codex_security_scan_draft");
-    expect(prompt()).toContain("complete_codex_security_scan");
-    expect(prompt()).not.toContain("do not finalize or seal them");
+    expect(prompt()).not.toContain("complete_codex_security_scan");
+    expect(prompt()).toContain("The SDK owns finalization");
     expect(prompt()).toContain(
       'start_codex_security_deep_scan with {"scanId":"scan_example_001"}',
     );
@@ -7230,7 +7230,7 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, { mode: "deep", maxCostUsd: 1 }),
     ).rejects.toThrow("prompt captured");
-    expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toContain("The SDK owns finalization");
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(

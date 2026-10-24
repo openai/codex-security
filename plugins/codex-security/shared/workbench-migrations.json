@@ -455,5 +455,12 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN pending_target_project_path TEXT;"
     ]
+  },
+  {
+    "version": 56,
+    "name": "recover unfinished legacy headless deep scans",
+    "statements": [
+      "UPDATE deep_scan_runs\nSET pending_target_project_path = ''\nWHERE pending_target_project_path IS NULL\n    AND status IN ('running', 'succeeded') AND cancel_requested = 0\n    AND discovery_user_context_json IS NOT NULL\n    AND EXISTS (\n        SELECT 1 FROM scans JOIN workspaces ON workspaces.id = scans.workspace_id\n        WHERE scans.id = deep_scan_runs.scan_id AND scans.mode = 'deep'\n            AND scans.status = 'running' AND scans.canceled_at IS NULL\n            AND scans.recipe_json IS NULL AND scans.handoff_status = 'delivered'\n            AND scans.handoff_claim_token IS NULL AND scans.continuation_thread_id IS NULL\n            AND workspaces.active_scan_id = scans.id AND workspaces.deep_scan_config_json IS NULL\n            AND workspaces.created_at = scans.created_at AND scans.created_at = deep_scan_runs.created_at\n    );"
+    ]
   }
 ]

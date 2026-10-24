@@ -1297,6 +1297,7 @@ async function testCliDeepScanEngine({
         recipe: {
           repository,
           mode: "deep",
+          maxCostUsd: 0.004,
           target: scoped
             ? { kind: "paths", paths }
             : { kind: "repository", paths: [] },
@@ -1398,11 +1399,43 @@ async function testCliDeepScanEngine({
     (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
     count,
   );
-  await runWorkbench(environment, [
-    "complete-scan",
+  // A resumed SDK scan rejoins through the parent MCP turn after discovery.
+  const parent = startServer(serverBundlePath, environment);
+  try {
+    assertNoError(await parent.initialize("sdk-parent"));
+    const joined = await parent.callTool(
+      2,
+      toolCall(
+        "start_codex_security_deep_scan",
+        { scanId: completed.scanId },
+        threadId,
+      ),
+    );
+    assertNoError(joined);
+    assert.equal(joined.result.structuredContent.scanId, completed.scanId);
+    assert.equal(joined.result.structuredContent.completion, undefined);
+    assert.match(joined.result.structuredContent.instructions, /SDK/);
+  } finally {
+    await parent.stop();
+  }
+  const warning = "The parent turn exceeded the scan cost limit.";
+  const recovered = await runWorkbench(environment, [
+    "complete-budget-exhausted-scan",
     "--scan-id",
     completed.scanId,
+    "--cost-json",
+    JSON.stringify({
+      model: "gpt-6.1-sol",
+      inputTokens: 1250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 0.00625,
+    }),
+    "--message",
+    warning,
   ]);
+  assert.ok(recovered.scan.warnings.includes(warning));
   const manifest = await readJson(
     path.join(completed.scanDir, "scan-manifest.json"),
   );

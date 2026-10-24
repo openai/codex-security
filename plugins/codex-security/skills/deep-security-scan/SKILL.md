@@ -5,7 +5,7 @@ description: Use when the user asks for a deep, exhaustive, multi-pass, or varia
 
 # Deep Security Scan
 
-The coordinator runs independent Standard audits, aggregates their validated findings, and finalizes the parent scan even if the calling thread detaches. This thread owns setup, user context, and reporting the completed result.
+The coordinator runs independent Standard audits, aggregates their validated findings, and finalizes plugin-launched scans even if the calling thread detaches. This thread owns setup, user context, and reporting the completed result.
 
 ## Resolve the Scan
 
@@ -40,14 +40,15 @@ After an ended turn or host timeout, rejoin with the same scan ID and token. If 
 
 ## Handle the Result
 
-- **Canonical result:** `structuredContent` contains `scanId`, `scanDir`, `manifestPath`, `completion`, and `instructions`. Use the returned scan ID, sealed artifacts, and generated `report.md` in the authoritative directory.
+- **SDK-registered scan.** The coordinator returns the aggregate's `scanId`, `scanDir`, `manifestPath`, and `instructions`. End the turn with the returned identity and manifest path. The SDK owns finalization and report generation after the turn ends.
+- **Plugin-launched scan.** The coordinator also returns `completion`. Use the returned scan ID, sealed artifacts, and generated `report.md` in the authoritative directory.
 - **Cancelled:** stop without completion. Report retained findings and pending work without claiming a successful scan or generating a replacement report.
 - **Terminal failure:** surface the exact stable MCP error and read the existing scan context to report preserved results and remaining work. Do not continue analysis, complete or cancel an already terminal scan, or claim a no-findings result.
 - **Missing or malformed canonical artifacts:** surface the blocker and preserve the existing scan. Do not fabricate a report.
 
 ## Report the Completed Parent Scan
 
-The coordinator returns `completion` after the host seals the artifacts and generates `report.md`. Read measured usage from `completion.scan.usage`. Do not call completion again, submit another semantic draft, rerun worker phases, or write the report yourself.
+When the coordinator returns `completion`, the host has sealed the artifacts and generated `report.md`. Read measured usage from `completion.scan.usage`. Do not call completion again, submit another semantic draft, rerun worker phases, or write the report yourself.
 
 If completion fails, surface its exact error. Preserve the accepted aggregate and handoff claim. A later continuation can rejoin the same scan to retry finalization. On explicit cancellation, call `cancel_codex_security_scan` and do not accept subsequent scan progress as success.
 

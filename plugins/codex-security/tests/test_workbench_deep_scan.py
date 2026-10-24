@@ -79,6 +79,13 @@ def begin_target_scan(
     )
 
 
+def restore_v53_schema(state_dir: Path) -> None:
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE workspaces DROP COLUMN deep_scan_config_json")
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN pending_target_project_path")
+        connection.execute("DELETE FROM schema_migrations WHERE version > 53")
+
+
 def claim_deep_scan_coordinator(
     state_dir: Path,
     codex_home: Path,
@@ -1378,6 +1385,8 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     assert begun["deepScan"]["scanId"] == scan_id
     assert begun["deepScan"]["scanDir"] == str(scan_dir)
     assert begun["deepScan"]["userContext"] == user_context
+    restore_v53_schema(state_dir)
+    get_deep_scan(state_dir, scan_id, "sdk-thread", environment=deep_environment(codex_home))
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
         assert connection.execute("SELECT thread_id FROM workspaces").fetchone() == ("sdk-thread",)
@@ -2056,6 +2065,52 @@ def test_sealed_target_result_replays_only_the_pending_request(tmp_path: Path) -
     assert begin(owner, context, selected, "--join-only") == new_target
 
 
+@pytest.mark.parametrize("already_complete", (False, True))
+def test_v53_headless_target_recovers_its_unfinished_result_after_upgrade(
+    tmp_path: Path, already_complete: bool
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    target.mkdir()
+    (target / "source.py").write_text("print('source')\n")
+    home, scan_root = tmp_path / "home", tmp_path / "scans"
+    run = begin_target_scan(state_dir, home, target, scan_root)["deepScan"]
+    scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
+
+    def finish() -> None:
+        mark_deep_coordinator_succeeded(state_dir, scan_id, scan_dir)
+        write_completed_contract(
+            scan_dir, scan_id, target, relative_path="source.py", coverage_mode="deep_repository"
+        )
+        assert scan_command(state_dir, "complete-scan", scan_id)["scan"]["reportAvailable"]
+
+    if already_complete:
+        finish()
+    restore_v53_schema(state_dir)
+    if already_complete:
+        assert (
+            begin_target_scan(state_dir, home, target, scan_root)["startDisposition"] == "created"
+        )
+        return
+
+    assert begin_target_scan(state_dir, home, target, scan_root)["deepScan"]["scanId"] == scan_id
+    finish()
+    different = begin_deep_scan(
+        state_dir,
+        "replacement-thread",
+        "--target-path",
+        str(target),
+        "--project-config-path",
+        "another.yaml",
+        "--join-only",
+    )
+    assert different == {"newScanTarget": str(target)}
+    replay = begin_target_scan(state_dir, home, target, scan_root, thread_id="replacement-thread")
+    assert replay["startDisposition"] == "joined"
+    assert replay["deepScan"]["scanId"] == scan_id
+    scan_command(state_dir, "acknowledge-deep-scan-result", scan_id)
+    assert begin_target_scan(state_dir, home, target, scan_root)["startDisposition"] == "created"
+
+
 def test_sealed_target_prefers_its_own_pending_scan(tmp_path: Path) -> None:
     target, state_dir, home = tmp_path / "target", tmp_path / "state", tmp_path / "home"
     target.mkdir()
@@ -2119,6 +2174,8 @@ def test_target_continuation_does_not_reuse_another_threads_app_scan(
     scan_dir = Path(str(begun["deepScan"]["scanDir"]))
     mark_deep_coordinator_succeeded(state_dir, app_scan_id, scan_dir)
     if sealed:
+        # A tokenless desktop run remains ineligible through the upgrade and automatic sealing.
+        restore_v53_schema(state_dir)
         write_completed_contract(
             scan_dir,
             app_scan_id,
