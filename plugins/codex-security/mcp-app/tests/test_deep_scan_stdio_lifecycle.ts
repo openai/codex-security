@@ -1711,11 +1711,9 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       } else if (message.method === 'thread/read') {
         result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { features: { code_mode: { enabled: true }, code_mode_host: { enabled: true } }, default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
-      } else if (message.method === 'configRequirements/read') {
-        result = { requirements: null };
       } else if (message.method === 'account/read') {
         result = { account: null, requiresOpenaiAuth: true };
       } else {

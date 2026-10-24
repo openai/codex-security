@@ -41,7 +41,6 @@ import {
 import {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   deepScanPermissionProfileFallbackError,
-  deepScanReducerFeatureDefaults,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanParentCyberAccessProgram,
   type DeepScanParentTurn,
@@ -180,7 +179,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "codex-security": { command: "node", enabled: false },
           ...this.compactArtifactServer(request, includePathsFile),
         },
-        ...workerToolConfig(request, runtimeSettings.config.features),
+        ...workerSubagentConfig(
+          request.subagents,
+          runtimeSettings.config.features,
+        ),
         approval_policy: "never",
         default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
         [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
@@ -230,16 +232,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Explicit per-scan feature settings remain authoritative.
         configOverrides.push("features.api_key_cyber_access_programs=true");
       }
-      if (request.kind === "dedup") {
-        configOverrides.push(
-          ...(await deepScanReducerFeatureDefaults(preflightOptions)),
-        );
-      }
       const { useOpenAiApiKey } =
         await preflightDeepScanWorkerPermissionProfile({
           ...preflightOptions,
           expectedProfile: workerProfile,
-          requireCodeMode: request.kind === "dedup",
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         });
       const prompt = await fs.readFile(request.promptPath, "utf8");
@@ -417,18 +413,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   }
 }
 
-function workerToolConfig(
-  { subagents }: Pick<CodexWorkerRequest, "subagents">,
-  inheritedFeatures: unknown,
-) {
-  const features = isRecord(inheritedFeatures) ? inheritedFeatures : {};
+function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   return {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
     ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
     features: {
-      ...features,
+      ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {
         enabled: false,
         max_concurrent_threads_per_session: subagents + 1,

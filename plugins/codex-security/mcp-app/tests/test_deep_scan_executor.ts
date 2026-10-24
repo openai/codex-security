@@ -2390,7 +2390,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             const workerFeatures = parseToml(
               invocation.argv
-                .filter((arg: string) => arg.startsWith("features="))
+                .filter((arg: string) => /^features[.=]/.test(arg))
                 .join("\n"),
             ).features;
             assert.deepEqual(JSON.parse(JSON.stringify(workerFeatures)), {
@@ -2402,9 +2402,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               enable_fanout: false,
             });
             assertConfigOverrides(invocation.argv, {
-              "features.code_mode.enabled": kind === "dedup" ? true : undefined,
-              "features.code_mode_host.enabled":
-                kind === "dedup" ? true : undefined,
               ...selectedProvider.nativePaths,
               sandbox_mode: undefined,
               "mcp_servers.parent": undefined,
@@ -2522,20 +2519,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 worker.environment!.CODEX_SECURITY_CONFIG_PATH ===
                 selectedProvider.path,
             )!;
-            const readingReducerDefaults =
-              kind === "dedup" &&
-              preflight.requests.length === 1 &&
-              preflight.requests[0].method === "config/read";
             assert.deepEqual(
               nativeConfigOverrides(launch.args).filter(
                 (override) => !override.startsWith("model_providers="),
               ),
-              nativeConfigOverrides(execution.args).filter(
-                (override) =>
-                  !readingReducerDefaults ||
-                  (override !== "features.code_mode.enabled=true" &&
-                    override !== "features.code_mode_host.enabled=true"),
-              ),
+              nativeConfigOverrides(execution.args),
             );
           }
           await Promise.all(
@@ -3869,6 +3857,7 @@ function assertWorkerSubagentPolicy(
       ? {
           "agents.max_threads": undefined,
           "features.enable_fanout": false,
+          "features.code_mode.enabled": undefined,
         }
       : {
           "agents.max_threads": subagents,

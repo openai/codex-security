@@ -51,7 +51,7 @@ For a valid merge, synthesize one stronger finding while preserving every materi
 
 Account for every input finding using the host-supplied `provenance.sourceFindingIds`. Copy the refs for retained findings; union them for a valid merge, preserving previous refs. Never invent, omit, or reuse a ref across independent output findings. The host retains original source payloads and rejects unaccounted input. Identity collisions do not establish that findings are duplicates.
 
-Carry unchanged previous findings forward with `retainedFindingRefs: ["previous:0", "previous:1", ...]`, using their zero-based indices in the previous aggregate. The host copies their full bodies, identities, source refs, and retained history. Omit those findings from `findings`; submit only new or synthesized findings there. Never replace descriptive text with placeholders to fit a submission. Build the submission object and call the record tool inside code mode, without printing the complete aggregate.
+Carry unchanged previous findings forward with `retainedFindingRefs: ["previous:0", "previous:1", ...]`, using their zero-based indices in the previous aggregate. The host copies their full bodies, identities, source refs, and retained history. Omit those findings from `findings`; submit only new or synthesized findings there. Never replace descriptive text with placeholders to fit a submission. When code mode is available, build the submission object and call the record tool inside a cell without printing the complete aggregate.
 
 Preserve the threat-model context and scope as needed, omitting scope `includePaths` and `excludePaths`. You cannot resolve or reject a source finding without inspecting code, which is outside this reducer's role.
 
