@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     types: [opened, edited, reopened, synchronize]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,83 +24,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      source-required: ${{ steps.scope.outputs.source-required }}
       container-validate: ${{ steps.scope.outputs.container-validate }}
-      test-quality: ${{ steps.scope.outputs.test-quality }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
-
+      compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
+      python-matrix: ${{ steps.scope.outputs.python-matrix }}
+      windows-node-matrix: ${{ steps.scope.outputs.windows-node-matrix }}
     steps:
-      - name: Checkout pull request for change classification
-        if: github.event_name == 'pull_request' && github.event.changes.base == null
+      - name: Checkout repository for change classification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
           persist-credentials: false
-
-      - name: Select additional checks
+      - name: Select required checks
         id: scope
-        shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_CHANGED: ${{ github.event.changes.base != null }}
-        run: |
-          set -euo pipefail
-          container_validate=false
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            container_validate=true
-          fi
-          test_quality=false
-          workflow_quality=false
-          if [[ "$EVENT_NAME" == "push" || "$BASE_CHANGED" == "true" ]]; then
-            workflow_quality=true
-          fi
-          if [[ "$EVENT_NAME" == "pull_request" && "$BASE_CHANGED" == "true" ]]; then
-            container_validate=true
-            test_quality=true
-          fi
-          if [[ "$EVENT_NAME" == "pull_request" &&
-                "$BASE_CHANGED" != "true" ]]; then
-            changed_files="$(mktemp)"
-            trap 'rm -f "$changed_files"' EXIT
-            git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
-
-            while IFS= read -r -d '' path; do
-              case "$path" in
-                .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml | \
-                  .github/scripts/release-progress.mjs | .github/scripts/test_release_progress.mjs | \
-                  sdk/typescript/scripts/release-pr.mjs | docker/verify-container-compose.sh)
-                  workflow_quality=true
-                  ;;
-              esac
-              case "$path" in
-                .dockerignore | .github/workflows/native-*.yml | \
-                  .github/actions/download-native/* | Dockerfile | \
-                  Dockerfile.dockerignore | compose.yaml | compose.apparmor.yaml | \
-                  compose.runner.yaml | docker/* | \
-                  plugins/codex-security/* | sdk/typescript/* | \
-                  .github/workflows/container-ci.yml | .github/workflows/container-release.yml | \
-                  .github/workflows/container-validate.yml)
-                  container_validate=true
-                  ;;
-                .github/workflows/node-ci.yml | .github/actions/setup-tools/*)
-                  container_validate=true
-                  ;;
-              esac
-              case "$path" in
-                .github/workflows/node-ci.yml | .github/workflows/test-quality.yml | \
-                  .github/actions/setup-tools/* | sdk/typescript/bunfig.toml | \
-                  sdk/typescript/scripts/compare-test-reports.mts | \
-                  sdk/typescript/scripts/prepare-windows-test-root.ps1 | \
-                  sdk/typescript/scripts/run-ci-tests.mts | \
-                  sdk/typescript/scripts/test-shards.mts | \
-                  sdk/typescript/scripts/test-timings.json)
-                  test_quality=true
-                  ;;
-              esac
-            done < "$changed_files"
-          fi
-          printf 'container-validate=%s\n' "$container_validate" >> "$GITHUB_OUTPUT"
-          printf 'test-quality=%s\n' "$test_quality" >> "$GITHUB_OUTPUT"
-          printf 'workflow-quality=%s\n' "$workflow_quality" >> "$GITHUB_OUTPUT"
+        run: node .github/scripts/select-ci-checks.mjs
 
   workflow-quality:
     needs: classify-changes
@@ -134,6 +78,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
+      - name: Test CI selection and result gating
+        run: node --test .github/scripts/test-ci-selection.mjs
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
@@ -144,22 +90,19 @@ jobs:
         run: pnpm --dir sdk/typescript run audit:prod
 
   native:
+    if: needs.classify-changes.outputs.source-required == 'true'
     needs: classify-changes
     uses: ./.github/workflows/native-artifacts.yml
+    with:
+      reuse-verified: true
 
   container-validate:
     needs: [classify-changes, native]
     if: needs.classify-changes.outputs.container-validate == 'true'
     uses: ./.github/workflows/container-validate.yml
 
-  test-quality:
-    needs: [classify-changes, native]
-    if: needs.classify-changes.outputs.test-quality == 'true'
-    uses: ./.github/workflows/test-quality.yml
-    with:
-      native-artifacts-ready: true
-
   package:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: build and check package
     needs: [classify-changes, native]
     runs-on: ubuntu-latest
@@ -193,6 +136,7 @@ jobs:
           retention-days: 7
 
   test:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
     needs: [classify-changes, package]
     runs-on: ${{ matrix.os }}
@@ -248,18 +192,14 @@ jobs:
           retention-days: 14
 
   compatibility:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: installed package / ${{ matrix.os }} / node-${{ matrix.node }}
     needs: [classify-changes, package]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        node: ["22.13.0", "24.0.0", "24", "26.0.0", "26"]
-        include:
-          - os: macos-latest
-            node: "22.13.0"
+      matrix: ${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}
     steps:
       - *checkout-repository
       - &set-up-node-js
@@ -298,6 +238,7 @@ jobs:
         uses: ./.github/actions/check-action-candidate
 
   mcp:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: MCP app tests
     needs: [classify-changes, package]
     runs-on: ubuntu-latest
@@ -332,6 +273,7 @@ jobs:
           retention-days: 14
 
   plugin-host:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: standalone plugin / ${{ matrix.os }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}
@@ -355,29 +297,14 @@ jobs:
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
   plugin-source:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python: "3.10"
-            markers: ""
-          - os: ubuntu-latest
-            python: "3.12"
-            markers: ""
-          - os: ubuntu-latest
-            python: "3.14"
-            markers: ""
-          - os: macos-latest
-            python: "3.12"
-            markers: cross_platform or native_macos
-          - os: windows-latest
-            python: "3.12"
-            markers: cross_platform or native_windows
+      matrix: ${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}
     steps:
       - *checkout-repository
       - name: Set up Node.js
@@ -474,14 +401,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
-  required-test:
-    # Skipped metadata jobs must not satisfy required source-check contexts.
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}${{ matrix.os }} / node-22
+  ci:
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}ci
     needs:
       [
         classify-changes,
-        workflow-quality,
         static-checks,
+        native,
         package,
         test,
         compatibility,
@@ -489,25 +415,35 @@ jobs:
         plugin-host,
         plugin-source,
         container-validate,
+        workflow-quality,
+        windows-test,
+        windows-verify,
       ]
     if: &source-aggregate always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
+    steps:
+      - *checkout-repository
+      - name: Require selected checks
+        env:
+          CI_RESULTS: ${{ toJSON(needs) }}
+        run: node .github/scripts/check-ci-results.mjs
+
+  # Retain required names until the repository ruleset has migrated to `ci`.
+  required-test:
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}${{ matrix.os }} / node-22
+    needs: [classify-changes, ci]
+    if: *source-aggregate
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - name: Require selected workflow checks
-        if: needs.classify-changes.outputs.workflow-quality == 'true' && needs.workflow-quality.result != 'success'
-        run: exit 1
-      - name: Require every Unix coverage job
-        if: needs.classify-changes.result != 'success' || (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success')
-        run: exit 1
-      - name: Require selected container coverage
-        if: needs.classify-changes.outputs.container-validate == 'true' && needs.container-validate.result != 'success'
+      - name: Require CI gate
+        if: needs.ci.result != 'success'
         run: exit 1
 
   windows-test:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [classify-changes, package]
     runs-on: windows-latest
@@ -524,14 +460,7 @@ jobs:
         with:
           python-version: "3.12"
       - *download-native
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22.13.0"
-      - name: Set up pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          package_json_file: package.json
+      - *set-up-typescript-tools
       - *set-up-bun
       - *install-dependencies
       - *download-package-for-this-commit
@@ -571,14 +500,14 @@ jobs:
         run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
+    if: needs.classify-changes.outputs.source-required == 'true'
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     needs: [classify-changes, package]
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy: &windows-node-strategy
+    strategy:
       fail-fast: false
-      matrix:
-        node: ["22.13.0", "24"]
+      matrix: ${{ fromJSON(needs.classify-changes.outputs.windows-node-matrix) }}
     steps:
       - *checkout-repository
       - *set-up-python
@@ -595,17 +524,11 @@ jobs:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: *source-aggregate
-    needs:
-      [
-        classify-changes,
-        static-checks,
-        plugin-host,
-        plugin-source,
-        windows-test,
-        windows-verify,
-      ]
-    strategy: *windows-node-strategy
+    needs: [classify-changes, ci]
+    strategy:
+      matrix:
+        node: ["22.13.0", "24"]
     steps:
-      - name: Require every Windows coverage job
-        if: needs.classify-changes.result != 'success' || (needs.static-checks.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')
+      - name: Require CI gate
+        if: needs.ci.result != 'success'
         run: exit 1

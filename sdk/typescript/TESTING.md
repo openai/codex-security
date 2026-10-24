@@ -131,23 +131,29 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ## GitHub Actions
 
-`node-ci` retains the required `ubuntu-latest / node-22`,
-`macos-latest / node-22`, and `windows-latest / node-22` checks. It builds and
-inspects one package archive, then passes that archive to jobs in the same
-workflow run, using the commit SHA in the artifact name. Every supported Node
-runtime still installs and inspects the package, including a strict NodeNext
-TypeScript consumer, the actual CLI, credential locking, and
-a nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+`node-ci` reports one `ci` gate for all selected required checks. The existing
+`ubuntu-latest / node-22`, `macos-latest / node-22`, and
+`windows-latest / node-22` check names forward that result while repository
+branch rules migrate. The [CI guide](../../docs/ci.md) describes documentation-only
+routing, platform/version selection, full scheduled qualification, and the gate
+migration.
+
+For source qualification, CI builds and inspects one package archive, then passes
+that archive to jobs in the same workflow run, using the commit SHA in the
+artifact name. Selected Node runtimes install and inspect the package, including
+a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
+nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
 
-The full Bun suite runs once per OS under Node 22: six file shards on Linux
-and macOS, and fourteen on Windows. GitHub runs the shards as separate jobs;
-each job uses Bun's default serial runner. The other Node versions run the
-installed-package checks instead of repeating the same Bun suite. MCP and
-Python tests run in separate required jobs. Python uses four isolated
-pytest-xdist workers with work stealing; worker crashes fail the run without automatic restarts.
+Source qualification runs the full Bun suite once per OS under Node 22: six
+file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
+as separate jobs; each job uses Bun's default serial runner. The other selected
+Node versions run the installed-package checks instead of repeating the same
+Bun suite. MCP and Python tests run in separate required jobs. Python uses four
+isolated pytest-xdist workers with work stealing; worker crashes fail the run
+without automatic restarts.
 
 `scripts/run-ci-tests.mts` discovers every shared test file and balances whole
 files using the platform's recorded durations in `scripts/test-timings.json`.
@@ -175,20 +181,20 @@ Coverage is diagnostic and split across shards, not a combined percentage.
 Failed tests and missing package artifacts block CI; failed diagnostic uploads
 do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
-The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow, setup tools, Bun configuration,
-shard runner, timing metadata, report comparator, or Windows test-root helper.
-It compares the previous layout (three shards on Linux/macOS, seven on Windows)
-with the expanded production layout (six on Linux/macOS, fourteen on Windows),
-for 39 sharded runner jobs. Both layouts use the same serial Bun runner and
-platform timing snapshot; the comparison combines all shards for each OS before
-checking inventory and outcomes. Local full-suite runs still cover unsharded
-cross-file ordering. More jobs add setup overhead, so compare required-green
+The separate `test-quality` workflow runs weekly and can be dispatched manually.
+Ordinary source pull requests run focused contracts for the shard runner, timing
+metadata, report comparator, and Windows test-root helper in the required SDK suite.
+The diagnostic workflow compares the previous layout (three shards on Linux/macOS,
+seven on Windows) with the expanded production layout (six on Linux/macOS,
+fourteen on Windows), for 39 sharded runner jobs. Both layouts use the same serial
+Bun runner and platform timing snapshot; the comparison combines all shards for
+each OS before checking inventory and outcomes. Local full-suite runs still cover
+unsharded cross-file ordering. More jobs add setup overhead, so compare required-green
 latency and summed runner time alongside shard test timings.
 
-Every layout uses the same seed for property cases and test ordering: pull requests
-replay seed 1; scheduled and manual runs use the workflow run number. Reports have
-unique OS/mode/shard names. The workflow requires every expected shard report
+Scheduled and manual diagnostics use the workflow run number as the same seed for
+property cases and test ordering in every layout. Reports have unique OS/layout/shard
+names. The workflow requires every expected shard report
 before accepting comparisons, then compares complete shard groups by test
 identity, outcome, assertion count, and occurrence count, retaining legitimate
 repeated names from parameterized tests while detecting missing or extra instances. It records every
@@ -203,8 +209,10 @@ before promotion.
 Both layouts use the same property seed and coverage settings. Required CI uses
 the default property seed and collects Linux coverage; diagnostics use the seed
 above and the same Linux LCOV instrumentation. Artifacts include JUnit and
-coverage in separate OS/layout/shard paths. Compare inventories across required
-CI and diagnostics, but measure scheduling changes between diagnostic layouts.
+coverage in separate OS/layout/shard paths. The automated comparison checks JUnit
+inventories, outcomes, and assertion counts; LCOV remains available for covered-line
+comparison during qualification. Compare inventories across required CI and
+diagnostics, but measure scheduling changes between diagnostic layouts.
 Both workflows install ripgrep on Linux so the inventory-path test executes.
 
 Keep the machine-policy test serial. Do not replace the full required suite

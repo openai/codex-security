@@ -223,12 +223,16 @@ test("builds and downloads native payloads from the same source as the image", (
       "${{ inputs.ref || github.sha }}",
     );
   }
-  expect(native.jobs["bundle"]!.steps![0]?.with?.["pattern"]).toBe(
-    "native-platform-*-${{ inputs.ref || github.sha }}",
-  );
-  expect(native.jobs["bundle"]!.steps![1]?.with?.["name"]).toBe(
-    "native-universal-${{ inputs.ref || github.sha }}",
-  );
+  expect(
+    native.jobs["bundle"]!.steps!.find(
+      (step) => step.name === "Download verified platform payloads",
+    )?.with?.["pattern"],
+  ).toBe("native-platform-*-${{ inputs.ref || github.sha }}");
+  expect(
+    native.jobs["bundle"]!.steps!.find(
+      (step) => step.name === "Upload universal native payload",
+    )?.with?.["name"],
+  ).toBe("native-universal-${{ inputs.ref || github.sha }}");
   for (const job of ["publish-platform", "manifest"]) {
     expect(release.jobs[job]!.steps![0]?.with?.["ref"]).toBe(
       "${{ needs.authorize.outputs.sha }}",

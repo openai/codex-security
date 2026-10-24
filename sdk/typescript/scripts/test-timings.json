@@ -109,10 +109,20 @@
     "darwin": 1.1,
     "win32": 2.1
   },
+  "api-validation.test.ts": {
+    "linux": 145.3,
+    "darwin": 248.7,
+    "win32": 368.2
+  },
+  "api-workflow.test.ts": {
+    "linux": 28.2,
+    "darwin": 45.0,
+    "win32": 70.3
+  },
   "api.test.ts": {
-    "linux": 62.1,
-    "darwin": 116.1,
-    "win32": 445.9
+    "linux": 49.4,
+    "darwin": 93.9,
+    "win32": 376.7
   },
   "artifact-export.test.ts": {
     "linux": 3.5,
