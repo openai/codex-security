@@ -408,4 +408,24 @@ test("legacy required check names propagate the final CI gate result", () => {
       result !== "success",
     );
   }
+  const retry = forwarder.steps.find(
+    (step) => step.name === "Require the edit classifier from this attempt",
+  )!;
+  expect(retry.run).toContain("exit 1");
+  for (const [action, changes, classifier, refuse] of [
+    ["synchronize", {}, "", false],
+    ["edited", { base: {} }, "", false],
+    ["edited", {}, "", true],
+    ["edited", {}, "1", true],
+    ["edited", {}, "2", false],
+  ] as const) {
+    expect(
+      expression(retry.if!, {
+        needs: {
+          "classify-changes": { outputs: { "edit-attempt": classifier } },
+        },
+        github: { ...eventContext(action, changes).github, run_attempt: "2" },
+      }),
+    ).toBe(refuse);
+  }
 });

@@ -30,6 +30,7 @@ jobs:
       pull-requests: read
     outputs:
       source-run: ${{ steps.proof.outputs.source-run }}
+      edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
@@ -503,6 +504,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFIED_SOURCE_RUN: ${{ needs.classify-changes.outputs.source-run }}
+          CLASSIFIER_ATTEMPT: ${{ needs.classify-changes.outputs.edit-attempt }}
         run: node .github/scripts/verify-pr-source.mjs confirm-target
 
   # Retain required names until the repository ruleset has migrated to `ci`.
@@ -519,6 +521,14 @@ jobs:
       - name: Require CI gate
         if: needs.ci.result != 'success'
         run: exit 1
+      - name: Require the edit classifier from this attempt
+        if: >-
+          github.event_name == 'pull_request' && github.event.action == 'edited' &&
+          github.event.changes.base == null &&
+          needs['classify-changes'].outputs['edit-attempt'] != github.run_attempt
+        run: |
+          echo 'Re-run all jobs to qualify this pull request edit.'
+          exit 1
 
   windows-test:
     if: needs.classify-changes.outputs.source-required == 'true'

@@ -52,6 +52,7 @@ function evidence(id, selected = "success") {
   const jobs = names.map((name) => ({
     name,
     run_id: id,
+    run_attempt: 1,
     ...passed,
     steps: [selection],
   }));
@@ -59,7 +60,7 @@ function evidence(id, selected = "success") {
 }
 function fixture(
   history,
-  { jobs = evidence, targets = [target], wait = false } = {},
+  { jobs = evidence, targets = [target], wait = false, runAttempt = 1 } = {},
 ) {
   let current = [],
     live = target;
@@ -73,14 +74,15 @@ function fixture(
     if (runId) return jobs(Number(runId[1]));
     current = history.shift() ?? current;
     if (current instanceof Error) throw current;
-    return Array.isArray(current)
-      ? { total_count: current.length, workflow_runs: current }
-      : current;
+    if (!Array.isArray(current)) return current;
+    const runs = [edit(99, { run_attempt: runAttempt }), ...current];
+    return { total_count: runs.length, workflow_runs: runs };
   };
-  const input = { pr, sha, runId: 99, api };
+  const input = { pr, sha, runId: 99, runAttempt, api };
   return {
     check: () => verifyEdit(input, () => wait),
-    finish: (id) => confirmEdit(input, id),
+    finish: (id, classifierAttempt = runAttempt) =>
+      confirmEdit(input, id, classifierAttempt),
   };
 }
 
@@ -96,18 +98,6 @@ test("the usual source and repeated metadata edits verify a single actual source
   }).check();
   assert.equal(result, 2);
   assert.deepEqual(inspected, [2]);
-  assert.equal(
-    await fixture([
-      [edit(8), edit(5, { conclusion: "failure" }), source],
-    ]).check(),
-    8,
-  );
-  assert.equal(
-    await fixture([[edit(8), edit(5, { conclusion: "failure" }), source]], {
-      jobs: (id) => evidence(id, "skipped"),
-    }).check(),
-    "full",
-  );
 });
 
 test("full qualification covers missing, ambiguous, ineligible and retargeted histories", async () => {
@@ -129,6 +119,9 @@ test("full qualification covers missing, ambiguous, ineligible and retargeted hi
     [],
     [run(99)],
     [run(5), run(2)],
+    [run(2), edit(5, { conclusion: "failure" }), edit(8)],
+    [run(2), edit(5, { conclusion: "cancelled" }), edit(8)],
+    { total_count: 1, workflow_runs: [run(2)] }, // Snapshot predates this edit.
     { total_count: 2, workflow_runs: [run(2)] },
   ]) {
     assert.equal(await fixture([history]).check(), "full");
@@ -144,6 +137,7 @@ test("only fresh canonical source jobs and genuine selection can qualify a sourc
     { jobs: page.jobs.slice(1) },
     { total_count: 6, jobs: [...page.jobs, page.jobs[0]] },
     { jobs: page.jobs.map((j) => ({ ...j, run_id: 1 })) },
+    { jobs: page.jobs.map((j) => ({ ...j, run_attempt: 2 })) },
     {
       jobs: page.jobs.map((j) =>
         j.name === "ci" ? { ...j, conclusion: "failure" } : j,
@@ -182,6 +176,15 @@ test("pending sources settle, genuine red remains red, and newer attempts cannot
       /source qualification changed/,
     );
   }
+});
+
+test("retrying a failed edit cannot replace its full checks with older green results", async () => {
+  const retry = fixture([[run(2)]], { runAttempt: 2 });
+  assert.equal(await retry.check(), "full");
+  await assert.rejects(retry.finish(2, 1), /Re-run all jobs/);
+  await assert.rejects(retry.finish(undefined, 1), /Re-run all jobs/);
+  await assert.rejects(retry.finish(2), /source qualification changed/);
+  await retry.finish();
 });
 
 test("even full fallback needs a current target; repeat this check just before the aliases", async () => {

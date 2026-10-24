@@ -56,8 +56,11 @@ successful CI for the exact main commit before publication. Title and body edits
 leave source CI running. On an edit, CI checks the source result for the same
 pull request, base, head and test merge. It waits for a running source check and
 reports a verified result, including static checks, through the required checks.
-Missing or ambiguous source evidence triggers full qualification of the current
-tree.
+Only the original source run and an uninterrupted sequence of successful edits
+can carry a green result. A cancelled or retried run, a changed target, missing
+evidence or conflicting results require full qualification. Use **Re-run all
+jobs** to retry an edit. A partial retry cannot refresh a previous attempt's
+required checks.
 
 ## Required gate
 

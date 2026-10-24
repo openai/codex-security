@@ -57,7 +57,10 @@ export function realSource(page, run) {
     page.total_count !== page.jobs.length ||
     jobs.length !== required.length ||
     new Set(jobs.map((j) => j.name)).size !== required.length ||
-    !jobs.every((job) => job.run_id === run.id && successful(job))
+    !jobs.every(
+      (job) =>
+        job.run_id === run.id && job.run_attempt === 1 && successful(job),
+    )
   )
     return false;
   return jobs
@@ -86,34 +89,33 @@ function sourceCandidate(runs, { pr, sha }) {
     );
   }
   if (!runs.length || !runs.every(identified)) return "full";
-  if (runs.some((r) => r.status !== "completed")) return "pending";
   const [first, ...later] = runs; // Oldest first.
-  const last = runs.at(-1);
-  const settled = runs
-    .slice(0, -1)
-    .every((run) => run.updated_at < last.run_started_at);
-  if (last.display_title === source && last.conclusion === "failure" && settled)
-    return "failed";
   if (
-    first.display_title === source &&
-    later.every((r) => r.display_title === edit)
-  ) {
-    if (runs.every(successful)) return first;
-    if (runs.every((r) => r.conclusion === "failure")) return "failed";
-  }
-  // In an ambiguous history, a later edit may itself have performed full qualification.
-  return last.display_title === edit && successful(last) && settled
-    ? last
-    : "full";
+    first.display_title !== source ||
+    later.some((r) => r.display_title !== edit)
+  )
+    return "full";
+  if (runs.some((r) => r.status !== "completed")) return "pending";
+  if (runs.every(successful)) return first;
+  if (runs.every((r) => r.conclusion === "failure")) return "failed";
+  return "full";
 }
 
 async function verifyHistory(input, wait) {
+  // A retry keeps the ID of its potentially failed previous qualification.
+  if (input.runAttempt !== 1) return "full";
   const { pr, runId, api } = input;
   async function candidate() {
     const page = await api(
       `actions/workflows/node-ci.yml/runs?event=pull_request&head_sha=${pr.head.sha}&per_page=100`,
     );
-    if (page.total_count !== page.workflow_runs.length) return "full";
+    if (
+      page.total_count !== page.workflow_runs.length ||
+      !page.workflow_runs.some(
+        (run) => run.id === runId && run.run_attempt === 1,
+      )
+    )
+      return "full";
     // A head may belong to several PRs. Keep unassociated runs so ambiguous histories go full.
     const runs = page.workflow_runs.filter(
       (run) =>
@@ -156,7 +158,9 @@ export async function verifyEdit(input, wait) {
   return result;
 }
 
-export async function confirmEdit(input, expectedId) {
+export async function confirmEdit(input, expectedId, classifierAttempt) {
+  if (input.runAttempt !== classifierAttempt)
+    throw new Error("Re-run all jobs to qualify this pull request edit.");
   if (expectedId && (await verifyHistory(input)) !== expectedId)
     throw new Error(
       "The selected source qualification changed before the CI gate finished.",
@@ -178,9 +182,19 @@ if (
     const endpoint = `repos/${env.GITHUB_REPOSITORY}/${path}`;
     return JSON.parse(execFileSync("gh", ["api", endpoint], utf8));
   }
-  const input = { pr, sha, runId: Number(env.GITHUB_RUN_ID), api };
+  const input = {
+    pr,
+    sha,
+    runId: Number(env.GITHUB_RUN_ID),
+    runAttempt: Number(env.GITHUB_RUN_ATTEMPT),
+    api,
+  };
   if (process.argv[2] === "confirm-target")
-    await confirmEdit(input, Number(env.VERIFIED_SOURCE_RUN));
+    await confirmEdit(
+      input,
+      Number(env.VERIFIED_SOURCE_RUN),
+      Number(env.CLASSIFIER_ATTEMPT),
+    );
   else {
     // Leave five minutes of the 40-minute classifier budget for ordinary full selection.
     const deadline = Date.now() + 35 * 60_000;
@@ -190,6 +204,7 @@ if (
       return true;
     });
     console.log(`Source qualification: ${result}`);
+    appendFileSync(env.GITHUB_OUTPUT, `edit-attempt=${input.runAttempt}\n`);
     if (result === "failed") process.exitCode = 1;
     if (typeof result === "number")
       appendFileSync(env.GITHUB_OUTPUT, `source-run=${result}\n`);

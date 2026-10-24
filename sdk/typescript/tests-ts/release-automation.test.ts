@@ -3829,7 +3829,7 @@ describe("GitHub release workflow safeguards", () => {
           needs?: string | string[];
           uses?: string;
           outputs?: Record<string, string>;
-          "timeout-minutes"?: number;
+          "timeout-minutes"?: number | string;
           steps: Array<{
             if?: string;
             name?: string;
@@ -3848,7 +3848,9 @@ describe("GitHub release workflow safeguards", () => {
       "${{ github.event_name == 'pull_request' }}",
     );
     const classifier = workflow.jobs["classify-changes"]!;
-    expect(classifier["timeout-minutes"]).toContain("40 || 10");
+    expect(classifier["timeout-minutes"]).toEqual(
+      expect.stringContaining("40 || 10"),
+    );
     expect(classifier.if).toBeUndefined();
     const checkout = classifier.steps.find(
       ({ name }) => name === "Checkout repository for change classification",
@@ -3893,7 +3895,9 @@ describe("GitHub release workflow safeguards", () => {
       "${{ steps.proof.outputs.source-run }}",
     );
     const flags = Object.keys(classifierOutputs).filter(
-      (key) => key !== "source-run" && !key.endsWith("-matrix"),
+      (key) =>
+        !["source-run", "edit-attempt"].includes(key) &&
+        !key.endsWith("-matrix"),
     );
     for (const enabled of flags) {
       expect(classifierOutputs[enabled]).toBe(
