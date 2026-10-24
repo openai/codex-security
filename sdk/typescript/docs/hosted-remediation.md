@@ -78,22 +78,15 @@ result validation finished; it does not imply that a patch fixed the finding:
   require a reason. The host must inspect the actual changes, collect the
   canonical diff, and run separate verification.
 - `verification` contains `id`, `status` (`fixed`, `still_vulnerable`, or
-  `inconclusive`), nonempty `evidence`, and a nonempty `checks` array. Each check
-  contains a nonempty `name`, `status` (`passed`, `failed`, or `not_run`),
-  nonempty `evidence`, and optional `command`. Names and evidence distinguish
-  static assessment from executed tests; `command` records an actual attempted
-  command, not a suggestion. A required check that could not be completed is
-  `not_run` with its blocker in `evidence`. An inconclusive result is preserved
-  as an assessment outcome rather than converted to execution failure.
+  `inconclusive`), and nonempty `evidence`, the same fields used by local
+  `verify-fix`. The finding ID must match the request. A `fixed` verdict needs
+  evidence that the original exploit path is closed and legitimate behavior
+  still works. If the selected mode cannot establish that, use `inconclusive`
+  unless the evidence shows the finding is still vulnerable.
 
-Hosted verification requests these checks explicitly and rejects a result with
-missing or empty checks, or a `fixed` verdict with a failed or unrun check. The
-model must report the required vulnerability and legitimate-behavior checks;
-the SDK does not reconstruct checks from prose. A malformed result retains the
-execution receipt and returns `status: "failed"` with `INVALID_RESULT`, rather
-than claiming verification succeeded. Shared result types keep `checks`
-optional for older and local results; the local CLI command and result contract
-are unchanged.
+Hosted and local verification use the same parser. Extra fields such as
+`checks` are ignored. Missing or invalid verdict fields still produce
+`INVALID_RESULT` in the hosted response, which retains the execution receipt.
 
 The host owns durable attempts, cancellation/reconciliation, usage, artifact
 storage and publication. No operation publishes a pull request or marks a

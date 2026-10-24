@@ -124,7 +124,6 @@ export async function runHostedRemediation(
       { occurrenceId: input.finding.id, context: input.finding.context },
     ],
     structuredPatch: true,
-    structuredVerification: true,
     verificationIds: [input.finding.id],
     instructions: input.instructions,
     validationInstructions: input.validationInstructions,
@@ -180,11 +179,9 @@ export async function runHostedRemediation(
       input.operation === "patch"
         ? { patch: parseFindingPatch(response, input.finding.id) }
         : {
-            verification: parseFindingVerifications(
-              response,
-              [input.finding.id],
-              { requireChecks: true },
-            )[0]!,
+            verification: parseFindingVerifications(response, [
+              input.finding.id,
+            ])[0]!,
           };
     return { ...base, status: "completed", execution, ...outcome };
   } catch (error) {
