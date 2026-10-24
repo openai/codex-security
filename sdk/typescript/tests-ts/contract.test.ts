@@ -375,6 +375,22 @@ describe("canonical scan contract", () => {
     ).resolves.toBe(false);
   });
 
+  test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "reports the permission error when opening an unreadable scan file",
+    async () => {
+      const scanDir = await realpath(await temporaryDirectory());
+      const path = join(scanDir, "report.md");
+      await writeFile(path, "Scan report", { mode: 0o000 });
+
+      const reading = readScanFile(scanDir, "report.md", "scan report");
+      await expect(reading).rejects.toBeInstanceOf(ContractValidationError);
+      await expect(reading).rejects.toMatchObject({
+        message: "scan report: unable to open the checked regular file.",
+        cause: expect.objectContaining({ code: "EACCES", path }),
+      });
+    },
+  );
+
   test("rejects scan-file replacements whose numeric file IDs collide", async () => {
     const title =
       "rejects scan-file replacements whose numeric file IDs collide";
