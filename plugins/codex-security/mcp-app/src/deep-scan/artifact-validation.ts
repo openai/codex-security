@@ -310,6 +310,17 @@ export function reconcileDeepReduction(
     previous ?? undefined,
   );
   retainSourceFindings(result, { discoveries, previous });
+  for (const finding of result.findings) {
+    const provenance = finding.provenance as Record<string, unknown>;
+    const sources = provenance.sourceFindings as {
+      id: string;
+      finding: Record<string, unknown>;
+    }[];
+    validateSeverityReconciliation(
+      finding,
+      sources.map((source) => source.finding),
+    );
+  }
   for (const [index, finding] of (previous?.findings ?? []).entries()) {
     const previousRefs = retainedFindingSources(finding, index).map(
       (source) => source.id,
@@ -319,6 +330,7 @@ export function reconcileDeepReduction(
     );
     if (retained) {
       const sourceIds = findingSourceIds(retained);
+      validateSeverityReconciliation(retained, [finding]);
       preserveFindingDetails(retained, finding);
       (retained.provenance as Record<string, unknown>).sourceFindingIds =
         sourceIds;
@@ -569,6 +581,31 @@ function retainSourceFindings(
     throw new Error(
       `Deep reduction left unaccounted source findings: ${missing.join(", ")}.`,
     );
+}
+
+function validateSeverityReconciliation(
+  finding: Record<string, unknown>,
+  sources: Record<string, unknown>[],
+): void {
+  const severity = finding.severity as Record<string, unknown>;
+  if (
+    sources.every(
+      (source) =>
+        (source.severity as Record<string, unknown>).level === severity.level,
+    )
+  )
+    return;
+  if (
+    typeof severity.rationale !== "string" ||
+    !severity.rationale.trim() ||
+    typeof severity.changeConditions !== "string" ||
+    !severity.changeConditions.trim()
+  ) {
+    throw new Error(
+      "Deep reduction changed or reconciled conflicting Standard or previous aggregate severities " +
+        "without recording severity.rationale and severity.changeConditions.",
+    );
+  }
 }
 
 /** Preserve previously accepted identities and never discard every reported finding. */
