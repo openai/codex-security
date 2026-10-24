@@ -48,6 +48,7 @@
 - preserve unrated vulnerability severity on import ([#1898](https://github.com/openai/codex-security/pull/1898))
 - match scan owner hints across email case variants ([#1900](https://github.com/openai/codex-security/pull/1900))
 - preserve worker coverage during recovery ([#1064](https://github.com/openai/codex-security/pull/1064))
+- update bundled undici to 6.29.1 ([#1915](https://github.com/openai/codex-security/pull/1915))
 
 <!-- release-section: highlights:end -->
 
