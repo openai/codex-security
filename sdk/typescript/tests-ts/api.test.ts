@@ -6128,7 +6128,10 @@ describe("CodexSecurity orchestration", () => {
       for (const operation of ["preflight", "run"] as const) {
         await expect(
           client[operation](repository, { outputDir: join(root, "output") }),
-        ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+        ).rejects.toMatchObject({
+          name: OutputInsideProtectedRootError.name,
+          pathKind: "state",
+        });
       }
       if (stateDirectory !== root && stateDirectory !== linkedState)
         expect(existsSync(stateDirectory)).toBe(false);
