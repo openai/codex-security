@@ -6,11 +6,13 @@ Use this exact reducer configuration:
 {{DEDUP_CONTEXT_JSON}}
 ```
 
-Read the assigned, already-validated Standard findings and the previous aggregate with `get_codex_security_deep_reducer_inputs({ maxBytes, cursor? })`. Choose a `maxBytes` budget for a small response you can work with, well below the code-mode IPC frame limit. The budget counts serialized response bytes, including JSON escaping, rather than findings. Both new findings and the previous aggregate are paged; even one large finding can span pages.
+Read the assigned, already-validated Standard findings and the previous aggregate with `get_codex_security_deep_reducer_inputs({ maxBytes, cursor? })`. Choose a small `maxBytes` that fits comfortably in a tool response. The budget counts serialized response bytes, including JSON escaping. Even one large finding can span pages.
 
-Each tool response has one text content block containing `{ json, nextCursor? }`. Parse that block to obtain the page. Its `json` is a fragment, not necessarily a complete JSON value. Follow `nextCursor` until absent, concatenate the fragments inside code mode, and only then parse the assembled document as `{ discoveries, previous }`. Inspect the findings and context selectively; do not print or return the entire assembled document from code mode. Do not concatenate pages from different `findingRef` requests.
+Each tool response has one text content block containing `{ json, nextCursor? }`. Its `json` is a fragment that may end inside a field. Follow `nextCursor` until absent and read the fragments in order as one document. The assigned document contains `{ discoveries, previous }`. Keep pages from different `findingRef` requests separate.
 
-Keep fragments, cursor and completion together in one serializable `store` value. An absent terminal cursor must become `null`; `store` cannot save `undefined`. Commit the state only after a successful page, so a retry resumes at the next unread page rather than appending a completed tail again. In code mode, define this helper and call it with your selected byte budget (and optional `findingRef`); inspect only the needed fields of its returned document:
+Without code mode, call `get_codex_security_deep_reducer_inputs` directly for each page. Keep the fragments in conversation order and submit the complete aggregate directly with `record_codex_security_deep_reduction`.
+
+With code mode, use the helper below to assemble the document inside a cell and return only the fields you need. It saves the fragments, next unread cursor, and completion together after each successful page. The terminal cursor is `null` because `store` cannot save `undefined`.
 
 ```javascript
 async function readReducerDocument(maxBytes, findingRef = null) {
@@ -41,7 +43,7 @@ Use the exact exposed tool name if the host uses a different MCP namespace. Code
 
 The input view omits the retained `provenance.sourceFindings`, `previousFindings`, and `originalCandidates` bodies. The host preserves those bodies when saving the aggregate. Fetch full details when needed with the same paged tool and `findingRef`: use `source:<sourceFindingId>` for an original source, or `previous:N` for the previous aggregate's zero-based finding index, including its synthesized history. Never copy those retained bodies into your submission; submit the semantic finding and its source refs.
 
-If a response exceeds the IPC frame limit, retry the failed page with a smaller `maxBytes` (halve the budget used for that request), keeping its cursor and findingRef. Do not retry an unchanged oversized request. Preserve already-read fragments and continue from the failed page. If the budget is too small to hold even one character and the page envelope, increase it as directed by the tool's diagnostic.
+If a response is truncated or exceeds the IPC frame limit, retry the failed page with a smaller `maxBytes` (halve the budget used for that request), keeping its cursor and findingRef. Preserve already-read fragments and continue from the failed page. If the budget is too small to hold even one character and the page envelope, increase it as directed by the tool's diagnostic.
 
 Read every finding and the previous aggregate. Merge only the same actionable root issue using remediation-subsumption: fixing the retained finding must also fix every absorbed finding. Preserve distinct reachable vulnerable instances, proof tuples, useful evidence, uncertainty, locations, provenance, severity, validation, attack paths, and remediation.
 
