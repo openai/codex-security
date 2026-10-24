@@ -229,6 +229,7 @@ async function installPackage(
     [
       ...npm.args,
       "install",
+      "--timing",
       "--global=false",
       "--prefix",
       consumer,
