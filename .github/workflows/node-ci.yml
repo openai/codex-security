@@ -32,6 +32,7 @@ jobs:
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
@@ -267,7 +268,7 @@ jobs:
         uses: ./.github/actions/check-action-candidate
 
   mcp:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: MCP app tests (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [classify-changes, package]
     runs-on: ubuntu-latest
@@ -309,7 +310,7 @@ jobs:
           retention-days: 14
 
   plugin-host:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: standalone plugin / ${{ matrix.os }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}
@@ -333,7 +334,7 @@ jobs:
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
   plugin-source:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}

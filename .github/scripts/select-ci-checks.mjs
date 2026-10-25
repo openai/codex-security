@@ -6,6 +6,7 @@ const documentation =
   /^(?:README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
 const ordinarySource =
   /^(?:sdk\/typescript\/(?:src|tests-ts)|plugins\/codex-security\/mcp-app\/(?:src|tests))\/.*\.ts$/;
+const sdkTest = /^sdk\/typescript\/tests-ts\/[^/]+\.test\.ts$/;
 const actionFiles =
   /^(?:action\.yml|github-action\/(?:README\.md|(?:runtime\/)?package(?:-lock)?\.json|dist\/(?:index|post)\.cjs|(?:src|scripts|tests)\/[^/]+\.(?:mjs|ts)))$/;
 const evalFiles =
@@ -60,6 +61,10 @@ export function selectChecks(paths, { event, baseChanged = false }) {
   ];
   return {
     "source-required": String(source),
+    "plugin-tests-required": String(
+      full ||
+        (scope === "source" && !paths.every((path) => sdkTest.test(path))),
+    ),
     "package-required": String(source || scope === "action"),
     "action-ci": String(action),
     "eval-contracts": String(source || scope === "evals"),

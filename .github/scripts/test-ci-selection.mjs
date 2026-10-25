@@ -9,6 +9,7 @@ const select = (paths, options = {}) =>
 
 const regularSource = {
   "source-required": "true",
+  "plugin-tests-required": "true",
   "package-required": "true",
   "action-ci": "false",
   "eval-contracts": "true",
@@ -78,6 +79,7 @@ const fullQualification = {
 const docs = {
   ...regularSource,
   "source-required": "false",
+  "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
   "container-validate": "false",
@@ -249,7 +251,6 @@ test("release helper changes select their release-progress regression checks", (
 test("ordinary TypeScript source and tests retain the reduced version matrices", () => {
   for (const path of [
     "sdk/typescript/src/cost.ts",
-    "sdk/typescript/tests-ts/skeleton.test.ts",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
     "plugins/codex-security/mcp-app/src/stdio-transport.ts",
     "plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
@@ -257,6 +258,32 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
   ]) {
     assert.deepEqual(select([path]), regularSource, path);
     assert.deepEqual(select(["README.md", path]), regularSource, path);
+  }
+});
+
+test("SDK test-only PRs keep the SDK jobs and skip independent plugin suites", () => {
+  const paths = [
+    "sdk/typescript/tests-ts/skeleton.test.ts",
+    "sdk/typescript/tests-ts/windows-machine-policy.test.ts",
+  ];
+  assert.deepEqual(select(paths), {
+    ...regularSource,
+    "plugin-tests-required": "false",
+  });
+  for (const other of [
+    "README.md",
+    "sdk/typescript/tests-ts/support/test-subprocess.ts",
+    "sdk/typescript/src/api.ts",
+  ]) {
+    assert.deepEqual(select([...paths, other]), regularSource, other);
+  }
+  for (const options of [
+    { event: "push" },
+    { event: "schedule" },
+    { event: "workflow_dispatch" },
+    { baseChanged: true },
+  ]) {
+    assert.deepEqual(select(paths, options), fullQualification);
   }
 });
 
@@ -378,6 +405,7 @@ test("documentation requires static checks and explicit selection, without skipp
   );
   for (const key of [
     "source-required",
+    "plugin-tests-required",
     "package-required",
     "action-ci",
     "eval-contracts",

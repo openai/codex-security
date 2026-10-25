@@ -11,8 +11,8 @@ required package contents. Deleting or renaming them must pass archive checks.
 `RELEASING.md` also receives full qualification because SDK tests validate its
 canonical release recovery example.
 
-Source changes run the complete SDK suite on Linux, macOS, and Windows, plus
-MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
+Product source changes run the complete SDK suite on Linux, macOS, and Windows,
+plus MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
 are discovered from the source tree, including new files without timing data.
 Platform-specific filesystem, credential, process, cancellation, and resumed
 worker cases remain enabled.
@@ -22,8 +22,16 @@ Pull requests limited to `.ts` files under `sdk/typescript/src/`,
 `plugins/codex-security/mcp-app/tests/`, optionally mixed with ordinary docs,
 use reduced version matrices. They test the minimum Node 22, 24, and 26 versions,
 current Node 24 for the Action adapter, macOS installation, and Windows Node 22
-installation. Python runs the full suite on 3.12 and the native subsets on macOS
-and Windows. All source changes still select container validation.
+installation. When selected, Python runs the full suite on 3.12 and the native
+subsets on macOS and Windows. All source changes still select container
+validation.
+
+A PR that changes only top-level `sdk/typescript/tests-ts/*.test.ts` files runs
+the same SDK shards on all three platforms and the same static, native, package,
+container, and eval checks as an ordinary source PR. It skips the independent
+MCP, standalone-plugin, and Python suites. Changes to a test helper, nested
+fixture, or any other path alongside an SDK test use the usual source or full
+route.
 
 PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
 locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
@@ -115,6 +123,8 @@ a PR that leaves those inputs unchanged, look for the exact key in
 matter which `main` run saved it. Different inputs can build in parallel.
 
 The key uses the UTC week and the paths listed in **Identify native build and
-proof inputs**. Compare the next change against current `main`: its PR run may
-have tested an older base or skipped native preparation entirely. PR runs
-cannot populate this cache for `main`.
+proof inputs**. For repository CI scripts, the native jobs compile
+`.github/scripts/*.mts` through `build:ci`; changing unrelated workflow scripts
+does not require rebuilding native artifacts. Compare the next change against
+current `main`: its PR run may have tested an older base or skipped native
+preparation entirely. PR runs cannot populate this cache for `main`.
