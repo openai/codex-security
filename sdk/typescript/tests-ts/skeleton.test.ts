@@ -407,7 +407,7 @@ describe("TypeScript package skeleton", () => {
     const steps = jobs["mcp"]!.steps!;
     const ripgrep = steps.findIndex(({ name }) => name === "Install ripgrep");
     const tests = steps.findIndex(({ name }) => name === "Test MCP app");
-    expect(steps[ripgrep]?.run).toContain("apt-get install --yes ripgrep");
+    expect(steps[ripgrep]?.run).toBe(".github/scripts/install-ripgrep.sh");
     expect(ripgrep).toBeLessThan(tests);
     expect(
       jobs["test"]!.steps!.some(({ name }) => name === "Test MCP app"),

@@ -3322,22 +3322,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await release();
   });
 
-  test("protects active and stalled credential-lock owners and recovers after a crash with a reused PID", async () => {
-    const root = await temporaryDirectory();
-    await promisify(execFile)(
-      process.execPath,
-      [
-        fileURLToPath(
-          new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
-        ),
-        new URL("../src/runtime.ts", import.meta.url).href,
-        join(root, "state"),
-      ],
-      { timeout: 120_000, windowsHide: true },
-    );
-  }, 125_000);
-
-  test("credential-lock fixture tolerates slow holder and legacy startup", async () => {
+  test("protects active and stalled credential-lock owners during slow legacy startup and recovers after a crash with a reused PID", async () => {
     const root = await temporaryDirectory();
     const runtime = join(root, "delayed-runtime.mjs");
     await writeFile(
