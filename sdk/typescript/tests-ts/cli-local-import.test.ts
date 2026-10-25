@@ -4,13 +4,16 @@ import {
   mkdtemp,
   readdir,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { readLocalExternalFindings } from "../src/external-findings-local.js";
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -266,11 +269,11 @@ test.each(["SIGINT", "SIGTERM"] as const)(
 
 test("imported readback resolves its repository argument and supports structured output", async () => {
   const deps = dependencies({ currentDirectory: resolve("workspace") });
-  deps.listLocalExternalFindings = async ({ repository }, settings) => {
+  deps.readLocalExternalFindings = async ({ repository }, settings) => {
     expect(repository).toBe(resolve("workspace", "project"));
     expect(settings?.environment).toBe(deps.environment);
     expect(settings?.signal?.aborted).toBe(false);
-    return [];
+    return { repository: resolve("selected project"), findings: [] };
   };
   const cli = createCliTest(main);
   expect(
@@ -280,10 +283,40 @@ test("imported readback resolves its repository argument and supports structured
     ),
   ).toBe(0);
   expect(JSON.parse(cli.stdout.text())).toEqual({
-    repository: resolve("workspace", "project"),
+    repository: resolve("selected project"),
     findings: [],
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "imported readback labels the repository used for an empty query after an alias changes",
+  async () => {
+    const f = await fixture();
+    const other = join(f.root, "other");
+    for (const repo of [f.repository, other])
+      await mkdir(join(repo, "child"), { recursive: true });
+    const entry = join(f.root, "entry");
+    await mkdir(entry);
+    const link = join(entry, "link");
+    const replacement = join(entry, "replacement");
+    await symlink(join(f.repository, "child"), link);
+    await symlink(join(other, "child"), replacement);
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(["findings", "imported", `${link}${sep}..`, "--json"], {
+        ...f.deps,
+        readLocalExternalFindings: async (selection, settings) => {
+          await rename(replacement, link);
+          return readLocalExternalFindings(selection, settings);
+        },
+      }),
+    ).toBe(0);
+    expect(JSON.parse(cli.stdout.text())).toEqual({
+      repository: other,
+      findings: [],
+    });
+  },
+);
 
 for (const format of ["json", "jsonl"] as const) {
   test.each(["SIGINT", "SIGTERM"] as const)(
@@ -294,7 +327,7 @@ for (const format of ["json", "jsonl"] as const) {
         signals,
         currentDirectory: resolve("workspace"),
       });
-      deps.listLocalExternalFindings = async (_selection, settings) => {
+      deps.readLocalExternalFindings = async (_selection, settings) => {
         expect(settings?.signal).toBeDefined();
         signals.emit(signalName);
         settings!.signal!.throwIfAborted();
@@ -317,6 +350,38 @@ for (const format of ["json", "jsonl"] as const) {
     },
   );
 }
+
+test("imported readback honors an interruption before resolving the repository", async () => {
+  const signals = new FakeSignals();
+  const deps = dependencies({
+    currentDirectory: resolve("workspace"),
+    signals,
+  });
+  deps.addSignalListener = (signal, listener) => {
+    signals.add(signal, listener);
+    if (signal === "SIGINT") listener();
+  };
+  deps.readLocalExternalFindings = async () => {
+    throw new Error("Interrupted readback reached the workbench");
+  };
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [
+        "findings",
+        "imported",
+        "missing/../repo",
+        "--format",
+        "json",
+        "--full-output",
+      ],
+      deps,
+    ),
+  ).toBe(130);
+  expect(JSON.parse(cli.stdout.text()).error.message).toBe("SIGINT");
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+});
 
 test("finding import requires an explicit destination and advertises local repository paths", async () => {
   const cli = createCliTest(main);

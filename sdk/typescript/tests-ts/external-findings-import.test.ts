@@ -1,12 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
-import { access, writeFile } from "node:fs/promises";
+import { access, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 test("cancels preparation while the source file read is pending", async () => {
   const fixture = await localFindingsFixture();
@@ -63,6 +64,53 @@ test("cancels preparation while the source file read is pending", async () => {
     });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe("CANCELLED");
+    await expect(access(fixture.stateDirectory)).rejects.toThrow();
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+const rotatedRepository =
+  "rejects a repository link that changes after the scanner findings are read";
+test(rotatedRepository, async () => {
+  if (runTestInSubprocess(import.meta.filename, rotatedRepository)) return;
+  const fixture = await localFindingsFixture();
+  try {
+    const link = join(fixture.root, "selected");
+    const other = join(fixture.root, "other");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    execFileSync("git", ["init", "--quiet", other]);
+    await symlink(fixture.repository, link, linkType);
+    const file = join(link, "wiz.json");
+    const record = {
+      id: "first-checkout",
+      name: "CVE-2026-0001",
+      detailedName: "example-package",
+      vulnerableAsset: { id: "source-branch", type: "REPOSITORY_BRANCH" },
+    };
+    await writeFile(file, JSON.stringify([record]));
+
+    const reader = { ...(await import("../src/external-findings-read.js")) };
+    mock.module("../src/external-findings-read.js", () => ({
+      ...reader,
+      async readExternalFindings(
+        ...args: Parameters<typeof reader.readExternalFindings>
+      ) {
+        const parsed = await reader.readExternalFindings(...args);
+        await unlink(link);
+        await symlink(other, link, linkType);
+        return parsed;
+      },
+    }));
+    await expect(
+      prepareLocalExternalImport(
+        file,
+        { repository: link, provider: "wiz", sourceKey: "example/main" },
+        { environment: fixture.environment },
+      ),
+    ).rejects.toThrow(
+      "Repository path changed while reading external findings",
+    );
     await expect(access(fixture.stateDirectory)).rejects.toThrow();
   } finally {
     await fixture.dispose();

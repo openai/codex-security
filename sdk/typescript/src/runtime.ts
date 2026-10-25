@@ -1,7 +1,8 @@
 import { executablePathForSpawn } from "./executable-path.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
-import { gitProtectionRoots } from "./targets.js";
+import { gitProtectionRoots, resolveTargetPath } from "./targets.js";
+import type { AbsolutePath } from "./config-path.js";
 import { isNonEmptyString, notify } from "./value.js";
 import {
   execFile as execFileCallback,
@@ -32,6 +33,7 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   realpath,
   rename,
   rm,
@@ -62,6 +64,7 @@ import { fromFdPromise, type ZipFile } from "yauzl";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
+  InvalidTargetError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -1765,16 +1768,38 @@ export async function bundledPluginRoot(): Promise<string> {
   );
 }
 
+export async function resolveScanOutputPath(
+  outputDirectory: string,
+  validateTraversalLink?: (path: string) => void,
+): Promise<string> {
+  try {
+    const requested = resolveInputPath(outputDirectory);
+    const path = await resolveParentTraversal(requested, {
+      allowMissing: true,
+    });
+    requireModelSafeOutputDir(path);
+    if (validateTraversalLink && path !== resolve(requested)) {
+      await validateDirectoryLinks(requested, validateTraversalLink);
+    }
+    return path;
+  } catch (error) {
+    throw outputInspectionError(outputDirectory, error);
+  }
+}
+
 export async function validateOutputDir(
   outputDirectory?: string,
   archiveExisting = false,
+  validateTraversalLink?: (path: string) => void,
 ): Promise<string | null> {
   if (outputDirectory === undefined) {
     return null;
   }
-  const path = resolve(expandHome(outputDirectory));
-  requireModelSafeOutputDir(path);
   try {
+    const path = await resolveScanOutputPath(
+      outputDirectory,
+      validateTraversalLink,
+    );
     const metadata = await lstat(path).catch(nullIfMissingFileError);
     if (metadata !== null) {
       if (!metadata.isDirectory()) {
@@ -1816,11 +1841,44 @@ export async function validateOutputDir(
       `Unable to create scan output directory: ${path}`,
     );
   } catch (error) {
-    if (error instanceof OutputDirectoryError) throw error;
-    throw new OutputDirectoryError(
-      `Unable to inspect scan output directory: ${outputDirectory}`,
-      { cause: error },
-    );
+    throw outputInspectionError(outputDirectory, error);
+  }
+}
+
+function outputInspectionError(
+  outputDirectory: string,
+  cause: unknown,
+): OutputDirectoryError {
+  return cause instanceof OutputDirectoryError
+    ? cause
+    : new OutputDirectoryError(
+        `Unable to inspect scan output directory: ${outputDirectory}`,
+        { cause },
+      );
+}
+
+/** Check each traversed directory link at its physical location, including linked targets. */
+export async function validateDirectoryLinks(
+  requested: string,
+  validateLocation: (path: string) => void,
+): Promise<void> {
+  const directories = [dirname(requested)];
+  const visited = new Set<string>();
+  while (directories.length > 0) {
+    let directory = directories.pop()!;
+    while (dirname(directory) !== directory && !visited.has(directory)) {
+      visited.add(directory);
+      if (
+        (await lstat(directory).catch(nullIfMissingFileError))?.isSymbolicLink()
+      ) {
+        const parent = await realpath(
+          await resolveParentTraversal(dirname(directory)),
+        );
+        validateLocation(join(parent, basename(directory)));
+        directories.push(resolveTargetPath(await readlink(directory), parent));
+      }
+      directory = dirname(directory);
+    }
   }
 }
 
@@ -1963,12 +2021,18 @@ export async function canonicalizeModelSafePath(
   return canonical;
 }
 
-export async function canonicalConfigPath(path: string): Promise<string> {
+export async function canonicalConfigPath(
+  path: string,
+  { verifyIdentity = false }: { verifyIdentity?: boolean } = {},
+): Promise<string> {
   let existing = resolve(path);
   const missing: string[] = [];
   while (true) {
     try {
-      return join(await realpath(existing), ...missing);
+      const canonical = await realpath(existing);
+      if (verifyIdentity && !(await sameFile(existing, canonical)))
+        throw new InvalidTargetError(`Repository path changed: ${existing}`);
+      return join(canonical, ...missing);
     } catch (error) {
       const parent = dirname(existing);
       if (
@@ -2032,6 +2096,7 @@ async function prepareOutputDirectory(
   const path = await validateOutputDir(
     outputDirectory,
     existingOutput !== "reject",
+    validateLocation,
   );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
@@ -3536,6 +3601,50 @@ export function sameFile(left: string, right: string): Promise<boolean> {
       leftMetadata.ino === rightMetadata.ino,
     () => false,
   );
+}
+
+export function resolveInputPath(
+  value: string,
+  directory = process.cwd(),
+  environment: ProcessEnvironment = process.env,
+): AbsolutePath {
+  if (value === "~") value = expandHome("~", environment);
+  else if (value.startsWith("~/") || value.startsWith("~\\")) {
+    const home = expandHome("~", environment);
+    const suffix = value.startsWith("~\\")
+      ? value.slice(2).split("\\").filter(Boolean).join(sep)
+      : value.slice(2);
+    value = home === "" ? suffix : `${home}${sep}${suffix}`;
+  }
+  return resolveTargetPath(value, directory) as AbsolutePath;
+}
+
+/** Resolve through the last parent traversal while retaining aliases in the remaining path. */
+export async function resolveParentTraversal(
+  path: string,
+  { allowMissing = false }: { allowMissing?: boolean } = {},
+): Promise<string> {
+  const parts = path.split(sep);
+  const parent = parts.lastIndexOf("..");
+  if (parent === -1) return path;
+  const prefix = parts.slice(0, parent + 1).join(sep);
+  // A new output directory can be spelled missing/../scan before its parent exists.
+  if (
+    allowMissing &&
+    (await stat(prefix).catch(nullIfMissingFileError)) === null
+  ) {
+    return resolve(path);
+  }
+  // Resolve each directory before moving to its parent. Some runtimes collapse
+  // a literal ".." inside realpath before consulting the filesystem.
+  const before =
+    parts.slice(0, parent).join(sep) || (isAbsolute(path) ? sep : ".");
+  const physical = dirname(
+    await realpath(await resolveParentTraversal(before)),
+  );
+  if (!(await sameFile(prefix, physical)))
+    throw new InvalidTargetError(`Repository path changed: ${prefix}`);
+  return join(physical, ...parts.slice(parent + 1));
 }
 
 function expandExecutableHome(

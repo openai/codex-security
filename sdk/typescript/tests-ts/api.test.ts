@@ -562,6 +562,43 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.skipIf(process.platform === "win32")(
+    "Node preflight preserves physical repository and scope paths",
+    async () => {
+      const root = await temporaryDirectory();
+      // Bun's realpath collapses parent traversal before resolving symlinks.
+      const source = new URL(
+        "./fixtures/target-paths-node.ts",
+        import.meta.url,
+      );
+      const built = await Bun.build({
+        entrypoints: [fileURLToPath(source)],
+        target: "node",
+        format: "esm",
+        packages: "external",
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL("../src/api.ts", import.meta.url).href,
+          ),
+        },
+      });
+      expect(built.success).toBe(true);
+      await symlink(
+        fileURLToPath(new URL("../node_modules", import.meta.url)),
+        join(root, "node_modules"),
+        "dir",
+      );
+      const module = join(root, "target-paths.mjs");
+      await writeFile(module, await built.outputs[0]!.text());
+      const exportRoot = await temporaryDirectory();
+      execFileSync(nodeCommand().command, [module, root, exportRoot], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, HOME: root, USERPROFILE: root },
+      });
+    },
+  );
+
   test("preflights local inputs without initializing runtime or credentials", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
@@ -760,6 +760,36 @@ test("request and pagination metadata retain Cloud byte limits and distinct iden
   expect(() =>
     validateRepositories({ ...page, next: `${page.next}é` }),
   ).toThrow("4096 UTF-8");
+});
+
+test("Cloud previews the findings file selected through a directory link and parent", async () => {
+  const f = await fixture();
+  const directory = join(f.root, "physical", "child");
+  await mkdir(directory, { recursive: true });
+  await fs.symlink(
+    directory,
+    join(f.root, "link"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const name = basename(f.file);
+  await writeFile(
+    join(f.root, "physical", name),
+    JSON.stringify([normalized("other")]),
+  );
+  const input = `link/../${name}`;
+  const [expected] = JSON.parse(await readFile(`${f.root}/${input}`, "utf8"));
+  const cli = createCliTest(main);
+  const args = [...f.command];
+  args[2] = input;
+  expect(
+    await cli.runCli([...args, "--dry-run"], {
+      ...f.cliDeps,
+      currentDirectory: () => f.root,
+    }),
+  ).toBe(0);
+  expect(JSON.parse(cli.stdout.text()).findings).toMatchObject([
+    { source_finding_id: expected.source_finding_id },
+  ]);
 });
 
 test("CLI preview and rejected confirmation never POST or persist an upload", async () => {

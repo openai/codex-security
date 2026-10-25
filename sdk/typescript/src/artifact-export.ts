@@ -14,6 +14,8 @@ import {
   bundledPluginRoot,
   codexSecurityStateDirectory,
   expandHome,
+  resolveInputPath,
+  resolveParentTraversal,
   pythonUtf8Environment,
   resolvePluginPython,
   runWorkbench,
@@ -72,6 +74,27 @@ interface HelperOptions {
   signal?: AbortSignal;
   output?: ArtifactOutput;
   failureMessage?: string;
+}
+
+export async function artifactSourceProtectionRoots(
+  sourceRoot: string | undefined,
+  directory = process.cwd(),
+): Promise<string[] | undefined> {
+  return (await resolveArtifactSource(sourceRoot, directory))?.protectedRoots;
+}
+
+async function resolveArtifactSource(
+  sourceRoot: string | undefined,
+  directory = process.cwd(),
+) {
+  if (sourceRoot === undefined) return;
+  const path = await resolveParentTraversal(sourceRoot);
+  return {
+    path,
+    protectedRoots: [
+      ...new Set([directory, resolve(directory, sourceRoot), path]),
+    ],
+  };
 }
 
 export function resolveArtifactFormat(
@@ -193,6 +216,7 @@ export async function runArtifactExport(
 ): Promise<string | undefined> {
   const artifact = arguments_.artifact ?? "findings";
   resolveArtifactFormat(artifact, arguments_.format);
+  const source = await resolveArtifactSource(arguments_.sourceRoot);
   const result = await runArtifactHelper(
     [
       "--scan-dir",
@@ -203,17 +227,12 @@ export async function runArtifactExport(
       ...(arguments_.output === "-"
         ? []
         : ["--export-output", arguments_.output]),
-      ...(arguments_.sourceRoot === undefined
-        ? []
-        : ["--source-root", arguments_.sourceRoot]),
+      ...(source === undefined ? [] : ["--source-root", source.path]),
       ...(arguments_.includeMetadata ? ["--export-metadata"] : []),
     ],
     {
       pythonPath: arguments_.pythonPath,
-      protectedRoot:
-        arguments_.sourceRoot === undefined
-          ? undefined
-          : [process.cwd(), arguments_.sourceRoot],
+      protectedRoot: source?.protectedRoots,
       signal: arguments_.signal,
       failureMessage:
         artifact === "findings"
@@ -232,10 +251,11 @@ export async function resolveArtifactExportOutput(
   arguments_: ArtifactExportArguments,
   currentDirectory: string,
 ): Promise<ArtifactExportArguments> {
-  const canonicalScan = await realpath(arguments_.scanDir).catch(
-    () => arguments_.scanDir,
-  );
-  const scanRelativeOutput = relative(arguments_.scanDir, arguments_.output);
+  const scanDir = await resolveParentTraversal(arguments_.scanDir, {
+    allowMissing: true,
+  });
+  const canonicalScan = await realpath(scanDir).catch(() => scanDir);
+  const scanRelativeOutput = relative(scanDir, arguments_.output);
   const scanLocalOutput = join(
     "exports",
     ARTIFACT_EXPORT_FILENAMES[arguments_.format],
@@ -352,20 +372,19 @@ export async function exportArtifact(
   const sourceRoot =
     options.sourceRoot === undefined
       ? undefined
-      : resolve(expandHome(options.sourceRoot));
+      : resolveInputPath(options.sourceRoot);
   const environment = {
     ...exportEnvironment(),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
   };
   let directory: string;
   if (options.source.directory !== undefined) {
-    directory = resolve(expandHome(options.source.directory));
+    directory = resolveInputPath(options.source.directory);
   } else {
     const python = await resolvePluginPython({
       configuredPath: options.pythonPath,
       environment,
-      protectedRoot:
-        sourceRoot === undefined ? undefined : [process.cwd(), sourceRoot],
+      protectedRoot: await artifactSourceProtectionRoots(sourceRoot),
       signal: options.signal,
     });
     const pluginRoot = await bundledPluginRoot();

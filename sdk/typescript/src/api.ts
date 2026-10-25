@@ -244,6 +244,7 @@ import {
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
+  resolveScanOutputPath,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -765,8 +766,13 @@ export class CodexSecurity {
       this.#dependencies.runWorkbench,
       this.config.pythonPath,
     );
-    if (options.outputDir !== undefined)
+    if (options.outputDir !== undefined) {
+      options.outputDir = await resolveScanOutputPath(
+        options.outputDir,
+        (path) => requireOutputOutsideRepositories(local.protectedRoots, path),
+      );
       await workflow.protectArtifacts(options.outputDir);
+    }
     const state = await workflow.bind({
       repositoryPath: local.repository,
       scanRequestDigest: workflowDigest({
@@ -776,10 +782,6 @@ export class CodexSecurity {
           ...local.prompts,
           target: options.target ?? "repository",
           mode: options.mode ?? DEFAULT_SCAN_MODE,
-          outputDir:
-            options.outputDir === undefined
-              ? undefined
-              : resolve(expandHome(options.outputDir)),
           workflowId: undefined,
           signal: undefined,
           auth: undefined,
@@ -5381,13 +5383,16 @@ async function prepareScanOutputDir(
   protectedRoots: readonly string[],
   allowExistingOutput = false,
 ): Promise<string | null> {
+  const validateLocation = (path: string) =>
+    requireOutputOutsideRepositories(protectedRoots, path);
   const output = await validateOutputDir(
     options.outputDir,
     allowExistingOutput ||
       options.resumeScanId !== undefined ||
       options.archiveExisting,
+    validateLocation,
   );
-  if (output !== null) requireOutputOutsideRepositories(protectedRoots, output);
+  if (output !== null) validateLocation(output);
   return output;
 }
 

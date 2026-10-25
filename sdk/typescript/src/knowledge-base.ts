@@ -10,11 +10,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, extname, join } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
-import { expandHome } from "./runtime.js";
+import { resolveInputPath, resolveParentTraversal } from "./runtime.js";
 import {
   gitMarkerRoot,
   isGitMetadataDirectory,
@@ -69,7 +69,7 @@ export async function readKnowledgeBaseSnapshot(
       signal?.throwIfAborted();
       if (!requested.trim())
         throw new Error("Knowledge base paths cannot be empty.");
-      const path = resolve(expandHome(requested));
+      const path = await resolveParentTraversal(resolveInputPath(requested));
       const metadata = await lstat(path);
       if (metadata.isSymbolicLink()) {
         throw new Error(

@@ -21,7 +21,8 @@ import {
   bundledPluginRoot,
   canonicalConfigPath,
   canonicalizeModelSafePath,
-  expandHome,
+  resolveInputPath,
+  resolveParentTraversal,
   requireOutputOutsideRepositories,
   runWorkbench,
   workbenchEnvironment,
@@ -269,6 +270,7 @@ async function localGitProtectionRoots(
   repository: string,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  requestedPaths: readonly string[] = [],
 ): Promise<string[]> {
   const roots = new Set(
     await abortable(() => gitProtectionRoots(repository, signal), signal),
@@ -277,7 +279,7 @@ async function localGitProtectionRoots(
     directory: await abortable(() => canonicalConfigPath(repository), signal),
     environment,
   };
-  const paths = new Set([resolve(repository), context.directory]);
+  const paths = new Set([repository, context.directory, ...requestedPaths]);
   for (const path of paths) {
     for (const root of await bareMetadataRoots(path, signal)) {
       roots.add(root);
@@ -428,16 +430,37 @@ async function localContext(
   const environment = workbenchEnvironment(
     dependencies.environment ?? process.env,
   );
-  const path = expandHome(selectedRepository, environment);
+  const requested = resolveInputPath(
+    selectedRepository,
+    process.cwd(),
+    environment,
+  );
+  const path = await abortable(
+    () => resolveParentTraversal(requested),
+    dependencies.signal,
+  );
   const repository =
     mode === "read"
       ? await abortable(() => canonicalConfigPath(path), dependencies.signal)
       : await normalizeRepository(path, dependencies.signal);
+  const lexicalPath = resolve(requested);
+  const lexicalRepository =
+    lexicalPath === resolve(path)
+      ? repository
+      : await abortable(
+          () => canonicalConfigPath(lexicalPath),
+          dependencies.signal,
+        );
   const protectedRoot = [
     ...new Set([
       repository,
+      ...(mode === "read" ? [lexicalRepository] : []),
       ...(await abortable(
-        () => localGitProtectionRoots(path, environment, dependencies.signal),
+        () =>
+          localGitProtectionRoots(path, environment, dependencies.signal, [
+            lexicalPath,
+            lexicalRepository,
+          ]),
         dependencies.signal,
       )),
       ...(await abortable(
@@ -461,6 +484,7 @@ async function localContext(
   );
   return {
     repository,
+    selectedPath: path,
     options: {
       pluginRoot: await abortable(
         () => bundledPluginRoot(),
@@ -592,8 +616,15 @@ export async function listLocalExternalFindings(
   selection: { repository: string; id?: string },
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
+  return (await readLocalExternalFindings(selection, dependencies)).findings;
+}
+
+export async function readLocalExternalFindings(
+  selection: { repository: string; id?: string },
+  dependencies: LocalExternalImportDependencies,
+) {
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
-  const { repository, options } = await localContext(
+  const { repository, selectedPath, options } = await localContext(
     selection.repository,
     dependencies,
     "read",
@@ -606,5 +637,8 @@ export async function listLocalExternalFindings(
       JSON.stringify({ repository, id: selection.id }),
     );
   }, dependencies.signal);
-  return result["findings"] as unknown as StoredExternalFinding[];
+  return {
+    repository: selectedPath,
+    findings: result["findings"] as unknown as StoredExternalFinding[],
+  };
 }

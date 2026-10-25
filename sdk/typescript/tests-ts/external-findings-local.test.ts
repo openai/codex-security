@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
@@ -770,6 +770,32 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(join(repository, "state"))).toBe(false);
   });
 
+  test("protects imported findings readback through parent traversal", async () => {
+    const { root, repository, environment } = await fixture();
+    const owner = join(root, "owner");
+    await mkdir(owner);
+    await mkdir(join(repository, "child"));
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    const link = join(owner, "link");
+    await symlink(join(repository, "child"), link, linkType);
+    const direct = join(owner, "direct");
+    await symlink(repository, direct, linkType);
+    const state = join(owner, "state");
+    const dependencies = {
+      environment: { ...environment, CODEX_SECURITY_STATE_DIR: state },
+    };
+    await expect(
+      listLocalExternalFindings(
+        { repository: `${link}${sep}..` },
+        dependencies,
+      ),
+    ).rejects.toThrow("must be outside the protected scan root");
+    expect(existsSync(state)).toBe(false);
+    expect(
+      await listLocalExternalFindings({ repository: direct }, dependencies),
+    ).toEqual([]);
+  });
+
   test.each(["bare", "linked", "ordinary"] as const)(
     "protects selected %s roots through nested paths and aliases",
     async (kind) => {
@@ -795,11 +821,21 @@ describe("local normalized scanner findings", () => {
       await symlink(repository, join(owner, "to-selected"), linkType);
       const alias = join(root, "owner-alias");
       await symlink(owner, alias, linkType);
+      const nestedAlias = join(root, "nested-alias");
+      await symlink(join(owner, "nested"), nestedAlias, linkType);
+      await mkdir(join(repository, "child"));
+      await mkdir(join(repository, "selected"));
+      await symlink(
+        join(repository, "child"),
+        join(owner, "nested", "link"),
+        linkType,
+      );
       const selections = [
         owner,
         nested,
         join(owner, "to-selected"),
         join(alias, "to-selected"),
+        `${join(nestedAlias, "link")}${sep}..${sep}selected`,
       ];
       if (kind === "bare") {
         const inner = join(owner, "inner-worktree");

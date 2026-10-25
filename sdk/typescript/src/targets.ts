@@ -147,8 +147,27 @@ export async function normalizeRepository(
   return canonical;
 }
 
-export function resolveRepositoryPath(repository: string): string {
-  return resolve(expandHome(repository));
+export function resolveRepositoryPath(
+  repository: string,
+  directory = process.cwd(),
+): string {
+  return resolveTargetPath(expandHome(repository), directory);
+}
+
+/** Preserve filesystem resolution of symlink/.. paths on POSIX. */
+export function resolveTargetPath(
+  value: string,
+  directory = process.cwd(),
+): string {
+  if (sep === "\\") return resolve(directory, value);
+  const base = isAbsolute(directory)
+    ? directory
+    : `${process.cwd()}/${directory}`;
+  const absolute = isAbsolute(value) ? value : `${base}/${value}`;
+  const parts = absolute
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  return `/${parts.join("/")}`;
 }
 
 function requirePortableWindowsRepositoryPath(path: string): void {
@@ -566,9 +585,7 @@ export async function normalizeTarget(
         "Path scan targets must not contain an empty path.",
       );
     }
-    const candidate = isAbsolute(expandHome(value))
-      ? resolve(expandHome(value))
-      : resolve(root, expandHome(value));
+    const candidate = resolveRepositoryPath(value, root);
     let metadata: Stats;
     let canonical: string;
     try {
@@ -941,7 +958,10 @@ function expandHome(value: string): string {
     return homedir();
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
+    const suffix = value.slice(2).replace(/^[/\\]+/, "");
+    const home = homedir();
+    if (process.platform === "win32") return resolve(home, suffix);
+    return home === "" ? resolveTargetPath(suffix) : `${home}${sep}${suffix}`;
   }
   return value;
 }

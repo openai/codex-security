@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { InvalidTargetError } from "./errors.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import {
   cloudRepositoryUrlKey,
@@ -11,6 +13,7 @@ import {
   prepareNormalizedLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
+import { resolveInputPath } from "./runtime.js";
 import { abortable } from "./targets.js";
 
 /** Read an installed vendor format and prepare it for the local workbench. */
@@ -20,6 +23,15 @@ export async function prepareLocalExternalImport(
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();
+  const requested = resolveInputPath(
+    options.repository,
+    process.cwd(),
+    dependencies.environment,
+  );
+  const selected = await abortable(
+    () => stat(requested, { bigint: true }).catch(() => null),
+    dependencies.signal,
+  );
   const parsed = await abortable(
     () => readExternalFindings(path, options, "local"),
     dependencies.signal,
@@ -54,11 +66,28 @@ export async function prepareLocalExternalImport(
         })),
       ];
   }
-  return prepareNormalizedLocalImport(parsed.findings, normalizedOptions, {
-    ...dependencies,
-    sourceRepositories: [
-      ...(dependencies.sourceRepositories ?? []),
-      ...sourceRepositories,
-    ],
-  });
+  const prepared = await prepareNormalizedLocalImport(
+    parsed.findings,
+    normalizedOptions,
+    {
+      ...dependencies,
+      sourceRepositories: [
+        ...(dependencies.sourceRepositories ?? []),
+        ...sourceRepositories,
+      ],
+    },
+  );
+  const destination = await abortable(
+    () => stat(prepared.preview.repository, { bigint: true }),
+    dependencies.signal,
+  );
+  if (
+    !selected ||
+    selected.dev !== destination.dev ||
+    selected.ino !== destination.ino
+  )
+    throw new InvalidTargetError(
+      `Repository path changed while reading external findings: ${requested}`,
+    );
+  return prepared;
 }

@@ -50,12 +50,16 @@ describe("CLI workbench", () => {
           fs.stat(replacementPath, { bigint: true }),
         ]);
         expect(actual.ino).not.toBe(replacement.ino);
-        for (const includeMatchingAlias of [false, true]) {
+        for (const [suffix, includeMatchingAlias] of [
+          ["", false],
+          ["", true],
+          ["removed", false],
+        ] as const) {
           const calls: Array<readonly string[]> = [];
           const stdout = captureCli(main, "stdout");
           expect(
             await stdout.run(
-              ["findings", "list", alias, "--json"],
+              ["findings", "list", join(alias, suffix), "--json"],
               dependencies({
                 onWorkbench: (args): JsonObject => {
                   calls.push(args);
@@ -64,7 +68,7 @@ describe("CLI workbench", () => {
                         repositories: [
                           {
                             targetId: "unrelated",
-                            targetPath: replacementPath,
+                            targetPath: join(replacementPath, suffix),
                           },
                           ...(includeMatchingAlias
                             ? [{ targetId: "selected", targetPath: savedAlias }]
@@ -94,7 +98,7 @@ describe("CLI workbench", () => {
               : []),
           ]);
           expect(JSON.parse(stdout.text())).toEqual({
-            repository: alias,
+            repository: join(alias, suffix),
             findings: includeMatchingAlias
               ? [{ title: "selected finding" }]
               : [],
@@ -256,6 +260,69 @@ describe("CLI workbench", () => {
             findings: [{ title: "Exact saved finding" }],
           });
         }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("findings list resolves parent paths after the checkout is removed", async () => {
+    const root = await temporaryDirectory("finding-removed-checkout-");
+    try {
+      const repository = join(root, "repository");
+      const directory = join(root, "tools");
+      await mkdir(repository);
+      await mkdir(directory);
+      await rm(repository, { recursive: true });
+      const requests: [string, string][] = [
+        [repository, repository],
+        ["../repository", repository],
+      ];
+      if (process.platform !== "win32") {
+        const moved = join(root, "moved");
+        await mkdir(join(moved, "child"), { recursive: true });
+        await symlink(join(moved, "child"), join(directory, "link"));
+        await symlink(root, join(moved, "archive"));
+        requests.push([
+          "link/../archive/repository",
+          join(moved, "archive", "repository"),
+        ]);
+      }
+      for (const [requested, displayed] of requests) {
+        const calls: Array<readonly string[]> = [];
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            ["findings", "list", requested, "--json"],
+            dependencies({
+              currentDirectory: directory,
+              onWorkbench: (args): JsonObject => {
+                calls.push(args);
+                return args[0] === "list-repositories"
+                  ? {
+                      repositories: [
+                        { targetId: "saved", targetPath: repository },
+                      ],
+                    }
+                  : {
+                      findings: [{ title: "Saved finding" }],
+                      nextOffset: null,
+                    };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(calls[1]).toEqual([
+          "list-global-findings",
+          "--target-id",
+          "saved",
+          "--status",
+          "open",
+        ]);
+        expect(JSON.parse(stdout.text())).toEqual({
+          repository: displayed,
+          findings: [{ title: "Saved finding" }],
+        });
       }
     } finally {
       await rm(root, { recursive: true, force: true });

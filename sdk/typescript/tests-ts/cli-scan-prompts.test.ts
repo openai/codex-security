@@ -114,16 +114,17 @@ describe("CLI scan prompts", () => {
           expect(onTurn).not.toHaveBeenCalled();
         }
 
-        for (const [directory, target] of [
-          [repository, "."],
-          [physicalRepository, repositoryAlias],
-          [repositoryAlias, physicalRepository],
+        for (const [directory, target, input] of [
+          [repository, ".", join("..", "external", "external-prompt.md")],
+          [repository, ".", external],
+          [physicalRepository, repositoryAlias, external],
+          [repositoryAlias, physicalRepository, external],
         ] as const) {
           let selected: unknown;
           expect(
             await runCapturedCli(
               main,
-              ["scan", target, option, external, "--json"],
+              ["scan", target, option, input, "--json"],
               dependencies({
                 currentDirectory: directory,
                 onTurn: (_repository, value) => (selected = value),

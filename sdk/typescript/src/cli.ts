@@ -44,6 +44,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -66,6 +67,7 @@ import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
   resolveArtifactFormat,
+  artifactSourceProtectionRoots,
   resolveArtifactExportOutput,
   resolveSavedArtifactDirectory,
   runArtifactExport,
@@ -114,7 +116,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
-import { listLocalExternalFindings } from "./external-findings-local.js";
+import { readLocalExternalFindings } from "./external-findings-local.js";
 import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
 import type { ExternalFindings } from "./external-findings.js";
 import {
@@ -258,10 +260,13 @@ import {
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
+  canonicalConfigPath,
   codexSecurityStateDirectory,
   executablePathForSpawn,
   environmentWithGit,
   expandHome,
+  resolveInputPath,
+  resolveParentTraversal,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
@@ -323,6 +328,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  resolveRepositoryPath,
   enclosingGitWorktreeRoots,
   gitMarkerRoot,
   normalizeRepository,
@@ -371,6 +377,7 @@ import {
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
+  type ScanPromptSettings,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -1217,7 +1224,7 @@ interface CliDependencies {
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   prepareLocalExternalImport?: typeof prepareLocalExternalImport;
-  listLocalExternalFindings?: typeof listLocalExternalFindings;
+  readLocalExternalFindings?: typeof readLocalExternalFindings;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
@@ -2270,33 +2277,47 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const requestedRepository = resolveCliPath(
-        dependencies.currentDirectory(),
+      const requestedPath = resolveInputPath(
         args.repository ?? ".",
+        dependencies.currentDirectory(),
       );
-      const repository = await realpath(requestedRepository).catch(
-        () => requestedRepository,
+      const storedPath = await resolveParentTraversal(requestedPath).catch(
+        () => undefined,
       );
+      const canonicalPath =
+        storedPath === undefined
+          ? undefined
+          : await realpath(storedPath).catch(() => undefined);
+      const requestedRepository =
+        canonicalPath === undefined
+          ? (storedPath ?? requestedPath)
+          : requestedPath;
       return presentHistory(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
-            let target = repositories.find(
-              (entry) => entry["targetPath"] === requestedRepository,
-            );
-            const canonicalTarget = repositories.find(
-              (entry) => entry["targetPath"] === repository,
-            );
-            if (
-              target === undefined &&
-              canonicalTarget !== undefined &&
-              (await sameFile(
-                canonicalTarget["targetPath"] as string,
-                requestedRepository,
-              ))
-            ) {
-              target = canonicalTarget;
+            let target =
+              repositories.find(
+                (entry) => entry["targetPath"] === requestedRepository,
+              ) ??
+              repositories.find((entry) => entry["targetPath"] === storedPath);
+            if (target === undefined && storedPath !== undefined) {
+              const canonical =
+                canonicalPath ??
+                (await canonicalConfigPath(storedPath, {
+                  verifyIdentity: true,
+                }).catch(() => undefined));
+              const saved = repositories.find(
+                (entry) => entry["targetPath"] === canonical,
+              );
+              if (
+                saved !== undefined &&
+                (canonicalPath === undefined ||
+                  (await sameFile(canonicalPath, requestedRepository)))
+              ) {
+                target = saved;
+              }
             }
             if (target === undefined) {
               for (const entry of repositories) {
@@ -2340,17 +2361,17 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       try {
-        const repository = resolveCliPath(
-          dependencies.currentDirectory(),
+        const requested = resolveInputPath(
           args.repository ?? ".",
+          dependencies.currentDirectory(),
         );
-        const findings = await (
-          dependencies.listLocalExternalFindings ?? listLocalExternalFindings
+        controller.signal.throwIfAborted();
+        return await (
+          dependencies.readLocalExternalFindings ?? readLocalExternalFindings
         )(
-          { repository },
+          { repository: requested },
           { environment: dependencies.environment, signal: controller.signal },
         );
-        return { repository, findings };
       } catch (error) {
         if (controller.signal.aborted) {
           exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
@@ -2401,11 +2422,14 @@ export async function main(
               ? await canonicalizeModelSafePath(
                   resolveCliPath(directory, options.scanRoot),
                 )
-              : resolveCliPath(directory, options.scanRoot);
+              : await resolveParentTraversal(
+                  resolveInputPath(options.scanRoot, directory),
+                  { allowMissing: true },
+                );
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolveCliPath(directory, args.repository ?? directory);
+            : resolveInputPath(args.repository ?? directory, directory);
         return presentHistory(
           await history(
             workbenchArgs("list-scans", {
@@ -2738,22 +2762,7 @@ export async function main(
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
             parentScanId,
-            {
-              scanPromptFile:
-                options.scanPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.scanPromptFile,
-                    ),
-              validationPromptFile:
-                options.validationPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.validationPromptFile,
-                    ),
-            },
+            options,
             dependencies.currentDirectory(),
           );
           scanArguments.verbose = options.verbose;
@@ -3046,29 +3055,33 @@ export async function main(
             options.csv === undefined
               ? undefined
               : resolveCliPath(currentDirectory, options.csv);
-          const directories = [
-            ...new Set(
-              [
-                ...(args.scanDir === undefined ? [] : [args.scanDir]),
-                ...options.scanDir,
-              ].map((directory) => resolveCliPath(currentDirectory, directory)),
-            ),
+          const directoryInputs = [
+            ...(args.scanDir === undefined ? [] : [args.scanDir]),
+            ...options.scanDir,
           ];
-          if (directories.length > 1 && options.to !== "cloud") {
-            throw new CodexSecurityError(
-              "Multiple scan directories are only supported with --to cloud.",
-            );
-          }
-          if (options.scan.length > 0 && directories.length > 0) {
+          const uniqueDirectories = (paths: string[]) => {
+            const directories = [...new Set(paths)];
+            if (directories.length > 1 && options.to !== "cloud") {
+              throw new CodexSecurityError(
+                "Multiple scan directories are only supported with --to cloud.",
+              );
+            }
+            return directories;
+          };
+          // Reject conflicting selectors before reading their path components.
+          uniqueDirectories(
+            directoryInputs.map((value) =>
+              resolveCliPath(currentDirectory, value),
+            ),
+          );
+          if (options.scan.length > 0 && directoryInputs.length > 0) {
             throw new CodexSecurityError(
               "Use --scan or scan directory inputs, not both.",
             );
           }
           if (
             csvPath !== undefined &&
-            (args.scanDir !== undefined ||
-              options.scan.length > 0 ||
-              options.scanDir.length > 0)
+            (directoryInputs.length > 0 || options.scan.length > 0)
           ) {
             throw new CodexSecurityError(
               "Use --csv or scan directory and ID inputs, not both.",
@@ -3140,6 +3153,16 @@ export async function main(
             runWorkbench: (args, input) =>
               dependencies.runWorkbench(args, input, controller.signal),
           };
+          const directories = uniqueDirectories(
+            await Promise.all(
+              directoryInputs.map((value) =>
+                resolveParentTraversal(
+                  resolveInputPath(value, currentDirectory),
+                  { allowMissing: true },
+                ),
+              ),
+            ),
+          );
           const selectedScans: { scanDir: string; scanId?: string }[] =
             directories.map((scanDir) => ({ scanDir }));
           for (const requestedId of new Set(options.scan)) {
@@ -3628,17 +3651,21 @@ export async function main(
           );
         };
         try {
+          const evidenceFile = resolveInputPath(
+            args.file,
+            dependencies.currentDirectory(),
+          );
           if (options.to === "local") {
             const prepared = await (
               dependencies.prepareLocalExternalImport ??
               prepareLocalExternalImport
             )(
-              resolveCliPath(dependencies.currentDirectory(), args.file),
+              evidenceFile,
               {
                 ...options,
-                repository: resolveCliPath(
-                  dependencies.currentDirectory(),
+                repository: resolveInputPath(
                   options.repository,
+                  dependencies.currentDirectory(),
                 ),
               },
               {
@@ -3660,7 +3687,7 @@ export async function main(
                   `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
                 );
               writeDiagnostic(
-                `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
+                `Evidence file: ${diagnosticValue(evidenceFile)}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
               );
             };
             if (!structured) showPreview();
@@ -3681,7 +3708,7 @@ export async function main(
             return { ...result };
           }
           const prepared = await prepareExternalPublication(
-            resolveCliPath(dependencies.currentDirectory(), args.file),
+            evidenceFile,
             options,
             {
               environment: dependencies.environment,
@@ -3704,7 +3731,7 @@ export async function main(
                 `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
               );
             writeDiagnostic(
-              `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
+              `Evidence file: ${diagnosticValue(evidenceFile)}\nImported evidence remains not assessed by Codex.\n`,
             );
             const severities = new Map<string, number>();
             for (const finding of preview.findings)
@@ -3791,12 +3818,20 @@ export async function main(
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
+          const input = resolveInputPath(
+            args.scanDir,
+            dependencies.currentDirectory(),
+          );
+          const destination = publicationDestination(
+            options,
+            dependencies.environment,
+          );
+          const directory = await resolveParentTraversal(input, {
+            allowMissing: true,
+          });
           const result = await (
             dependencies.checkScanPublication ?? checkScanPublication
-          )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
-            ...publicationDestination(options, dependencies.environment),
-            signal: controller.signal,
-          });
+          )(directory, { ...destination, signal: controller.signal });
           controller.signal.throwIfAborted();
           return { ...result };
         } catch (error) {
@@ -4094,7 +4129,7 @@ export async function main(
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
-                repository: resolveCliPath(directory, args.repository ?? "."),
+                repository: resolveInputPath(args.repository ?? ".", directory),
                 config: {
                   pluginPath: options.pluginPath,
                   pythonPath: options.python,
@@ -4486,9 +4521,9 @@ export async function main(
             "git",
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
+              resolveInputPath(
                 args.repository ?? ".",
+                dependencies.currentDirectory(),
               ),
               "rev-parse",
               "--path-format=absolute",
@@ -4565,9 +4600,9 @@ export async function main(
         const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(
-            directory,
+          const repository = resolveInputPath(
             options.sourceRoot ?? ".",
+            directory,
           );
           const findings = await parseImportedFindings(
             await readRegularInputFile(
@@ -5007,7 +5042,10 @@ export async function main(
         signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(directory, args.repository ?? ".");
+          const repository = resolveInputPath(
+            args.repository ?? ".",
+            directory,
+          );
           const project = await selectedProjectConfig(
             options.config,
             dependencies,
@@ -5302,7 +5340,7 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolveCliPath(currentDirectory, args.input);
+            inputPath = resolveInputPath(args.input, currentDirectory);
             outputDir = settings.outputDir;
           }
           const scanOptionsByMode =
@@ -5541,11 +5579,11 @@ export async function main(
           const sourceRoot =
             options.sourceRoot === undefined
               ? undefined
-              : resolveCliPath(currentDirectory, options.sourceRoot);
-          const protectedRoot =
-            sourceRoot === undefined
-              ? undefined
-              : [currentDirectory, sourceRoot];
+              : resolveInputPath(options.sourceRoot, currentDirectory);
+          const protectedRoot = await artifactSourceProtectionRoots(
+            sourceRoot,
+            currentDirectory,
+          );
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
             const scanId =
@@ -5569,7 +5607,7 @@ export async function main(
             );
           }
           const arguments_: ArtifactExportArguments = {
-            scanDir: resolveCliPath(currentDirectory, scanDir),
+            scanDir: resolveInputPath(scanDir, currentDirectory),
             artifact: options.artifact,
             format,
             output:
@@ -7098,7 +7136,7 @@ async function prepareScanArgumentsFromRecipe(
     scanPromptFile,
     validationPromptFile,
   }: Pick<
-    ScanArguments,
+    ScanPromptSettings,
     "scanPrompt" | "scanPromptFile" | "validationPromptFile"
   >,
   directory: string,
@@ -7300,7 +7338,7 @@ async function prepareScanArgumentsFromRecipe(
             ? DiffTarget.workingTree({ base: reference ?? "HEAD" })
             : "repository",
     knowledgeBasePaths: knowledgeBasePaths.map((path) =>
-      resolveCliPath(directory, path),
+      resolveInputPath(path, directory),
     ),
     ...prompts,
     safetyIdentifier,
@@ -9270,16 +9308,19 @@ async function executeScan(
     deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
-    if (arguments_.validate) {
+    const repositoryPath = arguments_.validate
+      ? resolveInputPath(repository, directory)
+      : resolveRepositoryPath(repository, directory);
+    if (arguments_.validate || repositoryPath.split(sep).includes("..")) {
       repository = await normalizeRepository(
-        resolve(directory, expandHome(repository)),
+        repositoryPath,
         preparationAbortController.signal,
       );
     }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
-      resolve(directory, repository),
+      resolveRepositoryPath(repository, directory),
       directory,
     );
     const config: CodexSecurityConfig = {
@@ -9816,7 +9857,10 @@ async function executeScan(
     } else {
       result = await security.run(repository, options);
       scanDir = result.scanDir;
-      repository = resolve(dependencies.currentDirectory(), repository);
+      repository = resolveRepositoryPath(
+        repository,
+        dependencies.currentDirectory(),
+      );
       if (arguments_.validate) {
         const scanId = result.manifest.scan.id;
         const checkTarget = async () => {

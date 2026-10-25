@@ -930,7 +930,18 @@ describe("CLI", () => {
       const scan = join(actual, "scan");
       await mkdir(scan, { recursive: true });
       await symlink(actual, linked, "dir");
-      for (const output of ["-", join(directory, "results.sarif")] as const) {
+      const selected = join(linked, "scan");
+      const scanDirs = [selected];
+      if (process.platform !== "win32") {
+        await mkdir(join(actual, "child"));
+        const entry = join(directory, "entry");
+        await symlink(join(actual, "child"), entry);
+        scanDirs.push(`${entry}/../scan`);
+      }
+      for (const [input, output] of [
+        ...scanDirs.map((input) => [input, "-"] as const),
+        [selected, join(directory, "results.sarif")] as const,
+      ]) {
         const deps = dependencies();
         let received = "";
         deps.exportFindings = async (arguments_) => {
@@ -940,7 +951,7 @@ describe("CLI", () => {
         expect(
           await runCapturedCli(
             main,
-            ["export", join(linked, "scan"), "--output", output],
+            ["export", input, "--output", output],
             deps,
           ),
         ).toBe(0);
