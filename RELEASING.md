@@ -92,8 +92,8 @@ Review this policy before enabling automation for `1.x`.
 ## Rolling release PRs
 
 `node-release-pr` runs after pushes to `main` and can be dispatched manually.
-Newer pushes can replace pending pushes. Manual runs keep their own place and
-all runs that update the release PR share one writer queue.
+Newer pushes can replace pending pushes. Manual runs keep their own place.
+Previews and writes share one queue so a preview sees a consistent proposal.
 It defaults to a read-only preview. It does not merge, tag, publish, or change
 the existing publication gates.
 

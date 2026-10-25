@@ -27,6 +27,10 @@ jobs:
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED != 'true'))
     name: preview release PR
     runs-on: ubuntu-latest
+    # Keep the writer from changing the release branch while a preview reads it.
+    concurrency: &release-pr-queue
+      group: node-release-pr
+      queue: max
     env:
       RELEASE_PR_DRY_RUN: "true"
 
@@ -57,9 +61,7 @@ jobs:
       (github.event_name != 'workflow_dispatch' && vars.RELEASE_PR_ENABLED == 'true'))
     name: maintain release PR
     runs-on: ubuntu-latest
-    concurrency:
-      group: node-release-pr
-      queue: max
+    concurrency: *release-pr-queue
     permissions:
       contents: write
       pull-requests: write

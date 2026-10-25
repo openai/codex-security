@@ -881,6 +881,9 @@ describe("release workflow controls", () => {
       group: "node-release-pr",
       queue: "max",
     });
+    expect(jobs["preview"]?.concurrency).toEqual(
+      jobs["reconcile"]?.concurrency,
+    );
   });
 
   test.each([
