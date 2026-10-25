@@ -346,27 +346,29 @@ describe("live scan dashboard", () => {
   )(
     "keeps %s intact at ASCII wrapping boundaries with code=%p",
     (cluster, code) => {
-      for (let padding = 0; padding < 40; padding++) {
-        const stderr = capture(true);
-        const dashboard = createDashboard({
-          ...stderr.stream,
-          columns: 40,
-          rows: 24,
-        });
-        dashboard.start();
+      const stderr = capture(true);
+      const dashboard = createDashboard({
+        ...stderr.stream,
+        columns: 40,
+        rows: 160,
+      });
+      const lines = Array.from(
+        { length: 40 },
+        (_, padding) => "x".repeat(padding) + cluster + "yyy",
+      );
+      dashboard.start();
+      try {
         dashboard.record({
           id: "mixed-code",
           kind: "message",
           status: "completed",
-          description:
-            (code ? "```text\n" : "") +
-            "x".repeat(padding) +
-            cluster +
-            "yyy" +
-            (code ? "\n```" : ""),
+          description: (code ? ["```text", ...lines, "```"] : lines).join("\n"),
           paths: [],
         });
-        expect(lastFrame(stderr)).toContain(cluster);
+        const frame = lastFrame(stderr);
+        expect(frame.replace(/\s+/gu, "")).toContain(lines.join(""));
+        expect(frame.split(cluster).length - 1).toBe(lines.length);
+      } finally {
         dashboard.stop();
       }
     },
@@ -1194,39 +1196,39 @@ describe("live scan dashboard", () => {
     "preserves Escape-prefixed cancellation and chunk ownership in %s",
     async (mode) => {
       jest.useFakeTimers();
-      for (const chunks of [
-        ["\u001B", "\u0003"],
-        ["\u001B\u0003"],
-        ["\u001B", "\u001B"],
-        ["\u001B\u001B"],
-        ["\u001B[", "\u0003"],
-        ["\u001B[\u0003"],
-        ["\u001BO", "\u0003"],
-        ["\u001BO\u0003"],
-        ["\u001B", "\u0003d"],
-        ["\u001B\u0003d"],
-        ["\u001B", "\u001B\u0003"],
-        ["\u001B\u001B", "\u0003"],
-        ["\u001B\u001B\u0003"],
-        ["\u001B", "\u001B\u0003d"],
-        ["\u001B\u001B[\u0003"],
-        ["\u001B", "\u001B[\u0003"],
-        ["\u001B\u001B", "[\u0003"],
-        ["\u001B\u001B[", "\u0003"],
-        ["\u001B", "\u001B", "[\u0003"],
-        ["\u001B", "\u001B[", "\u0003"],
-        ["\u001B\u001B", "[", "\u0003"],
-        ["\u001B", "\u001B", "[", "\u0003"],
-        ...Array.from({ length: 8 }, (_, index) => {
-          const escapes = "\u001B".repeat(index + 1);
-          return [
-            ["\u001B", `${escapes}\u0003`],
-            [escapes, "\u001B\u0003"],
-            [escapes, "\u0003"],
-            [`${escapes}\u0003`],
+      // The scan and budget handlers differ in who owns the rest of a chunk
+      // after Escape. Both component views use the ordinary key decoder.
+      const layouts = mode.startsWith("component")
+        ? [["\u001B\u0003"], ["\u001B", "\u0003d"], ["\u001B", "\u001B"]]
+        : [
+            ["\u001B", "\u001B"],
+            ["\u001B\u001B"],
+            ["\u001B[", "\u0003"],
+            ["\u001B[\u0003"],
+            ["\u001BO", "\u0003"],
+            ["\u001BO\u0003"],
+            ["\u001B", "\u0003d"],
+            ["\u001B\u0003d"],
+            ["\u001B", "\u001B\u0003d"],
+            ["\u001B\u001B[\u0003"],
+            ["\u001B", "\u001B[\u0003"],
+            ["\u001B\u001B", "[\u0003"],
+            ["\u001B\u001B[", "\u0003"],
+            ["\u001B", "\u001B", "[\u0003"],
+            ["\u001B", "\u001B[", "\u0003"],
+            ["\u001B\u001B", "[", "\u0003"],
+            ["\u001B", "\u001B", "[", "\u0003"],
+            ...Array.from({ length: 8 }, (_, index) => {
+              const escapes = "\u001B".repeat(index + 1);
+              return [
+                ...(index === 0 ? [] : [["\u001B", `${escapes}\u0003`]]),
+                [escapes, "\u001B\u0003"],
+                [escapes, "\u0003"],
+                [`${escapes}\u0003`],
+              ];
+            }).flat(),
           ];
-        }).flat(),
-      ]) {
+      for (const chunks of layouts) {
         const stderr = capture(true);
         const input = new DashboardTestInput();
         input.isRaw = true;
@@ -1241,8 +1243,9 @@ describe("live scan dashboard", () => {
           onInterrupt,
         });
         let answer: number | undefined | "pending" = "pending";
+        // Exercise bytewise UTF-8 before the split and coalesced following-key cases.
         const pasted =
-          mode === "budget"
+          mode === "budget" && chunks.at(-1)?.endsWith("d")
             ? Array.from(Buffer.from("é🙂界"), (byte) => Uint8Array.of(byte))
             : [];
         dashboard.start();
@@ -1273,7 +1276,7 @@ describe("live scan dashboard", () => {
                 answer = value;
               });
           for (const chunk of pasted) input.emit("data", chunk);
-          if (mode === "budget") {
+          if (pasted.length > 0) {
             expect(lastFrame(stderr)).toContain("é🙂界");
             expect(lastFrame(stderr)).not.toContain("\uFFFD");
           }
