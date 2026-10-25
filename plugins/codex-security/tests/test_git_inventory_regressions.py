@@ -124,6 +124,42 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("captured", [False, True], ids=["legacy-scopes", "saved-scopes"])
+@pytest.mark.parametrize(
+    ("mode", "kind", "expected"),
+    [
+        ("diff", None, None),
+        ("diff", "unknown", None),
+        ("diff", "working_tree", None),
+        ("diff", "commit", "1  fixture"),
+        ("diff", "range", "1  fixture"),
+        ("standard", None, "1  fixture"),
+    ],
+)
+def test_saved_excerpt_requires_a_known_diff_source(
+    tmp_path: Path, mode: str, kind: str | None, expected: str | None, captured: bool
+) -> None:
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    scan = {
+        "mode": mode,
+        "diff_target_kind": kind,
+        "target_revision": revision,
+        "target_snapshot_digest": None,
+    }
+    if captured:
+        scopes = load_script("workbench_source_scopes").capture_source_scopes(
+            target, (revision, None, 0, 0), ["."]
+        )
+        scan["source_scopes_json"] = json.dumps(scopes)
+    assert (
+        load_script("workbench_source_excerpt").finding_source_excerpt(
+            scan, target, [{"path": "README.md", "startLine": 1}], ["."]
+        )
+        == expected
+    )
+
+
 def test_working_tree_excerpt_declines_uncommitted_line_content(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)

@@ -63,6 +63,7 @@
 - show scan usage timestamps and account allowance ([#1911](https://github.com/openai/codex-security/pull/1911))
 - keep local action dependencies up to date ([#1961](https://github.com/openai/codex-security/pull/1961))
 - distinguish file inventory from review progress ([#1960](https://github.com/openai/codex-security/pull/1960))
+- omit excerpts for unknown diff target kinds ([#515](https://github.com/openai/codex-security/pull/515))
 
 <!-- release-section: highlights:end -->
 
