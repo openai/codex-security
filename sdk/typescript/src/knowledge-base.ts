@@ -288,9 +288,10 @@ async function extractPdf(
       return pages.join("\n");
     } finally {
       await loadingTask.destroy();
+      signal?.throwIfAborted();
     }
   } catch (error) {
-    if (signal?.aborted) signal.throwIfAborted();
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });

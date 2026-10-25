@@ -10,9 +10,10 @@ afterEach(cleanup);
 test.each([
   "load",
   "page",
-  "text",
   "empty final page",
+  "during cleanup",
   "cleanup failure",
+  "uncanceled cleanup failure",
   "not canceled",
 ] as const)("PDF extraction cancellation boundary: %s", async (boundary) => {
   if (
@@ -29,6 +30,11 @@ test.each([
   await mkdir(staging);
   await writeFile(documentPath, "%PDF-synthetic-loader-fixture");
   const reason = new Error("Synthetic PDF extraction cancellation");
+  const cleanupError = new Error("Synthetic PDF cleanup failure");
+  const emptyPage =
+    boundary === "empty final page" || boundary === "during cleanup";
+  const allPages =
+    boundary === "not canceled" || boundary === "uncanceled cleanup failure";
   let controller = new AbortController();
   let pages: number[] = [];
   let textPages: number[] = [];
@@ -39,7 +45,7 @@ test.each([
       promise: Promise.resolve().then(() => {
         if (boundary === "load") controller.abort(reason);
         return {
-          numPages: boundary === "empty final page" ? 1 : 3,
+          numPages: emptyPage ? 1 : 3,
           async getPage(number: number) {
             pages.push(number);
             if (boundary === "page") controller.abort(reason);
@@ -47,16 +53,12 @@ test.each([
               async getTextContent() {
                 textPages.push(number);
                 if (
-                  boundary === "text" ||
                   boundary === "empty final page" ||
                   boundary === "cleanup failure"
                 )
                   controller.abort(reason);
                 return {
-                  items:
-                    boundary === "empty final page"
-                      ? []
-                      : [{ str: `Synthetic page ${number}` }],
+                  items: emptyPage ? [] : [{ str: `Synthetic page ${number}` }],
                 };
               },
             };
@@ -65,8 +67,12 @@ test.each([
       }),
       async destroy() {
         destroyed++;
-        if (boundary === "cleanup failure")
-          throw new Error("Synthetic PDF cleanup failure");
+        if (boundary === "during cleanup") controller.abort(reason);
+        if (
+          boundary === "cleanup failure" ||
+          boundary === "uncanceled cleanup failure"
+        )
+          throw cleanupError;
       },
     }),
   }));
@@ -104,14 +110,18 @@ test.each([
       await expect(read()).resolves.toEqual([
         "Synthetic page 1\nSynthetic page 2\nSynthetic page 3",
       ]);
+    } else if (boundary === "uncanceled cleanup failure") {
+      await expect(read()).rejects.toMatchObject({
+        cause: { cause: cleanupError },
+      });
     } else {
       await expect(read()).rejects.toBe(reason);
     }
     expect(pages).toEqual(
-      boundary === "not canceled" ? [1, 2, 3] : boundary === "load" ? [] : [1],
+      allPages ? [1, 2, 3] : boundary === "load" ? [] : [1],
     );
     expect(textPages).toEqual(
-      boundary === "not canceled"
+      allPages
         ? [1, 2, 3]
         : boundary === "load" || boundary === "page"
           ? []
