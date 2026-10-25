@@ -56,6 +56,21 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
+def sort_checkpoint_entries(monkeypatch, *, key=None, reverse=False):
+    from workbench import saved_sources
+
+    children = saved_sources._children
+    monkeypatch.setattr(
+        saved_sources,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), key=key, reverse=reverse),
+    )
+
+
+def interrupt_publication(*args, **kwargs):
+    raise OSError("Synthetic publication interruption")
+
+
 def saved_coverage(*, deferred=(), surfaces=()):
     return {
         "surfaces": list(surfaces),

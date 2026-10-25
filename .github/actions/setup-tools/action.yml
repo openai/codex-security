@@ -1,9 +1,9 @@
 name: Set up TypeScript tools
 description: Install the pinned package manager and Node.js runtime for repository tools.
 inputs:
-  setup-node:
-    description: Install the pinned Node.js runtime; false keeps an earlier setup step.
-    default: "true"
+  node-version:
+    description: Node.js version for repository tools.
+    default: "22.13.0"
   cache-dependency-path:
     description: Lockfiles used for the pnpm store cache.
     default: "sdk/typescript/pnpm-lock.yaml"
@@ -22,7 +22,7 @@ runs:
     - name: Set up Node.js and pnpm cache
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
-        node-version: ${{ inputs.setup-node == 'true' && '22.13.0' || '' }}
+        node-version: ${{ inputs.node-version }}
         architecture: ${{ inputs.architecture }}
         cache: pnpm
         cache-dependency-path: ${{ inputs.cache-dependency-path }}
