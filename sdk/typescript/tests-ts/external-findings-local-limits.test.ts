@@ -293,7 +293,7 @@ test("local SQLite preserves each oversized evidence field and Cloud rejects eac
         prepareNormalizedExternalPublication(
           { read: 1, findings: [input], excluded: [] },
           options,
-          { credentials },
+          { ...dependencies, credentials },
         ),
       ).rejects.toThrow();
     }
@@ -339,7 +339,7 @@ test.each(["wiz", "endor"] as const)(
         prepareNormalizedExternalPublication(
           { read: 1, findings: prepared.preview.findings, excluded: [] },
           options,
-          { credentials },
+          { ...dependencies, credentials },
         ),
       ).rejects.toThrow("512");
       expect(credentials).not.toHaveBeenCalled();

@@ -9,6 +9,8 @@ import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { captureCli, runCapturedCli } from "./support/cli-run.js";
 import { importedAdvisory } from "./support/github-import-fixtures.js";
 
+const enabledEnvironment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" };
+
 function client(respond: (url: URL) => Response): Octokit {
   return new Octokit({
     auth: "SYNTHETIC_ADVISORY_TOKEN",
@@ -26,6 +28,48 @@ function client(respond: (url: URL) => Response): Octokit {
     },
   });
 }
+
+test.each(["repository", "global"] as const)(
+  "%s advisory imports require opt-in before GitHub authentication",
+  async (source) => {
+    const createGitHub = mock(async () => client(() => Response.json([])));
+    await expect(
+      importGitHubAdvisories(
+        {
+          repository: "example/project",
+          source,
+          advisoryIds: [importedAdvisory().ghsaId],
+        },
+        { environment: {}, createGitHub },
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(createGitHub).not.toHaveBeenCalled();
+  },
+);
+
+test("concurrent advisory imports keep opt-in scoped to each call", async () => {
+  const advisory = importedAdvisory();
+  const createGitHub = mock(async () =>
+    client(() => Response.json([advisory.advisory])),
+  );
+  const [enabled, disabled] = await Promise.allSettled([
+    importGitHubAdvisories(
+      { repository: "example/project" },
+      { environment: enabledEnvironment, createGitHub },
+    ),
+    importGitHubAdvisories(
+      { repository: "example/project" },
+      { environment: {}, createGitHub },
+    ),
+  ]);
+  expect(enabled).toEqual({ status: "fulfilled", value: [advisory] });
+  expect(disabled.status).toBe("rejected");
+  if (disabled.status === "rejected")
+    expect(disabled.reason.message).toContain(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+  expect(createGitHub).toHaveBeenCalledTimes(1);
+});
 
 test("repository advisory lists default to published and paginate cursors with full evidence", async () => {
   const paths: string[] = [];
@@ -47,7 +91,7 @@ test("repository advisory lists default to published and paginate cursors with f
   });
   const imported = await importGitHubAdvisories(
     { repository: "example/project" },
-    { createGitHub: async () => github },
+    { environment: enabledEnvironment, createGitHub: async () => github },
   );
   expect(paths).toHaveLength(2);
   expect(new URL(paths[1]!).searchParams.get("after")).toBe("cursor-2");
@@ -68,7 +112,7 @@ test("global advisory selection uses only explicit deduplicated IDs and preserve
       source: "global",
       advisoryIds: [selected.ghsaId.toLowerCase(), selected.ghsaId],
     },
-    { createGitHub: async () => github },
+    { environment: enabledEnvironment, createGitHub: async () => github },
   );
   expect(paths).toEqual([`/advisories/${selected.ghsaId}`]);
   expect(imported).toEqual([selected]);
@@ -86,7 +130,7 @@ test("explicit repository IDs allow private drafts without listing other advisor
   });
   const imported = await importGitHubAdvisories(
     { repository: "example/project", advisoryIds: [selected.ghsaId] },
-    { createGitHub: async () => github },
+    { environment: enabledEnvironment, createGitHub: async () => github },
   );
   expect(imported[0]!.advisory).toEqual(draft);
 });
@@ -96,7 +140,7 @@ test("global crawl and misleading exact-ID state filters fail before GitHub auth
   await expect(
     importGitHubAdvisories(
       { repository: "example/project", source: "global" },
-      { createGitHub },
+      { environment: enabledEnvironment, createGitHub },
     ),
   ).rejects.toThrow("explicit GHSA IDs");
   await expect(
@@ -106,7 +150,7 @@ test("global crawl and misleading exact-ID state filters fail before GitHub auth
         advisoryIds: [importedAdvisory().ghsaId],
         state: "draft",
       },
-      { createGitHub },
+      { environment: enabledEnvironment, createGitHub },
     ),
   ).rejects.toThrow("only filters repository lists");
   expect(createGitHub).not.toHaveBeenCalled();
@@ -125,7 +169,7 @@ test("a later advisory page failure returns no incomplete selection", async () =
   await expect(
     importGitHubAdvisories(
       { repository: "example/project" },
-      { createGitHub: async () => github },
+      { environment: enabledEnvironment, createGitHub: async () => github },
     ),
   ).rejects.toThrow("rate limited");
 });
@@ -147,6 +191,7 @@ test("GitHub advisory CLI exposes separate selection defaults and exact public I
         "json",
       ],
       dependencies({
+        environment: enabledEnvironment,
         importGitHubAdvisories: async (value) => {
           options = value;
           return [importedAdvisory("global")];
@@ -165,7 +210,7 @@ test("GitHub advisory CLI exposes separate selection defaults and exact public I
   expect(
     await schema.run(
       ["import", "github-advisories", "--schema", "--format", "json"],
-      dependencies(),
+      dependencies({ environment: enabledEnvironment }),
     ),
   ).toBe(0);
   expect(JSON.parse(schema.text())).toMatchObject({
@@ -185,6 +230,7 @@ test("advisory CLI cancellation removes handlers and preserves its exit code", a
       main,
       ["import", "github-advisories", "example/project"],
       dependencies({
+        environment: enabledEnvironment,
         signals,
         importGitHubAdvisories: async ({ signal }) => {
           signals.emit("SIGINT");
@@ -225,6 +271,7 @@ for (const format of [
             "--full-output",
           ],
           dependencies({
+            environment: enabledEnvironment,
             signals,
             importGitHubAdvisories: async ({ signal }) => {
               if (failure === "error")

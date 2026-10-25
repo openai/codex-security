@@ -77,6 +77,7 @@
 - include unscanned repository targets ([#547](https://github.com/openai/codex-security/pull/547))
 - constrain deferred coverage paths ([#558](https://github.com/openai/codex-security/pull/558))
 - compile evals with separate Ajv installations ([#2009](https://github.com/openai/codex-security/pull/2009))
+- require opt-in for external import workflows ([#1863](https://github.com/openai/codex-security/pull/1863))
 
 <!-- release-section: highlights:end -->
 
@@ -88,5 +89,6 @@ Review migration steps for these breaking changes:
 
 - use the CLI verdict contract for hosted verification ([#1951](https://github.com/openai/codex-security/pull/1951))
 - run inventory and ranking helpers in Node ([#1432](https://github.com/openai/codex-security/pull/1432))
+- require opt-in for external import workflows ([#1863](https://github.com/openai/codex-security/pull/1863))
 
 <!-- release-section: upgrades:end -->
