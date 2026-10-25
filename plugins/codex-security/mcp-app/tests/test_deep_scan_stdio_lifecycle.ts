@@ -1,3 +1,4 @@
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
 import { assertNoError, assertFlagPair } from "./assertions.ts";
@@ -14,6 +15,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -22,7 +24,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
-import * as streams from "./support/streams.ts";
+import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +59,7 @@ async function testDeepScanStdioLifecycle() {
     "fake-codex-signal-checkpoint-control.txt",
   );
   const fakeCodexPath = path.join(fixtureRoot, "fake-codex.mjs");
-  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper.mjs");
+  const pythonWrapperPath = path.join(fixtureRoot, "python-wrapper ");
   const cancelFailureControlPath = path.join(
     fixtureRoot,
     "fail-next-cancel-scan",
@@ -117,6 +119,28 @@ stop_after_no_new = 1
 max_discovery_runs = 2
 `,
   );
+  await writeFile(
+    path.join(codexHome, `${threadId}.jsonl`),
+    [
+      { type: "session_meta", payload: { id: threadId } },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "active-parent-turn",
+          cyber_access_program: "daybreak_red",
+        },
+      },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "another-parent-turn",
+          cyber_access_program: "standard",
+        },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n",
+  );
   await writeFakeCodex(fakeCodexPath);
   await writeFile(
     runtimeConfigPath,
@@ -126,7 +150,8 @@ profile = "selected"
 model_reasoning_summary = "none"
 `,
   );
-  await writePythonWrapper(pythonWrapperPath);
+  await writePythonWrapper(`${pythonWrapperPath}.mjs`);
+  await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
   await buildServer(serverBundlePath, { target: "node20" });
 
   const environment = {
@@ -140,6 +165,7 @@ model_reasoning_summary = "none"
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
+    CODEX_SECURITY_PYTHON_COMMAND: pythonWrapperPath,
     REAL_PYTHON: process.env.PYTHON?.trim() || "python3",
     FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL: cancelFailureControlPath,
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
@@ -226,7 +252,12 @@ model_reasoning_summary = "none"
         "start_codex_security_deep_scan",
         { targetPath, scope: ".", userContext: "stdio lifecycle fixture" },
         threadId,
-        { model: "gpt-5.5", reasoning_effort: "xhigh" },
+        {
+          model: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          thread_id: threadId,
+          turn_id: "active-parent-turn",
+        },
       ),
     );
 
@@ -248,7 +279,7 @@ model_reasoning_summary = "none"
     assert.equal(workerContext.pluginRoot, pluginRoot);
     assert.equal(startedWorker.readCoreScanReference, true);
     assert.equal(workerContext.targetPath, await realpath(targetPath));
-    assert.equal(workerContext.scope, ".");
+    assert.deepEqual(workerContext.includePaths, ["."]);
     assert.equal(workerContext.scanId, scanId);
     for (const field of [
       "artifactDir",
@@ -270,6 +301,11 @@ model_reasoning_summary = "none"
       { code: "ENOENT" },
     );
     assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
+    assertFlagPair(
+      startedWorker.argv,
+      "--cyber-access-program",
+      "daybreak_red",
+    );
     assert.equal(
       startedWorker.argv.includes('model_reasoning_effort="xhigh"'),
       true,
@@ -555,7 +591,7 @@ model_reasoning_summary = "none"
     assert.equal(activeFailureState.workers[0].status, "running");
     assertProcessAlive(failedWorker.pid);
 
-    const failureMessage = "fixture unrecoverable failure";
+    const failureMessage = "fixture unrecoverable failure\0source";
     const failureResponse = await server.request(
       21,
       "tools/call",
@@ -936,11 +972,13 @@ model_reasoning_summary = "none"
       const helperLaunches = await readLogLines(workbenchLaunchLogPath);
       for (const command of ["get-scan", "write-scan-draft", "complete-scan"]) {
         const launches = helperLaunches.filter(
-          (launch) => launch.args[1] === command,
+          (launch) => launch.workbenchArgs[0] === command,
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], workbenchPath);
+          assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
+          assert.equal(launch.args.at(-1), workbenchPath);
+          assert.equal(launch.args.length, 4);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -952,7 +990,10 @@ model_reasoning_summary = "none"
         assertReadOnlyWorkerInvocation(execution.argv, codexHome);
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
-        if (context.workerLabel) assert.equal(context.pluginRoot, pluginRoot);
+        if (context.workerLabel) {
+          assert.equal(context.pluginRoot, pluginRoot);
+          assert.deepEqual(context.includePaths, ["."]);
+        }
         assertWorkerArtifactEnvironment(
           execution.argv,
           pluginRoot,
@@ -985,6 +1026,13 @@ model_reasoning_summary = "none"
     } finally {
       await restartedServer.stop();
     }
+    await testCliDeepScanEngine({
+      fixtureRoot,
+      environment,
+      serverBundlePath,
+      codexHome,
+      restartControlPath,
+    });
   } catch (error) {
     (error as Error).message += `\nMCP stderr:\n${server.stderrText()}`;
     throw error;
@@ -996,19 +1044,274 @@ model_reasoning_summary = "none"
   }
 }
 
-function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
-  return streams.startServer(serverPath, env, {
-    cwd: pluginRoot,
-    component: "codex_security_deep_scan",
-    timeoutMessage: (id) => `Timed out waiting for JSON-RPC response ${id}.`,
+async function testCliDeepScanEngine({
+  fixtureRoot,
+  environment,
+  serverBundlePath,
+  codexHome,
+  restartControlPath,
+}: {
+  fixtureRoot: string;
+  environment: NodeJS.ProcessEnv;
+  serverBundlePath: string;
+  codexHome: string;
+  restartControlPath: string;
+}) {
+  const canonicalRoot = await realpath(fixtureRoot);
+  const repository = path.join(canonicalRoot, "cli-engine-target");
+  await mkdir(repository);
+  await writeFile(
+    path.join(repository, "fixture.py"),
+    "print('engine fixture')\n",
+  );
+  const paths = ["api", "background jobs"];
+  for (const directory of paths) {
+    await mkdir(path.join(repository, directory));
+    await writeFile(
+      path.join(repository, directory, "source.py"),
+      "# scoped fixture\n",
+    );
+  }
+  const userContext =
+    "  Review café authentication.\r\nPreserve exact context.\t";
+  const knowledgeBase = path.join(canonicalRoot, "knowledge-base");
+  await mkdir(knowledgeBase);
+  await writeFile(
+    path.join(knowledgeBase, "context.txt"),
+    "Synthetic deployment context.",
+  );
+  const threadId = "cli-engine-session";
+  const register = async (name: string, scoped = false) => {
+    const scanDir = path.join(canonicalRoot, name);
+    await mkdir(scanDir, { mode: 0o700 });
+    const registration = await runWorkbench(
+      environment,
+      [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
+          repository,
+          mode: "deep",
+          target: scoped
+            ? { kind: "paths", paths }
+            : { kind: "repository", paths: [] },
+          config: { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
+        },
+        userContext,
+      }),
+    );
+    await runWorkbench(environment, [
+      "set-scan-thread",
+      "--scan-id",
+      registration.scanId,
+      "--thread-id",
+      threadId,
+    ]);
+    return { scanId: registration.scanId as string, scanDir };
+  };
+  const launch = (scanId: string, overrides: NodeJS.ProcessEnv = {}) => {
+    const execution = execFileAsync(
+      process.execPath,
+      [serverBundlePath, "--deep-scan-engine"],
+      {
+        env: {
+          ...environment,
+          CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
+          ...overrides,
+        },
+        encoding: "utf8",
+        timeout: 30_000,
+      },
+    );
+    execution.child.stdin!.write(
+      JSON.stringify({
+        scanId,
+        threadId,
+        model: "gpt-6.1-sol",
+        reasoningEffort: "max",
+        permissionProfile: (
+          parentSandboxState as { permissionProfile: unknown }
+        ).permissionProfile,
+      }) + "\n",
+    );
+    return execution;
+  };
+  const completed = await register("cli-engine-completed", true);
+  const startIndex = (await readLogLines(environment.FAKE_CODEX_START_LOG!))
+    .length;
+  const helperStartIndex = (
+    await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
+  ).length;
+  const result = await launch(completed.scanId);
+  const helperLaunches = (
+    await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
+  ).slice(helperStartIndex);
+  assert.ok(helperLaunches.length > 0);
+  for (const launch of helperLaunches) {
+    assert.deepEqual(launch.args.slice(0, 5), ["-I", "-X", "utf8", "-B", "-c"]);
+    assert.equal(launch.args.at(-1), workbenchPath);
+    assert.equal(launch.args.length, 7);
+    assert.equal(launch.cwd, pluginRoot);
+  }
+  assert.deepEqual(JSON.parse(result.stdout), {
+    scanId: completed.scanId,
+    manifestPath: path.join(completed.scanDir, "scan-manifest.json"),
   });
+  const starts = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).slice(
+    startIndex,
+  );
+  assert.ok(
+    starts.some((entry) => discoveryPromptContext(entry.stdin).workerLabel),
+  );
+  assert.ok(
+    starts.some(
+      (entry) => discoveryPromptContext(entry.stdin).claimedWorkerIds,
+    ),
+  );
+  for (const entry of starts) {
+    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
+    assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
+    assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
+    assert.equal(entry.hasExpectedApiKey, true);
+    assert.equal(entry.knowledgeBase, knowledgeBase);
+    const context = discoveryPromptContext(entry.stdin);
+    if (context.workerLabel) {
+      assert.deepEqual(context.includePaths, paths);
+      assert.equal(context.userContext, userContext);
+    }
+  }
+  const count = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length;
+  await launch(completed.scanId);
+  assert.equal(
+    (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
+    count,
+  );
+  await runWorkbench(environment, [
+    "complete-scan",
+    "--scan-id",
+    completed.scanId,
+  ]);
+  const manifest = await readJson(
+    path.join(completed.scanDir, "scan-manifest.json"),
+  );
+  assert.equal(manifest.scan.status, "completed");
+  assert.ok(manifest.scan.sealedAt);
+  assert.deepEqual(manifest.scan.scope.includePaths, paths);
+  assert.ok(
+    (await readFile(path.join(completed.scanDir, "report.md"), "utf8")).length >
+      0,
+  );
+
+  await rm(restartControlPath);
+  const canceled = await register("cli-engine-canceled");
+  const execution = launch(canceled.scanId);
+  const outcome = execution.then(
+    () => undefined,
+    (error) => error,
+  );
+  try {
+    await waitForJsonLines(environment.FAKE_CODEX_START_LOG!, count + 1);
+    await waitForDeepScanWorker({
+      environment,
+      scanId: canceled.scanId,
+      threadId,
+    });
+    const running = (
+      await readLogLines(environment.FAKE_CODEX_START_LOG!)
+    ).slice(count);
+    assert.ok(running.length > 0);
+    const observerLog = path.join(
+      canonicalRoot,
+      "cli-observer-workbench.jsonl",
+    );
+    const observer = launch(canceled.scanId, {
+      FAKE_WORKBENCH_LAUNCH_LOG: observerLog,
+    });
+    const observerOutcome = observer.then(
+      () => undefined,
+      (error) => error,
+    );
+    try {
+      await waitFor(
+        async () =>
+          (await readLogLines(observerLog)).some(
+            (entry) => entry.workbenchArgs[0] === "get-deep-scan",
+          ),
+        "second CLI engine to observe the active coordinator",
+      );
+      observer.child.stdin!.end();
+      const error = await observerOutcome;
+      assert.ok(error);
+      assert.equal(error.killed, false);
+      for (const worker of running) assertProcessAlive(worker.pid);
+      assert.equal(
+        (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
+        count + running.length,
+      );
+    } finally {
+      if (
+        observer.child.exitCode === null &&
+        observer.child.signalCode === null
+      )
+        observer.child.kill("SIGKILL");
+      await observerOutcome;
+    }
+    execution.child.stdin!.end();
+    assert.ok(await outcome);
+    for (const worker of running) {
+      assert.throws(() => process.kill(worker.pid, 0), /ESRCH/);
+    }
+    const saved = await getDeepScan({
+      environment,
+      scanId: canceled.scanId,
+      threadId,
+    });
+    assert.notEqual(saved.status, "succeeded");
+    assert.equal(
+      saved.workers.filter(
+        (worker: PersistedDeepScanWorker) => worker.status === "running",
+      ).length,
+      0,
+    );
+  } finally {
+    if (
+      execution.child.exitCode === null &&
+      execution.child.signalCode === null
+    )
+      execution.child.kill("SIGKILL");
+    await outcome;
+  }
+}
+
+function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
+  return startRpcServer(
+    {
+      command: process.execPath,
+      args: [serverPath, "--stdio"],
+      cwd: pluginRoot,
+      env: env,
+      stderr: "pipe",
+    },
+    { component: "codex_security_deep_scan", timeoutMs: 15_000 },
+  );
 }
 
 function toolCall(
   name: string,
   args: Record<string, unknown>,
   threadId: string,
-  turnMetadata?: { model: string; reasoning_effort: string },
+  turnMetadata?: {
+    model: string;
+    reasoning_effort: string;
+    thread_id?: string;
+    turn_id?: string;
+  },
   sandboxState: unknown = parentSandboxState,
 ) {
   return {
@@ -1138,14 +1441,20 @@ function discoveryPromptContext(prompt: string) {
   return JSON.parse(match[1]);
 }
 
-async function runWorkbench(environment: NodeJS.ProcessEnv, args: string[]) {
+async function runWorkbench(
+  environment: NodeJS.ProcessEnv,
+  args: string[],
+  input?: string,
+) {
   const python = process.env.PYTHON?.trim() || "python3";
-  const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+  const execution = execFileAsync(python, [workbenchPath, ...args], {
     cwd: pluginRoot,
     env: environment,
     maxBuffer: 4 * 1024 * 1024,
     timeout: 30_000,
   });
+  execution.child.stdin!.end(input);
+  const { stdout } = await execution;
   return JSON.parse(stdout);
 }
 
@@ -1156,21 +1465,12 @@ async function writeFakeCodex(executablePath: string) {
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 if (process.argv.includes('app-server')) {
-  let buffer = '';
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => {
-    buffer += chunk;
-    while (true) {
-      const newline = buffer.indexOf('\\n');
-      if (newline < 0) return;
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      const message = JSON.parse(line);
-      if (message.method === 'initialized') continue;
+${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'thread/read') {
+        result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
         result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
@@ -1181,25 +1481,23 @@ if (process.argv.includes('app-server')) {
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');
         continue;
       }
-      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
-    }
-  });
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');`)}
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
 const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
 const root = process.argv[process.argv.indexOf('--cd') + 1];
 const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
-appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
   if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
-    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
     if (context.claimedWorkerIds) {
       const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
       const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
-      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [], coverage }));
+      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
     } else {
       writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
     }
@@ -1211,7 +1509,7 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
 setInterval(() => {}, 1_000);
 const stop = (signal) => {
   if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
-    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
     const checkpointDir = path.join(root, 'checkpoints');
     mkdirSync(checkpointDir, { recursive: true });
     writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
@@ -1234,17 +1532,19 @@ async function writePythonWrapper(executablePath: string) {
 import { appendFileSync, existsSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\\n');
+const input = Buffer.concat(await process.stdin.toArray());
+const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
+appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
-if (args[1] === 'cancel-scan') {
-  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');
+if (workbenchArgs[0] === 'cancel-scan') {
+  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');
 }
-if (args[1] === 'cancel-scan' && control && existsSync(control)) {
+if (workbenchArgs[0] === 'cancel-scan' && control && existsSync(control)) {
   unlinkSync(control);
   console.error('injected cancel-scan failure');
   process.exit(1);
 }
-const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { stdio: 'inherit' });
+const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { input, stdio: ['pipe', 'inherit', 'inherit'] });
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);
 `,

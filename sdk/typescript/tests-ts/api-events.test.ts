@@ -1,6 +1,6 @@
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
-import { mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   CodexSecurityError,
+  ContractValidationError,
   IncompleteScanError,
   ScanInterruptedError,
   type ScanAuthentication,
@@ -317,7 +318,11 @@ describe("one-shot scan events", () => {
   });
 
   test("does not mistake external-provider keys for OpenAI API organizations", async () => {
-    for (const source of ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"] as const) {
+    for (const source of [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
+      "CHEAPER_INFERENCE_API_KEY",
+    ] as const) {
       for (const status of ["not_granted", "unknown"] as const) {
         const scanDir = await copyCompletedScan(await temporaryDirectory());
         const warnings: string[] = [];
@@ -538,7 +543,8 @@ describe("one-shot scan events", () => {
 
   test("lets the workbench seal artifacts before validating completed scans", async () => {
     const root = await temporaryDirectory();
-    const scanDir = join(root, "scan");
+    const scanDir = await copyCompletedScan(root);
+    await rm(join(scanDir, "report.md"));
     const events = completedEvents();
     let finalized = false;
 
@@ -551,7 +557,8 @@ describe("one-shot scan events", () => {
           cache_write_input_tokens: 0,
           output_tokens: 3,
         });
-        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
+        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(true);
+        expect(existsSync(join(scanDir, "report.md"))).toBe(false);
         await copyCompletedScan(root);
         finalized = true;
       },
@@ -984,33 +991,10 @@ describe("one-shot scan events", () => {
     );
   });
 
-  test("forwards bounded worker-capacity updates while the scan runs", async () => {
+  test("forwards worker dispatch updates while the scan runs", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
-      yield {
-        type: "item.completed",
-        item: {
-          id: "command-1",
-          type: "command_execution",
-          command:
-            "python3 /plugin/scripts/config_preflight.py --profile security_scan",
-          aggregated_output: JSON.stringify({
-            profile: "security_scan",
-            status: "ready",
-            results: [
-              { capability: "delegated_workers", status: "pass" },
-              {
-                capability: "usable_worker_slots_6",
-                status: "pass",
-                actual: 8,
-              },
-            ],
-          }),
-          exit_code: 0,
-          status: "completed",
-        },
-      };
       yield {
         type: "item.completed",
         item: {
@@ -1027,7 +1011,6 @@ describe("one-shot scan events", () => {
       }),
     ).resolves.toBeDefined();
     expect(statuses).toEqual([
-      { kind: "preflight", delegation: "available", configuredSlots: 8 },
       { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
     ]);
   });
@@ -1146,3 +1129,70 @@ describe("one-shot scan events", () => {
     ]);
   });
 });
+
+test.each([
+  "scan-manifest.json",
+  "findings.json",
+  "coverage.json",
+  "report.md",
+])("missing required artifact %s remains an incomplete scan", async (name) => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  await rm(join(scanDir, name));
+  await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+    name: IncompleteScanError.name,
+    message: `Codex Security scan completed without required artifacts: ${name}`,
+  });
+});
+
+test("an aborted completed turn cannot prepare workbench artifacts", async () => {
+  const abortController = new AbortController();
+  let finalizations = 0;
+  async function* events() {
+    yield { type: "thread.started", thread_id: "synthetic-thread" } as const;
+    yield { type: "turn.started" } as const;
+    abortController.abort("synthetic cancellation");
+    yield completedTurn();
+  }
+  await expect(
+    runEvents("/synthetic-scan", events(), {
+      abortController,
+      workbenchValidated: true,
+      onFinalize: async () => {
+        finalizations++;
+      },
+    }),
+  ).rejects.toMatchObject({ name: ScanInterruptedError.name });
+  expect(finalizations).toBe(0);
+});
+
+test("workbench reconciliation precedes admission of canonical artifacts", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const file = join(scanDir, "scan-manifest.json");
+  const original = await readFile(file, "utf8");
+  const interrupted = JSON.parse(original);
+  interrupted.scan.complete = false;
+  await writeFile(file, JSON.stringify(interrupted));
+  let reconciliations = 0;
+  const result = await runEvents(scanDir, completedEvents(), {
+    workbenchValidated: true,
+    onFinalize: async () => {
+      reconciliations++;
+      await writeFile(file, original);
+    },
+  });
+  expect(reconciliations).toBe(1);
+  expect(result.turnResult.status).toBe("completed");
+});
+
+test.skipIf(process.platform === "win32")(
+  "preserves unsafe scan-root diagnostics instead of reporting missing files",
+  async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    await chmod(scanDir, 0o755);
+    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
+      name: ContractValidationError.name,
+      message: expect.stringContaining("chmod 700"),
+      cause: expect.any(Error),
+    });
+  },
+);

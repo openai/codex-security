@@ -49,6 +49,26 @@ function option(helpText: string, flag: string): string {
 }
 
 describe("CLI help", () => {
+  test.each(["scan", "patch", "verify-fix"])(
+    "%s advertises hosted mode without entering the protocol",
+    async (command) => {
+      const text = await help([command, "--host", "--help"]);
+      expect(option(text, "--host")).toContain("JSON-RPC stdin/stdout");
+      expect(option(text, "--host")).toContain("use alone");
+      if (command !== "scan") {
+        expect(option(text, "--verification-mode")).toContain("static");
+        expect(option(text, "--verification-mode")).toContain("standard");
+        const schema = captureCli(main, "stdout");
+        expect(
+          await schema.run([command, "--schema", "--json"], dependencies()),
+        ).toBe(0);
+        expect(
+          JSON.parse(schema.text()).options.properties.verificationMode.enum,
+        ).toEqual(["static", "standard"]);
+      }
+    },
+  );
+
   test("groups the common workflow ahead of setup and integrations", async () => {
     const text = await help(["--help"]);
     const sections = text.split(/\n(?=[A-Z][^\n]+:\n)/u);
@@ -63,7 +83,13 @@ describe("CLI help", () => {
     expect(sectionFor("login")).toBeGreaterThan(sectionFor("scan"));
     expect(sectionFor("init")).toBe(sectionFor("login"));
     expect(sectionFor("completions")).toBeGreaterThan(sectionFor("scan"));
-    expect(text).toContain("codex-security scan .");
+    expect(text).toContain("Aliases: cs");
+    for (const command of ["login", "policy .", "scan .", "findings"]) {
+      expect(text).toContain(`  codex-security ${command}`);
+    }
+    expect(text.indexOf("codex-security policy .")).toBeLessThan(
+      text.indexOf("codex-security scan ."),
+    );
     expect(text).toContain("<command> --help");
   });
 
@@ -75,6 +101,9 @@ describe("CLI help", () => {
     expect(option(text, "--codex")).toContain("<key=value>");
     expect(option(text, "--codex")).toMatch(/repeat/iu);
     expect(option(text, "--max-cost")).toContain("<usd>");
+    expect(option(text, "--owner-suggestions")).toContain(
+      "owner-suggestions.json",
+    );
     expect(option(text, "--mode")).toContain("<mode>");
     expect(option(text, "--mode")).toContain("standard");
     expect(option(text, "--mode")).toContain("deep");
@@ -118,7 +147,7 @@ describe("CLI help", () => {
     }
   });
 
-  test.each(["validate", "login", "logout", "serve"])(
+  test.each(["validate", "login", "logout"])(
     "%s does not promise unsupported JSON command output",
     async (command) => {
       const text = await help([command, "--help"]);
@@ -131,6 +160,15 @@ describe("CLI help", () => {
       expect(JSON.parse(schema.text())).toEqual(expect.any(Object));
     },
   );
+
+  test("documents optional validation context and structured output", async () => {
+    const text = await help(["validate", "--help"]);
+    expect(option(text, "--context")).toContain("<text>");
+    expect(option(text, "--context-file")).toContain("<file>");
+    expect(option(text, "--knowledge-base")).toContain("<path>");
+    expect(option(text, "--knowledge-base")).toMatch(/repeat/iu);
+    expect(option(text, "--output-schema")).toContain("<file>");
+  });
 
   test("documents raw export formats without promising output transforms", async () => {
     const text = await help(["export", "--help"]);

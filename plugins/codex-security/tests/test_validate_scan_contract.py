@@ -21,9 +21,6 @@ class ValidateScanContractTest(ScanFixtureTestCase):
     validator = VALIDATOR
     example_scan = EXAMPLE_SCAN
 
-    def write_json(self, name: str, payload: object) -> None:
-        (self.scan_dir / name).write_text(json.dumps(payload, indent=2) + "\n")
-
     def test_accepts_sealed_contract_without_mutating_it(self) -> None:
         before = {
             path.name: path.read_bytes() for path in self.scan_dir.iterdir() if path.is_file()

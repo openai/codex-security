@@ -9,15 +9,14 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
-import { normalizePersistedFindings, requireScanFile } from "./contract.js";
+import { readScanFile, requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
 
-type CanonicalFinding = FindingsDocument["findings"][number];
 type Finding = Pick<
-  CanonicalFinding,
+  FindingsDocument["findings"][number],
   | "title"
   | "locations"
   | "severity"
@@ -201,10 +200,7 @@ export async function runCustomValidation(options: {
   const documents = await Promise.all(
     DOCUMENTS.map(async (name) =>
       JSON.parse(
-        await readFile(await requireScanFile(scanDir, name, name, signal), {
-          encoding: "utf8",
-          signal,
-        }),
+        (await readScanFile(scanDir, name, name, signal)).toString("utf8"),
       ),
     ),
   );
@@ -215,8 +211,12 @@ export async function runCustomValidation(options: {
   ];
   if (
     manifest.scan?.scope?.validationMode !== "custom_pending" ||
-    manifest.scan.sealedAt !== undefined ||
-    manifest.scan.artifacts !== undefined ||
+    manifest.scan.sealedAt != null ||
+    (manifest.scan.artifacts != null &&
+      !(
+        Array.isArray(manifest.scan.artifacts) &&
+        manifest.scan.artifacts.length === 0
+      )) ||
     manifest.scan.id !== scanId ||
     findingsDocument.scanId !== scanId ||
     coverage.scanId !== scanId
@@ -225,9 +225,7 @@ export async function runCustomValidation(options: {
       "The scan did not return an unsealed custom-validation draft.",
     );
   }
-  const { findings } = normalizePersistedFindings(
-    findingsDocument,
-  ) as typeof findingsDocument;
+  const { findings } = findingsDocument;
   const [common, candidatesSchema, draft, coverageSchema] = await Promise.all([
     readSchema(options.pluginRoot, "definitions/artifact-common.schema.json"),
     readSchema(options.pluginRoot, "tools/candidate-validations.schema.json"),
@@ -381,7 +379,6 @@ export async function runCustomValidation(options: {
       decisions.set(id, values);
     }
     if (validation.disposition === "deferred") {
-      coverage.completeness = "partial";
       coverage.deferred.push({
         id: `custom-validation-${candidate.candidateId}`,
         reason:
@@ -397,6 +394,12 @@ export async function runCustomValidation(options: {
     finding.validation = {
       ...validation,
       summary: validation.evidence.join("\n"),
+      counterEvidence: validation.counterevidence_or_proof_gap
+        ? [validation.counterevidence_or_proof_gap]
+        : [],
+      limitations: validation.remaining_uncertainty
+        ? [validation.remaining_uncertainty]
+        : [],
     };
     finding.confidence = {
       level: validation.confidence,
@@ -439,6 +442,7 @@ export async function runCustomValidation(options: {
   firstSurface.receiptRefs = [
     ...new Set([...firstSurface.receiptRefs, CANDIDATES, RESULTS]),
   ];
+  delete coverage["completeness"];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.

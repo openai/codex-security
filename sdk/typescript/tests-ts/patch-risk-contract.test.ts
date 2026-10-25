@@ -20,55 +20,7 @@ import {
   windowsLoopbackPath,
 } from "./windows-helper-location.js";
 
-interface Assessment {
-  [key: string]: unknown;
-  schemaVersion: number;
-  patch: {
-    repository: string;
-    sourceType: string;
-    base: string;
-    head: string;
-    changedFiles: string[];
-    sha256: string;
-  };
-  recommendation: string;
-  workflowLabel: string;
-  impact: { rating: string; rationale: string };
-  regressionLikelihood: { rating: string; rationale: string };
-  regressionProtection: {
-    rating: string;
-    rationale: string;
-    exactHeadChecksPassed: boolean;
-  };
-  recoverability: { rating: string; rationale: string };
-  confidence: { rating: string; rationale: string };
-  applicability: { status: string; rationale: string };
-  statusQuoRisk: { rating: string; rationale: string };
-  autoMergeExclusions: string[];
-  affectedRuntimeRoots: string[];
-  materialBoundaries: Array<{
-    id: string;
-    invariant: string;
-    runtimeRoot: string;
-    counterexample: string;
-    legitimateControl: string;
-    result: string;
-  }>;
-  validation: Array<{
-    name: string;
-    status: string;
-    protects: string;
-  }>;
-  unknowns: Array<{
-    summary: string;
-    decisionCritical: boolean;
-  }>;
-  evidencePlan: Array<{
-    question: string;
-    action: string;
-    outcomes: Record<string, string>;
-  }>;
-}
+type Assessment = ReturnType<typeof assessment> & Record<string, unknown>;
 
 const schemaPath = join(
   PLUGIN_ROOT,
@@ -85,7 +37,7 @@ afterEach(async () => {
   );
 });
 
-function assessment(): Assessment {
+function assessment() {
   return {
     schemaVersion: 1,
     patch: {
@@ -118,7 +70,7 @@ function assessment(): Assessment {
       rating: "moderate",
       rationale: "The defect remains.",
     },
-    autoMergeExclusions: [],
+    autoMergeExclusions: [] as string[],
     affectedRuntimeRoots: ["service.request"],
     materialBoundaries: [
       {
@@ -138,8 +90,12 @@ function assessment(): Assessment {
         protects: "Changed behavior through the production caller.",
       },
     ],
-    unknowns: [],
-    evidencePlan: [],
+    unknowns: [] as { summary: string; decisionCritical: boolean }[],
+    evidencePlan: [] as {
+      question: string;
+      action: string;
+      outcomes: Record<string, string>;
+    }[],
   };
 }
 
@@ -255,7 +211,7 @@ describe("patch risk assessment contract", () => {
     delete (missingRequired as Record<string, unknown>)["patch"];
     invalidAssessments.push(missingRequired);
 
-    const additionalProperty = assessment();
+    const additionalProperty: Assessment = assessment();
     additionalProperty["unexpected"] = true;
     invalidAssessments.push(additionalProperty);
 
@@ -289,6 +245,35 @@ describe("patch risk assessment contract", () => {
     const result = validate(assessment());
     expect(result.status, result.stderr).toBe(0);
   });
+
+  test("rejects critical regression likelihood for every merge workflow", () => {
+    for (const workflowLabel of [
+      "human_review_required",
+      "auto_merge_candidate",
+    ]) {
+      const payload = assessment();
+      payload.workflowLabel = workflowLabel;
+      payload.impact.rating = "low";
+      payload.regressionLikelihood.rating = "critical";
+
+      const result = validate(payload);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "merge cannot retain critical regression likelihood",
+      );
+    }
+  });
+
+  test.each(["low", "moderate", "high"])(
+    "accepts critical-impact human-review merge with %s regression likelihood",
+    (rating) => {
+      const payload = assessment();
+      payload.impact.rating = "critical";
+      payload.regressionLikelihood.rating = rating;
+      const result = validate(payload);
+      expect(result.status, result.stderr).toBe(0);
+    },
+  );
 
   test("compares JSON numeric constants by value", () => {
     const serialized = JSON.stringify(assessment()).replace(
@@ -524,6 +509,7 @@ describe("patch risk assessment contract", () => {
 
   test("keeps all merge errors in their established order", () => {
     const payload = assessment();
+    payload.regressionLikelihood.rating = "critical";
     payload.workflowLabel = "block";
     payload.applicability.status = "wrong_owner";
     payload.unknowns = [
@@ -548,6 +534,7 @@ describe("patch risk assessment contract", () => {
       "merge requires every material boundary to be supported",
       "merge cannot retain a failed validation",
       "merge cannot retain an evidence plan",
+      "merge cannot retain critical regression likelihood",
       "only hold_for_evidence may include an evidence plan",
       "an established non-applicable disposition requires no_op",
     ]);
@@ -838,7 +825,7 @@ describe("patch risk assessment contract", () => {
             if (input === "missing") await rm(file);
             const result = await launcher.run(
               powershell,
-              "skills/assess-patch-risk/SKILL.md",
+              "skills/assess-patch-risk/references/windows-validation.md",
               {
                 "<plugin-root>": argument(launcher.plugin),
                 "<assessment.json>":

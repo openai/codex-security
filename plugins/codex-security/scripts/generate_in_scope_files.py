@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import git_blob_samples, git_command
+from workbench_target import SOURCE_METADATA_DIRECTORIES, git_blob_samples, git_command
 
 
 class InventoryError(ValueError):
@@ -94,11 +94,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--hidden",
         "--path-separator",
         "/",
-        # Prune Git metadata and its contents even when the scope starts inside .git.
+        # Prune metadata and its contents even when the scope starts inside it.
         "--glob",
-        "!**/.git",
+        "!**/{.git,.svn}",
         "--glob",
-        "!**/.git/**",
+        "!**/{.git,.svn}/**",
         "--",
         scope,
     ]
@@ -121,7 +121,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 message = f"{message}: {detail}"
             raise InventoryError(message)
 
-        if (repository / ".git").exists():
+        if any((parent / ".git").exists() for parent in (repository, *repository.parents)):
             try:
                 tracked = git_command(
                     repository,
@@ -146,7 +146,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         inventory.seek(0)
         rows: list[bytes] = []
         for path in inventory.read().split(b"\0"):
-            if not path:
+            if not path or not SOURCE_METADATA_DIRECTORIES.isdisjoint(os.fsdecode(path).split("/")):
                 continue
             if b"\n" in path or b"\r" in path:
                 raise InventoryError(
@@ -196,12 +196,7 @@ def generate_diff_in_scope_files(
                     continue
             elif path.is_symlink() or not path.is_file() or is_binary_file(path):
                 continue
-            try:
-                relative_path = relative.as_posix().encode("utf-8")
-            except UnicodeEncodeError as error:
-                raise InventoryError(
-                    "Git changes contain a path that cannot be encoded as UTF-8 for the file inventory"
-                ) from error
+            relative_path = os.fsencode(relative.as_posix())
             if b"\n" in relative_path or b"\r" in relative_path:
                 raise InventoryError(
                     "Git changes contain a path that cannot fit in the file inventory"

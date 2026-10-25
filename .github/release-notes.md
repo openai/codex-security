@@ -1,45 +1,25 @@
-<!-- release-version: 0.2.0 -->
+<!-- release-version: 0.6.0 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-- Threat models are now saved with Standard, Deep, and Diff scan results and
-  generated security policies. Export a saved model without another model call
-  using `codex-security export --artifact threat-model` or the SDK's
-  `exportArtifact` helper.
-  ([#1133](https://github.com/openai/codex-security/pull/1133))
-- Scans now check for exposed credentials in source code, including unused code
-  and tests, and distinguish suspected exposures from placeholders. This check
-  runs offline, without trying discovered credentials against a service.
-  ([#1134](https://github.com/openai/codex-security/pull/1134))
-- Use `--model` and `--effort` when generating patches, validating findings,
-  verifying fixes, or matching and comparing saved scans. Deep Scan workers and
-  patches generated during a scan also respect your selected service tier.
-  ([#1143](https://github.com/openai/codex-security/pull/1143),
-  [#1238](https://github.com/openai/codex-security/pull/1238),
-  [#1274](https://github.com/openai/codex-security/pull/1274))
-- Patch, validation, and fix-verification commands now respect custom model
-  providers and their authentication settings. Amazon Bedrock users get clearer
-  authentication errors and cost estimates for Daybreak Blue and Red. Eligible
-  OpenAI API-key users can select a Cyber access program for each scan.
-  ([#1131](https://github.com/openai/codex-security/pull/1131),
-  [#1187](https://github.com/openai/codex-security/pull/1187),
-  [#1188](https://github.com/openai/codex-security/pull/1188),
-  [#1185](https://github.com/openai/codex-security/pull/1185))
-- Scans include previously overlooked C++ headers (`.hh` and `.hxx`),
-  server-rendered templates (EJS, ERB, and PHTML), and Vyper source files when
-  selecting code to review.
-  ([#1079](https://github.com/openai/codex-security/pull/1079),
-  [#1197](https://github.com/openai/codex-security/pull/1197),
-  [#1306](https://github.com/openai/codex-security/pull/1306))
-- On Unix, scans check that the sandbox works before starting paid model calls.
-  Completed results are kept if you cancel follow-up work. CSV exports can now be
-  reimported without rejecting multiple occurrences of a finding or losing
-  leading apostrophes.
-  ([#1084](https://github.com/openai/codex-security/pull/1084),
-  [#1057](https://github.com/openai/codex-security/pull/1057),
-  [#1247](https://github.com/openai/codex-security/pull/1247))
+Codex Security 0.6.0 adds vendor report imports, optional owner suggestions, and hosted remediation commands. Severity classification now uses a built-in rubric and three independent reviews by default; review the model-access and cost changes below before upgrading.
+
+- **Import vendor findings.** Import supported Wiz, Snyk Open Source, Semgrep Code, and Endor Labs reports with `publish findings --to local`, or publish them with `--to cloud`. Read local evidence with `findings imported`. Local imports require no Cloud login or model call and remain separate from assessed scan findings. See the [Wiz](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/cli.md#import-wiz-findings), [Snyk](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/snyk.md), [Semgrep](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/semgrep.md), and [Endor](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/endor.md) format guides.
+- **Configurable severity reviews.** `classify-severity` uses a bundled rubric when no custom rubric is supplied. `--runs N` selects 1–10 independent reviews, with three by default. The most common severity wins, with the highest severity breaking ties. ([#1765](https://github.com/openai/codex-security/pull/1765))
+- **Optional owner suggestions.** `scan --owner-suggestions` writes a separate owner-suggestion report after supported committed Git scans. Suggestions preserve the completed scan and do not assign users. Owner enrichment is skipped when a scan cost limit is set. ([#1760](https://github.com/openai/codex-security/pull/1760))
+- **Hosted patching and source-only verification.** `patch --host` and `verify-fix --host` expose the hosted remediation protocol through the CLI. Ordinary patch and verification commands accept `--verification-mode static` to assess source evidence; omitting it preserves standard verification. Static mode sets the assessment scope and does not enforce a command-execution boundary. See the [hosted remediation guide](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/hosted-remediation.md). ([#1854](https://github.com/openai/codex-security/pull/1854))
+- **Policy previews without Python.** Policy diffs now run in Node while preserving diff formatting, cancellation, and source freshness checks. ([#1837](https://github.com/openai/codex-security/pull/1837))
+
+<details>
+<summary>Other improvements</summary>
+
+- Patch project-trust overrides are serialized correctly for Codex. ([#1861](https://github.com/openai/codex-security/pull/1861))
+- Update Hono and the Linear SDK dependencies. ([#1831](https://github.com/openai/codex-security/pull/1831), [#1852](https://github.com/openai/codex-security/pull/1852))
+- Release verification runs test shards in parallel and reports publication progress on the release PR. ([#1798](https://github.com/openai/codex-security/pull/1798))
+
+</details>
 
 <!-- release-section: highlights:end -->
 
@@ -47,28 +27,20 @@
 
 ## Upgrade notes
 
-- If your integration reads threat models, check `SecurityPolicyDraft.threatModelPath`
-  for `null` before opening the file. Policy generation now writes `threatmodel.md`
-  instead of `THREAT_MODEL.md`; use the returned path. Saved models can contain
-  Markdown (`format: "markdown"`, `content`) or the previous structured format, so
-  readers must handle both. Existing models remain readable and exportable
-  without migration.
-  ([#1133](https://github.com/openai/codex-security/pull/1133))
-- Findings service clients must send `Content-Type: application/json` to
-  `POST /v1/bulk/findings` and `POST /v1/dedupe-groups`. Missing or other content
-  types return HTTP 400 `invalid_request`. A charset parameter is accepted.
-  ([#1277](https://github.com/openai/codex-security/pull/1277))
-- Codex Security no longer masks diagnostic text that looks like credentials.
-  CLI output and saved error, publication, and patch-risk summaries can contain
-  sensitive values. Review them before sharing.
-  ([#1179](https://github.com/openai/codex-security/pull/1179))
-- SDK types and CLI schemas now accept any nonempty string for reasoning effort.
-  Update integrations that assume a fixed list. The chosen value must still be
-  supported by Codex and your model provider.
-  ([#1237](https://github.com/openai/codex-security/pull/1237))
-- Older CSV exports may have ambiguous leading apostrophes that cannot be
-  recovered from the CSV alone. Export the original saved results as JSON if you
-  need those exact values.
-  ([#1247](https://github.com/openai/codex-security/pull/1247))
+### Severity classification requires model access
+
+Classification without `--rubric` previously inherited the scanner's severity without model work. It now requires Codex authentication and model access, using three model calls per uncached finding by default. Set `--runs 1` (SDK: `classificationRuns: 1`) for a single review. All requested reviews must succeed; failures do not fall back to the scanner's severity or save a partial vote.
+
+Older classification checkpoints without a recorded review count, and former inherited assessments without a rubric hash, are reclassified on the next classification request. Changing the review count or rubric also invalidates matching checkpoints. Existing results remain readable, and publication does not silently classify findings. Use `--reprocess` when changing only the model or reasoning effort. See the [classification guide](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/cli.md#classify-finding-severity).
+
+### Policy preview interpreter selection is deprecated
+
+`securityPolicyDiff(draft, python, signal)` retains its call shape, but interpreter strings and paths returned by resolver callbacks no longer select or validate an executable. `previewPolicy()` no longer resolves Python, and `pythonPath` and `PYTHON` do not affect previews. Update integrations that relied on an invalid interpreter failing or a custom executable producing the diff. Explicit resolver callbacks still run for changed drafts and propagate their errors. Omit the second argument in new code, or pass `undefined` when supplying a cancellation signal. Python-dependent generation and other operations are unchanged.
+
+### Import identity and earlier upgrades
+
+Keep a stable source key and acquisition format across vendor imports. Switching formats can create separate records or replace richer evidence with less detail; omitted findings remain stored. Review each provider's format guide before changing inputs.
+
+If upgrading from before 0.5.1, also review the [0.5.1 upgrade notes](https://github.com/openai/codex-security/releases/tag/npm-v0.5.1) and their guidance for earlier versions. Use `openai/codex-security@action-v0.6.0` for the matching GitHub Action, or pin the distribution commit in its companion release after publication.
 
 <!-- release-section: upgrades:end -->

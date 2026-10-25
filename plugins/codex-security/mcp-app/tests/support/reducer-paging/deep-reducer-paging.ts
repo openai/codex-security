@@ -10,6 +10,8 @@ export interface ReducerTraceEvent {
   nextCursor?: string;
 }
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Codex } from "@openai/codex-sdk";
@@ -21,22 +23,46 @@ import {
   gradeReducerPagingResult,
 } from "./deep-reducer-paging-fixture.ts";
 
-/** Run one reducer through real code-mode IPC and the production artifact tools. */
-export async function runReducerPagingEval({
-  root,
-  mode = "deterministic",
-  model,
-}: {
+interface ReducerPagingEvalOptions {
   root: string;
   mode?: "deterministic" | "model";
   model?: string;
-}) {
+  transport?: "stdio" | "http";
+}
+
+/** Run one reducer through real code-mode IPC and the production artifact tools. */
+export async function runReducerPagingEval(options: ReducerPagingEvalOptions) {
+  try {
+    const result = await runReducer(options);
+    await writeJson(path.join(options.root, "report.json"), result.report);
+    return result;
+  } catch (error) {
+    await writeJson(path.join(options.root, "report.json"), {
+      mode: options.mode ?? "deterministic",
+      ...(options.model ? { model: options.model } : {}),
+      error: error instanceof Error ? error.stack : String(error),
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function runReducer({
+  root,
+  mode = "deterministic",
+  model,
+  transport: protocol = "stdio",
+}: ReducerPagingEvalOptions) {
+  assert.ok(mode === "deterministic" || mode === "model");
   const fixture = await createReducerPagingFixture(root);
   const tracePath = path.join(root, "tool-trace.jsonl");
   const serverConfigPath = path.join(root, "server-config.json");
   const serverPath = path.join(root, "artifact-server.cjs");
   await writeFile(tracePath, "");
-  await writeJson(serverConfigPath, { context: fixture.context, tracePath });
+  await writeJson(serverConfigPath, {
+    context: fixture.context,
+    tracePath,
+    transport: protocol,
+  });
   const [, { renderDedupPrompt }] = await Promise.all([
     build({
       entryPoints: [
@@ -61,71 +87,108 @@ export async function runReducerPagingEval({
     reducerLabel: "paging-eval",
     claimedWorkerIds,
   });
-  const mcpServer = {
+  let mcpServer:
+    | { command: string; args: string[]; required: true }
+    | { url: string; required: true } = {
     command: process.execPath,
     args: [serverPath, serverConfigPath],
     required: true,
   };
-  let transport;
-  let usage;
-  if (mode === "deterministic") {
-    transport = await runControlledCodeMode({
-      code: controlledReducerCode,
-      mcpServer,
-      workingDirectory: fixture.context.repoRoot,
-      prompt,
-    });
-    assert.equal(transport.exitCode, 0, transport.stderr);
-    assert.deepEqual(transport.serverErrors, []);
-    const output = JSON.stringify(transport.toolOutputs);
-    assert.match(
-      output,
-      /code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds 67108864 bytes/,
-      "the real transport must reject the legacy payload",
-    );
-    assert.match(output, /reductionRecorded/);
-  } else {
-    const codex = new Codex({
-      config: {
-        mcp_servers: { cs_artifacts: mcpServer },
-        features: {
-          code_mode: { enabled: true },
-          code_mode_host: { enabled: true, disable_in_process_fallback: true },
+  const httpChild =
+    protocol === "http"
+      ? spawn(process.execPath, [serverPath, serverConfigPath], {
+          stdio: ["ignore", "ignore", "inherit", "ipc"],
+        })
+      : undefined;
+  const httpClosed = httpChild ? once(httpChild, "close") : undefined;
+  try {
+    if (httpChild) {
+      const [message] = await Promise.race([
+        once(httpChild, "message"),
+        httpClosed!.then(([code, signal]) => {
+          throw new Error(
+            `HTTP MCP fixture exited before ready (${signal ?? code}).`,
+          );
+        }),
+      ]);
+      assert.equal(typeof message.url, "string");
+      mcpServer = { url: message.url, required: true };
+    }
+    let transport;
+    let usage;
+    if (mode === "deterministic") {
+      transport = await runControlledCodeMode({
+        code: controlledReducerCode,
+        mcpServer,
+        workingDirectory: fixture.context.repoRoot,
+        prompt,
+      });
+      assert.equal(transport.exitCode, 0, transport.stderr);
+      assert.deepEqual(transport.serverErrors, []);
+      const output = JSON.stringify(transport.toolOutputs);
+      assert.match(
+        output,
+        protocol === "http"
+          ? /code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds 67108864 bytes/
+          : /MCP response.*exceeds.*16777216/,
+        "the selected transport must report its actual response-size error",
+      );
+      assert.match(output, /reductionRecorded/);
+    } else {
+      const codex = new Codex({
+        config: {
+          mcp_servers: { cs_artifacts: mcpServer },
+          features: {
+            code_mode: { enabled: true },
+            code_mode_host: {
+              enabled: true,
+              disable_in_process_fallback: true,
+            },
+          },
         },
-      },
-    });
-    const thread = codex.startThread({
+      });
+      const thread = codex.startThread({
+        ...(model ? { model } : {}),
+        workingDirectory: fixture.context.repoRoot,
+        skipGitRepoCheck: true,
+        approvalPolicy: "never",
+        sandboxMode: "read-only",
+      });
+      const result = await thread.run(prompt);
+      usage = result.usage;
+      await writeFile(
+        path.join(root, "model-response.txt"),
+        result.finalResponse,
+      );
+    }
+    const trace = (await readFile(tracePath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const report = {
+      mode,
+      transport: protocol,
       ...(model ? { model } : {}),
-      workingDirectory: fixture.context.repoRoot,
-      skipGitRepoCheck: true,
-      approvalPolicy: "never",
-      sandboxMode: "read-only",
-    });
-    const result = await thread.run(prompt);
-    usage = result.usage;
-    await writeFile(
-      path.join(root, "model-response.txt"),
-      result.finalResponse,
-    );
+      ...fixture.measurements,
+      ...gradeReducerPagingTrace(
+        trace,
+        fixture.measurements.ipcFrameLimitBytes,
+      ),
+      ...(transport
+        ? {
+            realIpcErrorObserved: protocol === "http",
+            stdioResponseErrorObserved: protocol === "stdio",
+          }
+        : {}),
+      ...(await gradeReducerPagingResult(fixture)),
+      ...(usage ? { usage } : {}),
+    };
+    return { report, fixture };
+  } finally {
+    httpChild?.kill();
+    if (httpClosed) await httpClosed;
   }
-  const trace = (await readFile(tracePath, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  const report = {
-    mode,
-    ...(model ? { model } : {}),
-    ...fixture.measurements,
-    ...gradeReducerPagingTrace(trace, fixture.measurements.ipcFrameLimitBytes),
-    ...(transport ? { realIpcErrorObserved: true } : {}),
-    ...(await gradeReducerPagingResult(fixture)),
-    ...(usage ? { usage } : {}),
-  };
-  await writeFile(
-    path.join(root, "report.json"),
-    JSON.stringify(report, null, 2),
-  );
-  return { report, fixture };
 }
 
 /** Grade the captured I/O independently of model wording or another model run. */
@@ -133,6 +196,7 @@ export function gradeReducerPagingTrace(
   trace: ReducerTraceEvent[],
   ipcFrameLimitBytes: number,
 ) {
+  assert.ok(trace.length > 0, "The reducer produced no tool trace.");
   const reads = trace.filter(
     (event) =>
       event.event === "request" &&
@@ -225,6 +289,7 @@ async function readDocument(findingRef) {
     let response;
     try {
       response = await tools.mcp__cs_artifacts__get_codex_security_deep_reducer_inputs(input);
+      if (response.isError) throw new Error(response.content[0].text);
     } catch (error) {
       text(String(error));
       maxBytes = Math.floor(maxBytes / 2);

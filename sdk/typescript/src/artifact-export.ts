@@ -1,13 +1,16 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { spawn } from "node:child_process";
+import { realpath as callbackRealpath } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
-import type { ThreatModel } from "./models.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import {
+  type PluginPythonOptions,
   bundledPluginRoot,
   codexSecurityStateDirectory,
   expandHome,
@@ -15,6 +18,9 @@ import {
   resolvePluginPython,
   runWorkbench,
 } from "./runtime.js";
+
+// Bun's promise-based realpath can return drive-relative Windows roots.
+const nativeRealpath = promisify(callbackRealpath.native);
 
 export type ArtifactOutput = Pick<NodeJS.WriteStream, "write">;
 
@@ -36,12 +42,6 @@ export interface ArtifactExportArguments {
   pythonPath?: string;
   signal?: AbortSignal;
   includeMetadata?: boolean;
-}
-
-interface ThreatModelDescription {
-  threatModel: ThreatModel | null;
-  provenance: JsonObject;
-  path: string | null;
 }
 
 export type ExportArtifactOptions = {
@@ -67,7 +67,7 @@ export interface ArtifactExportResult {
 
 interface HelperOptions {
   pythonPath?: string;
-  protectedRoot?: string;
+  protectedRoot?: PluginPythonOptions["protectedRoot"];
   pluginRoot?: string;
   signal?: AbortSignal;
   output?: ArtifactOutput;
@@ -180,7 +180,7 @@ export async function readThreatModelPath(
       ["--scan-dir", directory, "--describe-threat-model"],
       options,
     );
-    return (JSON.parse(result.stdout) as ThreatModelDescription).path;
+    return (JSON.parse(result.stdout) as ArtifactExportResult).path;
   } catch {
     options.signal?.throwIfAborted();
     return null;
@@ -190,7 +190,7 @@ export async function readThreatModelPath(
 export async function runArtifactExport(
   arguments_: ArtifactExportArguments,
   output?: ArtifactOutput,
-): Promise<Uint8Array | undefined> {
+): Promise<string | undefined> {
   const artifact = arguments_.artifact ?? "findings";
   resolveArtifactFormat(artifact, arguments_.format);
   const result = await runArtifactHelper(
@@ -210,6 +210,10 @@ export async function runArtifactExport(
     ],
     {
       pythonPath: arguments_.pythonPath,
+      protectedRoot:
+        arguments_.sourceRoot === undefined
+          ? undefined
+          : [process.cwd(), arguments_.sourceRoot],
       signal: arguments_.signal,
       failureMessage:
         artifact === "findings"
@@ -220,7 +224,7 @@ export async function runArtifactExport(
   );
   return (arguments_.output === "-" && output === undefined) ||
     arguments_.includeMetadata
-    ? Buffer.from(result.stdout)
+    ? result.stdout
     : undefined;
 }
 
@@ -263,45 +267,52 @@ export async function resolveArtifactExportOutput(
             basename(arguments_.output),
           );
   if (arguments_.output !== "-") {
-    const outputFromCurrent = relative(currentDirectory, arguments_.output);
-    if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
-      let existingParent: string | undefined;
-      for (
-        let directory = dirname(arguments_.output);
-        relative(currentDirectory, directory) !== "";
-        directory = dirname(directory)
-      ) {
-        const metadata = await lstat(directory).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return undefined;
-            throw error;
-          },
+    const canonicalCurrent = await realpath(currentDirectory).catch(
+      () => currentDirectory,
+    );
+    let traversedSymlink = false;
+    let expectedOutput: string | undefined;
+    for (
+      let directory = dirname(arguments_.output);
+      ;
+      directory = dirname(directory)
+    ) {
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      const canonicalDirectory =
+        relative(currentDirectory, directory) === ""
+          ? canonicalCurrent
+          : metadata === undefined
+            ? undefined
+            : await nativeRealpath(directory);
+      if (canonicalDirectory !== undefined) {
+        expectedOutput ??= resolve(
+          canonicalDirectory,
+          relative(directory, arguments_.output),
         );
-        if (metadata?.isSymbolicLink()) {
+        if (
+          !isOutsidePath(relative(canonicalCurrent, canonicalDirectory)) &&
+          (traversedSymlink ||
+            isOutsidePath(relative(canonicalCurrent, outputPath)) ||
+            relative(expectedOutput, outputPath) !== "")
+        ) {
           throw new CodexSecurityError(
             "The export output path cannot traverse a repository symlink.",
           );
         }
-        if (metadata !== undefined) existingParent ??= directory;
       }
-      const canonicalCurrent = await realpath(currentDirectory).catch(
-        () => currentDirectory,
-      );
-      const expectedOutput =
-        existingParent === undefined
-          ? resolve(canonicalCurrent, outputFromCurrent)
-          : resolve(
-              await realpath(existingParent),
-              relative(existingParent, arguments_.output),
-            );
+      // An external alias may select the repository, but links below it are
+      // repository-owned. Check ancestors before counting the current link.
+      traversedSymlink ||= metadata?.isSymbolicLink() ?? false;
       if (
-        isOutsidePath(relative(canonicalCurrent, outputPath)) ||
-        relative(expectedOutput, outputPath) !== ""
-      ) {
-        throw new CodexSecurityError(
-          "The export output path cannot traverse a repository symlink.",
-        );
-      }
+        relative(currentDirectory, directory) === "" ||
+        dirname(directory) === directory
+      )
+        break;
     }
   }
   return { ...arguments_, scanDir: canonicalScan, output: outputPath };
@@ -316,16 +327,14 @@ export async function resolveSavedArtifactDirectory(
 ): Promise<string> {
   // Reuse the workbench's recorded digest and scan binding checks without
   // requiring a writable saved-scan directory for stdout or external exports.
-  const context = await workbench([
-    "export-findings",
-    "--scan-id",
-    scanId,
-    "--artifact",
-    artifact,
-    "--format",
-    format,
-    "--validate-only",
-  ]);
+  const context = await workbench(
+    workbenchArgs("export-findings", {
+      scanId,
+      artifact,
+      format,
+      validateOnly: true,
+    }),
+  );
   const scan = context["scan"] as JsonObject | undefined;
   if (typeof scan?.["scanDir"] !== "string")
     throw new CodexSecurityError(
@@ -340,6 +349,10 @@ export async function exportArtifact(
 ): Promise<ArtifactExportResult> {
   const artifact = options.artifact ?? "findings";
   const format = resolveArtifactFormat(artifact, options.format);
+  const sourceRoot =
+    options.sourceRoot === undefined
+      ? undefined
+      : resolve(expandHome(options.sourceRoot));
   const environment = {
     ...exportEnvironment(),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -351,6 +364,8 @@ export async function exportArtifact(
     const python = await resolvePluginPython({
       configuredPath: options.pythonPath,
       environment,
+      protectedRoot:
+        sourceRoot === undefined ? undefined : [process.cwd(), sourceRoot],
       signal: options.signal,
     });
     const pluginRoot = await bundledPluginRoot();
@@ -381,9 +396,7 @@ export async function exportArtifact(
       pythonPath: options.pythonPath,
       signal: options.signal,
       includeMetadata: artifact === "threat-model" && options.output !== "-",
-      ...(options.sourceRoot === undefined
-        ? {}
-        : { sourceRoot: resolve(expandHome(options.sourceRoot)) }),
+      ...(sourceRoot === undefined ? {} : { sourceRoot }),
     },
     process.cwd(),
   );
@@ -394,9 +407,7 @@ export async function exportArtifact(
   const description =
     metadata === undefined
       ? null
-      : (JSON.parse(
-          Buffer.from(metadata).toString("utf8"),
-        ) as ThreatModelDescription);
+      : (JSON.parse(metadata) as ArtifactExportResult);
   return {
     path: arguments_.output === "-" ? null : arguments_.output,
     provenance: description?.provenance ?? null,
@@ -460,6 +471,7 @@ export function exportEnvironment(
         "TEMP",
         "TMPDIR",
         "PYTHON",
+        "XDG_CACHE_HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",

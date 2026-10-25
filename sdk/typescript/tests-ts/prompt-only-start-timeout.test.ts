@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { PassThrough } from "node:stream";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 
 test("gives prompt-only scan startup the five-minute scan timeout", async () => {
@@ -14,16 +15,20 @@ test("gives prompt-only scan startup the five-minute scan timeout", async () => 
   const executeWorkbench = new Function(
     execFileHelper!,
     "workbenchScriptPath",
+    "WORKBENCH_PYTHON",
     "PLUGIN_ROOT",
     "isRecord",
     `${source}\nreturn executeWorkbench;`,
   )(
-    async (
-      _command: string,
-      _args: string[],
-      options: { timeout: number },
-    ) => ({ stdout: JSON.stringify({ timeout: options.timeout }) }),
+    (_command: string, _args: string[], options: { timeout: number }) =>
+      Object.assign(
+        Promise.resolve({
+          stdout: JSON.stringify({ timeout: options.timeout }),
+        }),
+        { child: { stdin: new PassThrough() } },
+      ),
     () => "workbench.py",
+    "fixture private workbench launcher",
     PLUGIN_ROOT,
     () => true,
   ) as (command: string, args: string[]) => Promise<{ timeout: number }>;

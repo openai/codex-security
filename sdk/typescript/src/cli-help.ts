@@ -18,7 +18,7 @@ const COMMAND_GROUPS: readonly Group[] = [
       "publish",
     ],
   ],
-  ["Automate", ["bulk-scan", "scan-components", "install-hook", "serve"]],
+  ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
   ["Setup and support", ["login", "logout", "init", "info", "feedback"]],
 ];
 
@@ -37,7 +37,9 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
+      "owner-suggestions",
       "max-cost",
+      "max-time",
       "show-cost",
       "fail-on-severity",
       "headless",
@@ -64,6 +66,9 @@ const PUBLISH_GROUPS: readonly Group[] = [
 ];
 
 const VALUE_LABELS: Record<string, string> = {
+  context: "text",
+  "context-file": "file",
+  "output-schema": "file",
   config: "file",
   path: "path",
   "knowledge-base": "path",
@@ -81,6 +86,7 @@ const VALUE_LABELS: Record<string, string> = {
   python: "path",
   codex: "key=value",
   "max-cost": "usd",
+  "max-time": "minutes",
   "max-time-hours": "hours",
   "fail-on-severity": "level",
   "patch-severity": "level",
@@ -96,7 +102,6 @@ const VALUE_LABELS: Record<string, string> = {
   "filter-output": "keys",
   "token-limit": "count",
   "token-offset": "count",
-  port: "port",
   to: "destination",
 };
 
@@ -204,13 +209,9 @@ function optionRow(row: Row, command: string): Row {
 
 function globalRows(rows: Row[], command: string): Row[] {
   const scan = command === "scan" || command === "scan import";
-  const plainOutput = [
-    "validate",
-    "login",
-    "logout",
-    "serve",
-    "export",
-  ].includes(command);
+  const plainOutput = ["validate", "login", "logout", "export"].includes(
+    command,
+  );
   const visible = rows.filter(({ label }) => {
     if (scan && label.startsWith("--filter-output")) return false;
     return !(
@@ -273,10 +274,33 @@ export function formatCliHelp(text: string, columns = 80): string {
       );
       if (command === "") {
         sections.push(
-          "Get started:\n" +
-            "  codex-security login\n" +
-            "  codex-security scan .\n" +
+          [
+            "Get started:",
+            "  codex-security login",
+            "",
+            wrap(
+              "In your repository, draft SECURITY.md (optional):",
+              width,
+              "  ",
+              "  ",
+            ),
+            "  codex-security policy .",
+            wrap(
+              "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.",
+              width,
+              "  ",
+              "  ",
+            ),
+            wrap(
+              "Skip this step to keep your existing policy or scan without one.",
+              width,
+              "  ",
+              "  ",
+            ),
+            "",
+            "  codex-security scan .",
             "  codex-security findings",
+          ].join("\n"),
         );
       } else if (examples) {
         sections.push(examples);

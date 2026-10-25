@@ -11,6 +11,7 @@ export interface ScanManifest {
       [k: string]: unknown;
     };
     status: "completed" | "failed" | "canceled" | "interrupted";
+    warnings?: string[];
     startedAt: string;
     completedAt: string;
     sealedAt: string;
@@ -300,7 +301,6 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
-  completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
@@ -405,8 +405,6 @@ export type AttackPathReachability = Extract<
 export type FindingProvenance = Finding["provenance"];
 
 export type CoverageMode = CoverageDocument["mode"];
-
-export type CoverageCompleteness = CoverageDocument["completeness"];
 
 export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
 

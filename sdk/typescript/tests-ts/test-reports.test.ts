@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { bashCommand, readSubprocess } from "./support/shell.js";
@@ -32,8 +32,56 @@ async function fixtures() {
   };
 }
 
-function testcase(name: string, status = "") {
-  return `<testcase file="tests-ts/example.test.ts" classname="example" name="${name}">${status}</testcase>`;
+async function workflowFixtures() {
+  const fixture = await fixtures();
+  const workflow = Bun.YAML.parse(
+    await readFile(
+      new URL("../../../.github/workflows/test-quality.yml", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    jobs: {
+      runner: {
+        strategy: {
+          matrix: {
+            target: Array<{
+              os: string;
+              shard: number;
+              count: number;
+              mode: string;
+            }>;
+          };
+        };
+      };
+      compare: { steps: Array<{ name?: string; run?: string }> };
+    };
+  };
+  await mkdir(join(fixture.root, "reports"));
+  const { target } = workflow.jobs.runner.strategy.matrix;
+  for (const { os, shard, count, mode } of target) {
+    const totalCases = Math.max(
+      ...target.filter((item) => item.os === os).map((item) => item.count),
+    );
+    const casesPerShard = totalCases / count;
+    await fixture.report(
+      `reports/runner-${os}-${mode}-${shard}.xml`,
+      Array.from({ length: casesPerShard }, (_, index) =>
+        testcase(`${os} case ${(shard - 1) * casesPerShard + index + 1}`),
+      ),
+    );
+  }
+  return {
+    ...fixture,
+    script: workflow.jobs.compare.steps.find(
+      (step) => step.name === "Compare inventories and outcomes",
+    )!.run!,
+  };
+}
+
+function testcase(name: string, status = "", assertions?: string) {
+  const assertionAttribute =
+    assertions === undefined ? "" : ` assertions="${assertions}"`;
+  return `<testcase file="tests-ts/example.test.ts" classname="example" name="${name}"${assertionAttribute}>${status}</testcase>`;
 }
 
 async function compare(baseline: string, ...candidates: string[]) {
@@ -54,29 +102,15 @@ async function compare(baseline: string, ...candidates: string[]) {
 
 describe("JUnit inventory comparison", () => {
   test("runs every workflow comparison before reporting a mismatch", async () => {
-    const fixture = await fixtures();
-    const workflow = Bun.YAML.parse(
-      await readFile(
-        new URL("../../../.github/workflows/test-quality.yml", import.meta.url),
-        "utf8",
-      ),
-    ) as {
-      jobs: { compare: { steps: Array<{ name?: string; run?: string }> } };
-    };
-    const script = workflow.jobs.compare.steps.find(
-      (step) => step.name === "Compare inventories and outcomes",
-    )!.run!;
-    const expected = [
-      ...["ubuntu-latest", "windows-latest"].flatMap((os) =>
-        ["isolated", "parallel"].map(
-          (mode) => `reports/runner-${os}-${mode}*.xml`,
-        ),
-      ),
-      "reports/runner-windows-latest-shard-*.xml",
-    ];
+    const fixture = await workflowFixtures();
+    const script = fixture.script;
+    const expected = ["ubuntu-latest", "macos-latest", "windows-latest"].map(
+      (os) =>
+        `reports/runner-${os}-baseline-*.xml|reports/runner-${os}-expanded-*.xml`,
+    );
     const mock = `node() {
-  printf '%s\\n' "$4"
-  [[ "$4" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
+  printf '%s\\n' "$3|$4"
+  [[ "$3|$4" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
 }`;
     const summary = join(fixture.root, "summary.md");
     for (const failedReport of ["", expected[0]!]) {
@@ -101,6 +135,170 @@ describe("JUnit inventory comparison", () => {
       );
     }
   });
+
+  test("requires complete workflow reports even when incomplete unions match", async () => {
+    const fixture = await workflowFixtures();
+    for (const incomplete of [false, true]) {
+      if (incomplete) {
+        // Both unions lose the same two cases, so only completeness catches this.
+        for (const name of ["baseline-3", "expanded-5", "expanded-6"]) {
+          await rm(
+            join(fixture.root, `reports/runner-ubuntu-latest-${name}.xml`),
+          );
+        }
+      }
+      await writeFile(join(fixture.root, "summary.md"), "");
+      const child = Bun.spawn({
+        cmd: [
+          bash,
+          "-e",
+          "-o",
+          "pipefail",
+          "-c",
+          `node() { command node --experimental-strip-types "$CODEX_SECURITY_TEST_COMPARATOR" "$3" "$4"; }\n${fixture.script}`,
+        ],
+        cwd: fixture.root,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          GITHUB_STEP_SUMMARY: "summary.md",
+          CODEX_SECURITY_TEST_COMPARATOR: join(
+            import.meta.dirname,
+            "..",
+            "scripts",
+            "compare-test-reports.mts",
+          ),
+        },
+        timeout: 10_000,
+      });
+      const { status, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(incomplete ? 1 : 0);
+      const summary = await readFile(join(fixture.root, "summary.md"), "utf8");
+      expect(
+        summary.match(/Identical test inventory and outcomes/gu),
+      ).toHaveLength(3);
+      expect(summary).toContain("runner-windows-latest-expanded-14.xml");
+      if (incomplete) {
+        expect(stderr).toContain("Missing shard report:");
+      } else {
+        expect(summary).toContain("runner-ubuntu-latest-expanded-6.xml");
+      }
+    }
+  });
+
+  for (const scenario of [
+    {
+      name: "missing baseline Linux shard",
+      os: "ubuntu-latest",
+      mode: "baseline",
+      count: 3,
+      missing: 3,
+    },
+    {
+      name: "missing expanded Linux shard",
+      os: "ubuntu-latest",
+      mode: "expanded",
+      count: 6,
+      missing: 6,
+    },
+    {
+      name: "missing baseline Windows shard",
+      os: "windows-latest",
+      mode: "baseline",
+      count: 7,
+      missing: 7,
+    },
+    {
+      name: "missing expanded Windows shard",
+      os: "windows-latest",
+      mode: "expanded",
+      count: 14,
+      missing: 14,
+    },
+    {
+      name: "missing baseline shard replaced by an unexpected index",
+      os: "ubuntu-latest",
+      mode: "baseline",
+      count: 3,
+      missing: 3,
+      extra: 4,
+    },
+    {
+      name: "missing expanded shard replaced by an unexpected index",
+      os: "ubuntu-latest",
+      mode: "expanded",
+      count: 6,
+      missing: 6,
+      extra: 7,
+    },
+    {
+      name: "extra baseline shard",
+      os: "windows-latest",
+      mode: "baseline",
+      count: 7,
+      extra: 8,
+    },
+    {
+      name: "extra expanded shard",
+      os: "windows-latest",
+      mode: "expanded",
+      count: 14,
+      extra: 15,
+    },
+  ]) {
+    test(`rejects incomplete workflow groups: ${scenario.name}`, async () => {
+      const fixture = await workflowFixtures();
+      if (scenario.missing !== undefined) {
+        await rm(
+          join(
+            fixture.root,
+            `reports/runner-${scenario.os}-${scenario.mode}-${scenario.missing}.xml`,
+          ),
+        );
+      }
+      if (scenario.extra !== undefined) {
+        await fixture.report(
+          `reports/runner-${scenario.os}-${scenario.mode}-${scenario.extra}.xml`,
+          [testcase("unexpected shard")],
+        );
+      }
+      const child = Bun.spawn({
+        cmd: [
+          bash,
+          "-e",
+          "-o",
+          "pipefail",
+          "-c",
+          `node() { printf '%s\\n' "$3|$4"; }\n${fixture.script}`,
+        ],
+        cwd: fixture.root,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+        env: { ...process.env, GITHUB_STEP_SUMMARY: "summary.md" },
+        timeout: 10_000,
+      });
+      const { status, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(1);
+      if (scenario.missing !== undefined) {
+        expect(stderr).toContain(
+          `Missing shard report: reports/runner-${scenario.os}-${scenario.mode}-${scenario.missing}.xml`,
+        );
+      } else {
+        expect(stderr).toContain(
+          `Expected ${scenario.count} reports for ${scenario.os}/${scenario.mode}, found ${scenario.count + 1}`,
+        );
+      }
+      // Missing artifacts must not prevent the other OS/mode diagnostics.
+      expect(
+        (await readFile(join(fixture.root, "summary.md"), "utf8"))
+          .trim()
+          .split(/\r?\n/u),
+      ).toHaveLength(3);
+    });
+  }
 
   test("merges native shards without depending on test order", async () => {
     const fixture = await fixtures();
@@ -257,25 +455,109 @@ ${testcase("&#97; &#38; &#x22; &#39; &#60; &#62;")}
     expect(result.stdout).toContain("| defaults.xml | 1 | 0 | 0.00 |");
   });
 
-  test("rejects ambiguous test identities even when totals match", async () => {
+  test("preserves repeated parameterized identities and their outcome counts", async () => {
     const fixture = await fixtures();
-    const first = testcase("same parameterized name");
-    for (const [name, repeated] of [
-      ["same-outcome", first],
-      ["different-outcome", testcase("same parameterized name", "<skipped/>")],
+    const passed = testcase("same parameterized name");
+    const skipped = testcase("same parameterized name", "<skipped/>");
+    const baseline = await fixture.report("baseline.xml", [
+      passed,
+      passed,
+      skipped,
+    ]);
+    const candidate = await fixture.report("candidate.xml", [
+      skipped,
+      passed,
+      passed,
+    ]);
+    const result = await compare(baseline, candidate);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("| baseline.xml | 3 | 1 | 1.25 |");
+    for (const [name, cases, diagnostic] of [
+      ["missing", [passed, skipped], "Missing (1)"],
+      ["extra", [passed, passed, passed, skipped], "Extra (1)"],
+      ["changed", [passed, skipped, skipped], "Missing (1)"],
     ] as const) {
-      const baseline = await fixture.report(`${name}-baseline.xml`, [
-        first,
-        repeated,
-      ]);
-      const candidate = await fixture.report(`${name}-candidate.xml`, [
-        first,
-        repeated,
-      ]);
-      const result = await compare(baseline, candidate);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("duplicate test identity");
+      const changed = await fixture.report(`${name}.xml`, [...cases]);
+      const comparison = await compare(baseline, changed);
+      expect(comparison.status, name).toBe(1);
+      expect(comparison.stderr).toContain(diagnostic);
     }
+  });
+
+  test("compares complete baseline and candidate shard groups", async () => {
+    const fixture = await fixtures();
+    const first = testcase("first");
+    const repeated = testcase("parameterized name");
+    await fixture.report("baseline-1.xml", [first, repeated]);
+    await fixture.report("baseline-2.xml", [repeated]);
+    await fixture.report("candidate-1.xml", [repeated, repeated]);
+    await fixture.report("candidate-2.xml", [first]);
+    const baseline = join(fixture.root, "baseline-*.xml");
+    const candidate = join(fixture.root, "candidate-*.xml");
+    const result = await compare(baseline, candidate);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      "Baseline shards: slowest 1.25s; combined test time: 2.50s.",
+    );
+    expect(result.stdout).toContain(
+      "Slowest candidate: 1.25s; combined test time: 2.50s.",
+    );
+    const extra = await fixture.report("extra.xml", [repeated]);
+    const duplicated = await compare(baseline, candidate, extra);
+    expect(duplicated.status).toBe(1);
+    expect(duplicated.stderr).toContain("Extra (1)");
+    const missing = await compare(
+      baseline,
+      join(fixture.root, "candidate-1.xml"),
+    );
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("Missing (1)");
+    expect(
+      (await compare(join(fixture.root, "absent-*.xml"), candidate)).status,
+    ).toBe(1);
+  });
+
+  test("preserves assertion counts for repeated identities across different shard layouts", async () => {
+    const fixture = await fixtures();
+    const repeated = (assertions: string) =>
+      testcase("same parameterized name", "", assertions);
+    await fixture.report("baseline-1.xml", [repeated("2"), repeated("5")]);
+    await fixture.report("baseline-2.xml", [repeated("5")]);
+    await fixture.report("candidate-1.xml", [repeated("5")]);
+    await fixture.report("candidate-2.xml", [repeated("2")]);
+    await fixture.report("candidate-3.xml", [repeated("05")]);
+    const baseline = join(fixture.root, "baseline-*.xml");
+    const candidate = join(fixture.root, "candidate-*.xml");
+    const matching = await compare(baseline, candidate);
+    expect(matching.status, matching.stderr).toBe(0);
+
+    await fixture.report("candidate-1.xml", [repeated("4")]);
+    const changed = await compare(baseline, candidate);
+    expect(changed.status).toBe(1);
+    expect(changed.stderr).toContain(
+      "Missing (1): tests-ts/example.test.ts > example > same parameterized name > passed > assertions=5",
+    );
+    expect(changed.stderr).toContain(
+      "Extra (1): tests-ts/example.test.ts > example > same parameterized name > passed > assertions=4",
+    );
+  });
+
+  test("distinguishes missing assertion counts from reported zero assertions", async () => {
+    const fixture = await fixtures();
+    const baseline = await fixture.report("baseline.xml", [
+      testcase("without assertions", "", "0"),
+    ]);
+    const candidate = await fixture.report("candidate.xml", [
+      testcase("without assertions"),
+    ]);
+    const result = await compare(baseline, candidate);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Missing (1): tests-ts/example.test.ts > example > without assertions > passed > assertions=0",
+    );
+    expect(result.stderr).toContain(
+      "Extra (1): tests-ts/example.test.ts > example > without assertions > passed",
+    );
   });
 
   test("reports every shard's timing even when an earlier shard fails", async () => {

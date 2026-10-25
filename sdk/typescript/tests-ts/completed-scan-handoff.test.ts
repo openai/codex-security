@@ -7,12 +7,15 @@ test("does not request completed findings after a prompt-only scan", async () =>
     runtime,
   )?.[0];
   expect(source).toBeDefined();
+  const actionSource =
+    /function scanActionResult\([^\n]*\) \{[\s\S]*?\n\}/u.exec(runtime)?.[0];
+  expect(actionSource).toBeDefined();
 
   const promptOnlyScanResult = new Function(
     "isRecord",
     "string2",
     "toolErrorResult",
-    `${source}\nreturn promptOnlyScanResult;`,
+    `${source}\n${actionSource}\nreturn promptOnlyScanResult;`,
   )(
     (value: unknown) => value !== null && typeof value === "object",
     () => ({ uuid: () => ({ safeParse: () => ({ success: true }) }) }),

@@ -1,4 +1,4 @@
-import { z } from "incur";
+import { z } from "zod";
 import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
@@ -26,33 +26,14 @@ const reviewSchema = z.discriminatedUnion("decision", [
   sameSchema,
   distinctSchema,
 ]);
-const screeningSameSchema = z.object({
-  decision: z.literal("SAME"),
-  rationale,
-});
-const screeningDistinctSchema = z.object({
-  decision: z.literal("DISTINCT"),
-  rationale,
-});
 const screeningDecisionSchema = z.discriminatedUnion("decision", [
-  screeningSameSchema.strict(),
-  screeningDistinctSchema.strict(),
+  sameSchema.pick({ decision: true, rationale: true }).strict(),
+  distinctSchema.pick({ decision: true, rationale: true }).strict(),
 ]);
 // The host assigns exact slot names; finding IDs stay out of model output.
-const screeningSchema = z
-  .object({
-    decisions: z.record(z.string(), screeningDecisionSchema),
-  })
-  .strict();
-
-function requireMergedFinding(result: DuplicateDecision): void {
-  if (result.decision !== "SAME") return;
-  const finding = requireFinding(result.mergedFinding);
-  if (finding.findingId !== result.canonicalFindingId)
-    throw new Error(
-      "Every SAME decision requires the canonical finding's identity.",
-    );
-}
+const screeningSchema = z.strictObject({
+  decisions: z.record(z.string(), screeningDecisionSchema),
+});
 
 export type ScreeningResult = z.infer<typeof screeningSchema>;
 export type DuplicateDecision = z.infer<typeof reviewSchema>;
@@ -76,9 +57,13 @@ export function validateReview(
   findings: readonly Finding[],
 ): DuplicateDecision {
   const result = reviewSchema.parse(value);
-  requireMergedFinding(result);
+  if (result.decision !== "SAME") return result;
+  const finding = requireFinding(result.mergedFinding);
+  if (finding.findingId !== result.canonicalFindingId)
+    throw new Error(
+      "Every SAME decision requires the canonical finding's identity.",
+    );
   if (
-    result.decision === "SAME" &&
     !findings.some((finding) => finding.findingId === result.canonicalFindingId)
   ) {
     throw new Error(
@@ -107,27 +92,18 @@ export function validateScreening(
 }
 
 function screeningToolSchema(neighborCount: number): object {
-  const decisionSchema = z.toJSONSchema(screeningDecisionSchema, {
-    target: "openapi-3.0",
-  });
-  const slots = Array.from({ length: neighborCount }, (_value, index) =>
-    screeningPairSlot(index),
+  const slots = Object.fromEntries(
+    Array.from({ length: neighborCount }, (_value, index) => [
+      screeningPairSlot(index),
+      screeningDecisionSchema,
+    ]),
   );
-  return {
-    type: "object",
-    properties: {
-      decisions: {
-        type: "object",
-        properties: Object.fromEntries(
-          slots.map((slot) => [slot, decisionSchema]),
-        ),
-        required: slots,
-        additionalProperties: false,
-      },
+  return z.toJSONSchema(z.strictObject({ decisions: z.strictObject(slots) }), {
+    target: "openapi-3.0",
+    override: ({ jsonSchema }) => {
+      if (jsonSchema.type === "object") jsonSchema.required ??= [];
     },
-    required: ["decisions"],
-    additionalProperties: false,
-  };
+  });
 }
 
 class CodexReviewer {

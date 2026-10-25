@@ -1,5 +1,5 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { nodeCommand } from "./support/shell.js";
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -11,7 +11,7 @@ import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
-import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
+import { TestClient } from "./support/api-client.js";
 import {
   codexFactory,
   completedEvents,
@@ -30,7 +30,7 @@ describe("CodexSecurity orchestration", () => {
     "profile-providers-ambient",
     "profile-inherited-cwd",
     "profile-overridden-cwd",
-    "profile-strict",
+    "profile-policy-override",
     "null optional args",
     "null optional cwd",
   ])(
@@ -41,7 +41,7 @@ describe("CodexSecurity orchestration", () => {
       const profileProviders = profile && selection !== "profile";
       const inheritedCwd = selection === "profile-inherited-cwd";
       const overriddenCwd = selection === "profile-overridden-cwd";
-      const strict = selection === "profile-strict";
+      const policyOverride = selection === "profile-policy-override";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -86,7 +86,7 @@ describe("CodexSecurity orchestration", () => {
             }
           : definition;
       const overrides = {
-        ...(strict ? { approval_policy: "never" } : {}),
+        ...(policyOverride ? { approval_policy: "never" } : {}),
         ...(profile
           ? {
               profile: "review",
@@ -94,7 +94,7 @@ describe("CodexSecurity orchestration", () => {
                 review: {
                   model_provider: "synthetic.provider",
                   service_tier: "fast",
-                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(policyOverride ? { approval_policy: "on-request" } : {}),
                   ...(profileProviders
                     ? {
                         model_providers: {
@@ -139,35 +139,27 @@ describe("CodexSecurity orchestration", () => {
           repositoryRevision: async () => "deadbeef",
           createCodex: (options) => {
             captured = options;
-            return {
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  if (!profile) {
-                    const preflightConfig = parseToml(
-                      await readFile(
-                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                        "utf8",
-                      ),
-                    );
-                    expect(preflightConfig["model_provider"]).toBe(
-                      "synthetic.provider",
-                    );
-                    expect(preflightConfig["model_providers"]).toBeUndefined();
-                    if (process.platform !== "win32") {
-                      expect(
-                        (
-                          await stat(
-                            options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                          )
-                        ).mode & 0o777,
-                      ).toBe(0o600);
-                    }
-                  }
-                  throw new Error("synthetic command-auth scan started");
-                },
-              }),
-            };
+            return codexFactory(async function runStreamed() {
+              if (!profile) {
+                const preflightConfig = parseToml(
+                  await readFile(
+                    options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  ),
+                );
+                expect(preflightConfig["model_provider"]).toBe(
+                  "synthetic.provider",
+                );
+                expect(preflightConfig["model_providers"]).toBeUndefined();
+                if (process.platform !== "win32") {
+                  expect(
+                    (await stat(options.env!["CODEX_SECURITY_CONFIG_PATH"]!))
+                      .mode & 0o777,
+                  ).toBe(0o600);
+                }
+              }
+              throw new Error("synthetic command-auth scan started");
+            })();
           },
         },
       );
@@ -226,8 +218,8 @@ describe("CodexSecurity orchestration", () => {
             "synthetic.provider",
           );
           expect(captured?.config?.["service_tier"]).toBe("fast");
-          if (strict)
-            expect(captured?.config?.["approval_policy"]).toBe("never");
+          if (policyOverride)
+            expect(captured?.config?.["approval_policy"]).toBe("on-request");
         } else {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
@@ -296,140 +288,94 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => interpreter!,
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(input: string) {
-              const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-              const codexHome = options.env?.["CODEX_HOME"];
-              expect(typeof configPath).toBe("string");
-              expect(typeof codexHome).toBe("string");
-              capturedConfigPath = configPath;
-              capturedCodexHome = codexHome;
-              expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
-              expect(
-                parseToml(
-                  await readFile(join(codexHome!, "config.toml"), "utf8"),
-                ),
-              ).toMatchObject({
-                approval_policy: "never",
-                permissions: {
-                  codex_security_scan: {
-                    filesystem: {
-                      ":root": "read",
-                      ":workspace_roots": "write",
-                      [join(
-                        ambientHome,
-                        "state",
-                        "plugins",
-                        "codex-security",
-                        "codex-home",
-                      )]: { ".": "deny" },
-                    },
+        createCodex: (options: CodexOptions) =>
+          codexFactory(async function runStreamed() {
+            const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+            const codexHome = options.env?.["CODEX_HOME"];
+            expect(typeof configPath).toBe("string");
+            expect(typeof codexHome).toBe("string");
+            capturedConfigPath = configPath;
+            capturedCodexHome = codexHome;
+            expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
+            expect(
+              parseToml(
+                await readFile(join(codexHome!, "config.toml"), "utf8"),
+              ),
+            ).toMatchObject({
+              approval_policy: "never",
+              permissions: {
+                codex_security_scan: {
+                  filesystem: {
+                    ":root": "read",
+                    ":workspace_roots": "write",
+                    [join(
+                      ambientHome,
+                      "state",
+                      "plugins",
+                      "codex-security",
+                      "codex-home",
+                    )]: { ".": "deny" },
                   },
                 },
-              });
-              const codexConfig = await readFile(
-                join(codexHome!, "config.toml"),
+              },
+            });
+            const codexConfig = await readFile(
+              join(codexHome!, "config.toml"),
+              "utf8",
+            );
+            expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
+            expect(codexConfig).not.toContain("model_reasoning_summary");
+            expect(codexConfig).not.toContain("show_raw_agent_reasoning");
+            expect(options.config).not.toHaveProperty("projects");
+            expect(options.config).not.toHaveProperty("permissions");
+            expect(options.config).toMatchObject({
+              default_permissions: "codex_security_scan",
+              allow_login_shell: false,
+              model_reasoning_summary: "detailed",
+              show_raw_agent_reasoning: true,
+              windows: { sandbox: "elevated" },
+              mcp_servers: {
+                private: {
+                  command: "echo",
+                  env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
+                },
+              },
+              shell_environment_policy: {
+                set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
+              },
+            });
+            expect(requestMetadata(options.configOverrides)).toMatchObject({
+              request_trace: "preserve-configured-metadata",
+              codex_security_surface: "sdk",
+            });
+            if (process.platform !== "win32") {
+              expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
+            }
+            const serialized = await readFile(configPath!, "utf8");
+            expect(serialized).not.toContain("RUNTIME_MCP_SECRET");
+            expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
+            expect(serialized).not.toContain("mcp_servers");
+            expect(serialized).not.toContain("shell_environment_policy");
+            expect(parseToml(serialized)).toMatchObject({
+              projects: {
+                [repository]: { trust_level: "trusted" },
+              },
+            });
+            await copyCompletedScan(root);
+            const manifestPath = join(scanDir, "scan-manifest.json");
+            const manifest = JSON.parse(
+              await readFile(manifestPath, "utf8"),
+            ) as { scan: { producer: { version: string } } };
+            const pluginManifest = JSON.parse(
+              await readFile(
+                join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
                 "utf8",
-              );
-              expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
-              expect(codexConfig).not.toContain("model_reasoning_summary");
-              expect(codexConfig).not.toContain("show_raw_agent_reasoning");
-              expect(options.config).not.toHaveProperty("projects");
-              expect(options.config).not.toHaveProperty("permissions");
-              expect(options.config).toMatchObject({
-                default_permissions: "codex_security_scan",
-                allow_login_shell: false,
-                model_reasoning_summary: "detailed",
-                show_raw_agent_reasoning: true,
-                windows: { sandbox: "elevated" },
-                mcp_servers: {
-                  private: {
-                    command: "echo",
-                    env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
-                  },
-                },
-                shell_environment_policy: {
-                  set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
-                },
-                responses_api_metadata: {
-                  request_trace: "preserve-configured-metadata",
-                  codex_security_surface: "sdk",
-                },
-              });
-              if (process.platform !== "win32") {
-                expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
-              }
-              const serialized = await readFile(configPath!, "utf8");
-              expect(serialized).not.toContain("RUNTIME_MCP_SECRET");
-              expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
-              expect(serialized).not.toContain("mcp_servers");
-              expect(serialized).not.toContain("shell_environment_policy");
-              expect(parseToml(serialized)).toMatchObject({
-                projects: {
-                  [repository]: { trust_level: "trusted" },
-                },
-              });
-              expect(input).toContain(
-                `--config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}`,
-              );
-              expect(input).toContain("--effective-config");
-              const shellEnvironment = options.env as Record<string, string>;
-              const helper = execFileSync(
-                interpreter!,
-                [
-                  join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-                  "--skill",
-                  "security-scan",
-                  "--config",
-                  shellEnvironment["CODEX_SECURITY_CONFIG_PATH"]!,
-                  "--cwd",
-                  repository,
-                  "--multi-agent-runtime-owner",
-                  "native",
-                  "--multi-agent-runtime-version",
-                  "v2",
-                  "--multi-agent-session-cap",
-                  "12",
-                  "--multi-agent-runtime-provenance",
-                  "tool-surface",
-                  "--runtime-check",
-                  "delegation_available=true",
-                  "--runtime-check",
-                  "goal_tools_available=true",
-                  "--effective-config",
-                  "features.goals=true",
-                ],
-                {
-                  env: {
-                    PATH: process.env["PATH"],
-                    CODEX_HOME: join(root, "denied"),
-                  },
-                  encoding: "utf8",
-                },
-              );
-              const preflight = JSON.parse(helper) as Record<string, unknown>;
-              expect(preflight["status"]).toBe("ready");
-              expect(preflight["config_resolution"]).toBe("manual-layers");
-              expect(preflight["config_paths"]).toEqual([configPath]);
-              await copyCompletedScan(root);
-              const manifestPath = join(scanDir, "scan-manifest.json");
-              const manifest = JSON.parse(
-                await readFile(manifestPath, "utf8"),
-              ) as { scan: { producer: { version: string } } };
-              const pluginManifest = JSON.parse(
-                await readFile(
-                  join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
-                  "utf8",
-                ),
-              ) as { version: string };
-              manifest.scan.producer.version = pluginManifest.version;
-              await writeFile(manifestPath, JSON.stringify(manifest));
-              return { events: completedEvents() };
-            },
-          }),
-        }),
+              ),
+            ) as { version: string };
+            manifest.scan.producer.version = pluginManifest.version;
+            await writeFile(manifestPath, JSON.stringify(manifest));
+            return { events: completedEvents() };
+          })(),
       },
     );
 

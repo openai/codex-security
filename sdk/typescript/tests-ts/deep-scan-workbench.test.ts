@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { CoverageDocument } from "../src/models.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { workbenchCommand as workbench } from "./support/workbench-command.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -169,6 +170,14 @@ test.each([
     await mkdir(repository);
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(repository, "source.py"), "# synthetic source\n");
+    const paths = _label === "supplied" ? ["api", "background jobs"] : [];
+    for (const path of paths) {
+      await mkdir(join(repository, path));
+      await writeFile(
+        join(repository, path, "source.py"),
+        "# scoped fixture\n",
+      );
+    }
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const command = workbench(python!, () => ({
@@ -192,7 +201,9 @@ test.each([
           },
           mode: "deep",
           repository,
-          target: { kind: "repository", paths: [] },
+          target: paths.length
+            ? { kind: "paths", paths }
+            : { kind: "repository", paths: [] },
         },
         userContext: scanPrompt,
       }),
@@ -215,6 +226,17 @@ test.each([
       "deep-scan-mcp/v1",
     ]);
     const deepScan = begun["deepScan"] as Record<string, unknown>;
+    const reloaded = await command([
+      "get-deep-scan",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "synthetic-thread",
+    ]);
+    expect(reloaded["deepScan"]).toMatchObject({
+      includePaths: paths.length ? paths : ["."],
+      userContext: scanPrompt ?? null,
+    });
     const running = await command(["get-scan", "--scan-id", scanId]);
     expect(running["scan"]).toMatchObject({
       progress: {
@@ -245,6 +267,7 @@ test.each([
     );
     expect(workerContext).toMatchObject({
       scanId,
+      includePaths: paths.length ? paths : ["."],
       userContext: scanPrompt ?? null,
     });
   },
@@ -446,7 +469,7 @@ describe("deep scan workbench ownership", () => {
     ["scoped_path", false],
     ["repository", true],
   ] as const)(
-    "returns an honest partial %s report with existing deferred work %p when saturated discovery exceeds its cost limit",
+    "returns a bounded %s report with existing deferred work %p when saturated discovery exceeds its cost limit",
     async (inventoryStrategy, existingDeferred) => {
       const root = await temporaryDirectories.create(
         "codex-security-deep-budget-recovery-",
@@ -599,48 +622,19 @@ describe("deep scan workbench ownership", () => {
         0,
       );
       if (existingDeferred) {
-        await Promise.all([
-          writeFile(
-            join(scanDir, "scan-manifest.json"),
-            JSON.stringify({
-              scan: {
-                target: {
-                  kind: "directory_snapshot",
-                  targetId,
-                  displayName: "repository",
-                },
-                scope: { limitations: [], validationMode: "incomplete" },
-              },
-            }),
-          ),
-          writeFile(
-            join(scanDir, "findings.json"),
-            JSON.stringify({ findings: [] }),
-          ),
-          writeFile(
-            join(scanDir, "coverage.json"),
-            JSON.stringify({
-              completeness: "partial",
-              inventoryStrategy,
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [
-                {
-                  id: "candidate-001",
-                  candidateId: "candidate-001",
-                  reason:
-                    "Existing candidate validation dependency was unavailable.",
-                  paths: ["src/source.py"],
-                },
-                {
-                  id: "candidate-deferred",
-                  candidateId: "candidate-deferred",
-                  reason: "Existing runtime policy could not be inspected.",
-                  paths: ["src/source.py"],
-                },
-              ],
-            }),
-          ),
+        await writeBoundedScanArtifacts(scanDir, targetId, inventoryStrategy, [
+          {
+            id: "candidate-001",
+            candidateId: "candidate-001",
+            reason: "Existing candidate validation dependency was unavailable.",
+            paths: ["src/source.py"],
+          },
+          {
+            id: "candidate-deferred",
+            candidateId: "candidate-deferred",
+            reason: "Existing runtime policy could not be inspected.",
+            paths: ["src/source.py"],
+          },
         ]);
       }
       const warning =
@@ -674,7 +668,6 @@ describe("deep scan workbench ownership", () => {
       const coverage = JSON.parse(
         await readFile(join(scanDir, "coverage.json"), "utf8"),
       ) as {
-        completeness: string;
         inventoryStrategy: string;
         includePaths: string[];
         deferred: Array<{
@@ -685,8 +678,8 @@ describe("deep scan workbench ownership", () => {
         }>;
         surfaces: Array<{ id: string; disposition: string }>;
       };
+      expect(coverage).not.toHaveProperty("completeness");
       expect(coverage).toMatchObject({
-        completeness: "partial",
         inventoryStrategy,
         includePaths: scoped ? ["src"] : ["."],
       });
@@ -763,9 +756,7 @@ describe("deep scan workbench ownership", () => {
         ]),
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-      expect(report).toContain(
-        "No findings were validated before the scan reached its cost limit.",
-      );
+      expect(report).toContain("No findings were reported.");
       if (existingDeferred) {
         expect(report).toContain(
           "Existing candidate validation dependency was unavailable.",
@@ -782,73 +773,6 @@ describe("deep scan workbench ownership", () => {
       );
       expect(report).toContain("Handler cannot receive external requests");
       expect(report).toContain("Attack path does not cross the trust boundary");
-      expect(report).not.toContain(
-        "No reportable findings survived the canonical discovery, validation",
-      );
-    },
-  );
-
-  test.each([
-    [
-      "a deferred discovery candidate",
-      "Validation was deferred because the scan reached its cost limit: candidate evidence.",
-      true,
-    ],
-    [
-      "a cost-limited scan without candidates",
-      "Validation was deferred because the scan reached its cost limit.",
-      true,
-    ],
-    [
-      "an unrelated retry budget",
-      "The retry budget was exhausted while checking the service.",
-      false,
-    ],
-    [
-      "an unrelated resource budget",
-      "Validation exceeded the container resource budget.",
-      false,
-    ],
-    [
-      "an unrelated service cost limit",
-      "A dependent service reached its configured cost limit.",
-      false,
-    ],
-    [
-      "a similar non-workbench cost limit",
-      "Validation was deferred because the scan reached its cost limit elsewhere.",
-      false,
-    ],
-  ] as const)(
-    "only describes an exhausted scan cost limit for %s",
-    (_description, reason, exhausted) => {
-      const python = Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
-      const script = [
-        "import json, pathlib, runpy, sys",
-        "plugin = pathlib.Path(sys.argv[1])",
-        "examples = plugin / 'examples' / 'completed-scan'",
-        "documents = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
-        "manifest, findings, coverage = documents",
-        "findings['findings'] = []",
-        "coverage['completeness'] = 'partial'",
-        "coverage['deferred'] = [{'id': 'candidate-example', 'reason': sys.argv[2]}]",
-        "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
-        "print(projection['build_report_markdown'](manifest, findings, coverage))",
-      ].join("\n");
-      const result = runPython(python!, ["-c", script, PLUGIN_ROOT, reason]);
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-      const report = new TextDecoder().decode(result.stdout);
-      expect(
-        report.includes(
-          "No findings were validated before the scan reached its cost limit.",
-        ),
-      ).toBe(exhausted);
-      expect(
-        report.includes(
-          "No reportable findings survived the canonical discovery, validation, and reportability gates.",
-        ),
-      ).toBe(!exhausted);
     },
   );
 
@@ -1098,7 +1022,7 @@ describe("deep scan workbench ownership", () => {
     expect(staleProgress["stderr"]).toContain("newer generation");
   });
 
-  test("completes an expired discovery deadline with no workers as honest partial coverage", async () => {
+  test("completes an expired discovery deadline with no workers with retained limitations", async () => {
     const root = await temporaryDirectories.create(
       "codex-security-deep-empty-deadline-",
     );
@@ -1205,34 +1129,8 @@ describe("deep scan workbench ownership", () => {
 
     const reason =
       "The configured discovery time limit elapsed before any source review completed.";
-    await Promise.all([
-      writeFile(
-        join(scanDir, "scan-manifest.json"),
-        JSON.stringify({
-          scan: {
-            target: {
-              kind: "directory_snapshot",
-              targetId,
-              displayName: "repository",
-            },
-            scope: { limitations: [], validationMode: "incomplete" },
-          },
-        }),
-      ),
-      writeFile(
-        join(scanDir, "findings.json"),
-        JSON.stringify({ findings: [] }),
-      ),
-      writeFile(
-        join(scanDir, "coverage.json"),
-        JSON.stringify({
-          completeness: "partial",
-          inventoryStrategy: "repository",
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [{ id: "source-review", reason }],
-        }),
-      ),
+    await writeBoundedScanArtifacts(scanDir, targetId, "repository", [
+      { id: "source-review", reason },
     ]);
     const completed = command(["complete-scan", "--scan-id", scanId])[
       "scan"
@@ -1245,18 +1143,14 @@ describe("deep scan workbench ownership", () => {
     const coverage = JSON.parse(
       await readFile(join(scanDir, "coverage.json"), "utf8"),
     );
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage).toMatchObject({
-      completeness: "partial",
       mode: "deep_repository",
       deferred: [{ id: "source-review", reason }],
     });
     const report = await readFile(join(scanDir, "report.md"), "utf8");
-    expect(report).toContain(
-      "No source review completed before the configured time limit. " +
-        "No vulnerability conclusion can be drawn.",
-    );
-    expect(report).not.toContain("No reportable findings survived");
-    expect(report).not.toContain("No findings were validated before");
+    expect(report).toContain("No findings were reported.");
+    expect(report).toContain(reason);
   });
 
   test("requeues a failed reducer's inputs and preserves findings at the discovery deadline", async () => {
@@ -1547,6 +1441,39 @@ describe("deep scan workbench ownership", () => {
     expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
   });
 });
+
+function writeBoundedScanArtifacts(
+  scanDir: string,
+  targetId: string,
+  inventoryStrategy: CoverageDocument["inventoryStrategy"],
+  deferred: CoverageDocument["deferred"],
+) {
+  return Promise.all([
+    writeFile(
+      join(scanDir, "scan-manifest.json"),
+      JSON.stringify({
+        scan: {
+          target: {
+            kind: "directory_snapshot",
+            targetId,
+            displayName: "repository",
+          },
+          scope: { limitations: [] },
+        },
+      }),
+    ),
+    writeFile(join(scanDir, "findings.json"), JSON.stringify({ findings: [] })),
+    writeFile(
+      join(scanDir, "coverage.json"),
+      JSON.stringify({
+        inventoryStrategy,
+        surfaces: [],
+        explicitExclusions: [],
+        deferred,
+      }),
+    ),
+  ]);
+}
 
 function workbenchCommand(
   python: string | null,

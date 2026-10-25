@@ -1,5 +1,6 @@
 import { isNonEmptyString } from "./value.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
 
@@ -31,6 +32,9 @@ export function updateNoticeEnabled(environment: NodeJS.ProcessEnv): boolean {
 export function updateCommand(
   environment: NodeJS.ProcessEnv = process.env,
   entrypoint: string = fileURLToPath(import.meta.url),
+  nodeExecutable: string | undefined = process.platform === "win32"
+    ? realpathSync(process.execPath)
+    : undefined,
 ): string {
   const path = entrypoint.replaceAll("\\", "/").toLowerCase();
   const agent = (environment["npm_config_user_agent"] ?? "").toLowerCase();
@@ -46,14 +50,24 @@ export function updateCommand(
     return "download and extract the latest Codex Security release";
   }
 
+  const nodeModulesDirectory =
+    nodeExecutable === undefined
+      ? undefined
+      : win32
+          .join(win32.dirname(nodeExecutable), "node_modules")
+          .replaceAll("\\", "/")
+          .toLowerCase();
   const global =
     environment["npm_config_global"] === "true" ||
     path.includes("/lib/node_modules/") ||
     path.includes("/appdata/roaming/npm/node_modules/") ||
+    (nodeModulesDirectory !== undefined &&
+      path.startsWith(`${nodeModulesDirectory}/`)) ||
     path.includes("/pnpm/global/") ||
     path.includes("/.bun/install/global/") ||
     path.includes("/.yarn/global/") ||
-    path.includes("/yarn/global/");
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/");
 
   if (agent.startsWith("pnpm/") || path.includes("/.pnpm/")) {
     return `pnpm add${global ? " -g" : ""} ${PACKAGE_NAME}@latest`;
@@ -61,7 +75,8 @@ export function updateCommand(
   if (
     agent.startsWith("yarn/") ||
     path.includes("/.yarn/") ||
-    path.includes("/yarn/global/")
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/")
   ) {
     return `yarn${global ? " global" : ""} add ${PACKAGE_NAME}@latest`;
   }
@@ -146,11 +161,7 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
   ].join("\n");
 }
 
-function packageVersions(url: URL): {
-  package: string;
-  sdk: string;
-  executable: string;
-} {
+function packageVersions(url: URL) {
   try {
     const manifest: unknown = JSON.parse(readFileSync(url, "utf8"));
     if (

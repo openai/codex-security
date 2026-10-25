@@ -111,7 +111,11 @@ export function plannedJobs(
   }));
 }
 
-if (import.meta.filename === fs.realpathSync(process.argv[1])) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.filename === fs.realpathSync(process.argv[1])
+) {
   const args = parseArgs(process.argv.slice(2));
   const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
   const jobs = plannedJobs(dataset, args);

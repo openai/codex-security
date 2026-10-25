@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -120,6 +121,8 @@ def archive_scan(
         if previous_scan["status"] == "running":
             raise SystemExit("Cannot archive the output of a running scan.")
     has_contents = next(scan_dir.iterdir(), None) is not None
+    if has_contents and (not args.archive_existing or archived_scan_dir is not None):
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
@@ -133,8 +136,9 @@ def archive_scan(
     moved = False
     try:
         if archived_scan_dir is None:
+            configured_state = state_dir(canonical=False)
             protected_directories = [
-                state_dir(),
+                *(path.resolve() for path in (configured_state, *configured_state.parents)),
                 *(
                     Path(row[2]).resolve().parent
                     for row in connection.execute("PRAGMA database_list")
@@ -157,12 +161,30 @@ def archive_scan(
             archived_scan_dir.rmdir()
             scan_dir.rename(archived_scan_dir)
             moved = True
-            scan_dir.mkdir(mode=0o700)
-            scan_dir.chmod(0o700)
+            if os.name == "nt":
+                from windows_scan_local_files import create_directory_with_same_dacl
+
+                create_directory_with_same_dacl(scan_dir, archived_scan_dir)
+            else:
+                scan_dir.mkdir(mode=0o700)
+                scan_dir.chmod(0o700)
         if previous_scan is not None:
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
                 (str(archived_scan_dir), timestamp, previous_scan["id"]),
+            )
+            connection.execute(
+                """UPDATE finding_workflows SET scan_dir = ?,
+                    results_json = CASE WHEN json_extract(results_json, '$.scan.sarifPath') = ?
+                        THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
+                    WHERE scan_id = ? AND scan_dir = ?""",
+                (
+                    str(archived_scan_dir),
+                    str(scan_dir / "exports" / "results.sarif"),
+                    str(archived_scan_dir / "exports" / "results.sarif"),
+                    previous_scan["id"],
+                    str(scan_dir),
+                ),
             )
             for artifact in artifacts:
                 try:
@@ -205,6 +227,7 @@ def insert_running_scan(
     scope: str,
     diff_target: dict[str, str] | None,
     target_identity: tuple[str, str | None, int | str, int | str],
+    source_scopes: dict[str, Any],
     target_root: Path,
     target_summary: str | None,
     scope_file_count: int,
@@ -228,11 +251,11 @@ def insert_running_scan(
         """
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-            target_device, target_inode, scope, mode, user_context,
+            target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
@@ -241,6 +264,7 @@ def insert_running_scan(
             workspace["target_id"],
             str(target),
             *target_identity,
+            json.dumps(source_scopes, allow_nan=False, separators=(",", ":"), sort_keys=True),
             scope,
             workspace["default_mode"],
             user_context,

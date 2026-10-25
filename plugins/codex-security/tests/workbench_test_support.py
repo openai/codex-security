@@ -56,9 +56,8 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     return checkpoint_path
 
 
-def saved_coverage(*, deferred=(), surfaces=(), completeness=None):
+def saved_coverage(*, deferred=(), surfaces=()):
     return {
-        "completeness": completeness or ("partial" if deferred else "complete"),
         "surfaces": list(surfaces),
         "explicitExclusions": [],
         "deferred": list(deferred),
@@ -73,14 +72,13 @@ def saved_draft(
     closures=(),
     complete=False,
     findings=(),
-    completeness=None,
 ):
     return {
         "scanId": scan_id,
         "complete": complete,
         "findings": list(findings),
         "coverage": {
-            **saved_coverage(deferred=deferred, surfaces=surfaces, completeness=completeness),
+            **saved_coverage(deferred=deferred, surfaces=surfaces),
             **({"resolvedDeferred": list(closures)} if closures else {}),
         },
     }
@@ -100,6 +98,8 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
     return {
         "id": worker_id,
         "kind": "discovery",
+        "status": "running",
+        "merge_state": "buffered",
         "artifact_dir": str(output),
         "result_manifest_path": None,
         "attempt": attempt,
@@ -401,6 +401,18 @@ def workspace_command(
     state_dir: Path, command: str, workspace_id: str, *extra: str, **options: Any
 ) -> dict[str, object]:
     return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
+
+
+def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
+    patch_path.write_text(
+        "diff --git a/source.txt b/source.txt\n"
+        "--- a/source.txt\n"
+        "+++ b/source.txt\n"
+        "@@ -1 +1 @@\n"
+        "-vulnerable\n"
+        "+fixed\n",
+        **text_options,
+    )
 
 
 def request_remediation(
@@ -808,7 +820,7 @@ def write_completed_contract(
                 },
                 "evidenceExcerpt": "destination.write_bytes(entry.read())",
                 "attackPath": {
-                    "dataFlow": "archive entry -> destination path -> filesystem write",
+                    "dataflow": "archive entry -> destination path -> filesystem write",
                     "reachability": "An archive uploader can supply the crafted entry.",
                     "evidenceRefs": ["archive-write"],
                     "impact": {
@@ -833,7 +845,6 @@ def write_completed_contract(
         "schemaVersion": "1.0",
         "scanId": scan_id,
         "mode": coverage_mode,
-        "completeness": "complete",
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
         "excludePaths": [],
@@ -914,6 +925,11 @@ class ScanFixtureTestCase(TestCase):
 
     def read_json(self, name: str) -> dict[str, object]:
         return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+
+    def write_json(self, relative_path: str, payload: object) -> None:
+        path = self.scan_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()

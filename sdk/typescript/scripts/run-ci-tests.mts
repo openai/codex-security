@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { shardTestFiles } from "./test-shards.mts";
+import { partitionTests, type TestTimings } from "./test-shards.mts";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
 const shard = Number(selection?.[1]);
@@ -11,27 +11,26 @@ if (!Number.isSafeInteger(count) || shard > count) {
     "Usage: node --experimental-strip-types scripts/run-ci-tests.mts <shard>/<count> [bun test options]",
   );
 }
-const tests = (await readdir(new URL("../tests-ts/", import.meta.url))).filter(
-  (file) =>
-    file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
-);
+const tests = (await readdir(new URL("../tests-ts/", import.meta.url)))
+  .filter(
+    (file) =>
+      file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
+  )
+  .sort();
+// The checked-in snapshot keeps every job in this run on the same assignment.
+// Discovery remains authoritative, including files without timing history.
 const timings = JSON.parse(
-  await readFile(new URL("./ci-test-durations.json", import.meta.url), "utf8"),
-);
-const windows = process.platform === "win32";
-const defaultTestTimeoutMs = windows ? "120000" : "30000";
-const assignments = shardTestFiles(
-  tests,
-  count,
-  timings[windows ? "windows" : "unix"],
-);
-const selected = assignments[shard - 1]!;
-if (selected.files.length === 0) {
+  await readFile(new URL("./test-timings.json", import.meta.url), "utf8"),
+) as TestTimings;
+const selected = partitionTests(tests, count, timings, process.platform)[
+  shard - 1
+]!;
+if (selected.length === 0) {
   throw new Error(`Test shard ${shard}/${count} is empty.`);
 }
-console.log(
-  `Test shard ${shard}/${count} (estimated ${selected.seconds.toFixed(1)}s): ${selected.files.join(" ")}`,
-);
+const windows = process.platform === "win32";
+const defaultTestTimeoutMs = windows ? "120000" : "30000";
+console.log(`Test shard ${shard}/${count}: ${selected.join(" ")}`);
 await mkdir(new URL("../reports/", import.meta.url), { recursive: true }).catch(
   () => {
     // Bun warns about report write failures without changing the test result.
@@ -44,7 +43,7 @@ const testArguments = [
   "--reporter=junit",
   `--reporter-outfile=reports/junit-${shard}.xml`,
   ...process.argv.slice(3),
-  ...selected.files.map((file) => `./tests-ts/${file}`),
+  ...selected.map((file) => `./tests-ts/${file}`),
 ];
 // Keep arities aligned with the pinned Bun's test_params:
 // https://github.com/oven-sh/bun/blob/bun-v1.3.14/src/cli/Arguments.zig

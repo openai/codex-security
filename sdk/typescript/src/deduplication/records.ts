@@ -1,5 +1,5 @@
 import { hash, randomUUID } from "node:crypto";
-import { z } from "incur";
+import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
@@ -47,36 +47,25 @@ export function recordsReviewAttribution(
 }
 
 const id = z.string().min(1);
-const record = z
-  .object({
-    id,
-    finding: z.unknown().transform((value) => requireFinding(value)),
-  })
-  .strict();
+const record = z.strictObject({
+  id,
+  finding: z.unknown().transform((value) => requireFinding(value)),
+});
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
-  .object({
-    version: z.literal(1),
-    observations: z.array(record),
-    candidateRelationships: z.array(
-      z
-        .object({
-          observationId: id,
-          candidateObservationIds: z.array(id),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+const deduplicateRecordsInputSchema = z.strictObject({
+  version: z.literal(1),
+  observations: z.array(record),
+  candidateRelationships: z.array(
+    z.strictObject({
+      observationId: id,
+      candidateObservationIds: z.array(id),
+    }),
+  ),
+});
 
-export interface DeduplicateRecordsInput {
-  version: 1;
-  observations: { id: string; finding: Finding }[];
-  candidateRelationships: {
-    observationId: string;
-    candidateObservationIds: string[];
-  }[];
-}
+export interface DeduplicateRecordsInput extends z.infer<
+  typeof deduplicateRecordsInputSchema
+> {}
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;
@@ -171,7 +160,7 @@ export async function deduplicateRecords(
                     ? screeningFindingFormatInstructions
                     : pairFindingFormatInstructions,
                 ].join("\n\n"),
-                findingSchema: findingSchema(),
+                findingSchema: structuredClone(findingSchema()),
               },
               { signal: options.signal },
             ),

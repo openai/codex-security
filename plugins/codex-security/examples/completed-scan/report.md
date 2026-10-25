@@ -21,7 +21,6 @@ The scan was configured for the include paths and exclusions listed below.
 | Reportable findings | 1            |
 | Severity mix        | high: 1      |
 | Confidence mix      | high: 1      |
-| Coverage            | complete     |
 | Validation mode     | not recorded |
 
 Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.

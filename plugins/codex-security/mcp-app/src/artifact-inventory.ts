@@ -1,65 +1,39 @@
 import { execFile as nodeExecFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
 import {
   artifactDestination,
+  artifactSourcePath,
   paginateArtifactRows,
-  readArtifactText,
   type ArtifactContext,
   type ArtifactPage,
 } from "./artifact-io.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./python_command.js";
+import { decodeUtf8 } from "./helpers/utf8.js";
+import { decodePosixBytes } from "./helpers/posix-path.js";
 
 const execFile = promisify(nodeExecFile);
-const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
-export interface ReviewItem {
-  path: string;
-}
-
-export interface ReviewItemsResult {
-  items: ReviewItem[];
-  nextCursor?: string;
-}
-
-export interface PreparedReviewItems {
-  reviewItemsTotal: number;
-}
-
-export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "prepareInput",
-) as z.ZodType<{ scanId: string; handoffClaimToken?: string }>;
-
-export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsInput",
-) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
-
-const reviewItemSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItem",
-) as z.ZodType<ReviewItem>;
+const definitions = artifactSchemaDocuments["tools/review-items"].$defs;
+export type ReviewItem = z.infer<typeof definitions.reviewItem>;
+export const {
+  prepareInput: prepareReviewItemsInputSchema,
+  reviewItemsInput: reviewItemsReaderInputSchema,
+  reviewItem: reviewItemSchema,
+} = definitions;
 
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-): Promise<PreparedReviewItems> {
+) {
   if (context.layout !== "scan") {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
@@ -81,11 +55,11 @@ export async function prepareCodexSecurityReviewItems(
     "generate_in_scope_files.py",
   );
   const arguments_ = [
+    "-B",
     helper,
     "--repo",
     context.repoRoot,
-    "--scope",
-    context.scope ?? ".",
+    `--scope=${context.scope ?? "."}`,
     "--out",
     destination,
   ];
@@ -145,7 +119,7 @@ export async function prepareCodexSecurityReviewItems(
 export async function listCodexSecurityReviewItems(
   context: ArtifactContext,
   page: ArtifactPage = {},
-): Promise<ReviewItemsResult> {
+) {
   const result = paginateArtifactRows(
     await readReviewItems(context),
     page,
@@ -160,7 +134,17 @@ export async function listCodexSecurityReviewItems(
 async function readReviewItems(
   context: ArtifactContext,
 ): Promise<ReviewItem[]> {
-  const source = await readArtifactText(context, inventoryComponents, label);
+  const path = await artifactSourcePath(context, inventoryComponents, label);
+  const contents = await readFile(path).catch((error: unknown) => {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  });
+  const source =
+    process.platform === "win32"
+      ? decodeUtf8(contents)
+      : decodePosixBytes(contents);
   const rows: ReviewItem[] = [];
 
   for (const [index, line] of source.split(/\r?\n/u).entries()) {
@@ -180,12 +164,12 @@ async function readReviewItems(
   return rows;
 }
 
-function helperError(error: unknown): string | undefined {
-  if (!error || typeof error !== "object" || !("stderr" in error))
-    return undefined;
-  const stderr = error.stderr;
-  if (typeof stderr === "string") return stderr.trim() || undefined;
-  if (Buffer.isBuffer(stderr))
-    return stderr.toString("utf8").trim() || undefined;
-  return undefined;
+function helperError(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = error.stderr;
+    if (typeof stderr === "string" && stderr.trim()) return stderr.trim();
+    if (Buffer.isBuffer(stderr) && stderr.length)
+      return stderr.toString("utf8").trim();
+  }
+  return error instanceof Error ? error.message : String(error);
 }

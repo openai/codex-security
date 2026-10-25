@@ -196,6 +196,41 @@ const sampleSpec = {
   seed: "test-seed",
   labelCounts: { true_positive: 4, false_positive: 6 },
 };
+// Keep the established v1 collation when comparing paired sample runs.
+const collationRepositories = [
+  "example/a-b",
+  "example/a_b",
+  "example/A",
+  "example/a",
+  "example/Z",
+  "example/z",
+];
+const collationDataset = Array.from({ length: 48 }, (_, index) =>
+  benchmarkRecord({
+    repo_name: collationRepositories[index % collationRepositories.length],
+    ground_truth: index < 24 ? "true_positive" : "false_positive",
+    metadata: {
+      source: "synthetic",
+      cwe_id: "CWE-79",
+      languages: ["JavaScript"],
+    },
+    to_analyzer: {
+      ...positive.to_analyzer,
+      locations: [
+        { ...positive.to_analyzer.locations[0], file: `src/file-${index}.js` },
+      ],
+    },
+  }),
+);
+assert.deepEqual(
+  selectRepresentativeSample(collationDataset, {
+    profile: "test-v1-collation",
+    seed: "test-v1-collation",
+    labelCounts: { true_positive: 6, false_positive: 6 },
+  }).map(({ index }) => index),
+  [0, 1, 10, 14, 21, 22, 32, 34, 36, 37, 44, 46],
+);
+
 const selectedSample = selectRepresentativeSample(sampleDataset, sampleSpec);
 const selectedAgain = selectRepresentativeSample(sampleDataset, sampleSpec);
 
@@ -283,3 +318,25 @@ assert.throws(
 );
 
 console.log("sastbench dataset and prompt tests passed");
+
+// A locale may reorder accents and punctuation; that must not change the sample.
+import { execFileSync } from "node:child_process";
+const localeRecords = ["true_positive", "false_positive"].flatMap(
+  (ground_truth) =>
+    ["a", "ä", "z", "Z", "_", "å"].map((repo_name) =>
+      benchmarkRecord({ ground_truth, repo_name }),
+    ),
+);
+const sampleProgram = `import { selectRepresentativeSample } from ${JSON.stringify(new URL("./sastbench-lib.mts", import.meta.url).href)}; console.log(JSON.stringify(selectRepresentativeSample(${JSON.stringify(localeRecords)}, {profile:'test',seed:'test',labelCounts:{true_positive:2,false_positive:2}}).map(entry => entry.index)));`;
+const localeSample = (locale: string) =>
+  execFileSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "--eval",
+      sampleProgram,
+    ],
+    { encoding: "utf8", env: { ...process.env, LANG: locale, LC_ALL: locale } },
+  );
+assert.equal(localeSample("en_US.UTF-8"), localeSample("sv_SE.UTF-8"));

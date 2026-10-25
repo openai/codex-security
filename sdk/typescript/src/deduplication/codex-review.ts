@@ -1,14 +1,10 @@
-import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-  type SpawnOptionsWithoutStdio,
-} from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { z } from "incur";
+import { z } from "zod";
 import type { JsonObject } from "../config.js";
 import {
   comparisonEnvironment,
@@ -21,9 +17,12 @@ import {
   executablePathForSpawn,
   expandHome,
   resolveCodexCommand,
+  type StartCodex,
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
+import type { CodexSecuritySurface } from "../api.js";
+import { codexSecurityRequestContext } from "../request-metadata.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
@@ -52,9 +51,7 @@ import {
   type DeduplicationDiagnosticObserver,
 } from "./diagnostics.js";
 
-const reviewErrorSchema = z
-  .object({ reason: z.string().trim().min(1) })
-  .strict();
+const reviewErrorSchema = z.strictObject({ reason: z.string().trim().min(1) });
 
 export interface CodexReview<T> extends Pick<
   DeduplicationReviewRequest,
@@ -75,12 +72,6 @@ class ReviewAttemptError extends Error {
     super(message);
   }
 }
-
-type StartCodex = (
-  command: string,
-  args: readonly string[],
-  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
-) => ChildProcessWithoutNullStreams;
 
 interface Message {
   id?: string | number;
@@ -112,6 +103,7 @@ interface Message {
 function transientCodexError(info: unknown): boolean {
   if (
     info === "usageLimitExceeded" ||
+    info === "rateLimitExceeded" ||
     info === "serverOverloaded" ||
     info === "internalServerError"
   )
@@ -164,6 +156,7 @@ export class CodexReviewRunner {
       random?: () => number;
     } = {},
     private readonly onDiagnostic?: DeduplicationDiagnosticObserver,
+    private readonly surface: CodexSecuritySurface = "sdk",
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
@@ -307,7 +300,7 @@ export class CodexReviewRunner {
         "--config",
         'default_permissions="codex_security_review"',
         "--config",
-        `permissions.codex_security_review={extends=":read-only",filesystem={${[...privatePaths].map((path) => `${JSON.stringify(path)}="deny"`).join(",")}}}`,
+        `permissions.codex_security_review={extends=":read-only",filesystem=${inlineToml(Object.fromEntries([...privatePaths].map((path) => [path, "deny"])))}}`,
         "--config",
         `windows=${inlineToml(executionConfig["windows"] ?? DEFAULT_CODEX_CONFIG["windows"]!)}`,
       );
@@ -343,10 +336,26 @@ export class CodexReviewRunner {
         inputError = error;
         lines.close();
       });
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (message: string) =>
-        emitDiagnostic(onDiagnostic, { event: "review.stderr", message }),
-      );
+      const releaseCanceledPipes = () => {
+        if (!this.signal?.aborted) return;
+        lines.close();
+        if (child.exitCode === null && child.signalCode === null) return;
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      };
+      this.signal?.addEventListener("abort", releaseCanceledPipes, {
+        once: true,
+      });
+      child.once("exit", releaseCanceledPipes);
+      let diagnostic = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        diagnostic += chunk;
+        emitDiagnostic(onDiagnostic, {
+          event: "review.stderr",
+          message: chunk,
+        });
+      });
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
       const startThread = () =>
@@ -380,7 +389,14 @@ export class CodexReviewRunner {
                 update_plan: { enabled: false },
                 experimental_request_user_input: { enabled: false },
               },
-              responses_api_metadata: { codex_security_surface: "sdk" },
+              responses_api_metadata: codexSecurityRequestContext(
+                executionConfig,
+                {
+                  surface: this.surface,
+                  command: "dedupe",
+                  providerResolved: false,
+                },
+              ).metadata,
               features: {
                 code_mode: {
                   direct_only_tool_namespaces: ["review_validator"],
@@ -664,19 +680,25 @@ export class CodexReviewRunner {
             return accepted;
           }
         }
-        if (processError) throw processError;
-        throw new ReviewAttemptError(
-          "transport",
-          inputError?.message ?? "Codex exited before completing the review",
-          "Codex review transport failed.",
-          true,
-        );
       } finally {
         lines.close();
         child.stdin.end();
         if (child.exitCode === null) child.kill();
-        await closed;
+        try {
+          await closed;
+        } finally {
+          this.signal?.removeEventListener("abort", releaseCanceledPipes);
+          child.removeListener("exit", releaseCanceledPipes);
+        }
       }
+      if (processError) throw processError;
+      throw new ReviewAttemptError(
+        "transport",
+        [inputError?.message, diagnostic].filter(Boolean).join("\n") ||
+          "Codex exited before completing the review",
+        "Codex review transport failed.",
+        true,
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

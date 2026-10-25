@@ -1,3 +1,4 @@
+import { runNodePython } from "./support/python-probe.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
@@ -27,6 +28,7 @@ test("diff previews stay inside the selected repository", () => {
   const nested = join(repository, "src", "nested");
   mkdirSync(nested, { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   writeFileSync(join(repository, "src", "handler.py"), "value = 1\n");
   writeFileSync(join(repository, "src", "deleted.py"), "removed = True\n");
   writeFileSync(join(repository, "src", "entry.py"), "handler.py");
@@ -111,6 +113,7 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   const source = join(repository, "src", "変更.py");
   mkdirSync(join(repository, "src"), { recursive: true });
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   writeFileSync(source, "value = 1\n");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "base");
@@ -136,24 +139,18 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   const python = pythonExecutable();
   expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
-  const rank = spawnSync(
-    python!,
-    [
-      "-I",
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-      "make-diff-rank-input",
-      "--repo",
-      repository,
-      "--base",
-      base,
-      "--head",
-      head,
-      "--out",
-      output,
-    ],
-    { encoding: "utf8" },
-  );
+  const rank = runNodePython(python!, [
+    join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+    "make-diff-rank-input",
+    "--repo",
+    repository,
+    "--base",
+    base,
+    "--head",
+    head,
+    "--out",
+    output,
+  ]);
   const probeSource = [
     "import json, pathlib, sys",
     "sys.path.insert(0, sys.argv[1])",
@@ -165,19 +162,13 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
     "diff = db.require_diff_target(repo, 'commit', None, sys.argv[3], None)",
     "print(json.dumps({'root': str(root), 'pathspec': pathspec, 'subject': metadata['commitSubject'], 'diff': diff}))",
   ].join("\n");
-  const probe = spawnSync(
-    python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probeSource,
-      join(PLUGIN_ROOT, "scripts"),
-      repository,
-      legacyHead,
-    ],
-    { encoding: "utf8" },
-  );
+  const probe = runNodePython(python!, [
+    "-c",
+    probeSource,
+    join(PLUGIN_ROOT, "scripts"),
+    repository,
+    legacyHead,
+  ]);
 
   expect(rank.status, `${rank.stderr}\n${String(rank.error ?? "")}`).toBe(0);
   expect(
@@ -215,6 +206,7 @@ testPosix(
     mkdirSync(shimDirectory, { recursive: true });
     mkdirSync(externalBin);
     git(repository, "init", "-q");
+    git(repository, "config", "--local", "core.autocrlf", "false");
     writeFileSync(join(repository, "source.py"), "value = 1\n");
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "base");
@@ -240,11 +232,9 @@ testPosix(
     );
     const output = join(root, "output");
     const run = (script: string, args: string[], binding = trustedGit) =>
-      spawnSync(
+      runNodePython(
         python!,
         [
-          "-I",
-          "-B",
           join(PLUGIN_ROOT, "scripts", script),
           ...args,
           "--repo",
@@ -253,7 +243,6 @@ testPosix(
           output,
         ],
         {
-          encoding: "utf8",
           env: {
             ...process.env,
             PATH: `${externalBin}:${process.env["PATH"] ?? ""}`,

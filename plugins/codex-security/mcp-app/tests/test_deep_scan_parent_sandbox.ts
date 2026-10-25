@@ -114,21 +114,6 @@ assert.deepEqual(
   { filesystemDenies: [], literalFilesystemDenies: literalPaths },
 );
 
-const collidingDenies = [
-  { path: { type: "glob_pattern", pattern: "/repo/[ab]" }, access: "deny" },
-  { path: { type: "path", path: "/repo/[ab]" }, access: "none" },
-];
-for (const entries of [collidingDenies, [...collidingDenies].reverse()]) {
-  assert.throws(
-    () => resolveDeepWorkerParentSandbox(restricted([rootRead, ...entries])),
-    (error: Error) =>
-      error.name === "DeepScanNonRetryableError" &&
-      /literal path and glob denials with the same key cannot be preserved/i.test(
-        error.message,
-      ),
-  );
-}
-
 assert.throws(
   () =>
     resolveDeepWorkerParentSandbox(
@@ -147,6 +132,20 @@ assert.throws(
     error.name === "DeepScanNonRetryableError" &&
     /symbolic project-roots denial metadata/i.test(error.message),
 );
+
+const collidingDenies = [
+  { path: { type: "glob_pattern", pattern: "/repo/[ab]" }, access: "deny" },
+  { path: { type: "path", path: "/repo/[ab]" }, access: "none" },
+];
+for (const entries of [collidingDenies, [...collidingDenies].reverse()]) {
+  assert.deepEqual(
+    resolveDeepWorkerParentSandbox(restricted([rootRead, ...entries])),
+    {
+      filesystemDenies: ["/repo/[ab]"],
+      literalFilesystemDenies: ["/repo/[ab]"],
+    },
+  );
+}
 
 const pinnedFileUri = extra(
   pinnedReadOnly,

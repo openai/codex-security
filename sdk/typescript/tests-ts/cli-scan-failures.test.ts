@@ -37,6 +37,9 @@ function failingScan(message: string, onRun?: () => void) {
       onRun?.();
       throw new CodexSecurityError(message);
     },
+    validate: async () => {
+      throw new CodexSecurityError(message);
+    },
     preflight: async () => fakePreflight(),
     close: async () => {},
   });
@@ -48,11 +51,12 @@ function expectFailure(
   fullOutput: boolean,
   code: string,
   message: string,
+  data?: unknown,
 ) {
   const result = JSON.parse(text);
   if (fullOutput) {
     expect(result).toMatchObject({ ok: false, error: { code, message } });
-    expect(result).not.toHaveProperty("data");
+    expect(result.data).toEqual(data);
   } else {
     expect(result).toEqual({ status: "failed", code, message });
   }
@@ -236,7 +240,9 @@ test.each(commands)(
       for (const fullOutput of [false, true]) {
         const stdout = capture();
         const signals = new FakeSignals();
+        const result = fakeResult();
         const deps = dependencies({
+          result,
           signals,
           onRun: () => signals.emit(signal),
         });
@@ -249,7 +255,13 @@ test.each(commands)(
             deps,
           ),
         ).toBe(exitCode);
-        expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
+        expectFailure(
+          stdout.text(),
+          fullOutput,
+          "SCAN_FAILED",
+          message,
+          fullOutput ? result.toJSON() : undefined,
+        );
       }
     }
   },
@@ -436,3 +448,42 @@ test.each(commands.slice(1))(
     expectFailure(failure.text(), true, "SCAN_FAILED", message);
   },
 );
+
+for (const command of ["rerun", "resume"]) {
+  test.each([true, false, undefined])(
+    `${command} restores owner suggestions from its saved recipe (%p)`,
+    async (ownerSuggestions) => {
+      let observed: boolean | undefined;
+      let called = false;
+      const deps = dependencies({
+        onWorkbench: () => ({
+          scanId: "saved-scan",
+          scanDir: "/tmp/saved-scan",
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "deep",
+            config: {},
+            ...(ownerSuggestions === undefined ? {} : { ownerSuggestions }),
+          },
+        }),
+        onTurn: (_repository, options) => {
+          called = true;
+          observed = options.ownerSuggestions;
+        },
+      });
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", command, "saved-scan", "--json"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(called).toBe(true);
+      expect(observed).toBe(ownerSuggestions);
+    },
+  );
+}

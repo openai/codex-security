@@ -2,7 +2,6 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
-  readdir,
   readFile,
   rm,
   writeFile,
@@ -10,55 +9,223 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
-import { shardTestFiles } from "../scripts/test-shards.mts";
+import { partitionTests, type TestTimings } from "../scripts/test-shards.mts";
 import { readSubprocess } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
-test("balances measured work and includes new files without mutating the inventory", () => {
-  const files = [
-    "new.test.ts",
-    "small.test.ts",
-    "medium.test.ts",
-    "slow.test.ts",
-  ];
-  const shards = shardTestFiles(files, 2, {
-    "slow.test.ts": 100,
-    "medium.test.ts": 70,
-    "small.test.ts": 30,
-  });
-  expect(shards.map(({ seconds }) => seconds)).toEqual([101, 100]);
-  expect(shards.flatMap(({ files }) => files).sort()).toEqual(
-    [...files].sort(),
+async function copyRunner(root: string, timings: TestTimings = {}) {
+  for (const name of ["run-ci-tests.mts", "test-shards.mts"]) {
+    await copyFile(
+      new URL(`../scripts/${name}`, import.meta.url),
+      join(root, "scripts", name),
+    );
+  }
+  await writeFile(
+    join(root, "scripts", "test-timings.json"),
+    JSON.stringify(timings),
   );
-  expect(files[0]).toBe("new.test.ts");
-  expect(
-    shardTestFiles([...files].reverse(), 2, {
-      "slow.test.ts": 100,
-      "medium.test.ts": 70,
-      "small.test.ts": 30,
-    }),
-  ).toEqual(shards);
+}
+
+test.each(["linux", "darwin", "win32"] as const)(
+  "balances whole files using %s durations without depending on discovery order",
+  (platform) => {
+    const files = ["a", "b", "c", "d", "e", "f"];
+    const timings = Object.fromEntries(
+      files.map((file, index) => [file, { [platform]: 100 - index * 10 }]),
+    );
+    const shards = partitionTests(files, 3, timings, platform);
+    expect(shards).toEqual([
+      ["a", "f"],
+      ["b", "e"],
+      ["c", "d"],
+    ]);
+    expect(partitionTests(files.toReversed(), 3, timings, platform)).toEqual(
+      shards,
+    );
+    expect(files).toEqual(["a", "b", "c", "d", "e", "f"]);
+  },
+);
+
+test("uses each platform's history and includes new files without selecting deleted files", () => {
+  const files = ["a", "b", "c", "new"];
+  const timings = {
+    a: { linux: 100, win32: 1 },
+    b: { linux: 1, win32: 100 },
+    c: { linux: 1, win32: 1 },
+    deleted: { linux: 1_000, win32: 1_000 },
+  };
+  expect(partitionTests(files, 2, timings, "linux")).toEqual([
+    ["a"],
+    ["b", "c", "new"],
+  ]);
+  expect(partitionTests(files, 2, timings, "win32")).toEqual([
+    ["b"],
+    ["a", "c", "new"],
+  ]);
+  expect(partitionTests(files, 2, {}, "darwin").flat().sort()).toEqual(files);
 });
 
-test.each([
-  ["unix", 3],
-  ["windows", 7],
-] as const)("covers every shared test once on %s", async (platform, count) => {
-  const tests = (await readdir(new URL("./", import.meta.url)))
-    .filter(
-      (file) =>
-        file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
-    )
-    .sort();
-  const timings = JSON.parse(
-    await readFile(
-      new URL("../scripts/ci-test-durations.json", import.meta.url),
-      "utf8",
-    ),
-  );
-  const shards = shardTestFiles(tests, count, timings[platform]);
-  expect(shards.every(({ files }) => files.length > 0)).toBe(true);
-  expect(shards.flatMap(({ files }) => files).sort()).toEqual(tests);
+test.each([3, 6, 7, 14])(
+  "runs each eligible file once across %i native shards, including new files",
+  async (count) => {
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const root = await temporaryDirectory("codex-security-native-shards-");
+    try {
+      await mkdir(join(root, "scripts"));
+      await mkdir(join(root, "tests-ts"));
+      await copyRunner(root, {
+        "probe-0.test.ts": { linux: 100, darwin: 100, win32: 100 },
+        "probe-1.test.ts": { linux: 80, darwin: 80, win32: 80 },
+        "deleted.test.ts": { linux: 1_000, darwin: 1_000, win32: 1_000 },
+      });
+      const files = [
+        ...Array.from({ length: 20 }, (_, index) => `probe-${index}.test.ts`),
+        "newly-added.test.ts",
+      ];
+      const executionLog = join(root, "executed.txt");
+      for (const file of files) {
+        await writeFile(
+          join(root, "tests-ts", file),
+          `import { appendFileSync } from "node:fs";
+import { test } from "bun:test";
+test(${JSON.stringify(file)}, () => {
+  appendFileSync(${JSON.stringify(executionLog)}, ${JSON.stringify(`${file}\n`)});
+});\n`,
+        );
+      }
+      await writeFile(
+        join(root, "tests-ts", "windows-machine-policy.test.ts"),
+        'throw new Error("Machine policy test must run separately");\n',
+      );
+      const executed: string[] = [];
+      for (let shard = 1; shard <= count; shard++) {
+        await writeFile(executionLog, "");
+        const child = Bun.spawn({
+          cmd: [
+            node!,
+            "--experimental-strip-types",
+            join(root, "scripts", "run-ci-tests.mts"),
+            `${shard}/${count}`,
+          ],
+          env: {
+            ...process.env,
+            PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+          },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 30_000,
+          windowsHide: true,
+        });
+        const { status, stdout, stderr } = await readSubprocess(child);
+        expect(status, stderr).toBe(0);
+        const shardFiles = (await readFile(executionLog, "utf8"))
+          .trim()
+          .split("\n");
+        expect(stdout).toContain(
+          `Test shard ${shard}/${count}: ${shardFiles.sort().join(" ")}`,
+        );
+        executed.push(...shardFiles);
+      }
+      expect(executed.sort()).toEqual(files.sort());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-empty-shard-");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root);
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      'import { test } from "bun:test"; test("synthetic shard probe", () => {});\n',
+    );
+    await writeFile(
+      join(root, "tests-ts", "windows-machine-policy.test.ts"),
+      'throw new Error("Machine policy test must run separately");\n',
+    );
+    for (const shard of [1, 2]) {
+      const child = Bun.spawn({
+        cmd: [
+          node!,
+          "--experimental-strip-types",
+          join(root, "scripts", "run-ci-tests.mts"),
+          `${shard}/2`,
+        ],
+        env: {
+          ...process.env,
+          PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const { status, stdout, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(shard === 1 ? 0 : 1);
+      if (shard === 1) {
+        expect(stdout).toContain("Test shard 1/2: probe.test.ts");
+        expect(stderr).toContain("synthetic shard probe");
+      } else {
+        expect(stderr).toContain("Test shard 2/2 is empty.");
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("propagates a subprocess exit after successful test assertions", async () => {
+  const node = Bun.which("node");
+  expect(node).not.toBeNull();
+  const root = await temporaryDirectory("codex-security-shard-exit-");
+  const completed = join(root, "assertion-completed");
+  try {
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyRunner(root);
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      `import { writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+test("completed shard assertion", () => {
+  expect(1).toBe(1);
+  writeFileSync(${JSON.stringify(completed)}, "completed");
+});
+afterAll(() => { process.exit(7); });
+`,
+    );
+    const child = Bun.spawn({
+      cmd: [
+        node!,
+        "--experimental-strip-types",
+        join(root, "scripts", "run-ci-tests.mts"),
+        "1/1",
+      ],
+      env: {
+        ...process.env,
+        PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    const { status, stderr } = await readSubprocess(child);
+    expect(await readFile(completed, "utf8")).toBe("completed");
+    expect(status, stderr).toBe(7);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const defaultTimeoutMs = process.platform === "win32" ? "120000" : "30000";
@@ -96,16 +263,7 @@ test.each([
     try {
       await mkdir(join(root, "scripts"));
       await mkdir(join(root, "tests-ts"));
-      for (const file of [
-        "run-ci-tests.mts",
-        "test-shards.mts",
-        "ci-test-durations.json",
-      ]) {
-        await copyFile(
-          new URL(`../scripts/${file}`, import.meta.url),
-          join(root, "scripts", file),
-        );
-      }
+      await copyRunner(root);
       await writeFile(
         join(root, "tests-ts", "probe.test.ts"),
         `import { expect, test } from "bun:test";
@@ -137,7 +295,7 @@ test("synthetic report probe --timeout=5000", () => {
       });
       const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(fail ? 1 : 0);
-      expect(stdout).toContain("probe.test.ts");
+      expect(stdout).toContain("Test shard 1/1: probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
       if (report === "available") {
         const xml = await readFile(

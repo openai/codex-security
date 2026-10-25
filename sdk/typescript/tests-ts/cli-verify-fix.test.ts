@@ -1,13 +1,20 @@
-import { describe, expect, test, mock } from "bun:test";
+import { requestMetadata } from "./support/request-metadata.js";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
-import { main } from "../src/cli.js";
+import { main, runCodexSkillCommand } from "../src/cli.js";
+import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { dependencies, fakeResult } from "./cli-fixtures.js";
+import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures("verify-fix-");
+afterEach(cleanup);
 
 async function linearIssue(identifier: string) {
   return {
@@ -48,6 +55,10 @@ describe("read-only finding verification", () => {
           },
           linearClient,
           onCodex: (args, output, processEnvironment, input) => {
+            expect(requestMetadata(args)).toMatchObject({
+              codex_security_command: "verify-fix",
+              codex_security_package_version: VERSION,
+            });
             expect(args[0]).toBe("app-server");
             expect(input).toBeUndefined();
             expect(args).toContain('approval_policy="on-request"');
@@ -301,7 +312,9 @@ describe("read-only finding verification", () => {
     });
   });
 
-  test("verifies saved findings in their original repository", async () => {
+  test("verifies saved findings in their original repository with static mode", async () => {
+    const evidence =
+      "Source review confirms the guard; runtime checks were not performed.";
     const result = fakeResult(["high", "medium"]);
     result.findings.findings.forEach((finding, index) => {
       Object.assign(finding, {
@@ -320,6 +333,8 @@ describe("read-only finding verification", () => {
           "scan-1",
           "--severity",
           "high",
+          "--verification-mode",
+          "static",
           "--model",
           "gpt-6-astra",
           "--effort",
@@ -327,6 +342,7 @@ describe("read-only finding verification", () => {
           "--json",
         ],
         dependencies({
+          result,
           onWorkbench: (args) => {
             expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
             return {
@@ -342,6 +358,9 @@ describe("read-only finding verification", () => {
             expect(args).toContain('model_reasoning_effort="max"');
             expect(output?.appServer?.directory).toBe("/saved/repository");
             expect(output?.appServer?.sandbox).toBe("read-only");
+            expect(output?.appServer?.prompt).toContain(
+              "Verification mode: static",
+            );
             const findings = JSON.parse(
               output!.appServer!.prompt.split("\n").at(-1)!,
             ) as Finding[];
@@ -354,8 +373,7 @@ describe("read-only finding verification", () => {
                   {
                     id: "occ_1",
                     status: "fixed",
-                    evidence:
-                      "The original exploit fails and regression checks pass.",
+                    evidence,
                   },
                 ],
               }),
@@ -369,7 +387,7 @@ describe("read-only finding verification", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       repository: "/saved/repository",
       scanId: "scan-1",
-      results: [{ id: "occ_1", status: "fixed" }],
+      results: [{ id: "occ_1", status: "fixed", evidence }],
     });
   });
 
@@ -410,19 +428,165 @@ describe("read-only finding verification", () => {
   ] as const)(
     "maps Codex exit %i to verification exit %i",
     async (codexStatus, expectedStatus) => {
-      const stdout = captureCli(main, "stdout");
+      for (const flags of [
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "yaml", "--full-output"],
+        ["--token-count"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["verify-fix", "Synthetic finding", ...flags],
+            dependencies({ onCodex: () => codexStatus }),
+          ),
+        ).toBe(expectedStatus);
+        const message = `Codex verification failed with exit code ${codexStatus}.`;
+        if (expectedStatus === 2) {
+          expect(stderr.text()).toContain(`codex-security: ${message}\n`);
+          expect(stderr.text().split(message)).toHaveLength(2);
+        } else expect(stderr.text()).not.toContain(message);
+        if (expectedStatus === 2 && flags[0] === "--json") {
+          const failure = JSON.parse(stdout.text());
+          if (flags.includes("--full-output")) {
+            expect(failure.ok).toBe(false);
+            expect(failure.error).toMatchObject({
+              code: "VERIFICATION_FAILED",
+              message,
+            });
+          } else {
+            expect(failure).toMatchObject({
+              status: "failed",
+              code: "VERIFICATION_FAILED",
+              message,
+            });
+          }
+        } else expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
+  test.each(["exit", "throw"] as const)(
+    "reports ChatGPT authentication diagnostics after a Codex %s failure",
+    async (transport) => {
+      const message =
+        "401 Unauthorized: stored ChatGPT credentials expired. Run codex-security login --auth chatgpt.";
+      for (const flags of [
+        [],
+        ["--json"],
+        ["--json", "--full-output"],
+        ["--format", "jsonl"],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            ["verify-fix", "Synthetic finding", "--auth", "chatgpt", ...flags],
+            dependencies({
+              onCodex: (_args, output) => {
+                if (transport === "throw") throw new Error(message);
+                output!.stderr.write(`${message}\n`);
+                return 1;
+              },
+            }),
+          ),
+        ).toBe(2);
+        if (flags.length === 0) expect(stdout.text()).toBe("");
+        else {
+          const failure = JSON.parse(stdout.text());
+          const details = flags.includes("--full-output")
+            ? failure.error
+            : failure;
+          expect(details).toMatchObject({
+            code: "VERIFICATION_FAILED",
+            message,
+          });
+          expect(failure.results).toBeUndefined();
+        }
+        expect(stderr.text()).toContain(message);
+        expect(stderr.text().split(message)).toHaveLength(2);
+      }
+    },
+  );
+
+  test("reports an authentication protocol error from a successfully exited Codex child", async () => {
+    const directory = await temporaryDirectory();
+    const message = "401 Unauthorized: synthetic ChatGPT token expired";
+    const source = `
+const lines = require("node:readline").createInterface({ input: process.stdin });
+lines.once("line", () => process.stdout.write(JSON.stringify({
+  id: 1, error: { code: -32001, message: ${JSON.stringify(message)} }
+}) + "\\n"));
+`;
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["verify-fix", "Synthetic finding", "--auth", "chatgpt", "--json"],
+        dependencies({
+          currentDirectory: directory,
+          onCodex: (_args, output) =>
+            runCodexSkillCommand(
+              ["-e", source],
+              { ...output!, auth: undefined },
+              { command: process.execPath },
+              {},
+            ),
+        }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "VERIFICATION_FAILED",
+      message: expect.stringContaining(message),
+    });
+    expect(stderr.text()).toContain(message);
+  });
+
+  test.each([
+    ["fixed", 0],
+    ["still_vulnerable", 1],
+    ["inconclusive", 2],
+  ] as const)(
+    "retains completed %s results with full output",
+    async (status, code) => {
+      const { stdout, runCli } = createCliTest(main);
+      const results = [
+        {
+          id: "finding-1",
+          status,
+          evidence: "Synthetic verification evidence.",
+        },
+      ];
       expect(
-        await stdout.run(
-          [
-            "verify-fix",
-            "A previously reported authorization bypass",
-            "--json",
-          ],
-          dependencies({ onCodex: () => codexStatus }),
+        await runCli(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(JSON.stringify({ results }));
+              return 0;
+            },
+          }),
         ),
-      ).toBe(expectedStatus);
-      expect(stdout.text()).toBe("");
+      ).toBe(code);
+      expect(JSON.parse(stdout.text()).data.results).toEqual(results);
+    },
+  );
+
+  test.each([130, 143])(
+    "preserves interrupted status %i without writing a success envelope",
+    async (status) => {
+      const { stderr } = createCliTest(main);
+      const write = mock(() => {
+        throw new Error("Unexpected stdout write.");
+      });
+      expect(
+        await main(
+          ["verify-fix", "Synthetic finding", "--json", "--full-output"],
+          { write },
+          stderr.stream,
+          dependencies({ onCodex: () => status }),
+        ),
+      ).toBe(status);
+      expect(write).not.toHaveBeenCalled();
     },
   );
 
@@ -455,6 +619,105 @@ describe("read-only finding verification", () => {
     expect(stdout.text()).toBe(
       "FIXED finding-1: Original exploit rejected. Forged result.\n",
     );
+  });
+
+  test.each(["fixed", "still_vulnerable", "inconclusive"])(
+    "reports required output failure for a %s verification",
+    async (status) => {
+      const failure = new Error("Synthetic verification output failure");
+      const stdout = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() => callback(failure));
+        },
+      });
+      const emitted = new Promise<Error>((resolve) =>
+        stdout.once("error", resolve),
+      );
+      const stderr = capture();
+      const [exitCode, error] = await Promise.all([
+        main(
+          ["verify-fix", "Synthetic finding"],
+          stdout,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              output?.stdout.write(
+                JSON.stringify({
+                  results: [
+                    {
+                      id: "finding-1",
+                      status,
+                      evidence: "Synthetic evidence.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+        emitted,
+      ]);
+      expect(error).toBe(failure);
+      expect(exitCode).toBe(2);
+      expect(stderr.text()).toContain(failure.message);
+      expect(stdout.listenerCount("error")).toBe(0);
+    },
+  );
+
+  test("waits for each verification result before writing the next", async () => {
+    const writes = [
+      Promise.withResolvers<() => void>(),
+      Promise.withResolvers<() => void>(),
+    ];
+    const chunks: string[] = [];
+    const stdout = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        writes[chunks.length - 1]!.resolve(callback);
+      },
+    });
+    const operation = main(
+      ["verify-fix", "First finding", "Second finding"],
+      stdout,
+      capture().stream,
+      dependencies({
+        onCodex: (_args, output) => {
+          output?.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id: "finding-1",
+                  status: "fixed",
+                  evidence: "Café evidence.",
+                },
+                {
+                  id: "finding-2",
+                  status: "still_vulnerable",
+                  evidence: "Exploit still succeeds.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      }),
+    );
+    const first = await writes[0]!.promise;
+    const firstBufferedBytes = stdout.writableLength;
+    first();
+    const second = await writes[1]!.promise;
+    second();
+    expect(await operation).toBe(1);
+    expect(chunks).toEqual([
+      "FIXED finding-1: Café evidence.\n",
+      "STILL_VULNERABLE finding-2: Exploit still succeeds.\n",
+    ]);
+    expect(firstBufferedBytes).toBe(Buffer.byteLength(chunks[0]!));
+    expect(stdout.writableEnded).toBe(false);
+    expect(stdout.listenerCount("error")).toBe(0);
+    stdout.destroy();
   });
 
   test.each([
@@ -494,7 +757,10 @@ describe("read-only finding verification", () => {
         ),
       ).toBe(2);
 
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "VERIFICATION_FAILED",
+      });
       expect(stderr.text()).toContain(
         "an evidence-backed verification result for every finding",
       );

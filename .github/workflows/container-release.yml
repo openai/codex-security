@@ -5,58 +5,74 @@ on:
     tags:
       - "container-v*"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-sha:
+        description: Verified npm release source commit.
+        required: true
+        type: string
+      release-version:
+        description: Verified stable npm version.
+        required: true
+        type: string
 
-concurrency: container-release-publish
+concurrency:
+  group: container-release-publish
+  queue: max
 
 permissions:
   contents: read
 
 jobs:
-  native:
+  source:
     if: github.repository == 'openai/codex-security'
-    uses: ./.github/workflows/native-artifacts.yml
-
-  validate:
-    needs: native
-    if: github.repository == 'openai/codex-security'
-    uses: ./.github/workflows/container-validate.yml
-
-  authorize:
-    if: github.repository == 'openai/codex-security'
-    name: authorize-container-publication
-    needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: container
     permissions:
       contents: read
       packages: read
+      attestations: read
     outputs:
+      sha: ${{ steps.release.outputs.sha }}
       image: ${{ steps.release.outputs.image }}
       version: ${{ steps.release.outputs.version }}
-      labels: ${{ steps.metadata.outputs.labels }}
-      metadata: ${{ steps.metadata.outputs.json }}
-
+      existing-digest: ${{ steps.existing.outputs.digest }}
     steps:
-      - name: Checkout release source
+      - name: Checkout release history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Validate protected release source and version
         id: release
+        env:
+          RELEASE_SHA: ${{ inputs.release-sha }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
         shell: bash
         run: |
           set -euo pipefail
-          package_version="$(node -p 'require("./sdk/typescript/package.json").version')"
+          source_sha="$GITHUB_SHA"
 
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+          if [[ -n "$RELEASE_SHA" ]]; then
+            if [[ "$GITHUB_REF" != refs/heads/main || ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'Coordinated image releases must run on main with an exact release commit.' >&2
+              exit 1
+            fi
+            source_sha="$RELEASE_SHA"
+            version="$RELEASE_VERSION"
+            if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
+              [[ "$(git rev-parse "refs/tags/npm-v$version^{commit}")" != "$source_sha" ]]; then
+              echo 'The container source must match the immutable npm release tag.' >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             if [[ "$GITHUB_REF" != refs/heads/main ]]; then
               echo 'Manual image releases must use the protected main branch.' >&2
               exit 1
             fi
-            version="$package_version"
+            version="$(git show "$source_sha:sdk/typescript/package.json" | jq -r .version)"
           elif [[ "$GITHUB_REF_NAME" =~ ^container-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             version="${GITHUB_REF_NAME#container-v}"
           else
@@ -64,24 +80,112 @@ jobs:
             exit 1
           fi
 
+          package_version="$(git show "$source_sha:sdk/typescript/package.json" | jq -r .version)"
           if [[ "$version" != "$package_version" ]]; then
             echo "Container version $version must match the CLI package version $package_version." >&2
             exit 1
           fi
 
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+          if ! git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main; then
             echo 'Container releases must be built from a commit on the protected main branch.' >&2
             exit 1
           fi
 
-          printf 'image=ghcr.io/%s\n' "${GITHUB_REPOSITORY_OWNER,,}/codex-security" >> "$GITHUB_OUTPUT"
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          printf 'image=ghcr.io/%s/codex-security\n' "$owner" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+      - &set-up-docker-buildx
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Verify an existing immutable container release
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          endpoint="orgs/$owner/packages/container/codex-security"
+          versions="$(gh api --paginate "$endpoint/versions?per_page=100")"
+          digest="$(jq -r -s --arg version "$VERSION" '
+            [.[][] | select(any(.metadata.container.tags[]?; . == $version)) | .name]
+            | unique | .[]
+          ' <<< "$versions")"
+          if [[ -z "$digest" ]]; then
+            exit 0
+          fi
+          if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo 'The existing container version must resolve to one immutable digest.' >&2
+            exit 1
+          fi
+          jq --exit-status --slurp --arg tag "sha-$RELEASE_SHA" --arg digest "$digest" '
+            [.[][] | select(any(.metadata.container.tags[]?; . == $tag)) | .name]
+            | unique == [$digest]
+          ' <<< "$versions" > /dev/null
+          reference="$IMAGE@$digest"
+          docker buildx imagetools inspect "$reference" --raw |
+            jq --exit-status --arg version "$VERSION" --arg sha "$RELEASE_SHA" '
+              .annotations["org.opencontainers.image.version"] == $version
+              and .annotations["org.opencontainers.image.revision"] == $sha
+              and (
+                [.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+                | (index("amd64") != null and index("arm64") != null)
+              )
+            ' > /dev/null
+          gh attestation verify "oci://$reference" --repo "$GITHUB_REPOSITORY"
+          docker pull "$reference"
+          docker run --rm "$reference" --version
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION" "$digest"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: source
+    if: github.repository == 'openai/codex-security' && needs.source.outputs.existing-digest == ''
+    uses: ./.github/workflows/native-artifacts.yml
+    with:
+      ref: ${{ needs.source.outputs.sha }}
+
+  validate:
+    needs: [source, native]
+    if: github.repository == 'openai/codex-security'
+    uses: ./.github/workflows/container-validate.yml
+    with:
+      ref: ${{ needs.source.outputs.sha }}
+
+  authorize:
+    if: github.repository == 'openai/codex-security'
+    name: authorize-container-publication
+    needs: [source, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: container
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      sha: ${{ needs.source.outputs.sha }}
+      image: ${{ needs.source.outputs.image }}
+      version: ${{ needs.source.outputs.version }}
+      labels: ${{ steps.metadata.outputs.labels }}
+      metadata: ${{ steps.metadata.outputs.json }}
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Preflight public package and immutable release version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ needs.source.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -104,16 +208,17 @@ jobs:
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ steps.release.outputs.image }}
+          images: ${{ needs.source.outputs.image }}
           # Use the release version for metadata; only promote publishes stable tags.
-          tags: type=raw,value=${{ steps.release.outputs.version }}
+          tags: type=raw,value=${{ needs.source.outputs.version }}
           labels: |
             org.opencontainers.image.title=Codex Security
-            org.opencontainers.image.description=Codex Security scanner with a preview findings API and dashboard.
+            org.opencontainers.image.description=Codex Security scanner.
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.vendor=OpenAI
-            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/releases/tag/npm-v${{ steps.release.outputs.version }}
-            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/docker/README.md
+            org.opencontainers.image.revision=${{ needs.source.outputs.sha }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/releases/tag/npm-v${{ needs.source.outputs.version }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ needs.source.outputs.sha }}/docker/README.md
 
   publish-platform:
     name: publish-linux-${{ matrix.architecture }}
@@ -136,12 +241,15 @@ jobs:
       - name: Checkout approved release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
       - name: Prepare native runtime
-        uses: ./.github/actions/download-native
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-universal-${{ needs.authorize.outputs.sha }}
+          path: plugins/codex-security/native/prebuilt
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - *set-up-docker-buildx
 
       - &sign-in-to-github-container-registry
         name: Sign in to GitHub Container Registry
@@ -199,17 +307,6 @@ jobs:
           docker run --rm "$reference" info --json
           [[ "$(docker run --rm --entrypoint id "$reference" -u)" == 10001 ]]
 
-      - name: Set up Bun for findings service verification
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: "1.3.14"
-          no-cache: true
-
-      - name: Verify findings API and persistent storage through consumer Compose
-        env:
-          IMAGE: ${{ needs.authorize.outputs.image }}@${{ steps.build.outputs.digest }}
-        run: bun sdk/typescript/scripts/smoke-findings-service.ts "$IMAGE"
-
       - name: Record verified platform digest
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -220,7 +317,7 @@ jobs:
           touch "$RUNNER_TEMP/codex-security-platform-digests/${IMAGE_DIGEST#sha256:}"
 
       - name: Upload platform digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: codex-security-image-digest-${{ matrix.architecture }}
           path: ${{ runner.temp }}/codex-security-platform-digests/*
@@ -246,13 +343,13 @@ jobs:
       - name: Checkout approved customer configuration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - *set-up-docker-buildx
 
       - name: Download verified platform digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: ${{ runner.temp }}/codex-security-platform-digests
           pattern: codex-security-image-digest-*
@@ -266,6 +363,7 @@ jobs:
           IMAGE: ${{ needs.authorize.outputs.image }}
           IMAGE_LABELS: ${{ needs.authorize.outputs.labels }}
           IMAGE_METADATA: ${{ needs.authorize.outputs.metadata }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -293,7 +391,7 @@ jobs:
             annotations+=(--annotation "index:$label")
           done <<< "$IMAGE_LABELS"
 
-          candidate="$IMAGE:release-candidate-$GITHUB_SHA"
+          candidate="$IMAGE:release-candidate-$RELEASE_SHA"
           docker buildx imagetools create \
             "${annotations[@]}" \
             --tag "$candidate" \
@@ -347,6 +445,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       attestations: write
+      artifact-metadata: write
       contents: read
       id-token: write
       packages: write
@@ -377,10 +476,10 @@ jobs:
       - name: Checkout approved immutable-version verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - *set-up-docker-buildx
 
       - *sign-in-to-github-container-registry
 
@@ -408,10 +507,11 @@ jobs:
           VERSION: ${{ needs.authorize.outputs.version }}
           PUBLISH_LATEST: ${{ steps.version.outputs.publish_latest }}
           MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          tags=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$GITHUB_SHA")
+          tags=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$RELEASE_SHA")
           if [[ "$PUBLISH_LATEST" == true ]]; then
             tags+=(--tag "$IMAGE:latest")
           fi
@@ -445,13 +545,14 @@ jobs:
           MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
           RELEASE_URL: ${{ fromJSON(needs.authorize.outputs.metadata).labels['org.opencontainers.image.url'] }}
           DOCUMENTATION_URL: ${{ fromJSON(needs.authorize.outputs.metadata).labels['org.opencontainers.image.documentation'] }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
         shell: bash
         run: |
           {
             printf '## Codex Security container %s\n\n' "$VERSION"
             printf 'Platforms: linux/amd64, linux/arm64.\n\n'
             printf 'Source: [%s](%s/%s/commit/%s)\n\n' \
-              "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+              "$RELEASE_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_SHA"
             printf '[Container guide](%s) | [Release notes](%s)\n\n' \
               "$DOCUMENTATION_URL" "$RELEASE_URL"
             printf '```bash\n'

@@ -1,5 +1,6 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { setTimeout } from "node:timers/promises";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
 import {
@@ -16,7 +17,7 @@ export async function removeTemporaryDirectory(path: string): Promise<void> {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
         throw error;
-      await Bun.sleep(100 * (attempt + 1));
+      await setTimeout(100 * (attempt + 1));
     }
   }
 }
@@ -27,7 +28,10 @@ export function createApiTestFixtures(
   prefix = "codex-security-api-",
   canonicalize = true,
 ) {
-  const temporaryDirectories = createTemporaryDirectories(canonicalize);
+  const temporaryDirectories = createTemporaryDirectories(
+    canonicalize,
+    removeTemporaryDirectory,
+  );
   return {
     temporaryDirectories,
     cleanup: temporaryDirectories.cleanup,

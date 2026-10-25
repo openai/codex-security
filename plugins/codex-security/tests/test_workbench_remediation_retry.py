@@ -18,6 +18,7 @@ from workbench_test_support import (
     set_triage,
     start_saved_scan,
     write_completed_contract,
+    write_remediation_patch,
 )
 
 
@@ -118,14 +119,7 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     assert regenerated["state"] == "requested"
 
     patch_path = scan_dir / "remediation.patch"
-    patch_path.write_text(
-        "diff --git a/source.txt b/source.txt\n"
-        "--- a/source.txt\n"
-        "+++ b/source.txt\n"
-        "@@ -1 +1 @@\n"
-        "-vulnerable\n"
-        "+fixed\n"
-    )
+    write_remediation_patch(patch_path)
     patch_digest = f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}"
     update_remediation(
         state_dir,
@@ -195,12 +189,28 @@ def test_failed_remediation_steps_can_retry_or_regenerate(tmp_path: Path) -> Non
     assert failed["pendingAction"] == "verify"
     assert failed["actionClaimToken"] is None
     assert failed["actionDeliveredAt"] is None
+    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, verify_token)[
+        "scan"
+    ]["findings"][0]["remediationState"]
+    assert canceled == failed
     verify_retry_token = str(uuid.uuid4())
     claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
     delivered = mark_remediation_delivered(
         state_dir, occurrence_id, request_id, verify_retry_token
     )["scan"]["findings"][0]["remediationState"]
     assert delivered["actionDeliveredAt"]
+    canceled = cancel_remediation_request(state_dir, occurrence_id, request_id, verify_retry_token)[
+        "scan"
+    ]["findings"][0]["remediationState"]
+    assert canceled["state"] == "failed"
+    assert canceled["pendingAction"] == "verify"
+    assert canceled["summary"] == failed["summary"]
+    assert canceled["version"] == failed["version"]
+    assert canceled["actionClaimToken"] is None
+    assert canceled["actionClaimedAt"] is None
+    assert canceled["actionDeliveredAt"] is None
+    verify_retry_token = str(uuid.uuid4())
+    claim_remediation_resend(state_dir, occurrence_id, request_id, verify_retry_token)
     verified = update_remediation(
         state_dir,
         occurrence_id,
