@@ -67,6 +67,7 @@
 - finalize runs, preserve findings, and honor project budgets ([#1912](https://github.com/openai/codex-security/pull/1912))
 - select the mutation test runtime in one setup step ([#1985](https://github.com/openai/codex-security/pull/1985))
 - keep selected results stable during retries ([#915](https://github.com/openai/codex-security/pull/915))
+- request review when the updated PR head becomes visible ([#1989](https://github.com/openai/codex-security/pull/1989))
 
 <!-- release-section: highlights:end -->
 
