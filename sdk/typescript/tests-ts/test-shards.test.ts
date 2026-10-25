@@ -348,3 +348,53 @@ test("isolated timeout", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("MCP shards run each literal test filename once and propagate failures", async () => {
+  const root = await temporaryDirectory("mcp-shard-");
+  const tests = join(root, "tests");
+  await mkdir(tests);
+  const files = ["test_route_[ab].ts", "test_route_a.ts", "test_route_b.ts"];
+  try {
+    for (const file of files) {
+      await writeFile(
+        join(tests, file),
+        [
+          'import { appendFileSync } from "node:fs";',
+          'import { test } from "node:test";',
+          `test(${JSON.stringify(file)}, () => {`,
+          `  appendFileSync("executed.txt", ${JSON.stringify(file + "\n")});`,
+          file === files[0]
+            ? '  throw new Error("intentional test failure");'
+            : "",
+          "});",
+        ].join("\n"),
+      );
+    }
+    const statuses = [];
+    for (const shard of ["1", "2"]) {
+      const child = Bun.spawn({
+        cmd: [
+          Bun.which("node")!,
+          "--experimental-strip-types",
+          join(import.meta.dir, "../scripts/run-mcp-test-shard.mts"),
+          shard,
+          "2",
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const { status } = await readSubprocess(child);
+      statuses.push(status);
+    }
+    expect(statuses.sort()).toEqual([0, 1]);
+    expect(
+      (await readFile(join(root, "executed.txt"), "utf8"))
+        .trim()
+        .split("\n")
+        .sort(),
+    ).toEqual(files.sort());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

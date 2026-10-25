@@ -292,11 +292,9 @@ jobs:
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
       - name: Test MCP app
         working-directory: plugins/codex-security/mcp-app
-        # Keep Node options before the glob; trailing shard flags run every file.
         run: >-
-          node --experimental-strip-types --test --test-concurrency=2
-          --test-shard=${{ matrix.shard }}/${{ strategy.job-total }}
-          --test-reporter=./scripts/test_reporter.mts "tests/test_*.ts"
+          node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts
+          ${{ matrix.shard }} ${{ strategy.job-total }}
       - name: Upload MCP test reports
         if: always()
         continue-on-error: true

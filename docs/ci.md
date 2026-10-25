@@ -17,6 +17,10 @@ are discovered from the source tree, including new files without timing data.
 Platform-specific filesystem, credential, process, cancellation, and resumed
 worker cases remain enabled.
 
+The two Linux MCP jobs discover the same test files as local MCP testing. CI
+assigns files by observed runtimes, with two Node workers per job. Refresh the
+slow-file estimates in `run-mcp-test-shard.mts` when the jobs drift apart.
+
 Pull requests limited to `.ts` files under `sdk/typescript/src/`,
 `sdk/typescript/tests-ts/`, `plugins/codex-security/mcp-app/src/`, and
 `plugins/codex-security/mcp-app/tests/`, optionally mixed with ordinary docs,
