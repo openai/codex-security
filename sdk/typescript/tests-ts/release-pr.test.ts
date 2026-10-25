@@ -54,6 +54,12 @@ type GitHubClient = {
   repositoryUrl: string;
   request: (method: string, path: string, body?: Body) => Promise<unknown>;
   list: (path: string) => Promise<unknown[]>;
+  releaseReviewPage: (
+    number: number,
+    branch: string,
+    after: string | null,
+    openAfter: string | null,
+  ) => Promise<unknown>;
 };
 type Fetcher = (url: string, options: RequestInit) => Promise<Response>;
 type Pull = {
@@ -121,6 +127,7 @@ const {
     repo: GitRepository;
     github: GitHubClient;
     dryRun?: boolean;
+    waitForHead?: (ms: number) => Promise<void>;
   }) => Promise<{
     action: string;
     reason?: string;
@@ -377,11 +384,12 @@ class Fixture {
     return sha;
   }
 
-  run(dryRun = false) {
+  run(dryRun = false, waitForHead?: (ms: number) => Promise<void>) {
     return reconcileReleasePullRequest({
       repo: this.repo,
       github: this.github,
       dryRun,
+      ...(waitForHead && { waitForHead }),
     });
   }
 }
@@ -394,6 +402,9 @@ class FakeGitHub {
   readonly commitPulls = new Map<string, Pull[]>();
   readonly comments = new Map<number, { body: string }[]>();
   readonly writes: { method: string; path: string; body: Body }[] = [];
+  releaseReviewPage: GitHubClient["releaseReviewPage"] = async () => {
+    throw new Error("Unexpected release head recovery");
+  };
   beforeRefWrite: (() => void) | undefined;
   afterCommit: (() => void) | undefined;
   failPullCreation = false;
@@ -542,6 +553,53 @@ class FakeGitHub {
   }
 }
 
+// The REST listing still shows the original pull head after the fake ref moves.
+async function laggingPull(title: string) {
+  const { fixture, first, pull } = await Fixture.withInitialPull();
+  const main = fixture.merge(title);
+  const { github } = fixture;
+  const comments = github.comments.get(pull.number)!;
+  const original = github.request.bind(github);
+  github.request = async (method, path, body) => {
+    if (method === "GET" && path === `pulls/${pull.number}`)
+      return structuredClone(pull);
+    return original(method, path, body);
+  };
+  const page = () => {
+    const branch = fixture.head(first.plan.branch)!;
+    const last = { hasNextPage: false, endCursor: null as string | null };
+    return {
+      main: { target: { oid: main } },
+      branch: { target: { oid: branch } as { oid: string } | null },
+      open: {
+        nodes: github.pulls
+          .filter((p) => p.state === "open")
+          .map((p) => ({
+            number: p.number,
+            title: p.title,
+            baseRefName: p.base.ref,
+            headRefName: p.head.ref,
+            headRefOid: p.head.sha,
+            headRepository: { nameWithOwner: p.head.repo.full_name },
+          })),
+        pageInfo: last,
+      },
+      pullRequest: {
+        state: "OPEN",
+        baseRefName: pull.base.ref,
+        headRefName: pull.head.ref,
+        headRefOid: branch,
+        headRepository: { nameWithOwner: github.repository },
+        comments: {
+          nodes: comments.map(({ body }, i) => ({ id: String(i + 1), body })),
+          pageInfo: last,
+        },
+      },
+    };
+  };
+  return { fixture, first, pull, comments, page, original };
+}
+
 describe("GitHub request transport", () => {
   function retryClient(fetcher: Fetcher) {
     const delays: number[] = [];
@@ -555,6 +613,45 @@ describe("GitHub request transport", () => {
     );
     return { github, delays };
   }
+
+  test("retries the same read-only review query and rejects a partial error response", async () => {
+    const requests: unknown[] = [];
+    const repository = { pullRequest: null };
+    const { github, delays } = retryClient(async (url, options) => {
+      expect(url).toBe("https://api.github.com/graphql");
+      expect(options.method).toBe("POST");
+      const { query, variables } = JSON.parse(String(options.body));
+      expect(query).toMatch(/^\s*query\b/u);
+      requests.push(variables);
+      if (requests.length === 1) return new Response(null, { status: 503 });
+      return Response.json({
+        data: { repository },
+        ...(requests.length === 3 && {
+          errors: [{ message: "Review page unavailable" }],
+        }),
+      });
+    });
+    const variables = {
+      owner: "example",
+      name: "release-fixture",
+      number: 42,
+      ref: "refs/heads/release/next",
+      after: "page-2",
+      openAfter: "open-3",
+    };
+    expect(
+      await github.releaseReviewPage(42, "release/next", "page-2", "open-3"),
+    ).toEqual(repository);
+    await expect(
+      github.releaseReviewPage(42, "release/next", null, null),
+    ).rejects.toThrow("Review page unavailable");
+    expect(requests).toEqual([
+      variables,
+      variables,
+      { ...variables, after: null, openAfter: null },
+    ]);
+    expect(delays).toEqual([1000]);
+  });
 
   const interruptedJsonResponse = (error: Error) =>
     new Response(
@@ -1586,28 +1683,157 @@ describe("rolling release reconciliation", () => {
   });
 
   test("recovers review on a manual rerun after GitHub exposes the updated head", async () => {
-    const { fixture, first } = await Fixture.withInitialPull();
-    fixture.merge("fix: later fix");
-    const request = fixture.github.request.bind(fixture.github);
-    let headLagged = true;
-    fixture.github.request = async (method, path, body) => {
-      const result = structuredClone(await request(method, path, body));
-      if (headLagged && method === "GET" && path === `pulls/${first.pull}`) {
-        (result as Pull).head.sha = first.headSha!;
-      }
-      return result;
+    const { fixture, first, pull, page, comments, original } =
+      await laggingPull("fix!: later fix");
+    fixture.github.releaseReviewPage = async () => {
+      const snapshot = page();
+      snapshot.pullRequest.headRefOid = first.headSha!;
+      return snapshot;
     };
-    const pending = await fixture.run();
+    const delays: number[] = [];
+    const pending = await fixture.run(false, async (ms) => {
+      expect(pull.title).toBe("chore(release): 0.2.0");
+      delays.push(ms);
+    });
     expect(pending.reviewRequested).toBe(false);
     expect(pending.reason).toContain("Rerun");
-    expect(fixture.github.comments.get(first.pull!)).toHaveLength(1);
-    headLagged = false;
+    expect(delays).toEqual([1000, 2000, 4000]);
+    expect(comments).toHaveLength(1);
+    const count = fixture.github.writes.length;
+    expect((await fixture.run()).reviewRequested).toBe(false); // No new ref write to wait for.
+    expect(fixture.github.writes).toHaveLength(count);
+    fixture.github.request = original;
     const recovered = await fixture.run();
     expect(recovered.action).toBe("unchanged");
     expect(recovered.headSha).toBe(pending.headSha);
     expect(recovered.reviewRequested).toBe(true);
-    expect(fixture.github.comments.get(first.pull!)).toHaveLength(2);
+    expect(comments).toHaveLength(2);
   });
+
+  test.each([
+    "changed plan",
+    "proposal",
+    "suggestions",
+    "same",
+    "release moved",
+    "main moved",
+    "retargeted",
+    "competing PR",
+    "competing head",
+  ])(
+    "checks the latest target and marker when the release PR head catches up: %s",
+    async (change) => {
+      const { fixture, first, pull, comments, page } = await laggingPull(
+        change === "changed plan"
+          ? "fix!: change the public interface"
+          : "test: more coverage",
+      );
+      const initial = comments[0]!.body;
+      const digest = change === "competing PR" ? "proposal" : change;
+      const newer = initial.replace(
+        new RegExp(`release-pr-${digest}: [a-f0-9]+`),
+        `release-pr-${digest}: ${"0".repeat(64)}`,
+      );
+      let visible = false;
+      const cursors: [string | null, string | null][] = [];
+      const writes = fixture.github.writes.length;
+      fixture.github.releaseReviewPage = async (
+        number,
+        branch,
+        after,
+        openAfter,
+      ) => {
+        expect([number, branch]).toEqual([pull.number, first.plan.branch]);
+        if (visible && after && change === "competing PR")
+          fixture.github.addPull(
+            "manual",
+            "release: alternate",
+            first.headSha!,
+          );
+        const snapshot = page();
+        const pr = snapshot.pullRequest;
+        if (!visible) {
+          pr.headRefOid = first.headSha!;
+          return snapshot;
+        }
+        cursors.push([after, openAfter]);
+        // Comments need two pages; a long open-PR list needs three. A new
+        // marker can arrive as the last comments page is read again.
+        if (change === "proposal" && openAfter !== "last") {
+          snapshot.open.nodes = [];
+          snapshot.open.pageInfo = {
+            hasNextPage: true,
+            endCursor: openAfter ? "last" : "more",
+          };
+        }
+        pr.comments.nodes = after
+          ? [{ id: "9007199254740992", body: initial }]
+          : [
+              {
+                id: "9007199254740993",
+                body: change === "proposal" ? initial : newer,
+              },
+            ];
+        if (openAfter === "last")
+          pr.comments.nodes.push({ id: "9007199254740994", body: newer });
+        if (!after)
+          pr.comments.pageInfo = { hasNextPage: true, endCursor: "older" };
+        else if (change === "release moved") snapshot.branch.target = null;
+        else if (change === "main moved")
+          snapshot.main.target.oid = first.headSha!;
+        else if (change === "retargeted") pr.baseRefName = "maintenance";
+        return snapshot;
+      };
+      const result = await fixture.run(false, async () => {
+        visible = true;
+        if (change === "changed plan")
+          expect(pull.title).toBe("chore(release): 0.2.0");
+        if (change === "competing head") pull.head.sha = "c".repeat(40);
+      });
+      expect(visible).toBe(true);
+      expect(
+        fixture.github.writes
+          .slice(writes)
+          .filter((w) => w.path.startsWith("git/refs")),
+      ).toHaveLength(1);
+      expect(cursors).toEqual(
+        change === "proposal"
+          ? [
+              [null, null],
+              ["older", "more"],
+              ["older", "last"],
+            ]
+          : change === "competing head"
+            ? [[null, null]]
+            : [
+                [null, null],
+                ["older", null],
+              ],
+      );
+      if (
+        ["changed plan", "proposal", "suggestions", "same"].includes(change)
+      ) {
+        const eligible = change === "proposal" || change === "changed plan";
+        expect(result.action).toBe("updated");
+        expect(result.reviewRequested).toBe(eligible);
+        expect(comments).toHaveLength(change === "same" ? 1 : 2);
+        if (change !== "same") {
+          expect(comments[1]!.body).toContain(
+            `<!-- release-pr-head: ${result.headSha} -->`,
+          );
+          expect(
+            comments[1]!.body.includes(
+              `@codex review the current head ${result.headSha}.`,
+            ),
+          ).toBe(eligible);
+        }
+      } else {
+        expect(result.action).toBe("held");
+        expect(result.reviewRequested).toBe(false);
+        expect(comments).toHaveLength(1);
+      }
+    },
+  );
 
   test("requests review when the proposal changes back to previously reviewed content", async () => {
     const fixture = new Fixture();
