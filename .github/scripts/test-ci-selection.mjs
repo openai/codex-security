@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
@@ -332,7 +333,7 @@ test("main, scheduled, manual, empty and retargeted changes receive full qualifi
   assert.deepEqual(select([]), fullQualification);
 });
 
-test("the final gate rejects every missing or unsuccessful selected check", () => {
+function successfulFullRun() {
   const outputs = select([".github/workflows/node-ci.yml"]);
   const needs = Object.fromEntries(
     [
@@ -354,6 +355,11 @@ test("the final gate rejects every missing or unsuccessful selected check", () =
   );
   needs["action-ci"].outputs = { passed: "true" };
   needs["classify-changes"] = { result: "success", outputs };
+  return needs;
+}
+
+test("the final gate rejects every missing or unsuccessful selected check", () => {
+  const needs = successfulFullRun();
   assert.deepEqual(failedChecks(needs), []);
   for (const name of Object.keys(needs)) {
     for (const result of ["failure", "cancelled", "skipped", undefined]) {
@@ -363,6 +369,28 @@ test("the final gate rejects every missing or unsuccessful selected check", () =
       );
     }
   }
+});
+
+test("the final gate distinguishes a failed check from a skipped dependent job", () => {
+  const run = (needs) =>
+    spawnSync(process.execPath, ["check-ci-results.mjs"], {
+      cwd: new URL(".", import.meta.url),
+      env: { ...process.env, CI_RESULTS: JSON.stringify(needs) },
+      encoding: "utf8",
+    });
+  const needs = successfulFullRun();
+  const passed = run(needs);
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(passed.stdout.trim(), "All selected required CI checks passed.");
+
+  needs["static-checks"].result = "failure";
+  needs["container-validate"].result = "skipped";
+  const failed = run(needs);
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.match(
+    failed.stderr,
+    /^Required CI checks did not pass: static-checks \(failure\), container-validate \(skipped\)$/m,
+  );
 });
 
 test("documentation requires static checks and explicit selection, without skipped source failures", () => {
