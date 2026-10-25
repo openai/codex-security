@@ -106,3 +106,15 @@ When measuring CI changes, separate time to required-green from summed job
 execution time, prerequisite waits, runner scheduling, approval waits, and
 manual retry delays. Compare matching revisions and test configurations, and
 record failures as well as successful runs.
+
+When a batch of merges can wait, check **Restore verified native payload** in
+an active `node-ci` push or scheduled run on `main`. On a miss, another push
+with the same inputs can start all eight platform builds again. Before merging
+a PR that leaves those inputs unchanged, look for the exact key in
+`gh cache list --ref refs/heads/main --key KEY`. Once it is there, it does not
+matter which `main` run saved it. Different inputs can build in parallel.
+
+The key uses the UTC week and the paths listed in **Identify native build and
+proof inputs**. Compare the next change against current `main`: its PR run may
+have tested an older base or skipped native preparation entirely. PR runs
+cannot populate this cache for `main`.
