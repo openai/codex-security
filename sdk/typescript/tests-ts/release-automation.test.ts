@@ -3870,7 +3870,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
-  test("preserves source validation dependencies and forwards the centralized gate result", async () => {
+  test("requires every selected source validation in the centralized gate", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3919,16 +3919,14 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(workflow.jobs["static-checks"]?.if).toBe(
       "needs.classify-changes.outputs.source-run == ''",
     );
-    const aggregates = ["ci", "required-test"];
+    const gate = workflow.jobs["ci"]!;
     const checks = Object.entries(workflow.jobs).filter(
-      ([name]) => name !== "classify-changes" && !aggregates.includes(name),
+      ([name]) => name !== "classify-changes" && name !== "ci",
     );
-    expect(new Set([workflow.jobs["ci"]!.needs].flat())).toEqual(
+    expect(new Set([gate.needs].flat())).toEqual(
       new Set(["classify-changes", ...checks.map(([name]) => name)]),
     );
-    for (const job of aggregates) {
-      expect(workflow.jobs[job]?.if).toContain("always()");
-    }
+    expect(gate.if).toContain("always()");
     expect(workflow.jobs["action-ci"]).toMatchObject({
       uses: "./.github/workflows/action-ci.yml",
       with: {
@@ -3936,8 +3934,14 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
           "${{ needs.classify-changes.outputs.source-required == 'false' }}",
       },
     });
+    const sdkShards = ["test", "windows-test"];
     for (const [name, job] of checks) {
-      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+      if (sdkShards.includes(name))
+        expect(job.needs).toContain("static-checks");
+      else
+        expect(job.if ?? "", name).not.toMatch(
+          /\b(always|failure|cancelled)\(/u,
+        );
     }
 
     // With no job results, the gate must report exactly the jobs enabled in YAML.
@@ -3965,6 +3969,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         ([name, job]) =>
           name === "static-checks" ||
           !job.if ||
+          (sdkShards.includes(name) && enabled === "source-required") ||
           job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
       );
       expect(
@@ -3975,9 +3980,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       ).toEqual(new Set(scheduled.map(([name]) => name)));
     }
     expect(
-      workflow.jobs["ci"]?.steps.find(
-        ({ name }) => name === "Require selected checks",
-      ),
+      gate.steps.find(({ name }) => name === "Require selected checks"),
     ).toMatchObject({
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },

@@ -70,6 +70,9 @@
 - request review when the updated PR head becomes visible ([#1989](https://github.com/openai/codex-security/pull/1989))
 - use the CLI verdict contract for hosted verification ([#1951](https://github.com/openai/codex-security/pull/1951))
 - run inventory and ranking helpers in Node ([#1432](https://github.com/openai/codex-security/pull/1432))
+- remove redundant required check jobs ([#2001](https://github.com/openai/codex-security/pull/2001))
+- skip independent jobs for edits to existing Python tests ([#2002](https://github.com/openai/codex-security/pull/2002))
+- skip SDK shards when PR static checks fail ([#2006](https://github.com/openai/codex-security/pull/2006))
 
 <!-- release-section: highlights:end -->
 

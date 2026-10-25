@@ -590,35 +590,22 @@ async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
   }
 }
 
+// Only Windows launches the resolved path; the other hosts exercise lookup.
+async function writeWindowsLaunchFixture(file: string) {
+  if (process.platform === "win32") await copyFile(process.execPath, file);
+  else await writeFile(file, "x", { mode: 0o755 });
+}
+
 async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
   const root = await temporaryDirectories.create(
     "codex-security-windows-cache-",
   );
   const localAppData = path.join(root, "LocalAppData");
-  const olderBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "11111111",
-    "codex.exe",
-  );
-  const currentBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "22222222",
-    "codex.exe",
-  );
-  const emptyBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "33333333",
-    "codex.exe",
-  );
+  const cachedBinary = (id: string) =>
+    path.join(localAppData, "OpenAI", "Codex", "bin", id, "codex.exe");
+  const olderBinary = cachedBinary("11111111");
+  const currentBinary = cachedBinary("22222222");
+  const emptyBinary = cachedBinary("33333333");
   const protectedDirectory = path.join(
     root,
     "WindowsApps",
@@ -653,8 +640,8 @@ async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
   await mkdir(path.dirname(currentBinary), { recursive: true });
   await mkdir(path.dirname(emptyBinary), { recursive: true });
   await mkdir(path.dirname(protectedPackageBinary), { recursive: true });
-  await copyFile(process.execPath, olderBinary);
-  await copyFile(process.execPath, currentBinary);
+  await writeFile(olderBinary, "x", { mode: 0o755 });
+  await writeWindowsLaunchFixture(currentBinary);
   await writeFile(emptyBinary, "");
   await writeFile(
     path.join(protectedDirectory, "codex.exe"),
@@ -813,7 +800,7 @@ async function testWindowsNpmPackageResolution(installation = "global") {
   await writeJson(path.join(platformPackage, "package.json"), {
     name: `@openai/codex-win32-${architecture}`,
   });
-  await copyFile(process.execPath, nativeBinary);
+  await writeWindowsLaunchFixture(nativeBinary);
 
   const environment = windowsLauncherEnvironment(shimDirectory);
   if (installation === "managed") {

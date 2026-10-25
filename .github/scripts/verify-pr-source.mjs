@@ -47,11 +47,7 @@ export async function confirmTarget(pr, sha, api) {
 }
 
 export function realSource(page, run) {
-  const required = [
-    "ci",
-    "classify changes",
-    ...["ubuntu", "macos", "windows"].map((os) => `${os}-latest / node-22`),
-  ];
+  const required = ["ci", "classify changes"];
   const jobs = page.jobs.filter((job) => required.includes(job.name));
   if (
     page.total_count !== page.jobs.length ||
