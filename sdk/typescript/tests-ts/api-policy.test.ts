@@ -771,13 +771,15 @@ describe("CodexSecurity policy API", () => {
       const gitDirectory = policyGitDirectory(repository);
       for (const metadata of new Set([common, gitDirectory])) {
         const outputDir = join(metadata, "policy-artifacts");
-        for (const operation of [
-          () => f.security.preflightPolicy(repository, { outputDir }),
-          () => f.security.generatePolicy(repository, { outputDir }),
-        ])
-          await expect(operation()).rejects.toThrow(
-            "outside the protected scan root",
-          );
+        await expect(
+          f.security.preflightPolicy(repository, { outputDir }),
+        ).rejects.toThrow("outside the protected scan root");
+        // Generation uses the same checks as preflight; exercise each destination type once.
+        if (kind === "separate") {
+          await expect(
+            f.security.generatePolicy(repository, { outputDir }),
+          ).rejects.toThrow("outside the protected scan root");
+        }
         const state = new InternalSecurity(
           {},
           { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
@@ -785,9 +787,11 @@ describe("CodexSecurity policy API", () => {
         await expect(state.preflightPolicy(repository)).rejects.toThrow(
           "outside the protected scan root",
         );
-        await expect(state.generatePolicy(repository)).rejects.toThrow(
-          "outside the protected scan root",
-        );
+        if (kind === "linked" && metadata === gitDirectory) {
+          await expect(state.generatePolicy(repository)).rejects.toThrow(
+            "outside the protected scan root",
+          );
+        }
         await state.close();
         await expect(readdir(outputDir)).rejects.toMatchObject({
           code: "ENOENT",

@@ -109,10 +109,25 @@
     "darwin": 1.1,
     "win32": 2
   },
+  "api-validation-evidence.test.ts": {
+    "linux": 74.9,
+    "darwin": 128.8,
+    "win32": 139
+  },
+  "api-validation-guidance.test.ts": {
+    "linux": 42.9,
+    "darwin": 66.5,
+    "win32": 66.1
+  },
+  "api-validation-persistence.test.ts": {
+    "linux": 77.3,
+    "darwin": 121.6,
+    "win32": 136.7
+  },
   "api-validation.test.ts": {
-    "linux": 190.4,
-    "darwin": 197.1,
-    "win32": 319.2
+    "linux": 0.3,
+    "darwin": 0.8,
+    "win32": 3.6
   },
   "api-workflow.test.ts": {
     "linux": 27.1,

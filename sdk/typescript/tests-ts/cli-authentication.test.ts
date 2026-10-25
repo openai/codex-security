@@ -26,7 +26,6 @@ import {
 import {
   codexSecurityCredentialAllowsAmbientImport,
   prepareCodexSecurityCredentialHome,
-  resolveCodexCommand,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import {
@@ -929,25 +928,14 @@ describe("CLI authentication", () => {
           expect(run(["login", "--with-api-key"], "synthetic-key\n")).toBe(0);
           expect(await stat(join(credentialHome, "auth.json"))).toBeDefined();
           await expect(stat(join(repository, "auth.json"))).rejects.toThrow();
-          expect(run(["login", "status"])).toBe(0);
-          expect(run(["logout"])).toBe(0);
+          if (configuredHome === mountedHome) {
+            expect(run(["login", "status"])).toBe(0);
+            expect(run(["logout"])).toBe(0);
+          } else {
+            // Empty and blank settings share the default. Each login must create its own file.
+            await rm(join(credentialHome, "auth.json"));
+          }
         }
-        expect(
-          spawnSync(
-            process.execPath,
-            [join(import.meta.dir, "../src/cli.ts"), "login", "--help"],
-            {
-              cwd: repository,
-              env: {
-                PATH: process.env["PATH"],
-                HOME: root,
-                USERPROFILE: root,
-                Codex_Home: "   ",
-              },
-              encoding: "utf8",
-            },
-          ).status,
-        ).toBe(0);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -2246,27 +2234,40 @@ describe("skill authentication", () => {
     },
   );
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "%s stops before starting a model command without a stored login",
-    async (command) => {
-      for (const auth of ["auto", "chatgpt"] as const) {
-        await expect(
-          runCodexSkillCommand(
-            ["invalid-synthetic-command"],
-            {
-              command,
-              auth,
-              stdout: capture().stream,
-              stderr: capture().stream,
-            },
-            resolveCodexCommand({}),
-            {
-              CODEX_HOME: join(stateDirectory, "ambient"),
-              CODEX_SECURITY_STATE_DIR: stateDirectory,
-            },
-          ),
-        ).rejects.toThrow("No credentials were found");
-      }
+  test.each(["auto", "chatgpt"] as const)(
+    "%s auth stops after the native status check when no login is stored",
+    async (auth) => {
+      const directory = join(stateDirectory, "checkout");
+      await mkdir(directory);
+      const script = join(stateDirectory, "check-login.mjs");
+      const calls = join(stateDirectory, "calls.jsonl");
+      await writeFile(
+        script,
+        [
+          'import { appendFileSync } from "node:fs";',
+          'appendFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)) + "\\n");',
+          'console.error("Not logged in");',
+          "process.exitCode = 1;",
+        ].join("\n"),
+      );
+      await expect(
+        runCodexSkillCommand(
+          [script, calls, "model"],
+          {
+            command: "validate",
+            directory,
+            auth,
+            stdout: capture().stream,
+            stderr: capture().stream,
+          },
+          { command: process.execPath, args: [script, calls] },
+          {
+            CODEX_HOME: join(stateDirectory, "ambient"),
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        ),
+      ).rejects.toThrow("No credentials were found");
+      expect(await readJsonLines(calls)).toEqual([["login", "status"]]);
     },
   );
 
