@@ -6,6 +6,7 @@ const documentation =
   /^(?:README\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|docs\/.*\.md|github-action\/README\.md|docker\/README\.md)$/;
 const ordinarySource =
   /^(?:sdk\/typescript\/(?:src|tests-ts)|plugins\/codex-security\/mcp-app\/(?:src|tests))\/.*\.ts$/;
+const pythonTest = /^plugins\/codex-security\/tests\/test_[^/]*\.py$/;
 const sdkTest = /^sdk\/typescript\/tests-ts\/[^/]+\.test\.ts$/;
 const actionFiles =
   /^(?:action\.yml|github-action\/(?:README\.md|(?:runtime\/)?package(?:-lock)?\.json|dist\/(?:index|post)\.cjs|(?:src|scripts|tests)\/[^/]+\.(?:mjs|ts)))$/;
@@ -24,8 +25,10 @@ const packagedDocs = new Set(
     .map((file) => `sdk/typescript/${file}`),
 );
 
-function scopeFor(paths, event, baseChanged) {
+function scopeFor(paths, { event, baseChanged, modifiedOnly }) {
   if (event !== "pull_request" || baseChanged || !paths.length) return "full";
+  if (modifiedOnly && paths.every((path) => pythonTest.test(path)))
+    return "python-tests";
   if (
     paths.every(
       (path) =>
@@ -47,9 +50,9 @@ function scopeFor(paths, event, baseChanged) {
   return "full";
 }
 
-export function selectChecks(paths, { event, baseChanged = false }) {
-  const scope = scopeFor(paths, event, baseChanged);
-  const full = scope === "full";
+export function selectChecks(paths, options) {
+  const scope = scopeFor(paths, options);
+  const full = scope === "full" || scope === "python-tests";
   const source = full || scope === "source";
   const action =
     full ||
@@ -80,7 +83,7 @@ export function selectChecks(paths, { event, baseChanged = false }) {
       markers: "cross_platform or native_windows",
     },
   ];
-  return {
+  const selected = {
     "source-required": String(source),
     "plugin-tests-required": String(
       full ||
@@ -102,6 +105,11 @@ export function selectChecks(paths, { event, baseChanged = false }) {
       node: full ? ["22.13.0", "24"] : ["22.13.0"],
     }),
   };
+  if (scope === "python-tests") {
+    for (const name of ["source-required", "action-ci", "eval-contracts"])
+      selected[name] = "false";
+  }
+  return selected;
 }
 
 if (
@@ -127,17 +135,19 @@ if (
       );
     }
   }
-  const paths =
+  const changes =
     event === "pull_request" && !baseChanged
       ? execFileSync(
           "git",
-          ["diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD"],
+          ["diff", "--no-renames", "--name-status", "-z", "HEAD^1", "HEAD"],
           { encoding: "utf8" },
         )
           .split("\0")
           .filter(Boolean)
       : [];
-  const selected = selectChecks(paths, { event, baseChanged });
+  const paths = changes.filter((_, i) => i % 2);
+  const modifiedOnly = changes.every((field, i) => i % 2 || field === "M");
+  const selected = selectChecks(paths, { event, baseChanged, modifiedOnly });
   appendFileSync(
     process.env.GITHUB_OUTPUT,
     Object.entries(selected)

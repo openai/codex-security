@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
@@ -84,6 +87,58 @@ const docs = {
   "eval-contracts": "false",
   "container-validate": "false",
 };
+
+test("only edits to existing direct pytest modules skip independent jobs", (t) => {
+  const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const files = join(cwd, "plugins/codex-security/tests");
+  const output = join(cwd, "output");
+  const script = join(import.meta.dirname, "select-ci-checks.mjs");
+  const env = {
+    ...process.env,
+    EVENT_NAME: "pull_request",
+    BASE_CHANGED: "false",
+    GITHUB_OUTPUT: output,
+  };
+  // A Git hook may export its own repository and index into this process.
+  for (const name of Object.keys(env))
+    if (/^GIT_/iu.test(name)) delete env[name];
+  env.GIT_CONFIG_GLOBAL = join(cwd, "empty.gitconfig");
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  const git = (...args) => execFileSync("git", args, { cwd, env });
+  git("init", "-q");
+  git("config", "user.name", "CI Fixture");
+  git("config", "user.email", "fixture@example.com");
+  fs.mkdirSync(files, { recursive: true });
+  let revision = 0;
+  function commit(...names) {
+    for (const name of names)
+      fs.writeFileSync(join(files, name), String(revision++));
+    git("add", "--force", "plugins");
+    git("commit", "-qm", "fixture");
+  }
+  commit("test_2fa.py", "conftest.py");
+  const reduced = {
+    ...fullQualification,
+    "source-required": "false",
+    "action-ci": "false",
+    "eval-contracts": "false",
+  };
+  for (const [names, expected] of [
+    [["test_2fa.py"], reduced],
+    [["test_2fa.py", "test_added.py"], fullQualification],
+    [["test_2fa.py", "conftest.py"], fullQualification],
+  ]) {
+    commit(...names);
+    fs.writeFileSync(output, "");
+    execFileSync(process.execPath, [script], { cwd, env });
+    const lines = fs.readFileSync(output, "utf8").trim().split("\n");
+    assert.deepEqual(
+      Object.fromEntries(lines.map((line) => line.split("="))),
+      expected,
+    );
+  }
+});
 
 test("ordinary documentation selects static checks", () => {
   assert.deepEqual(select(["README.md", "docs/bedrock.md"]), docs);
