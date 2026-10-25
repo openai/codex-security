@@ -24,6 +24,7 @@ worktree_content_digest = cast(Callable[[Path], str], WORKBENCH_TARGET["worktree
 update_digest_field = cast(
     Callable[[Any, bytes, bytes], None], WORKBENCH_TARGET["update_digest_field"]
 )
+CASE_ALIAS = pytest.param("case", marks=pytest.mark.native_macos)
 
 
 @pytest.fixture(
@@ -1186,7 +1187,7 @@ def test_directory_snapshot_preserves_target_alias_spelling(tmp_path: Path, scop
 
 
 @pytest.mark.parametrize("scope", [".", "component"])
-@pytest.mark.parametrize("alias_kind", ["symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["symlink", CASE_ALIAS])
 def test_submodule_checks_preserve_target_alias_spelling(
     tmp_path: Path, scope: str, alias_kind: str
 ) -> None:
@@ -1212,7 +1213,7 @@ def test_submodule_checks_preserve_target_alias_spelling(
 
 
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
-@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", CASE_ALIAS])
 def test_content_digest_expands_nested_git_repositories(
     tmp_path: Path, content_digest: Callable[[Path], str], alias_kind: str
 ) -> None:
@@ -1486,6 +1487,7 @@ def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str
     assert pathspec == scoped.name
 
 
+@pytest.mark.native_macos
 def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
@@ -1541,7 +1543,7 @@ def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("scope", [".", "component"])
-@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", CASE_ALIAS])
 def test_copy_retains_alias_rooted_gitlink_exclusions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, alias_kind: str
 ) -> None:
