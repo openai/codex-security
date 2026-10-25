@@ -5,6 +5,8 @@ import { resolving } from "./support/promises.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import * as filesystem from "node:fs/promises";
 import { CodexSecurityError } from "../src/errors.js";
 import {
@@ -29,6 +31,7 @@ import { VERSION } from "../src/version.js";
 import {
   forceTerminatePublicationProcesses,
   publishScanInternal,
+  terminatePublicationProcessGroup,
   type PublicationCodexResult,
   type PublishScanDependencies,
   type PublishScanOptions,
@@ -3208,6 +3211,21 @@ describe("connected Linear publication", () => {
     expect(saved?.exitCode).toBe(1);
     expect(savedIssueIdentifiers).toEqual(["SEC-1"]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "signals the direct publication child when it has no process group of its own",
+    async () => {
+      const child = spawn(process.execPath, ["-e", "process.stdin.resume()"]);
+      const closed = once(child, "close");
+      try {
+        terminatePublicationProcessGroup(child, "SIGTERM");
+      } finally {
+        child.stdin.end();
+      }
+      const [, signal] = await closed;
+      expect(signal).toBe("SIGTERM");
+    },
+  );
 
   test.each([
     ["a promptly exiting parent", false, "SIGTERM", true],

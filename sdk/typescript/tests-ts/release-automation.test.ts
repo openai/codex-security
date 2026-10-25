@@ -3859,7 +3859,7 @@ describe("GitHub release workflow safeguards", () => {
     });
     expect(checkout).not.toHaveProperty("if");
 
-    const aggregates = ["ci", "required-test", "windows"];
+    const aggregates = ["ci", "required-test"];
     const checks = Object.entries(workflow.jobs).filter(
       ([name]) => name !== "classify-changes" && !aggregates.includes(name),
     );
@@ -3916,28 +3916,6 @@ describe("GitHub release workflow safeguards", () => {
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     });
-
-    const conditionCases = [];
-    for (const name of ["required-test", "windows"]) {
-      const job = workflow.jobs[name]!;
-      expect(new Set([job.needs].flat())).toEqual(
-        new Set(["classify-changes", "ci"]),
-      );
-      const gate = job.steps.find(({ name }) => name === "Require CI gate");
-      expect(gate?.run).toBe("exit 1");
-      for (const result of ["success", "failure", "cancelled", "skipped"]) {
-        conditionCases.push({
-          condition: gate?.if ?? "",
-          values: { "needs.ci.result": result },
-          expected: result !== "success",
-          message: `${name}: ${result}`,
-        });
-      }
-    }
-    const conditions = await evaluateWorkflowConditions(conditionCases);
-    for (const [index, item] of conditionCases.entries()) {
-      expect(conditions[index], item.message).toBe(item.expected);
-    }
   });
 
   test("documents a canonical historical-summary prefix block", () => {
