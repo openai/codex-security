@@ -53,7 +53,14 @@ implementation or eval changes with product code also selects full qualification
 Every push to `main`, nightly run, manual `node-ci` dispatch, and pull-request
 retarget runs the complete version matrices. Release automation still requires
 successful CI for the exact main commit before publication. Title and body edits
-neither cancel source runs nor satisfy their required check names.
+leave source CI running. On an edit, CI checks the source result for the same
+pull request, base, head and test merge. It waits for a running source check and
+reports a verified result, including static checks, through the required checks.
+Only the original source run and an uninterrupted sequence of successful edits
+can carry a green result. A cancelled or retried run, a changed target, missing
+evidence or conflicting results require full qualification. Use **Re-run all
+jobs** to retry an edit. A partial retry cannot refresh a previous attempt's
+required checks.
 
 ## Required gate
 
@@ -71,7 +78,8 @@ this order.
    documentation pull requests, including a failing selected-check example.
 2. Change the repository's required status checks to `ci` and `Validate PR Title`,
    preserving their GitHub Actions integration and all unrelated protection rules.
-3. Remove the compatibility matrix `required-test` in a follow-up.
+3. Remove the compatibility matrix `required-test` and its three OS check
+   names from source verification in a follow-up.
 
 Do not remove the old contexts before changing the rules. The workflow change
 itself does not change repository protection settings.
@@ -81,7 +89,7 @@ itself does not change repository protection settings.
 The workflow-selection and gate tests run without installing dependencies:
 
 ```bash
-node --test .github/scripts/test-ci-selection.mjs
+node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
 ```
 
 The [SDK testing guide](../sdk/typescript/TESTING.md) describes local behavioral

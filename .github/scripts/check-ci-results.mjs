@@ -4,6 +4,7 @@ export function failedChecks(needs) {
   if (needs["classify-changes"]?.result !== "success")
     return ["classify-changes"];
   const selected = needs["classify-changes"].outputs;
+  if (selected["source-run"]) return [];
   const required = ["static-checks"];
   const groups = {
     "package-required": ["native", "package", "compatibility"],

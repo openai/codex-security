@@ -80,13 +80,20 @@ test.each([
   (action, changes, sourceEvent) => {
     const context = eventContext(action, changes);
     const classifier = ci.jobs["classify-changes"]!;
-    expect(expression(classifier.if!, context)).toBe(sourceEvent);
+    expect(classifier.if).toBeUndefined();
+    const proof = classifier.steps.find(
+      ({ name }) => name === "Verify pull request source",
+    )!;
+    expect(expression(proof.if!, context)).toBe(!sourceEvent);
+    const confirmation = ci.jobs["ci"]!.steps.at(-1)!;
+    expect(confirmation.run).toBe(
+      "node .github/scripts/verify-pr-source.mjs confirm-target",
+    );
+    expect(expression(confirmation.if!, context)).toBe(!sourceEvent);
     for (const [id, matrix, name] of aggregates) {
       const aggregate = ci.jobs[id]!;
-      expect(expression(aggregate.if!, context)).toBe(sourceEvent);
-      expect(interpolate(aggregate.name, { ...context, matrix })).toBe(
-        sourceEvent ? name : `metadata / ${name}`,
-      );
+      expect(expression(aggregate.if!, context)).toBe(true);
+      expect(interpolate(aggregate.name, { ...context, matrix })).toBe(name);
     }
     const sourceGroup = interpolate(
       ci.concurrency.group,
@@ -121,9 +128,7 @@ test("all source jobs depend on classification and titles cannot block source ch
   }
   const classifier = ci.jobs["classify-changes"]!;
   expect(JSON.stringify(classifier)).not.toContain("PR_TITLE");
-  expect(
-    expression(classifier.if!, eventContext("opened", {}, "Invalid title")),
-  ).toBe(true);
+  expect(classifier.if).toBeUndefined();
 });
 
 const musl = Bun.YAML.parse(
@@ -402,5 +407,25 @@ test("legacy required check names propagate the final CI gate result", () => {
     expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
       result !== "success",
     );
+  }
+  const retry = forwarder.steps.find(
+    (step) => step.name === "Require the edit classifier from this attempt",
+  )!;
+  expect(retry.run).toContain("exit 1");
+  for (const [action, changes, classifier, refuse] of [
+    ["synchronize", {}, "", false],
+    ["edited", { base: {} }, "", false],
+    ["edited", {}, "", true],
+    ["edited", {}, "1", true],
+    ["edited", {}, "2", false],
+  ] as const) {
+    expect(
+      expression(retry.if!, {
+        needs: {
+          "classify-changes": { outputs: { "edit-attempt": classifier } },
+        },
+        github: { ...eventContext(action, changes).github, run_attempt: "2" },
+      }),
+    ).toBe(refuse);
   }
 });
