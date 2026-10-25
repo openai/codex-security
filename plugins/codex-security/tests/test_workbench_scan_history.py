@@ -9,6 +9,7 @@ import subprocess
 import sys
 import uuid
 from argparse import Namespace
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -964,6 +965,53 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
 
 
+def create_ordered_history(root: Path, anchors: tuple[str, ...]):
+    repository = root / "repository"
+    repository.mkdir()
+    state_dir = root / "state"
+    scans = sorted(
+        (
+            create_cli_scan(state_dir, root / "results", repository, identity_anchor=anchor)
+            for anchor in anchors
+        ),
+        key=lambda scan: scan["scanId"],
+    )
+    return state_dir / "workbench.sqlite3", repository, scans
+
+
+@pytest.fixture(scope="module")
+def recurring_history(tmp_path_factory: pytest.TempPathFactory):
+    return create_ordered_history(tmp_path_factory.mktemp("recurring-scans"), ("recurring",) * 2)
+
+
+@pytest.fixture(scope="module")
+def matched_history(tmp_path_factory: pytest.TempPathFactory):
+    database, _repository, scans = create_ordered_history(
+        tmp_path_factory.mktemp("matched-scans"), tuple(f"synthetic-{index}" for index in range(4))
+    )
+    findings = [get_scan(database.parent, scan["scanId"])["scan"]["findings"][0] for scan in scans]
+    for left, right in ((0, 1), (1, 3)):
+        save_scan_matches(
+            database.parent,
+            scans[left],
+            scans[right],
+            confirmed_match(findings[left]["occurrenceId"], findings[right]["occurrenceId"]),
+        )
+    return database, scans, [sorted(finding["findingId"] for finding in findings[:2])]
+
+
+def copy_history_state(database: Path, tmp_path: Path) -> Path:
+    # Each case changes its own timestamps or matches. The sealed scan directories are read-only.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with (
+        closing(sqlite3.connect(database)) as source,
+        closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as destination,
+    ):
+        source.backup(destination)
+    return state_dir
+
+
 @pytest.mark.parametrize(
     ("timestamps", "expected_order"),
     [
@@ -974,15 +1022,10 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     ids=["mixed-offsets", "microseconds", "equal-instants"],
 )
 def test_finding_occurrence_history_uses_start_instants(
-    tmp_path: Path, timestamps: tuple[str, str], expected_order: tuple[int, int]
+    tmp_path: Path, recurring_history, timestamps: tuple[str, str], expected_order: tuple[int, int]
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scans = sorted(
-        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
-        key=lambda scan: scan["scanId"],
-    )
+    database, _repository, scans = recurring_history
+    state_dir = copy_history_state(database, tmp_path)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
@@ -1091,15 +1134,10 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
     ],
 )
 def test_automatic_matching_orders_instants_and_preserves_directed_cache(
-    tmp_path: Path, before_started: str, after_started: str
+    tmp_path: Path, recurring_history, before_started: str, after_started: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    before, after = sorted(
-        (create_cli_scan(state_dir, tmp_path / "results", repository) for _ in range(2)),
-        key=lambda scan: scan["scanId"],
-    )
+    database, repository, (before, after) = recurring_history
+    state_dir = copy_history_state(database, tmp_path)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
@@ -1337,37 +1375,17 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     ids=["offsets", "microseconds", "equal-instants"],
 )
 def test_explicit_comparison_uses_chronological_matching_cutoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
+    tmp_path: Path, matched_history, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
 ) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    scans = sorted(
-        (
-            create_cli_scan(
-                state_dir, tmp_path / "scans", repository, identity_anchor=f"synthetic-{index}"
-            )
-            for index in range(4)
-        ),
-        key=lambda scan: scan["scanId"],
-    )
+    database, scans, expected = matched_history
+    state_dir = copy_history_state(database, tmp_path)
     middle, after, future = scans[1:]
-    findings = [get_scan(state_dir, scan["scanId"])["scan"]["findings"][0] for scan in scans]
-    for left, right in ((0, 1), (1, 3)):
-        save_scan_matches(
-            state_dir,
-            scans[left],
-            scans[right],
-            confirmed_match(findings[left]["occurrenceId"], findings[right]["occurrenceId"]),
-        )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
             [(timestamp, scan["scanId"]) for timestamp, scan in zip(timestamps, scans)],
         )
         original = list(connection.iterdump())
-    expected = [sorted(finding["findingId"] for finding in findings[:2])]
-
     for before_scan, after_scan in ((middle, after), (after, middle)):
         compared = compare_scan_pair(
             state_dir, before_scan, after_scan, "--include-matching-inputs"

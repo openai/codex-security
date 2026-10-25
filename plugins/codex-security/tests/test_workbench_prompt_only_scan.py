@@ -102,10 +102,18 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
     target.mkdir()
     (target / "fixture.py").write_text("print('fixture')\n")
 
-    started = start_headless_standard_scan(state_dir, target, tmp_path / "scans")
+    user_context = (
+        "Repository: https://github.com/example/security-review\n"
+        "OAuth issuer: https://accounts.example.test"
+    )
+    started = start_headless_standard_scan(
+        state_dir, target, tmp_path / "scans", user_context=user_context
+    )
     scan = started["scan"]
     workspace = started["workspace"]
     assert started["startDisposition"] == "created"
+    assert scan["userContext"] == user_context
+    assert workspace["userContext"] == user_context
     assert scan["mode"] == "standard"
     assert scan["progress"]["status"] == "running"
     assert scan["progress"]["phase"] == "preflight"
@@ -114,27 +122,6 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
     assert str(uuid.UUID(str(scan["handoffClaimToken"]))) == scan["handoffClaimToken"]
     assert workspace["setup"] == {"submitted": True}
     assert workspace["results"]["scanId"] == scan["scanId"]
-
-
-def test_headless_standard_scan_preserves_url_user_context(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "fixture.py").write_text("print('fixture')\n")
-    user_context = (
-        "Repository: https://github.com/example/security-review\n"
-        "OAuth issuer: https://accounts.example.test"
-    )
-
-    started = start_headless_standard_scan(
-        state_dir,
-        target,
-        tmp_path / "scans",
-        user_context=user_context,
-    )
-
-    assert started["scan"]["userContext"] == user_context
-    assert started["workspace"]["userContext"] == user_context
 
 
 def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> None:
@@ -176,17 +163,6 @@ def test_headless_standard_scan_serializes_concurrent_starts(tmp_path: Path) -> 
 
     assert {result["startDisposition"] for result in results} == {"created", "joined"}
     assert len({result["scan"]["scanId"] for result in results}) == 1
-
-
-def test_prompt_only_scan_starts_without_persisted_opt_out(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    scan_root = tmp_path / "scans"
-    started = start_prompt_only_scan(state_dir, target, scan_root)
-    assert started["startDisposition"] == "created"
 
 
 def test_prompt_only_scan_creates_submitted_delivered_scan(

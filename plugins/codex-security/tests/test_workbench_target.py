@@ -935,6 +935,15 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
         b"object blob invalid\n" + b"x" * (4 * 1024 * 1024),
         b"object blob 131072\n" + b"x" * (64 * 1024 + 1),
     ],
+    ids=[
+        "unterminated-header",
+        "invalid-size",
+        "negative-size",
+        "short-body",
+        "invalid-terminator",
+        "large-invalid-header",
+        "truncated-large-body",
+    ],
 )
 def test_git_blob_samples_reject_incomplete_framing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: bytes
