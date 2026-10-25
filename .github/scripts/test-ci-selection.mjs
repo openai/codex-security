@@ -244,6 +244,7 @@ test("release helper changes select their release-progress regression checks", (
 test("ordinary TypeScript source and tests retain the reduced version matrices", () => {
   for (const path of [
     "sdk/typescript/src/cost.ts",
+    "sdk/typescript/src/index.ts",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
     "plugins/codex-security/mcp-app/src/stdio-transport.ts",
     "plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
@@ -323,6 +324,13 @@ test("unknown paths and dependency configuration receive full qualification", ()
 
 test("tooling and non-TypeScript product inputs receive full qualification", () => {
   for (const path of [
+    "Dockerfile",
+    ".github/workflows/container-ci.yml",
+    ".github/workflows/container-validate.yml",
+    ".github/workflows/container-release.yml",
+    ".github/workflows/native-windows.yml",
+    "sdk/typescript/scripts/run-ci-tests.mts",
+    "plugins/codex-security/skills/example/SKILL.md",
     "package.json",
     "sdk/typescript/pnpm-lock.yaml",
     "sdk/typescript/bunfig.toml",
@@ -401,9 +409,29 @@ test("the final gate distinguishes a failed check from a skipped dependent job",
       encoding: "utf8",
     });
   const needs = successfulFullRun();
-  const passed = run(needs);
-  assert.equal(passed.status, 0, passed.stderr);
-  assert.equal(passed.stdout.trim(), "All selected required CI checks passed.");
+  for (const selected of [true, false]) {
+    const outputs = select([selected ? "Dockerfile" : "README.md"]);
+    for (const result of ["success", "failure", "cancelled", "skipped"]) {
+      const verdict = run({
+        ...needs,
+        "classify-changes": { result: "success", outputs },
+        "container-validate": { result },
+      });
+      const failed = selected && result !== "success";
+      assert.equal(verdict.status, failed ? 1 : 0, verdict.stderr);
+      if (failed) {
+        assert.ok(
+          verdict.stderr.includes(`container-validate (${result})`),
+          verdict.stderr,
+        );
+      } else {
+        assert.equal(
+          verdict.stdout.trim(),
+          "All selected required CI checks passed.",
+        );
+      }
+    }
+  }
 
   needs["static-checks"].result = "failure";
   needs["container-validate"].result = "skipped";
