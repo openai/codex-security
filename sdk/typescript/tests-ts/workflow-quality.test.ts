@@ -19,7 +19,6 @@ const ci = Bun.YAML.parse(
       name: string;
       needs?: string | string[];
       if?: string;
-      strategy?: { matrix: Record<string, string[]>; "fail-fast"?: boolean };
       steps: { name: string; if?: string; run: string }[];
     }
   >;
@@ -59,13 +58,6 @@ function eventContext(
   };
 }
 
-const aggregates = [
-  ["ci", {}, "ci"] as const,
-  ...ci.jobs["required-test"]!.strategy!.matrix["os"]!.map(
-    (os) => ["required-test", { os }, `${os} / node-22`] as const,
-  ),
-];
-
 test.each([
   ["push", {}, true],
   ["opened", {}, true],
@@ -85,16 +77,14 @@ test.each([
       ({ name }) => name === "Verify pull request source",
     )!;
     expect(expression(proof.if!, context)).toBe(!sourceEvent);
-    const confirmation = ci.jobs["ci"]!.steps.at(-1)!;
+    const gate = ci.jobs["ci"]!;
+    expect(gate.name).toBe("ci");
+    expect(expression(gate.if!, context)).toBe(true);
+    const confirmation = gate.steps.at(-1)!;
     expect(confirmation.run).toBe(
       "node .github/scripts/verify-pr-source.mjs confirm-target",
     );
     expect(expression(confirmation.if!, context)).toBe(!sourceEvent);
-    for (const [id, matrix, name] of aggregates) {
-      const aggregate = ci.jobs[id]!;
-      expect(expression(aggregate.if!, context)).toBe(true);
-      expect(interpolate(aggregate.name, { ...context, matrix })).toBe(name);
-    }
     const sourceGroup = interpolate(
       ci.concurrency.group,
       eventContext("synchronize"),
@@ -108,12 +98,6 @@ test.each([
 );
 
 test("all source jobs depend on classification and titles cannot block source checks", () => {
-  expect(aggregates.map(([, , name]) => name)).toEqual([
-    "ci",
-    "ubuntu-latest / node-22",
-    "macos-latest / node-22",
-    "windows-latest / node-22",
-  ]);
   expect(ci.on.pull_request.types).toEqual([
     "opened",
     "edited",
@@ -393,39 +377,3 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
     });
   }
 }
-
-test("legacy required check names propagate the final CI gate result", () => {
-  const forwarder = ci.jobs["required-test"]!;
-  expect(forwarder.strategy?.["fail-fast"]).toBe(false);
-  expect(new Set([forwarder.needs].flat())).toEqual(
-    new Set(["classify-changes", "ci"]),
-  );
-  expect(forwarder.if).toContain("always()");
-  const gate = forwarder.steps.find((step) => step.name === "Require CI gate")!;
-  expect(gate.run).toBe("exit 1");
-  for (const result of ["success", "failure", "cancelled", "skipped"]) {
-    expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
-      result !== "success",
-    );
-  }
-  const retry = forwarder.steps.find(
-    (step) => step.name === "Require the edit classifier from this attempt",
-  )!;
-  expect(retry.run).toContain("exit 1");
-  for (const [action, changes, classifier, refuse] of [
-    ["synchronize", {}, "", false],
-    ["edited", { base: {} }, "", false],
-    ["edited", {}, "", true],
-    ["edited", {}, "1", true],
-    ["edited", {}, "2", false],
-  ] as const) {
-    expect(
-      expression(retry.if!, {
-        needs: {
-          "classify-changes": { outputs: { "edit-attempt": classifier } },
-        },
-        github: { ...eventContext(action, changes).github, run_attempt: "2" },
-      }),
-    ).toBe(refuse);
-  }
-});

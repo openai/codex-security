@@ -139,12 +139,9 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ## GitHub Actions
 
-`node-ci` reports one `ci` gate for all selected required checks. The existing
-`ubuntu-latest / node-22`, `macos-latest / node-22`, and
-`windows-latest / node-22` check names forward that result while repository
-branch rules migrate. The [CI guide](../../docs/ci.md) describes documentation-only
-routing, platform/version selection, full scheduled qualification, and the gate
-migration.
+`node-ci` reports one `ci` gate for all selected required checks. The
+[CI guide](../../docs/ci.md) describes documentation-only routing,
+platform/version selection, and full scheduled qualification.
 
 For source qualification, CI builds and inspects one package archive, then passes
 that archive to jobs in the same workflow run, using the commit SHA in the

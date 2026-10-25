@@ -154,7 +154,6 @@ describe("TypeScript package skeleton", () => {
     expect([false, "false"]).not.toContain(
       verificationSteps[pythonSetup]?.with?.["update-environment"],
     );
-    expect(jobs["required-test"]?.name).toEndWith("${{ matrix.os }} / node-22");
     for (const name of ["compatibility", "windows-verify"]) {
       expect(jobs[name]?.steps).toContainEqual(
         expect.objectContaining({

@@ -86,19 +86,9 @@ job can be skipped. Static checks are always required. The separate `test-qualit
 workflow runs weekly property and mutation tests. Dispatch it to compare full SDK
 shard layouts.
 
-One compatibility matrix forwards the `ci` result to the three OS-named Node 22
-checks required by the current `main` ruleset. Migrate the required checks in
-this order.
-
-1. Merge the workflow change and verify that `ci` is reported for source and
-   documentation pull requests, including a failing selected-check example.
-2. Change the repository's required status checks to `ci` and `Validate PR Title`,
-   preserving their GitHub Actions integration and all unrelated protection rules.
-3. Remove the compatibility matrix `required-test` and its three OS check
-   names from source verification in a follow-up.
-
-Do not remove the old contexts before changing the rules. The workflow change
-itself does not change repository protection settings.
+The required GitHub Actions checks on `main` are `ci` and `Validate PR Title`.
+The title check runs on pull request edits. To diagnose a failed `ci`, open
+the selected job named in the gate output.
 
 ## Diagnostics and local checks
 
