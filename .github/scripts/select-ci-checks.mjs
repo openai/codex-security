@@ -51,6 +51,8 @@ export function selectChecks(paths, { event, baseChanged = false }) {
   const scope = scopeFor(paths, event, baseChanged);
   const full = scope === "full";
   const source = full || scope === "source";
+  const sourceBeyondSdkTests =
+    full || (scope === "source" && !paths.every((path) => sdkTest.test(path)));
   const action =
     full ||
     paths.some(
@@ -82,13 +84,14 @@ export function selectChecks(paths, { event, baseChanged = false }) {
   ];
   return {
     "source-required": String(source),
-    "plugin-tests-required": String(
-      full ||
-        (scope === "source" && !paths.every((path) => sdkTest.test(path))),
-    ),
+    "plugin-tests-required": String(sourceBeyondSdkTests),
     "package-required": String(source || scope === "action"),
     "action-ci": String(action),
-    "eval-contracts": String(source || scope === "evals"),
+    "eval-contracts": String(
+      sourceBeyondSdkTests ||
+        scope === "evals" ||
+        paths.includes("sdk/typescript/tests-ts/codex-dependency-pins.test.ts"),
+    ),
     "workflow-quality": String(full),
     "container-validate": String(source),
     "compatibility-matrix": JSON.stringify({

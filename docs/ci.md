@@ -34,12 +34,10 @@ installation. When selected, Python runs the full suite on 3.12 and the native
 subsets on macOS and Windows. All source changes still select container
 validation.
 
-A PR that changes only top-level `sdk/typescript/tests-ts/*.test.ts` files runs
-the same SDK shards on all three platforms and the same static, native, package,
-container, and eval checks as an ordinary source PR. It skips the independent
-MCP, standalone-plugin, and Python suites. Changes to a test helper, nested
-fixture, or any other path alongside an SDK test use the usual source or full
-route.
+PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK
+shards, static checks, native builds, packages, and containers. They skip the
+plugin suites and run evals only when their `codex-dependency-pins.test.ts`
+input changes. Mixed changes follow the usual source or full route.
 
 PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
 locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
@@ -56,8 +54,7 @@ README, or to the triage eval's scripts, assertions, README, manifest or lock,
 run the deterministic eval job and static checks. The eval job builds the SDK
 and host plugin, checks the Codex version across the SDK, MCP and triage
 lockfiles, and runs the triage, secret-discovery, Standard time-budget and
-workflow-routing suites. This job also runs on source changes, independently
-of the Python matrix.
+workflow-routing suites.
 
 Inputs outside these routes select full qualification, including workflow checks,
 containers, current Node 26, Windows Node 24 installation, and Python 3.10 and

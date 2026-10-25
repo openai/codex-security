@@ -203,8 +203,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-          # The separate MCP job covers Linux worker tests only when it is scheduled.
-          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required || needs.classify-changes.outputs.source-required }}
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required }}
         run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()

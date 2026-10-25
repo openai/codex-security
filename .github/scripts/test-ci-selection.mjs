@@ -254,15 +254,17 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
   }
 });
 
-test("SDK test-only PRs keep the SDK jobs and skip independent plugin suites", () => {
+test("SDK test-only PRs skip independent suites and retain any changed eval input", () => {
   const paths = [
     "sdk/typescript/tests-ts/skeleton.test.ts",
     "sdk/typescript/tests-ts/windows-machine-policy.test.ts",
   ];
-  assert.deepEqual(select(paths), {
-    ...regularSource,
-    "plugin-tests-required": "false",
-  });
+  const sdk = { ...regularSource, "plugin-tests-required": "false" };
+  assert.deepEqual(select(paths), { ...sdk, "eval-contracts": "false" });
+  assert.deepEqual(
+    select([...paths, "sdk/typescript/tests-ts/codex-dependency-pins.test.ts"]),
+    sdk,
+  );
   for (const other of [
     "README.md",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
