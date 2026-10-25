@@ -1435,21 +1435,7 @@ def test_stopped_scan_rebinds_prepared_completion_seal(tmp_path: Path) -> None:
     assert seal_digest
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        ("request-finding-remediation",),
-        ("request-finding-remediation-action", "--expected-version", "1", "--action", "apply"),
-        ("claim-finding-remediation-resend",),
-        ("mark-finding-remediation-delivered",),
-        ("release-finding-remediation-claim",),
-        ("cancel-finding-remediation-request",),
-        ("set-finding-remediation", "--expected-version", "1", "--state", "failed"),
-    ],
-)
-def test_stopped_findings_cannot_enter_remediation(
-    tmp_path: Path, command: tuple[str, ...]
-) -> None:
+def test_stopped_findings_cannot_enter_remediation(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = standard_contract(tmp_path, scan_id, target)
@@ -1464,20 +1450,36 @@ def test_stopped_findings_cannot_enter_remediation(
     )
     occurrence_id = failed["findings"][0]["occurrenceId"]
 
-    blocked = run_workbench(
-        state_dir,
-        *command,
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        str(uuid.uuid4()),
-        "--action-token",
-        str(uuid.uuid4()),
-        check=False,
+    commands = (
+        ("request-finding-remediation",),
+        ("request-finding-remediation-action", "--expected-version", "1", "--action", "apply"),
+        ("claim-finding-remediation-resend",),
+        ("mark-finding-remediation-delivered",),
+        ("release-finding-remediation-claim",),
+        ("cancel-finding-remediation-request",),
+        ("set-finding-remediation", "--expected-version", "1", "--state", "failed"),
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        for command in commands:
+            blocked = run_workbench(
+                state_dir,
+                *command,
+                "--occurrence-id",
+                occurrence_id,
+                "--request-id",
+                str(uuid.uuid4()),
+                "--action-token",
+                str(uuid.uuid4()),
+                check=False,
+            )
 
-    assert blocked["returncode"] != 0
-    assert "successfully completed scans" in blocked["stderr"]
+            assert blocked["returncode"] != 0, command[0]
+            assert "successfully completed scans" in blocked["stderr"], command[0]
+            attempt = connection.execute(
+                "SELECT 1 FROM finding_remediation_attempts WHERE occurrence_id = ?",
+                (occurrence_id,),
+            ).fetchone()
+            assert attempt is None, command[0]
 
 
 @pytest.mark.parametrize("explicit_complete", [True, False], ids=["explicit", "default"])

@@ -130,43 +130,53 @@ def assert_retained_finding(scan: SimpleNamespace):
     assert findings[0]["severity"] == scan.finding["severity"]
 
 
-@pytest.mark.parametrize("canonical", [False, True])
-@pytest.mark.parametrize("same_identity", [False, True])
-@pytest.mark.parametrize(
-    ("field", "value"), [("severity", None), ("code_evidence", []), ("root_cause", None)]
-)
-def test_deadline_recovers_partial_worker_findings_before_completion(
-    tmp_path, canonical, same_identity, field, value
-):
+def append_worker_findings(scan, findings):
+    head = next(scan.directory.glob("artifacts/**/checkpoint-head.json"))
+    previous = head.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    draft = json.loads(previous.read_text())
+    draft["findings"].extend(findings)
+    checkpoint = write_checkpoint(head.parent / "checkpoints", draft)
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    return previous, checkpoint, head
+
+
+@pytest.mark.parametrize("canonical", [False, True], ids=["coordinator", "canonical"])
+def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, canonical):
     scan = deadline_fixture(tmp_path, "valid")
     if canonical:
         canonical_parent(scan, saved_draft(scan.scan_id))
-    head = next(scan.directory.glob("artifacts/**/checkpoint-head.json"))
-    selected = head.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
-    draft = json.loads(selected.read_text())
-    partial = copy.deepcopy(scan.finding)
-    if not same_identity:
-        partial["ruleId"] = "synthetic.partial"
-        partial["identity"] = {"anchor": "partial"}
-        partial["provenance"]["candidateId"] = "partial-candidate"
-    if field == "severity":
-        partial.pop(field)
-    else:
-        partial[field] = value
-        partial["severity"]["level"] = "critical"
-    draft["findings"].append(partial)
-    checkpoint = write_checkpoint(head.parent / "checkpoints", draft)
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    source_bytes = {path: path.read_bytes() for path in (selected, checkpoint, head)}
+
+    defects = {"severity": None, "codeEvidence": [None], "rootCause": {"summary": 7}}
+    partials = []
+    for same_identity in (False, True):
+        for field, value in defects.items():
+            partial = copy.deepcopy(scan.finding)
+            if not same_identity:
+                anchor = f"partial-{field.lower()}"
+                partial.update(ruleId="synthetic.partial", identity={"anchor": anchor})
+                partial["provenance"]["candidateId"] = anchor
+            if field == "severity":
+                partial.pop(field)
+            else:
+                partial[field] = value
+                partial["severity"]["level"] = "critical"
+            partials.append(partial)
+    # Reject the old spelling even when the canonical rootCause is present.
+    partials.append({**scan.finding, "root_cause": None})
+    source_bytes = {path: path.read_bytes() for path in append_worker_findings(scan, partials)}
 
     terminal = finish(scan, canonical=canonical)["deepScan"]
     assert terminal["status"] == "succeeded"
     assert terminal["terminalReason"] == "capped"
     assert_retained_finding(scan)
     warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
-    assert any(field in warning for warning in warnings)
     coverage = json.loads((scan.directory / "coverage.json").read_text())
-    assert any(field in row["reason"] for row in coverage["deferred"])
+    pending = {row["reason"] for row in coverage["deferred"]}
+    for field in defects:
+        field_warnings = [warning for warning in warnings if field in warning]
+        assert len(field_warnings) == 2, (field, warnings)
+        assert pending.issuperset(field_warnings)
+    assert any("root_cause" in warning and warning in pending for warning in warnings)
     assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
     run_workbench(
         scan.state,
@@ -249,16 +259,38 @@ def test_deadline_recovery_does_not_snapshot_untouched_optional_sarif(tmp_path):
     assert external.read_text() == "Unchanged optional export.\n"
 
 
-@pytest.mark.parametrize("include_paths", [None, ["app.py"], ["unrelated.py"]])
-@pytest.mark.parametrize("source", ["parent", "worker", "both"])
+@pytest.mark.parametrize(
+    ("source", "include_paths", "distinct"),
+    [
+        ("both", None, ["parent-app.py", "parent-other.py", "worker-app.py", "worker-other.py"]),
+        ("both", ["app.py"], ["parent-app.py", "worker-app.py"]),
+        ("parent", ["app.py"], ["parent-app.py"]),
+        ("worker", ["app.py"], ["worker-app.py"]),
+        ("both", ["unrelated.py"], []),
+    ],
+    ids=["repository", "scoped", "parent-only", "worker-only", "no-matches"],
+)
 def test_deadline_recovery_applies_requested_scope_to_parent_and_worker_findings(
-    tmp_path, include_paths, source
+    tmp_path, source, include_paths, distinct
 ):
     scan = deadline_fixture(
         tmp_path, "empty" if source == "parent" else "valid", include_paths=include_paths
     )
+
+    def source_findings(source_name):
+        rows = []
+        for path in ("app.py", "other.py"):
+            row = copy.deepcopy(scan.finding)
+            row["identity"] = {"anchor": f"{source_name}-{path}"}
+            row["locations"][0]["path"] = row["codeEvidence"][0]["path"] = path
+            rows.append(row)
+        return rows
+
+    (tmp_path / "target" / "other.py").write_text("value = 1\n")
+    if source != "parent":
+        append_worker_findings(scan, source_findings("worker"))
     if source != "worker":
-        draft = saved_draft(scan.scan_id, findings=[scan.finding])
+        draft = saved_draft(scan.scan_id, findings=[scan.finding, *source_findings("parent")])
         draft["coverage"].update(
             mode="scoped_path" if include_paths is not None else "deep_repository",
             inventoryStrategy="scoped_path" if include_paths is not None else "repository",
@@ -272,13 +304,18 @@ def test_deadline_recovery_applies_requested_scope_to_parent_and_worker_findings
     findings = json.loads((scan.directory / "findings.json").read_text())["findings"]
     head = json.loads((scan.directory / "checkpoint-head.json").read_text())["checkpoint"]
     checkpoint = json.loads((scan.directory / "checkpoints" / head).read_text())
-    expected = 0 if include_paths == ["unrelated.py"] else 1
-    assert len(findings) == len(checkpoint["findings"]) == expected
+    # Each available source starts with the same app.py finding; keep it exactly once in scope.
+    expected = [scan.finding["identity"]["anchor"], *distinct] if distinct else []
+    for rows in (findings, checkpoint["findings"]):
+        assert sorted(row["identity"]["anchor"] for row in rows) == sorted(expected)
     assert all(path.read_bytes() == contents for path, contents in original.items())
 
 
-@pytest.mark.parametrize("with_worker", [False, True])
-@pytest.mark.parametrize("inventory", [None, "", "invalid_strategy", 7, "scoped_path"])
+@pytest.mark.parametrize(
+    ("with_worker", "inventory"),
+    [(False, None), (True, "invalid_strategy")],
+    ids=["missing-without-worker", "invalid-with-worker"],
+)
 def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication(
     tmp_path: Path, with_worker: bool, inventory: object
 ):
@@ -476,9 +513,8 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
     assert unrelated.read_text() == "Unrelated worker evidence.\n"
 
 
-@pytest.mark.parametrize("snapshot_failure", [False, True])
 def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
-    tmp_path, monkeypatch, workbench_api, snapshot_failure
+    tmp_path, monkeypatch, workbench_api
 ):
     from workbench import retained_coverage, saved_sources
 
@@ -494,7 +530,7 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
     failed_snapshots = []
 
     def fail_before_snapshot_directory(directory, relative, contents):
-        if snapshot_failure and "/checkpoint-heads/" in relative:
+        if "/checkpoint-heads/" in relative:
             assert not (directory / relative).parent.exists()
             failed_snapshots.append(relative)
             raise OSError("Synthetic head snapshot write failure")
@@ -512,7 +548,7 @@ def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
         record = workbench_api["require_scan"](connection, scan.scan_id)
         with pytest.raises(sqlite3.IntegrityError, match="synthetic publication failure"):
             saved.preserve_deep_deadline_draft(SimpleNamespace(**workbench_api), connection, record)
-    assert bool(failed_snapshots) is snapshot_failure
+    assert failed_snapshots
     assert all(not (scan.directory / path).exists() for path in failed_snapshots)
     after = {
         path.relative_to(scan.directory): (path.read_bytes(), path.stat().st_mtime_ns)

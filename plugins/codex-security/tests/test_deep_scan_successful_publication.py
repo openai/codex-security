@@ -344,6 +344,13 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
 
     complete(workbench_api, workbench_db, scan, prepare_only=True)
     complete(workbench_api, workbench_db, scan)
+    # A capped scan with a failed worker cannot publish anew, but its sealed result can be read.
+    add_worker(workbench_db, scan, status="failed")
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET terminal_reason = 'capped' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
     repeated = complete(workbench_api, workbench_db, scan)
 
     assert repeated["progress"]["status"] == "complete"
@@ -422,9 +429,8 @@ def test_completion_preserves_non_utf8_filename_warning(
 
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("scope", [".", "subdir"])
-@pytest.mark.parametrize("missing_parent", [False, True])
 def test_deep_completion_preserves_findings_with_missing_optional_writeups(
-    workbench_api, workbench_db, publication_scan, scope, missing_parent
+    workbench_api, workbench_db, publication_scan, scope
 ):
     scan = publication_scan(scope=scope)
     valid_path = "findings/valid/valid.md"
@@ -432,16 +438,17 @@ def test_deep_completion_preserves_findings_with_missing_optional_writeups(
     valid_file.parent.mkdir(parents=True)
     valid_file.write_text("# Retained writeup\n")
     scan.findings[0]["writeup"] = {"reportPath": valid_path}
-    missing = copy.deepcopy(scan.findings[0])
-    missing["identity"]["anchor"] = "missing-writeup"
-    missing["summary"] = "A separate finding whose optional writeup was not transferred."
-    missing_path = "findings/missing/missing.md"
-    if not missing_parent:
-        (scan.scan_dir / missing_path).parent.mkdir()
-    missing["writeup"] = {"reportPath": missing_path}
-    scan.findings.append(missing)
+    (scan.scan_dir / "findings" / "missing-file").mkdir()
+    missing_findings = []
+    for anchor in ("missing-file", "missing-directory"):
+        finding = copy.deepcopy(scan.findings[0])
+        finding["identity"]["anchor"] = anchor
+        finding["summary"] = f"An independent finding with a missing writeup ({anchor})."
+        finding["writeup"] = {"reportPath": f"findings/{anchor}/{anchor}.md"}
+        missing_findings.append(finding)
+    scan.findings.extend(missing_findings)
     if scope != ".":
-        excluded = copy.deepcopy(missing)
+        excluded = copy.deepcopy(missing_findings[0])
         excluded["identity"]["anchor"] = "excluded-writeup"
         excluded["locations"] = [{"path": "unrelated/extract.py", "startLine": 1}]
         excluded["writeup"] = {"reportPath": "findings/excluded/excluded.md"}
@@ -467,20 +474,21 @@ def test_deep_completion_preserves_findings_with_missing_optional_writeups(
     completed = complete(workbench_api, workbench_db, scan)
 
     assert completed["progress"]["status"] == "complete"
-    assert completed["findingCount"] == 2
-    assert len(completed["warnings"]) == 1
+    assert completed["findingCount"] == 3
     assert completed["warnings"] == prepared["warnings"]
-    assert completed["warnings"][0].startswith("Skipped missing writeup for finding 2:")
-    assert "findings[1].writeup.reportPath" in completed["warnings"][0]
+    assert len(completed["warnings"]) == 2
     if scope != ".":
         scan.findings.pop(0)
-    missing.pop("writeup")
+    report = (scan.scan_dir / "report.md").read_text()
+    for index, (finding, warning) in enumerate(zip(missing_findings, completed["warnings"]), 1):
+        assert warning.startswith(f"Skipped missing writeup for finding {index + 1}:")
+        assert f"findings[{index}].writeup.reportPath" in warning
+        missing_path = finding.pop("writeup")["reportPath"]
+        assert missing_path not in report
+        assert finding["summary"] in report
     assert_published_aggregate(scan)
     assert {path: path.read_bytes() for path in original_files} == original_files
-    report = (scan.scan_dir / "report.md").read_text()
     assert valid_path in report
-    assert missing_path not in report
-    assert missing["summary"] in report
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "completed"
     assert manifest["scan"]["sealedAt"]
@@ -975,21 +983,3 @@ def test_stopped_file_scope_filters_siblings_before_assigning_identity(
     )
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert checkpoint.read_bytes() == checkpoint_bytes
-
-
-def test_already_sealed_legacy_capped_scan_remains_immutable(
-    workbench_api, workbench_db, publication_scan
-):
-    scan = publication_scan()
-    complete(workbench_api, workbench_db, scan)
-    names = ("scan-manifest.json", "findings.json", "coverage.json")
-    sealed = {name: (scan.scan_dir / name).read_bytes() for name in names}
-    add_worker(workbench_db, scan, status="failed")
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET terminal_reason = 'capped' WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    repeated = complete(workbench_api, workbench_db, scan)
-    assert repeated["progress"]["status"] == "complete"
-    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == sealed

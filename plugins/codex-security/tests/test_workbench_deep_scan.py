@@ -799,10 +799,7 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
     )
 
 
-@pytest.mark.parametrize(
-    "mutation", ("worker", "progress", "failure", "dedup", "commit", "finish", "renewal")
-)
-def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutation: str) -> None:
+def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path) -> None:
     state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
@@ -819,14 +816,10 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
     )
     result.write_text("{}\n")
     expire_deep_scan_coordinator(state_dir, scan_id)
-    assert (
-        claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"][
-            "coordinatorGeneration"
-        ]
-        == 3
-    )
-    operations = {
-        "worker": (
+    recovered = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
+    assert (recovered["status"], recovered["coordinatorGeneration"]) == ("running", 3)
+    operations = (
+        (
             "upsert-deep-scan-worker",
             "--worker-id",
             worker,
@@ -841,9 +834,9 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
             "--result-manifest-path",
             str(result),
         ),
-        "progress": ("update-progress", "--phase", "discovery"),
-        "failure": ("fail-deep-scan", "--message", "stale coordinator"),
-        "dedup": (
+        ("update-progress", "--phase", "discovery"),
+        ("fail-deep-scan", "--message", "stale coordinator"),
+        (
             "claim-deep-scan-dedup",
             "--worker-id",
             str(uuid.uuid4()),
@@ -854,7 +847,7 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
             "--input-worker-id",
             worker,
         ),
-        "commit": (
+        (
             "commit-deep-scan-dedup",
             "--worker-id",
             worker,
@@ -863,33 +856,32 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path, mutatio
             "--new-findings-count",
             "0",
         ),
-        "finish": (
+        (
             "finish-deep-scan",
             "--terminal-reason",
             "capped",
             "--manifest-path",
             str(result),
         ),
-        "renewal": ("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan"),
-    }
-    command, *arguments = operations[mutation]
-    rejected = scan_command(
-        state_dir,
-        command,
-        scan_id,
-        *arguments,
-        "--coordinator-generation",
-        "2",
-        check=False,
-        environment=deep_environment(codex_home),
+        ("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan"),
     )
-
-    assert rejected["returncode"] != 0
-    assert "coordinator" in str(rejected["stderr"]).lower()
-    persisted = get_deep_scan(
-        state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
-    )["deepScan"]
-    assert (persisted["status"], persisted["coordinatorGeneration"]) == ("running", 3)
+    for command, *arguments in operations:
+        rejected = scan_command(
+            state_dir,
+            command,
+            scan_id,
+            *arguments,
+            "--coordinator-generation",
+            "2",
+            check=False,
+            environment=deep_environment(codex_home),
+        )
+        assert rejected["returncode"] != 0, command
+        assert "coordinator" in str(rejected["stderr"]).lower(), command
+        persisted = get_deep_scan(
+            state_dir, scan_id, "thread-deep-scan", environment=deep_environment(codex_home)
+        )["deepScan"]
+        assert persisted == recovered, command
 
 
 @pytest.mark.parametrize(
