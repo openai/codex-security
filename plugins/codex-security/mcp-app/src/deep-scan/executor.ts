@@ -576,7 +576,7 @@ function mergeConfigTables(
   ]);
 }
 
-async function workerRuntimeSettings(
+export async function workerRuntimeSettings(
   environment: Record<string, string>,
 ): Promise<CodexSdkWorkerRuntimeSettings> {
   const configPath = environmentVariable(
