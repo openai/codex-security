@@ -292,21 +292,23 @@ def test_diff_inventories_exclude_non_file_type_changes(
     git(target, "add", ".")
     git(target, "commit", "-qm", "Add source fixture")
     base = git(target, "rev-parse", "HEAD").decode()
+    source.unlink()
     if replacement == "symlink":
-        source.unlink()
         try:
             source.symlink_to("README.md")
         except OSError:
             pytest.skip("symlinks are unavailable")
+        git(target, "add", "--", source.name)
     else:
-        origin = tmp_path / "origin"
-        initialize_git_repository(origin)
-        git(target, "rm", "-f", source.name)
-        git(
-            target, "-c", "protocol.file.allow=always", "submodule", "add", str(origin), source.name
+        # The diff consumes the gitlink's index mode, so it needs no child clone.
+        source.mkdir()
+        git(target, "update-index", "--add", "--cacheinfo", f"160000,{base},{source.name}")
+        (target / ".gitmodules").write_text(
+            f'[submodule "fixture"]\n\tpath = {source.name}\n\turl = ../fixture\n'
         )
+        git(target, "add", ".gitmodules")
     (target / "visible.py").write_text("value = 1\n")
-    git(target, "add", ".")
+    git(target, "add", "visible.py")
     if mode == "revisions":
         git(target, "commit", "-qm", "Replace source type")
     inventory_path = tmp_path / "inventory.txt"

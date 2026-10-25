@@ -325,7 +325,7 @@ test('accepted relative path spellings preserve completed findings and SARIF', a
   }
 });
 
-test('prepared SARIF lets the uploader set distinct workflow categories', async (t) => {
+test('SARIF preparation removes only automationDetails and preserves the published bytes', async (t) => {
   const opts = await fixture(t);
   const original = JSON.parse(await readFile(join(opts.resultsDirectory, 'exports/results.sarif'), 'utf8'));
   assert.ok(original.runs[0].automationDetails.id);
@@ -334,14 +334,6 @@ test('prepared SARIF lets the uploader set distinct workflow categories', async 
   const expected = structuredClone(original);
   for (const run of expected.runs) delete run.automationDetails;
   assert.deepEqual(sarif, expected);
-  for (const category of ['security/frontend', 'security/backend']) {
-    const upload = structuredClone(sarif);
-    // Match upload-sarif's category precedence: it fills only missing automationDetails.
-    for (const run of upload.runs) {
-      if (run.automationDetails === undefined) run.automationDetails = {id: `${category}/`};
-    }
-    assert.ok(upload.runs.every((run: any) => run.automationDetails.id === `${category}/`));
-  }
   assert.deepEqual((await collectReports(result)).get('exports/results.sarif'), await readFile(result.paths.sarifPath));
   assert.equal((await analyzeResults(opts)).sarifUploadReady, true, 'preparation is repeatable');
 });

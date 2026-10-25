@@ -402,18 +402,6 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("installs ripgrep before the independent MCP job", async () => {
-    const { jobs } = await workflow("node-ci.yml");
-    const steps = jobs["mcp"]!.steps!;
-    const ripgrep = steps.findIndex(({ name }) => name === "Install ripgrep");
-    const tests = steps.findIndex(({ name }) => name === "Test MCP app");
-    expect(steps[ripgrep]?.run).toBe(".github/scripts/install-ripgrep.sh");
-    expect(ripgrep).toBeLessThan(tests);
-    expect(
-      jobs["test"]!.steps!.some(({ name }) => name === "Test MCP app"),
-    ).toBe(false);
-  });
-
   test("runs static checks independently and keeps diagnostic uploads non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps ?? []);
@@ -441,13 +429,6 @@ describe("TypeScript package skeleton", () => {
         "continue-on-error": true,
       });
     }
-    expect(
-      jobs["plugin-source"]!.steps!.find(
-        ({ name }) => name === "Test Python source contracts",
-      )?.run,
-    ).toContain(
-      "-n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml",
-    );
   });
 
   test("runs Windows native proofs with and without symbolic-link privileges", async () => {

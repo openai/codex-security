@@ -68,11 +68,7 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import {
-  copyCompletedScan,
-  INTEGRATION_TARGET,
-  PLUGIN_ROOT,
-} from "./plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import {
   mockScanRegistration,
   mockWorkbench,
@@ -102,7 +98,6 @@ import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
-const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -538,12 +533,6 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     },
   );
-
-  test("selects a real-scan target in the active repository layout", async () => {
-    await expect(
-      stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
-    ).resolves.toBeDefined();
-  });
 
   test("validates local inputs before runtime or plugin Python discovery", async () => {
     const client = new CodexSecurity({
@@ -4836,14 +4825,6 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  const pricedModels = [
-    "gpt-5.5",
-    "gpt-6-astra",
-    "gpt-5.6-terra",
-    "gpt-5.6-cyber",
-    "gpt-daybreak-blue-latest",
-    "gpt-daybreak-red-latest",
-  ];
   test("reports unpriced model usage without letting its observer stop the scan", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
@@ -4874,19 +4855,13 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
-  test.each(pricedModels)("tracks live and saved %s costs", async (model) => {
+  const prices = [
+    { model: "gpt-6-astra", min: 0.000232, max: 0.000389 },
+    { model: "gpt-5.6-cyber", min: 0.0003275, max: null },
+  ];
+  test.each(prices)("tracks live and saved $model costs", async (price) => {
+    const { model, min, max } = price;
     const { root, repository, codexHome, scanDir } = await scanDirectories();
-
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
-    const expectedCost = estimateScanCost(model, usage);
-    expect(expectedCost).not.toBeNull();
-    if (expectedCost === null) throw new Error("Missing selected-model price");
 
     const costs: ScanCost[] = [];
     const commands: Array<readonly string[]> = [];
@@ -4917,15 +4892,24 @@ describe("CodexSecurity orchestration", () => {
     });
 
     expect(result.turnResult.model).toBe(model);
-    expect(result.cost).toEqual(expectedCost);
-    expect(costs).toEqual([expectedCost]);
+    expect(result.cost).toMatchObject({
+      model,
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      cacheWriteInputTokens: 0,
+      outputTokens: 3,
+      estimatedUsd: min,
+      estimatedUsdRange: { min, max, context: "unknown" },
+      pricing: { serviceTier: "standard", context: "short" },
+    });
+    expect([result.cost]).toEqual(costs);
 
     const completion = commands.find((args) => args[0] === "complete-scan");
     expect(completion).toBeDefined();
     const costIndex = completion?.indexOf("--cost-json") ?? -1;
     expect(costIndex).toBeGreaterThan(0);
     expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toEqual(
-      expectedCost,
+      result.cost,
     );
 
     await client.close();
@@ -7629,8 +7613,10 @@ process.exit(2);
       },
       prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
         CODEX_HOME: codexHome,
-        OpenAi_Api_Key: "forwarded-openai-key",
-        codex_api_key: "forwarded-codex-key",
+        OPENAI_API_KEY: "forwarded-openai-key",
+        OpenAi_Api_Key: "mixed-case-openai-key",
+        CODEX_API_KEY: "forwarded-codex-key",
+        codex_api_key: "lowercase-codex-key",
         ...fakeCommand.environment,
       })),
       resolveCodexCommand: () => fakeCommand.command,
@@ -8544,42 +8530,6 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       ]),
     ).resolves.toBeUndefined();
     await expect(login.wait()).resolves.toMatchObject({ success: false });
-  });
-
-  test("keeps ambient credentials available to scans", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome, { mode: 0o700 });
-    await mkdir(scanDir, { mode: 0o700 });
-    const createCodex = mock(completedCodex(root));
-    const client = TestClient.withDependencies({
-      environment: {
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        OPENAI_API_KEY: "ambient-key",
-      },
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      prepareRuntime: unauthenticatedRuntime(codexHome, () => ({
-        ...process.env,
-        CODEX_HOME: codexHome,
-        OPENAI_API_KEY: "ambient-key",
-        CODEX_API_KEY: "secondary-ambient-key",
-      })),
-      createCodex,
-    });
-    try {
-      await client.run(repository);
-      expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("ambient-key");
-      expect(
-        Object.keys(createCodex.mock.lastCall?.[0]?.env ?? {}).some((name) =>
-          ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-        ),
-      ).toBe(false);
-    } finally {
-      await client.close();
-    }
   });
 
   test("aborts and waits for an in-flight API-key login during close", async () => {

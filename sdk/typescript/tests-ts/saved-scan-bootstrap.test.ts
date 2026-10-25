@@ -1172,90 +1172,81 @@ connection.close()
   });
 }
 
-test.each([
-  ["offsets", "2026-08-01T03:00:00+02:00", "2026-08-01T01:30:00Z"],
-  ["fractional seconds", "2026-08-01T01:00:00Z", "2026-08-01T01:00:00.100000Z"],
-  [
-    "microseconds",
-    "2026-08-01T01:00:00.000001Z",
-    "2026-08-01T01:00:00.000002Z",
-  ],
-  [
-    "millisecond boundaries",
-    "2026-08-01T01:00:00.481998Z",
-    "2026-08-01T01:00:00.482012Z",
-  ],
-  [
-    "offset microseconds",
-    "2026-08-01T03:00:00.000001+02:00",
-    "2026-08-01T01:00:00.000002Z",
-  ],
-])(
-  "latest orders timestamps chronologically with %s",
-  async (_, older, newer) => {
-    const f = await fixture();
-    const db = new Database(
-      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-    );
-    try {
-      // The older scan wins an ID tie, so lost timestamp precision cannot pass.
-      const [olderScan, newerScan] =
-        f.first.scanId < f.second.scanId
-          ? ([f.first, f.second] as const)
-          : ([f.second, f.first] as const);
-      for (const [scan, timestamp] of [
-        [olderScan, older],
-        [newerScan, newer],
-      ] as const) {
-        db.query(
-          "UPDATE scans SET updated_at = ?, started_at = '2000-01-01T00:00:00Z' WHERE id = ?",
-        ).run(timestamp, scan.scanId);
-        db.query(
-          "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-        ).run(older, scan.scanId);
-      }
-      async function latest() {
-        const workbench = await savedScanWorkbench("latest", {
-          environment: { ...f.environment, PYTHON: f.python },
-          pluginRoot: PLUGIN_ROOT,
-          currentDirectory: f.repository,
-        });
-        return (
-          await resolveCompletedScan("latest", {
-            currentDirectory: () => f.repository,
-            runWorkbench: workbench,
-          })
-        ).scanId;
-      }
-      expect(await latest()).toBe(newerScan.scanId);
-      // Either the scan or its progress may hold the latest update.
-      db.query("UPDATE scans SET updated_at = ?").run(older);
-      db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
-        newer,
-        newerScan.scanId,
-      );
-      expect(await latest()).toBe(newerScan.scanId);
-      // Equal updates fall back to the scans' chronological start times.
-      db.query("UPDATE scans SET updated_at = '2099-01-01T00:00:00Z'").run();
+test("latest considers scan and progress updates, start times, and scan IDs", async () => {
+  const older = "2026-08-01T03:00:00.000001+02:00";
+  const newer = "2026-08-01T01:00:00.000002Z";
+  const f = await fixture();
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    // The older scan wins an ID tie, so lost timestamp precision cannot pass.
+    const [olderScan, newerScan] =
+      f.first.scanId < f.second.scanId
+        ? ([f.first, f.second] as const)
+        : ([f.second, f.first] as const);
+    for (const [scan, timestamp] of [
+      [olderScan, older],
+      [newerScan, newer],
+    ] as const) {
       db.query(
-        "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z'",
-      ).run();
-      db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
+        "UPDATE scans SET updated_at = ?, started_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+      ).run(timestamp, scan.scanId);
+      db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
         older,
-        olderScan.scanId,
+        scan.scanId,
       );
-      db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
-        newer,
-        newerScan.scanId,
-      );
-      expect(await latest()).toBe(newerScan.scanId);
-      db.query("UPDATE scans SET started_at = ?").run(older);
-      expect(await latest()).toBe(olderScan.scanId);
-    } finally {
-      db.close();
     }
-  },
-);
+    async function latest() {
+      const workbench = await savedScanWorkbench("latest", {
+        environment: { ...f.environment, PYTHON: f.python },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.repository,
+      });
+      return (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: workbench,
+        })
+      ).scanId;
+    }
+    expect(await latest()).toBe(newerScan.scanId);
+    // Either the scan or its progress may hold the latest update.
+    db.query("UPDATE scans SET updated_at = ?").run(older);
+    db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+      newer,
+      newerScan.scanId,
+    );
+    expect(await latest()).toBe(newerScan.scanId);
+    // Progress can outrank both the other scan's update and its later start.
+    db.query(
+      "UPDATE scans SET updated_at = ?, started_at = ? WHERE id = ?",
+    ).run(newer, newer, newerScan.scanId);
+    db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+      "2026-08-01T01:00:00.000003Z",
+      olderScan.scanId,
+    );
+    expect(await latest()).toBe(olderScan.scanId);
+    // Equal updates fall back to the scans' chronological start times.
+    db.query("UPDATE scans SET updated_at = '2099-01-01T00:00:00Z'").run();
+    db.query(
+      "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z'",
+    ).run();
+    db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
+      older,
+      olderScan.scanId,
+    );
+    db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
+      newer,
+      newerScan.scanId,
+    );
+    expect(await latest()).toBe(newerScan.scanId);
+    db.query("UPDATE scans SET started_at = ?").run(older);
+    expect(await latest()).toBe(olderScan.scanId);
+  } finally {
+    db.close();
+  }
+});
 
 test("latest follows progress timestamps and excludes canceled scans", async () => {
   const f = await fixture();

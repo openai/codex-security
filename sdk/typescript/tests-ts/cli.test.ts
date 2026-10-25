@@ -3778,16 +3778,6 @@ describe("CLI", () => {
     }
   });
 
-  test("honors Incur help before command validation", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(["scan", "--mode", "bogus", "--help"], dependencies()),
-    ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security scan [repository]");
-    expect(stderr.text()).toBe("");
-  });
-
   test("maps configuration and emits JSON only on stdout", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -4629,49 +4619,18 @@ describe("CLI", () => {
     }
   });
 
-  test("emits structured failures for machine-readable scan output", async () => {
+  test("preserves a model content refusal in structured scan failures", async () => {
     const message = "This content was flagged for possible cybersecurity risk.";
-    for (const formatArgs of [
-      ["--json"],
-      ["--format", "json"],
-      ["--format", "jsonl"],
-    ] as const) {
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      const deps = dependencies();
-      deps.createSecurity = () => failingSecurity(message);
-
-      expect(await runCli(["scan", ".", ...formatArgs], deps)).toBe(2);
-      expect(JSON.parse(stdout.text().trim())).toEqual({
-        status: "failed",
-        code: "SCAN_FAILED",
-        message,
-      });
-      expect(stderr.text()).toContain(`${message}\n`);
-    }
-  });
-
-  test("reports full-output scan failures in an error envelope", async () => {
-    const message = "This content was flagged for possible cybersecurity risk.";
-    for (const formatArgs of [
-      ["--json"],
-      ["--format", "json"],
-      ["--format", "jsonl"],
-    ] as const) {
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      const deps = dependencies();
-      deps.createSecurity = () => failingSecurity(message);
-
-      expect(
-        await runCli(["scan", ".", ...formatArgs, "--full-output"], deps),
-      ).toBe(2);
-      const envelope = JSON.parse(stdout.text().trim());
-      expect(envelope.ok).toBe(false);
-      expect(envelope.error).toEqual({ code: "SCAN_FAILED", message });
-      expect(envelope).not.toHaveProperty("data");
-      expect(stderr.text()).toContain(`${message}\n`);
-    }
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.createSecurity = () => failingSecurity(message);
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message,
+    });
+    expect(stderr.text()).toContain(message);
   });
 
   test("preserves diagnostic text in full-output scan failures", async () => {

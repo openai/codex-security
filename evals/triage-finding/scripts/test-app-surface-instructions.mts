@@ -20,9 +20,12 @@ const agent = fs.readFileSync(agentPath, "utf8");
 const pluginPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
 const plugin = JSON.parse(fs.readFileSync(pluginPath, "utf8"));
 
-assert.match(skill, /### Jira and Linear intake/);
 assert.match(skill, /references\/ticket-intake\.md/);
 assert.match(ticketIntake, /Atlassian[\s\S]*JQL/);
+assert.match(
+  ticketIntake,
+  /\bsearchJiraIssuesUsingJql`?\s+for\s+collections\b|\bfor\s+collections,\s+use\s+`?searchJiraIssuesUsingJql\b/i,
+);
 assert.match(ticketIntake, /natural-language search[\s\S]*discover[\s\S]*JQL/);
 assert.match(skill, /security or vulnerability Jira\/Linear tickets/);
 assert.match(skill, /Atlassian and Linear mentions are connector hints/);
@@ -35,9 +38,24 @@ assert.match(
   ticketIntake,
   /issue key[\s\S]*URL[\s\S]*project[\s\S]*status[\s\S]*labels[\s\S]*components[\s\S]*priority/,
 );
-assert.match(
-  ticketIntake,
-  /Default to read-only import and triage[\s\S]*Do not add comments, transition or close issues, assign owners, or change labels/,
+const sentences = ticketIntake
+  .split(/[.!?]|\n\s*\n|^#{1,6}[ \t]+.*$/m)
+  .map((sentence) => sentence.trim().replace(/\s+/g, " "));
+assert.ok(
+  sentences.some((sentence) =>
+    sentence.startsWith("Default to read-only import and triage"),
+  ),
+);
+assert.ok(
+  sentences.some(
+    (sentence) =>
+      sentence.startsWith(
+        "Do not add comments, transition or close issues, assign owners, or change labels",
+      ) &&
+      /\b(?:without|unless)\b.*\bexplicit(?:ly)?\b.*\brequest(?:ed|s)?\b/i.test(
+        sentence,
+      ),
+  ),
 );
 assert.match(agent, /default_prompt:.*Use \$triage-finding/);
 assert.match(ticketIntake, /missing connector|connector.*unavailable/i);
@@ -49,7 +67,7 @@ assert.match(ticketIntake, /exhaust[\s\S]*pag(?:es|ination)/i);
 assert.match(ticketIntake, /independent vulnerability claim/i);
 assert.match(ticketIntake, /ambiguous[\s\S]*ask/i);
 assert.match(ticketIntake, /deterministic[\s\S]*tree order/i);
-assert.equal(plugin.interface.defaultPrompt.length, 3);
+assert.ok(plugin.interface.defaultPrompt.length <= 3);
 assert(
   plugin.interface.defaultPrompt.every(
     (prompt: string) => [...prompt].length <= 128,

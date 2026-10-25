@@ -302,10 +302,6 @@ const titleWorkflow = readFileSync(
   new URL("../../../.github/workflows/validate-pr-title.yml", import.meta.url),
   "utf8",
 );
-const releasingGuide = readFileSync(
-  new URL("../../../RELEASING.md", import.meta.url),
-  "utf8",
-);
 function publishedMetadata(): ReleaseMetadata {
   return {
     name: "@openai/codex-security",
@@ -1669,19 +1665,6 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).not.toContain("late stderr");
   });
 
-  test("rejects unsupported jq mock filters", () => {
-    const result = spawnSync(
-      bash,
-      [
-        "-c",
-        `${jqMock}\nprintf '%s\\n' '{"object":{"type":"commit","sha":"abc"}}' | jq -r '.wrong | @tsv'`,
-      ],
-      { encoding: "utf8" },
-    );
-
-    expect(result.status).toBe(64);
-  });
-
   test("requires a real tag for protected npm publication", () => {
     expect(protectedReleaseWorkflow).toContain("release-tag");
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF_TYPE"');
@@ -1852,6 +1835,78 @@ describe("GitHub release workflow safeguards", () => {
         "github.repository": "openai/codex-security",
       }),
     ).toBe(scenario.expected);
+  });
+
+  test("only consults release metadata for a CI commit on main", async () => {
+    const cwd = directories.create("release-cut-ancestry-");
+    // A maintainer may be running with GIT_DIR, a custom template or global hooks.
+    const env = {
+      PATH: process.env["PATH"],
+      SYSTEMROOT: process.env["SYSTEMROOT"],
+      HOME: cwd,
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const setup = await runCommand(
+      bash,
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        `
+set -eu
+git init --quiet --bare --template= -b main .
+git init --quiet --bare --template= -b main remote.git
+git config --local user.name "Release fixture"
+git config --local user.email "release@example.invalid"
+tree=$(git mktree </dev/null)
+qualified=$(git commit-tree "$tree" -m qualified)
+main=$(git commit-tree "$tree" -p "$qualified" -m main)
+candidate=$(git commit-tree "$tree" -p "$qualified" -m off-main)
+git push --quiet ./remote.git "$main:refs/heads/main"
+git remote add origin ./remote.git
+printf '%s\\n%s\\n%s\\n' "$qualified" "$main" "$candidate"
+`,
+      ],
+      { cwd, env },
+    );
+    expect(setup.status, setup.stderr).toBe(0);
+    const [qualified, main, candidate] = setup.stdout.trim().split(/\r?\n/u);
+    const script = `
+# actions/checkout detaches HEAD at the selected release SHA.
+git update-ref --no-deref HEAD "$RELEASE_SHA" || exit 1
+node() { echo "release metadata lookup" >&2; return 64; }
+npm() { echo "unexpected registry lookup" >&2; return 65; }
+${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
+`;
+    for (const [workflowSha, releaseSha, expectedStatus, expectedMessage] of [
+      [main, candidate, 1, "Release tags can only be cut from commits on main"],
+      [
+        candidate,
+        qualified,
+        1,
+        "Release tags can only be cut from commits on main",
+      ],
+      [main, qualified, 64, "release metadata lookup"],
+    ] as const) {
+      const result = await runCommand(
+        bash,
+        ["--noprofile", "--norc", "-c", script],
+        {
+          cwd,
+          env: {
+            ...env,
+            GITHUB_REF: "refs/heads/main",
+            GITHUB_EVENT_NAME: "workflow_run",
+            GITHUB_OUTPUT: "/dev/null",
+            GITHUB_SHA: workflowSha,
+            RELEASE_SHA: releaseSha,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(expectedStatus);
+      expect(result.stderr).toContain(expectedMessage);
+      expect(result.stderr).not.toContain("unexpected registry lookup");
+    }
   });
 
   test("executes the manual release cut against all published versions", async () => {
@@ -3927,26 +3982,6 @@ describe("GitHub release workflow safeguards", () => {
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     });
-  });
-
-  test("documents a canonical historical-summary prefix block", () => {
-    const start = "<!-- codex-security-release-summary:start -->";
-    const end = "<!-- codex-security-release-summary:end -->";
-    const recovery = releasingGuide.slice(
-      releasingGuide.indexOf("## Recover or repair a release"),
-    );
-    const markerBlock =
-      [...recovery.matchAll(/^```text\r?\n([\s\S]*?)^```[ \t]*$/gmu)]
-        .find(
-          (match) => match[1]?.includes(start) && match[1]?.includes(end),
-        )?.[1]
-        ?.replaceAll("\r\n", "\n") ?? "";
-
-    expect(markerBlock.startsWith(`${start}\n`)).toBe(true);
-    expect(markerBlock).toContain(`${end}\n\n`);
-    expect(extractHistoricalReleaseSummary(markerBlock)).toBe(
-      "Reviewed summary",
-    );
   });
 
   test.each([

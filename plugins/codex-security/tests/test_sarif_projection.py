@@ -25,6 +25,33 @@ class SarifProjectionTest(unittest.TestCase):
         self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text())
         self.finding = self.findings["findings"][0]
 
+    def test_sarif_preserves_alert_identity_when_finding_text_changes(self) -> None:
+        finding = self.finding
+        finding["extensions"] = {"candidateId": "candidate-example"}
+        run = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
+        rule = run["tool"]["driver"]["rules"][0]
+        result = run["results"][0]
+        self.assertEqual(rule["shortDescription"]["text"], rule["name"])
+        self.assertIn(finding["remediation"], rule["help"]["text"])
+        for field in ("findingId", "occurrenceId"):
+            self.assertEqual(result["properties"][field], finding[field])
+        self.assertEqual(result["properties"]["candidateId"], "candidate-example")
+        for text in (
+            finding["title"],
+            finding["summary"],
+            *finding["remediationTests"],
+            *finding["preventiveControls"],
+        ):
+            self.assertIn(text, result["message"]["text"])
+
+        finding.update(
+            title="A new title", summary="A changed summary", remediation="A different fix."
+        )
+        changed = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
+        self.assertEqual(changed["tool"]["driver"]["rules"][0]["name"], rule["name"])
+        for field in ("ruleId", "ruleIndex", "locations", "partialFingerprints", "properties"):
+            self.assertEqual(changed["results"][0][field], result[field])
+
     def test_sarif_merges_shared_rule_metadata_without_mixing_results(self) -> None:
         first = copy.deepcopy(self.finding)
         first["severity"] = {"level": "low"}
@@ -59,6 +86,7 @@ class SarifProjectionTest(unittest.TestCase):
             },
         )
         results = {result["properties"]["occurrenceId"]: result for result in run["results"]}
+        self.assertEqual(results[first["occurrenceId"]]["level"], "note")
         for own, other in ((first, second), (second, first)):
             result = results[own["occurrenceId"]]
             self.assertIn(own["remediation"], rules[0]["help"]["markdown"])
@@ -83,10 +111,12 @@ class SarifProjectionTest(unittest.TestCase):
                 finding["severity"] = {"level": level}
                 if score is not None:
                     finding["severity"].update(score=score, scoringSystem="CVSS:3.1")
-                finding["taxonomy"]["cwe"] = []
-                properties = FINALIZER._sarif_rule(finding["ruleId"], [finding])["properties"]
-                self.assertEqual(properties.get("security-severity"), expected)
-                self.assertEqual(properties["tags"], ["path-traversal", "security"])
+                finding["taxonomy"] = {"category": "sql-injection", "cwe": []}
+                run = FINALIZER.build_sarif(self.manifest, {"findings": [finding]})["runs"][0]
+                properties = {"tags": ["security", "sql-injection"]}
+                if expected is not None:
+                    properties["security-severity"] = expected
+                self.assertEqual(run["tool"]["driver"]["rules"][0]["properties"], properties)
 
     def test_sarif_normalizes_long_cwe_identifiers_as_text(self) -> None:
         for label, digits, tag in (

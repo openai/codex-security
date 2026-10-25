@@ -38,7 +38,7 @@ jobs:
           empty_tree="$(git hash-object -t tree --stdin </dev/null)"
           source_hash="$(git diff-tree -r -z --no-abbrev "$empty_tree" HEAD -- \
             .gitattributes .cargo .npmrc .pnpmfile.cjs package.json pnpm-workspace.yaml \
-            .github/actions/setup-tools .github/scripts ':(exclude).github/scripts/invoice-desk-*.mjs' \
+            .github/actions/setup-tools '.github/scripts/*.mts' \
             .github/workflows/native-artifacts.yml \
             .github/workflows/native-unix.yml \
             .github/workflows/native-windows.yml \

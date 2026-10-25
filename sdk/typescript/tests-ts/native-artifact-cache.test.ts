@@ -88,8 +88,8 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     writeSource(repository, "README.md", "updated documentation\n");
     writeSource(
       repository,
-      ".github/scripts/invoice-desk-target.mjs",
-      "invoice\n",
+      ".github/scripts/verify-pr-source.mjs",
+      "ci selection\n",
     );
     writeSource(
       repository,

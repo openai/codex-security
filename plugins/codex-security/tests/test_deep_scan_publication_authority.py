@@ -338,12 +338,18 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     return backend
 
 
-@pytest.mark.parametrize("workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1"])
 @pytest.mark.parametrize(
-    ("backend_kind", "failure"),
-    [("host", failure) for failure in ("write", "rename")]
-    + [("posix", failure) for failure in ("root-stat", "root-resolve", "root-open", "parent-open")]
-    + [("windows-emulated", failure) for failure in ("create", "write", "rename")],
+    ("workflow", "backend_kind", "failure"),
+    [
+        ("deep-security-scan/v1", backend, failure)
+        for backend, failures in (
+            ("host", ("write", "rename")),
+            ("posix", ("root-stat", "root-resolve", "root-open", "parent-open")),
+            ("windows-emulated", ("create", "write", "rename")),
+        )
+        for failure in failures
+    ]
+    + [("deep-scan-mcp/v1", "host", "write")],
 )
 def test_receipt_io_failure_preserves_successful_publication(
     workbench_api, workbench_db, publication_scan, monkeypatch, workflow, backend_kind, failure
@@ -470,7 +476,6 @@ def test_receipt_io_failure_preserves_successful_publication(
     assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 2
 
 
-@pytest.mark.parametrize("workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1"])
 @pytest.mark.parametrize(
     ("operation", "failure"),
     [
@@ -490,7 +495,6 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
     publication_scan,
     monkeypatch,
     tmp_path,
-    workflow,
     operation,
     failure,
 ):
@@ -498,9 +502,8 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
     result = add_worker(workbench_db, scan)
     with workbench_db:
         workbench_db.execute(
-            "UPDATE deep_scan_runs SET workflow_version = ?, coordinator_generation = 2 "
-            "WHERE scan_id = ?",
-            (workflow, scan.scan_id),
+            "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
+            (scan.scan_id,),
         )
         workbench_db.execute(
             "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",

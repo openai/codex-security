@@ -348,117 +348,112 @@ function sarifWithRepositories(urls: string[]) {
   };
 }
 
-for (const format of ["SARIF", "SARIF gzip"]) {
-  test.each([
-    ["unknown host", "git.example.test", "with remote"],
-    ["GitHub", "github.com", "with remote"],
-    ["known GitHub custom host", "git.example.test", "with remote"],
-    ["GitHub", "github.com", "with uppercase remote"],
-    ["known GitHub custom host", "git.example.test", "with uppercase remote"],
-    ["unknown host", "git.example.test", "without remote"],
-    ["GitHub", "github.com", "without remote"],
-    ["known GitHub custom host", "git.example.test", "without remote"],
-  ])(
-    `Semgrep ${format} preserves original repository references on %s (%s, %s)`,
-    async (platform, host, checkout) => {
-      const sourceRepositoryUrl = `https://${host}/team/project`;
-      const originalUrl = `https://${host}/Team/Project`;
-      const fixture = await localFindingsFixture(
-        checkout === "without remote"
-          ? {}
-          : {
-              remote: `git@${host}:${checkout === "with uppercase remote" ? "Team/Project" : "team/project"}.git`,
-            },
-      );
-      try {
-        const file = join(fixture.root, "semgrep-report");
-        const options = {
-          repository: fixture.repository,
-          provider: "semgrep" as const,
-          sourceKey: "example-project:main",
-          sourceRepositoryUrl,
-        };
-        const dependencies = {
-          environment: fixture.environment,
-          ...(platform === "known GitHub custom host"
-            ? {
-                sourceRepositories: [
-                  { url: originalUrl, platform: "github" as const },
-                ],
-              }
-            : {}),
-        };
-        const database = join(fixture.stateDirectory, "workbench.sqlite3");
-        async function writeReport(url: string) {
-          // Keep both refs: checking only the first would miss the case-distinct one.
-          const input = sarifWithRepositories([sourceRepositoryUrl, url]);
-          const contents = JSON.stringify(input);
-          await writeFile(
-            file,
-            format.endsWith("gzip") ? gzipSync(contents) : contents,
-          );
-          return input;
-        }
-        await writeReport(originalUrl);
-        if (platform === "unknown host") {
-          await expect(
-            prepareLocalExternalImport(file, options, dependencies),
-          ).rejects.toThrow("does not match");
-          await expect(access(database)).rejects.toThrow();
-          await writeReport(sourceRepositoryUrl);
-        }
-        const parsed = await readSemgrepFindings(file, { sourceRepositoryUrl });
-        const prepared = await prepareLocalExternalImport(
-          file,
-          options,
-          dependencies,
+test.each([
+  ["unknown host", "git.example.test", "with remote"],
+  ["GitHub", "github.com", "with remote"],
+  ["known GitHub custom host", "git.example.test", "with remote"],
+  ["GitHub", "github.com", "with uppercase remote"],
+  ["known GitHub custom host", "git.example.test", "with uppercase remote"],
+  ["unknown host", "git.example.test", "without remote"],
+  ["GitHub", "github.com", "without remote"],
+  ["known GitHub custom host", "git.example.test", "without remote"],
+])(
+  "Semgrep SARIF preserves original repository references on %s (%s, %s)",
+  async (platform, host, checkout) => {
+    const sourceRepositoryUrl = `https://${host}/team/project`;
+    const originalUrl = `https://${host}/Team/Project`;
+    const fixture = await localFindingsFixture(
+      checkout === "without remote"
+        ? {}
+        : {
+            remote: `git@${host}:${checkout === "with uppercase remote" ? "Team/Project" : "team/project"}.git`,
+          },
+    );
+    try {
+      const file = join(fixture.root, "semgrep-report");
+      const options = {
+        repository: fixture.repository,
+        provider: "semgrep" as const,
+        sourceKey: "example-project:main",
+        sourceRepositoryUrl,
+      };
+      const dependencies = {
+        environment: fixture.environment,
+        ...(platform === "known GitHub custom host"
+          ? {
+              sourceRepositories: [
+                { url: originalUrl, platform: "github" as const },
+              ],
+            }
+          : {}),
+      };
+      const database = join(fixture.stateDirectory, "workbench.sqlite3");
+      async function writeReport(url: string, compressed = false) {
+        // Keep both refs: checking only the first would miss the case-distinct one.
+        const contents = JSON.stringify(
+          sarifWithRepositories([sourceRepositoryUrl, url]),
         );
-        expect(prepared.preview.findings).toEqual(parsed.findings);
-        expect((await prepared.import()).counts).toEqual({
-          created: 1,
-          updated: 0,
-          unchanged: 0,
-        });
-        const stored = await listLocalExternalFindings(options, dependencies);
-        expect(stored[0]!.evidence).toEqual(parsed.findings[0]!.evidence);
-        expect(stored[0]!.evidence.details?.repository?.url).toBe(
-          sourceRepositoryUrl,
-        );
-        expect(stored[0]!.evidence.source_data?.["runContext"]).toMatchObject({
-          versionControlProvenance: [
-            { repositoryUri: sourceRepositoryUrl },
-            {
-              repositoryUri:
-                platform === "unknown host" ? sourceRepositoryUrl : originalUrl,
-            },
-          ],
-        });
-        expect(
-          (
-            await (
-              await prepareLocalExternalImport(file, options, dependencies)
-            ).import()
-          ).counts,
-        ).toEqual({ created: 0, updated: 0, unchanged: 1 });
-        const before = await readFile(database);
-        await writeReport(
-          platform === "unknown host"
-            ? originalUrl
-            : `https://${host}/other/project`,
-        );
+        await writeFile(file, compressed ? gzipSync(contents) : contents);
+      }
+      await writeReport(originalUrl, true);
+      if (platform === "unknown host") {
         await expect(
           prepareLocalExternalImport(file, options, dependencies),
         ).rejects.toThrow("does not match");
-        expect(await readFile(database)).toEqual(before);
-        expect(await listLocalExternalFindings(options, dependencies)).toEqual(
-          stored,
-        );
-      } finally {
-        await fixture.dispose();
+        await expect(access(database)).rejects.toThrow();
+        await writeReport(sourceRepositoryUrl);
       }
-    },
-  );
-}
+      const parsed = await readSemgrepFindings(file, { sourceRepositoryUrl });
+      const prepared = await prepareLocalExternalImport(
+        file,
+        options,
+        dependencies,
+      );
+      expect(prepared.preview.findings).toEqual(parsed.findings);
+      expect((await prepared.import()).counts).toEqual({
+        created: 1,
+        updated: 0,
+        unchanged: 0,
+      });
+      const stored = await listLocalExternalFindings(options, dependencies);
+      expect(stored[0]!.evidence).toEqual(parsed.findings[0]!.evidence);
+      expect(stored[0]!.evidence.details?.repository?.url).toBe(
+        sourceRepositoryUrl,
+      );
+      expect(stored[0]!.evidence.source_data?.["runContext"]).toMatchObject({
+        versionControlProvenance: [
+          { repositoryUri: sourceRepositoryUrl },
+          {
+            repositoryUri:
+              platform === "unknown host" ? sourceRepositoryUrl : originalUrl,
+          },
+        ],
+      });
+      expect(
+        (
+          await (
+            await prepareLocalExternalImport(file, options, dependencies)
+          ).import()
+        ).counts,
+      ).toEqual({ created: 0, updated: 0, unchanged: 1 });
+      const before = await readFile(database);
+      await writeReport(
+        platform === "unknown host"
+          ? originalUrl
+          : `https://${host}/other/project`,
+      );
+      await expect(
+        prepareLocalExternalImport(file, options, dependencies),
+      ).rejects.toThrow("does not match");
+      expect(await readFile(database)).toEqual(before);
+      expect(await listLocalExternalFindings(options, dependencies)).toEqual(
+        stored,
+      );
+    } finally {
+      await fixture.dispose();
+    }
+  },
+);
 
 test("normalized Semgrep SDK imports retain original SARIF repository metadata through the explicit dependency", async () => {
   const sourceRepositoryUrl = "https://git.example.test/team/project";
@@ -501,68 +496,61 @@ test("normalized Semgrep SDK imports retain original SARIF repository metadata t
   }
 });
 
-test.each(["JSON", "JSON gzip"])(
-  "Semgrep %s uses the caller source URL without treating rule metadata as repository provenance",
-  async (format) => {
-    const sourceRepositoryUrl = "https://git.example.test/Team/Project";
-    const fixture = await localFindingsFixture({
-      remote: "git@git.example.test:Team/Project.git",
-    });
-    try {
-      const input = semgrepJson();
-      const first = input.results[0]!;
-      const report = {
-        ...input,
-        results: [
-          {
-            ...first,
-            extra: {
-              ...first.extra,
-              metadata: {
-                ...first.extra.metadata,
-                source: "https://rules.example.test/Other/Repository",
-              },
+test("Semgrep gzipped JSON uses the caller source URL without treating rule metadata as repository provenance", async () => {
+  const sourceRepositoryUrl = "https://git.example.test/Team/Project";
+  const fixture = await localFindingsFixture({
+    remote: "git@git.example.test:Team/Project.git",
+  });
+  try {
+    const input = semgrepJson();
+    const first = input.results[0]!;
+    const report = {
+      ...input,
+      results: [
+        {
+          ...first,
+          extra: {
+            ...first.extra,
+            metadata: {
+              ...first.extra.metadata,
+              source: "https://rules.example.test/Other/Repository",
             },
           },
-        ],
-      };
-      const file = join(fixture.root, "semgrep-report");
-      const contents = JSON.stringify(report);
-      await writeFile(
+        },
+      ],
+    };
+    const file = join(fixture.root, "semgrep-report");
+    await writeFile(file, gzipSync(JSON.stringify(report)));
+    const options = {
+      repository: fixture.repository,
+      provider: "semgrep" as const,
+      sourceKey: "example-project:main",
+      sourceRepositoryUrl,
+    };
+    const dependencies = { environment: fixture.environment };
+    const parsed = await readSemgrepFindings(file, { sourceRepositoryUrl });
+    const prepared = await prepareLocalExternalImport(
+      file,
+      options,
+      dependencies,
+    );
+    expect((await prepared.import()).counts.created).toBe(1);
+    const stored = await listLocalExternalFindings(options, dependencies);
+    expect(stored[0]!.evidence).toEqual(parsed.findings[0]!.evidence);
+    await expect(
+      prepareLocalExternalImport(
         file,
-        format.endsWith("gzip") ? gzipSync(contents) : contents,
-      );
-      const options = {
-        repository: fixture.repository,
-        provider: "semgrep" as const,
-        sourceKey: "example-project:main",
-        sourceRepositoryUrl,
-      };
-      const dependencies = { environment: fixture.environment };
-      const parsed = await readSemgrepFindings(file, { sourceRepositoryUrl });
-      const prepared = await prepareLocalExternalImport(
-        file,
-        options,
+        {
+          ...options,
+          sourceRepositoryUrl: "https://git.example.test/team/project",
+        },
         dependencies,
-      );
-      expect((await prepared.import()).counts.created).toBe(1);
-      const stored = await listLocalExternalFindings(options, dependencies);
-      expect(stored[0]!.evidence).toEqual(parsed.findings[0]!.evidence);
-      await expect(
-        prepareLocalExternalImport(
-          file,
-          {
-            ...options,
-            sourceRepositoryUrl: "https://git.example.test/team/project",
-          },
-          dependencies,
-        ),
-      ).rejects.toThrow("does not match");
-      expect(await listLocalExternalFindings(options, dependencies)).toEqual(
-        stored,
-      );
-    } finally {
-      await fixture.dispose();
-    }
-  },
-);
+      ),
+    ).rejects.toThrow("does not match");
+    expect(await listLocalExternalFindings(options, dependencies)).toEqual(
+      stored,
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});

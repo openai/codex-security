@@ -32,6 +32,7 @@ jobs:
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
@@ -104,8 +105,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node --experimental-strip-types sdk/typescript/scripts/check-devcontainer-cooldown.mts
-      - name: Test CI selection and result gating
-        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs
+      - name: Test CI selection, result gating and the release guide
+        run: node --test .github/scripts/test-ci-selection.mjs .github/scripts/test-verify-pr-source.mjs .github/scripts/test-release-guide.mjs
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
       - name: Check formatting
@@ -202,6 +203,8 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+          # The separate MCP job covers Linux worker tests only when it is scheduled.
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required || needs.classify-changes.outputs.source-required }}
         run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
@@ -258,8 +261,8 @@ jobs:
       - name: Inspect installed package
         working-directory: sdk/typescript
         env: &package-deep-retry
-          # On PRs, exercise the real retry delay on each OS's floor or only runtime.
-          PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
+          # Qualify retries on each OS's floor or only runtime, and on every scheduled/manual lane.
+          PACKAGE_DEEP_RETRY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
       - name: Check Action against the release candidate
@@ -267,7 +270,7 @@ jobs:
         uses: ./.github/actions/check-action-candidate
 
   mcp:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: MCP app tests (${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [classify-changes, package]
     runs-on: ubuntu-latest
@@ -292,11 +295,9 @@ jobs:
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
       - name: Test MCP app
         working-directory: plugins/codex-security/mcp-app
-        # Keep Node options before the glob; trailing shard flags run every file.
         run: >-
-          node --experimental-strip-types --test --test-concurrency=2
-          --test-shard=${{ matrix.shard }}/${{ strategy.job-total }}
-          --test-reporter=./scripts/test_reporter.mts "tests/test_*.ts"
+          node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts
+          ${{ matrix.shard }} ${{ strategy.job-total }}
       - name: Upload MCP test reports
         if: always()
         continue-on-error: true
@@ -309,7 +310,7 @@ jobs:
           retention-days: 14
 
   plugin-host:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: standalone plugin / ${{ matrix.os }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}
@@ -333,7 +334,7 @@ jobs:
         run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
 
   plugin-source:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.plugin-tests-required == 'true'
     name: plugin source contracts / ${{ matrix.os }} / python-${{ matrix.python }}
     needs: classify-changes
     runs-on: ${{ matrix.os }}

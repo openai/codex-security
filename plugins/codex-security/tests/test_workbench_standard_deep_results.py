@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     BUDGET_COST,
-    begin_deep_scan,
     cancel_scan,
     claim_deep_scan_dedup,
     commit_deep_dedup,
@@ -1106,6 +1105,7 @@ def deep_scan_fixture(
     budget: bool = False,
     workers: int = 1,
     include_paths: list[str] | None = None,
+    run=run_workbench,
 ) -> tuple[Path, Path, Path, Path, str]:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -1124,7 +1124,7 @@ def deep_scan_fixture(
     if budget or include_paths is not None:
         scan_dir = tmp_path / "scan"
         scan_dir.mkdir(mode=0o700)
-        registered = run_workbench(
+        registered = run(
             state_dir,
             "register-cli-scan",
             "--scan-dir",
@@ -1146,12 +1146,20 @@ def deep_scan_fixture(
             ),
         )
         scan_id = str(registered["scanId"])
-        begin_deep_scan(
-            state_dir, "standard-worker-thread", "--scan-id", scan_id, environment=environment
+        run(
+            state_dir,
+            "begin-deep-scan",
+            "--thread-id",
+            "standard-worker-thread",
+            "--scan-id",
+            scan_id,
+            environment=environment,
         )
     else:
-        begun = begin_deep_scan(
+        begun = run(
             state_dir,
+            "begin-deep-scan",
+            "--thread-id",
             "standard-worker-thread",
             "--target-path",
             str(target),
@@ -1176,6 +1184,7 @@ def accepted_standard_worker(
     scan_id: str,
     *,
     name: str = "standard-worker",
+    run=run_workbench,
 ) -> tuple[str, Path]:
     worker_id = str(uuid.uuid4())
     prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
@@ -1195,7 +1204,7 @@ def accepted_standard_worker(
         "1",
     )
     environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(state_dir, *base_args, "--status", "running", environment=environment)
+    run(state_dir, *base_args, "--status", "running", environment=environment)
     result_path.write_text(
         json.dumps(
             {
@@ -1206,7 +1215,7 @@ def accepted_standard_worker(
             }
         )
     )
-    run_workbench(
+    run(
         state_dir,
         *base_args,
         "--status",
@@ -1435,21 +1444,7 @@ def test_stopped_scan_rebinds_prepared_completion_seal(tmp_path: Path) -> None:
     assert seal_digest
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        ("request-finding-remediation",),
-        ("request-finding-remediation-action", "--expected-version", "1", "--action", "apply"),
-        ("claim-finding-remediation-resend",),
-        ("mark-finding-remediation-delivered",),
-        ("release-finding-remediation-claim",),
-        ("cancel-finding-remediation-request",),
-        ("set-finding-remediation", "--expected-version", "1", "--state", "failed"),
-    ],
-)
-def test_stopped_findings_cannot_enter_remediation(
-    tmp_path: Path, command: tuple[str, ...]
-) -> None:
+def test_stopped_findings_cannot_enter_remediation(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = standard_contract(tmp_path, scan_id, target)
@@ -1464,20 +1459,36 @@ def test_stopped_findings_cannot_enter_remediation(
     )
     occurrence_id = failed["findings"][0]["occurrenceId"]
 
-    blocked = run_workbench(
-        state_dir,
-        *command,
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        str(uuid.uuid4()),
-        "--action-token",
-        str(uuid.uuid4()),
-        check=False,
+    commands = (
+        ("request-finding-remediation",),
+        ("request-finding-remediation-action", "--expected-version", "1", "--action", "apply"),
+        ("claim-finding-remediation-resend",),
+        ("mark-finding-remediation-delivered",),
+        ("release-finding-remediation-claim",),
+        ("cancel-finding-remediation-request",),
+        ("set-finding-remediation", "--expected-version", "1", "--state", "failed"),
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        for command in commands:
+            blocked = run_workbench(
+                state_dir,
+                *command,
+                "--occurrence-id",
+                occurrence_id,
+                "--request-id",
+                str(uuid.uuid4()),
+                "--action-token",
+                str(uuid.uuid4()),
+                check=False,
+            )
 
-    assert blocked["returncode"] != 0
-    assert "successfully completed scans" in blocked["stderr"]
+            assert blocked["returncode"] != 0, command[0]
+            assert "successfully completed scans" in blocked["stderr"], command[0]
+            attempt = connection.execute(
+                "SELECT 1 FROM finding_remediation_attempts WHERE occurrence_id = ?",
+                (occurrence_id,),
+            ).fetchone()
+            assert attempt is None, command[0]
 
 
 @pytest.mark.parametrize("explicit_complete", [True, False], ids=["explicit", "default"])

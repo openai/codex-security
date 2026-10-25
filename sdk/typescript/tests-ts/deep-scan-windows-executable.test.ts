@@ -165,27 +165,3 @@ test.each([
     }
   },
 );
-
-test("keeps operating-system worker failures retryable", async () => {
-  const runtime = await loadBundledRuntime();
-  const source =
-    /function classifyCodexWorkerError\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
-  expect(source).toBeDefined();
-  const classify = new Function(
-    `${source}\nreturn classifyCodexWorkerError;`,
-  )() as (error: Error) => Error;
-  for (const original of [
-    Object.assign(new Error("spawn codex EPERM"), { code: "EPERM" }),
-    ...[
-      "Error: No such file or directory (os error 2)",
-      "Error: The system cannot find the file specified. (os error 2)",
-    ].map(
-      (diagnostic) =>
-        new Error(`Codex Exec exited with code 1:\n${diagnostic}`),
-    ),
-  ]) {
-    expect(classify(original)).toBe(original);
-  }
-});

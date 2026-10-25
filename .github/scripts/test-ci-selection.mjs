@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
@@ -10,6 +9,7 @@ const select = (paths, options = {}) =>
 
 const regularSource = {
   "source-required": "true",
+  "plugin-tests-required": "true",
   "package-required": "true",
   "action-ci": "false",
   "eval-contracts": "true",
@@ -79,6 +79,7 @@ const fullQualification = {
 const docs = {
   ...regularSource,
   "source-required": "false",
+  "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
   "container-validate": "false",
@@ -203,41 +204,34 @@ test("Standard and triage eval changes require all deterministic eval contracts"
   );
 });
 
-test("packaged SDK documentation keeps package validation selected", () => {
-  const manifest = JSON.parse(
-    readFileSync(
-      new URL("../../sdk/typescript/package.json", import.meta.url),
-      "utf8",
-    ),
-  );
-  for (const file of manifest.files.filter((file) => file.endsWith(".md"))) {
-    const path = `sdk/typescript/${file}`;
-    const selected = select([path]);
-    assert.deepEqual(selected, fullQualification, path);
+test("packaged guides keep the archive and installed-package gates", () => {
+  const expected = {
+    ...docs,
+    "package-required": "true",
+    "compatibility-matrix": JSON.stringify({
+      include: [{ os: "ubuntu-latest", node: "24" }],
+    }),
+  };
+  for (const paths of [
+    ["sdk/typescript/README.md"],
+    ["RELEASING.md", "sdk/typescript/docs/cli.md"],
+    // --no-renames includes the old required path even when the new path is ordinary docs.
+    ["sdk/typescript/docs/hosted-scans.md", "docs/hosted-scans.md"],
+  ]) {
+    assert.deepEqual(select(paths), expected, paths.join(", "));
   }
-  // The --no-renames diff reports the old path when a required doc is renamed.
-  const renamed = select([
-    "sdk/typescript/docs/hosted-scans.md",
-    "docs/hosted-scans.md",
-  ]);
-  assert.equal(renamed["source-required"], "true");
-  assert.equal(
-    select(["README.md", "sdk/typescript/README.md"])["source-required"],
-    "true",
+  assert.deepEqual(
+    failedChecks({
+      "classify-changes": { result: "success", outputs: expected },
+      "static-checks": { result: "success" },
+    }),
+    ["native", "package", "compatibility"],
   );
 });
 
-test("release recovery documentation keeps its SDK contract selected", () => {
-  for (const paths of [["RELEASING.md"], ["README.md", "RELEASING.md"]]) {
-    const outputs = select(paths);
-    assert.deepEqual(outputs, fullQualification);
-    // release-automation.test.ts validates the documented recovery marker.
-    const missing = failedChecks({
-      "classify-changes": { result: "success", outputs },
-      "static-checks": { result: "success" },
-    });
-    assert.ok(missing.includes("test"));
-  }
+test("release guide changes select the static route", () => {
+  assert.deepEqual(select(["RELEASING.md"]), docs);
+  assert.deepEqual(select(["README.md", "RELEASING.md"]), docs);
 });
 
 test("release helper changes select their release-progress regression checks", () => {
@@ -250,7 +244,6 @@ test("release helper changes select their release-progress regression checks", (
 test("ordinary TypeScript source and tests retain the reduced version matrices", () => {
   for (const path of [
     "sdk/typescript/src/cost.ts",
-    "sdk/typescript/tests-ts/skeleton.test.ts",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
     "plugins/codex-security/mcp-app/src/stdio-transport.ts",
     "plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
@@ -258,6 +251,32 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
   ]) {
     assert.deepEqual(select([path]), regularSource, path);
     assert.deepEqual(select(["README.md", path]), regularSource, path);
+  }
+});
+
+test("SDK test-only PRs keep the SDK jobs and skip independent plugin suites", () => {
+  const paths = [
+    "sdk/typescript/tests-ts/skeleton.test.ts",
+    "sdk/typescript/tests-ts/windows-machine-policy.test.ts",
+  ];
+  assert.deepEqual(select(paths), {
+    ...regularSource,
+    "plugin-tests-required": "false",
+  });
+  for (const other of [
+    "README.md",
+    "sdk/typescript/tests-ts/support/test-subprocess.ts",
+    "sdk/typescript/src/api.ts",
+  ]) {
+    assert.deepEqual(select([...paths, other]), regularSource, other);
+  }
+  for (const options of [
+    { event: "push" },
+    { event: "schedule" },
+    { event: "workflow_dispatch" },
+    { baseChanged: true },
+  ]) {
+    assert.deepEqual(select(paths, options), fullQualification);
   }
 });
 
@@ -273,6 +292,9 @@ test("unknown paths and dependency configuration receive full qualification", ()
     ["other/sdk/typescript/src/runtime.ts"],
     [".npmrc"],
     ["sdk/typescript/.npmrc"],
+    ["sdk/typescript/docs/unlisted.md"],
+    ["RELEASING.md", "sdk/typescript/src/api.ts"],
+    ["sdk/typescript/docs/cli.md", "sdk/typescript/src/api.ts"],
     ["plugins/codex-security/mcp-app/src/.npmrc"],
     ["pnpm-workspace.yaml"],
     ["sdk/typescript/pnpm-workspace.yaml"],
@@ -406,6 +428,7 @@ test("documentation requires static checks and explicit selection, without skipp
   );
   for (const key of [
     "source-required",
+    "plugin-tests-required",
     "package-required",
     "action-ci",
     "eval-contracts",

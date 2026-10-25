@@ -47,6 +47,9 @@ The SDK shards in `node-ci` use the workflow run number as their seed, so
 rerunning a job repeats its test order. To replay a shard locally, use its
 platform, shard selector, and seed, for example
 `node --experimental-strip-types scripts/run-ci-tests.mts 2/6 --seed=12345`.
+On Linux, if the original workflow ran the separate MCP tests, prefix that
+command with `CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE=true` to skip the four
+worker groups they cover. Leave it unset to replay a run that skipped MCP.
 
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner diagnostics allow 120 seconds for slower native
@@ -147,7 +150,12 @@ For source qualification, CI builds and inspects one package archive, then passe
 that archive to jobs in the same workflow run, using the commit SHA in the
 artifact name. Selected Node runtimes install and inspect the package, including
 a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
-nested Codex worker. Native plugin-build tests remain in the shared Bun suite.
+nested Codex worker. The installed Deep Scan smoke exercises a real retry on
+one runtime per OS for PRs and main pushes, and on every scheduled or manual
+qualification lane. All selected runtimes still complete direct and detached scans.
+Native plugin-build tests remain in the shared Bun suite. Each supported OS
+exercises the maintainer release preview, Git branch and commit updates,
+concurrent ref conflicts, and preservation of maintainer edits.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
@@ -156,9 +164,12 @@ Source qualification runs the full Bun suite once per OS under Node 22: six
 file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
 as separate jobs; each job uses Bun's default serial runner. The other selected
 Node versions run the installed-package checks instead of repeating the same
-Bun suite. MCP tests run in two required jobs using Node's native file sharding,
-with two isolated test file processes per job. Local and release `test:mcp`
-commands still run the full suite. Python tests run separately and use four
+Bun suite. MCP CI assigns files by measured duration and starts the longest
+files first, using two isolated Node test processes per job. From
+`plugins/codex-security/mcp-app`, replay shard 1
+with `node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts 1 2`.
+Local and release `test:mcp` commands run the full suite. Python tests run
+separately and use four
 isolated pytest-xdist workers with work stealing; worker crashes fail the run
 without automatic restarts.
 
@@ -176,8 +187,9 @@ Refresh timing hints from successful CI JUnit artifacts when shard runtimes
 become uneven. From the SDK directory, pass reports for one platform to
 `node --experimental-strip-types scripts/update-test-timings.mts win32 <junit.xml> ...`
 (use `linux` or `darwin` for the other platforms). The updater sums testcase
-durations per file and uses their median across reports, preserving the other
-platforms. Review and commit the generated snapshot. The initial hints use runs
+durations for executed cases per file and uses their median across reports. A
+report that skipped every case in a file leaves its timing hint unchanged. Other
+platforms retain their hints. Review and commit the generated snapshot. The initial hints use runs
 `39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
 timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
 changes; compare complete JUnit inventories and outcomes as well as wall time.

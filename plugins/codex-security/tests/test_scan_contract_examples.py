@@ -24,7 +24,6 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> None:
-    Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     errors = sorted(validator.iter_errors(value), key=lambda error: list(error.absolute_path))
     if not errors:

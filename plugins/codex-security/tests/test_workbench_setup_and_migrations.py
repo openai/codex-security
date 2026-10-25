@@ -2326,7 +2326,8 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = 'current-model' WHERE id = ?", (scan_id,))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     expected_migration_name = {
         11: "deep scan orchestration state",
@@ -2355,8 +2356,6 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
             (workspace_id,),
         ).fetchone() == (legacy_model, legacy_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
 
 @pytest.mark.parametrize("installed_history", ["main-scan-names", "source-excerpt-scopes"])
@@ -2766,7 +2765,8 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = ? WHERE id = ?", ("gpt-current", scan_id))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
@@ -2802,8 +2802,6 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             (workspace_id,),
         ).fetchone() == (model, reasoning_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
 
 def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_history() -> None:

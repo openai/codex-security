@@ -84,50 +84,14 @@ def test_later_scans_preserve_global_findings_and_repository_counts(
         include_paths=include_paths,
     )
 
-    findings = run_workbench(state_dir, "list-global-findings")["findings"]
-    assert len(findings) == 1
-    assert findings[0]["scanId"] == original["scanId"]
-    assert findings[0]["status"] == "open"
+    page = run_workbench(state_dir, "list-global-findings", "--limit", "1")
+    assert page["nextOffset"] is None
+    (finding,) = page["findings"]
+    assert finding["scanId"] == original["scanId"]
+    assert finding["status"] == "open"
     assert (
         run_workbench(state_dir, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
     )
-
-
-def test_global_findings_apply_pagination_to_historical_findings(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    historical_target = tmp_path / "historical-repo"
-    first_active_target = tmp_path / "first-active-repo"
-    second_active_target = tmp_path / "second-active-repo"
-    for target in (historical_target, first_active_target, second_active_target):
-        target.mkdir()
-
-    historical = complete_scan(state_dir, historical_target, identity_anchor="historical-finding")
-    complete_scan(state_dir, historical_target, identity_anchor="clean-scan", finding=False)
-    first_active = complete_scan(
-        state_dir, first_active_target, identity_anchor="first-active-finding"
-    )
-    second_active = complete_scan(
-        state_dir, second_active_target, identity_anchor="second-active-finding"
-    )
-
-    first_page = run_workbench(state_dir, "list-global-findings", "--limit", "1")
-    second_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "1")
-    third_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "2")
-
-    assert first_page["nextOffset"] == 1
-    assert second_page["nextOffset"] == 2
-    assert third_page["nextOffset"] is None
-    assert {
-        first_page["findings"][0]["scanId"],
-        second_page["findings"][0]["scanId"],
-        third_page["findings"][0]["scanId"],
-    } == {
-        historical["scanId"],
-        first_active["scanId"],
-        second_active["scanId"],
-    }
 
 
 def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_path: Path) -> None:
@@ -189,13 +153,17 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
             (distinct_first_occurrence,),
         ).fetchone()[0]
 
-    first_page = run_workbench(state_dir, "list-global-findings", "--limit", "1")
-    second_page = run_workbench(state_dir, "list-global-findings", "--offset", "1", "--limit", "20")
-    assert first_page["limit"] == 1
-    assert first_page["nextOffset"] == 1
-    assert first_page["offset"] == 0
-    assert second_page["nextOffset"] is None
-    findings = first_page["findings"] + second_page["findings"]
+    pages = [
+        run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", str(offset))
+        for offset in range(3)
+    ]
+    assert [(page["offset"], page["limit"], page["nextOffset"]) for page in pages] == [
+        (0, 1, 1),
+        (1, 1, 2),
+        (2, 1, None),
+    ]
+    assert all(len(page["findings"]) == 1 for page in pages)
+    findings = [page["findings"][0] for page in pages]
     findings_by_identity = {
         (finding["targetId"], finding["findingId"]): finding for finding in findings
     }
@@ -207,7 +175,6 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
         (second_target_id, str(latest_second["findings"][0]["findingId"]))
     ]
 
-    assert len(findings) == 3
     assert first["scanId"] == latest_first["scanId"]
     assert first["occurrenceId"] == latest_first_occurrence
     assert first["occurrenceCount"] == 2
@@ -272,51 +239,28 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["scanCount"] == 1
 
 
-def test_overlapping_scans_mark_findings_present_in_latest_started_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "repo"
-    target.mkdir()
-    first = complete_scan(state_dir, target, identity_anchor="recurring-finding")
-    second = complete_scan(state_dir, target, identity_anchor="recurring-finding")
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET started_at = ? WHERE id = ?",
-            ("2026-01-01T00:00:00Z", first["scanId"]),
-        )
-        connection.execute(
-            "UPDATE scans SET started_at = ? WHERE id = ?",
-            ("2026-01-02T00:00:00Z", second["scanId"]),
-        )
-        connection.execute(
-            "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
-            ("2026-01-04T00:00:00Z", first["scanId"]),
-        )
-        connection.execute(
-            "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
-            ("2026-01-03T00:00:00Z", second["scanId"]),
-        )
-    finding = run_workbench(state_dir, "list-global-findings")["findings"][0]
-    assert finding["confirmedInLatestScan"] is True
-    assert set(finding["knownScanIds"]) == {first["scanId"], second["scanId"]}
-
-
-@pytest.mark.parametrize("query", ["strasse", "STRAẞE", "éclair", "ÉCLAIR"])
-def test_scan_and_finding_search_casefold_unicode(tmp_path: Path, query: str) -> None:
+def test_scan_and_finding_search_casefold_unicode(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "Straße ÉCLAIR"
     target.mkdir()
     first = complete_scan(state_dir, target, identity_anchor="first-finding")
-    complete_scan(state_dir, target, identity_anchor="second-finding")
+    second = complete_scan(state_dir, target, identity_anchor="second-finding")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("UPDATE finding_occurrences SET title = ?", ("Straße ÉCLAIR",))
-    page = run_workbench(state_dir, "list-scans", "--query", query, "--limit", "1")
-    assert len(page["scans"]) == 1
-    assert page["nextOffset"] == 1
-    next_page = run_workbench(
-        state_dir, "list-scans", "--query", query, "--limit", "1", "--offset", "1"
-    )
-    assert len(next_page["scans"]) == 1
-    findings = run_workbench(
-        state_dir, "list-findings", "--scan-id", str(first["scanId"]), "--query", query
-    )
-    assert len(findings["findingsPage"]["findings"]) == 1
+    for query in ("strasse", "STRAẞE", "éclair", "ÉCLAIR"):
+        page = run_workbench(state_dir, "list-scans", "--query", query, "--limit", "1")
+        assert page["nextOffset"] == 1, query
+        next_page = run_workbench(
+            state_dir, "list-scans", "--query", query, "--limit", "1", "--offset", "1"
+        )
+        assert next_page["nextOffset"] is None, query
+        (first_match,) = page["scans"]
+        (second_match,) = next_page["scans"]
+        assert {first_match["scanId"], second_match["scanId"]} == {
+            first["scanId"],
+            second["scanId"],
+        }, query
+        findings = run_workbench(
+            state_dir, "list-findings", "--scan-id", str(first["scanId"]), "--query", query
+        )
+        assert len(findings["findingsPage"]["findings"]) == 1, query

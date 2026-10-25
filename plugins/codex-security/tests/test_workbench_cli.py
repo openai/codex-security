@@ -116,7 +116,13 @@ def test_context_stdin_is_not_read_before_argument_parsing(
     stdin.buffer.read.assert_not_called()
 
 
-@pytest.mark.parametrize("command", CONTEXT_COMMANDS, ids=lambda args: args[0])
+# These two commands declare their option groups separately. All other commands
+# use the shared workbench declaration exercised by the parser tests above.
+@pytest.mark.parametrize(
+    "command",
+    [args for args in CONTEXT_COMMANDS if args[0] in {"create-workspace", "begin-deep-scan"}],
+    ids=lambda args: args[0],
+)
 @pytest.mark.parametrize(
     "flags, payload, diagnostic",
     [

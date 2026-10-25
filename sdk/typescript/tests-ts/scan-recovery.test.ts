@@ -770,7 +770,7 @@ describe("scan publication and artifact recovery", () => {
     expect((await completeScan(fixture)).findingCount).toBe(1);
   });
 
-  test("keeps verified coverage receipts and records invalid references", async () => {
+  test("seals verified receipts and discards unsafe references without losing findings", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
@@ -788,17 +788,29 @@ describe("scan publication and artifact recovery", () => {
       null,
     ];
     await writeJson(path, document);
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const draft = await readJson<{ scan: { hardening?: unknown } }>(
+      manifestPath,
+    );
+    draft.scan.hardening = { portfolioPath: "../outside.md" };
+    await writeJson(manifestPath, draft);
 
     const completed = await completeScan(fixture);
 
     expect(completed.progress.status).toBe("complete");
-    expect(completed.warnings).toHaveLength(4);
+    expect(completed.findingCount).toBe(1);
+    expect(completed.warnings).toHaveLength(5);
     expect(
-      completed.warnings.every((warning) =>
+      completed.warnings.filter((warning) =>
         warning.startsWith("Skipped malformed coverage receipt"),
       ),
+    ).toHaveLength(4);
+    expect(
+      completed.warnings.some((warning) =>
+        warning.startsWith("Skipped malformed hardening portfolio:"),
+      ),
     ).toBe(true);
-    expect(completed.warnings.join("\n")).not.toContain("../outside.json");
+    expect(completed.warnings.join("\n")).not.toContain("../outside");
     const recovered = await readJson<CoverageDocument>(path);
     expect((recovered.surfaces as CoverageSurface[])[0]).toMatchObject({
       disposition: "needs_follow_up",
@@ -806,61 +818,63 @@ describe("scan publication and artifact recovery", () => {
     });
     const manifest = await readJson<{
       scan: { artifacts: Array<{ path: string }> };
-    }>(join(fixture.scanDir, "scan-manifest.json"));
+    }>(manifestPath);
+    expect(manifest.scan).not.toHaveProperty("hardening");
     expect(manifest.scan.artifacts.map((artifact) => artifact.path)).toContain(
       receipt,
     );
   });
 
-  test("recovers malformed coverage collections", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "coverage.json");
-    const document = await readJson<CoverageDocument>(path);
-    document.surfaces = { id: "not-an-array" };
-    document.explicitExclusions = null;
-    document.deferred = "later";
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.warnings).toHaveLength(3);
-    const recovered = await readJson<CoverageDocument>(path);
-    expect(recovered).toMatchObject({
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    });
-  });
-
-  test("discards unsafe hardening portfolios without discarding findings", async () => {
-    for (const hardening of [
-      "not an object",
-      { portfolioPath: "../outside.md" },
-      { portfolioPath: "hardening/hardening.md" },
-    ]) {
+  test.each([
+    ["invalid object", "not an object"],
+    ["missing file", { portfolioPath: "hardening/hardening.md" }],
+  ] as const)(
+    "recovers malformed coverage collections and omits a hardening portfolio (%s)",
+    async (_case, hardening) => {
       const fixture = await startDraftScan();
-      const path = join(fixture.scanDir, "scan-manifest.json");
+      const coveragePath = join(fixture.scanDir, "coverage.json");
+      const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+      const findingsPath = join(fixture.scanDir, "findings.json");
+      const { findings } = await readJson<FindingsDocument>(findingsPath);
+      const coverage = await readJson<CoverageDocument>(coveragePath);
+      coverage.surfaces = { id: "not-an-array" };
+      coverage.explicitExclusions = null;
+      coverage.deferred = "later";
+      await writeJson(coveragePath, coverage);
       const manifest = await readJson<{
-        scan: { hardening?: unknown };
-      }>(path);
+        scan: { hardening?: unknown; sealedAt?: string };
+      }>(manifestPath);
       manifest.scan.hardening = hardening;
-      await writeJson(path, manifest);
+      await writeJson(manifestPath, manifest);
 
       const completed = await completeScan(fixture);
 
-      expect(completed.progress.status).toBe("complete");
-      expect(completed.findingCount).toBe(1);
-      expect(completed.warnings).toHaveLength(1);
-      expect(completed.warnings[0]).toContain(
-        "Skipped malformed hardening portfolio:",
-      );
-      expect(completed.warnings[0]).not.toContain("../outside.md");
+      expect(completed).toMatchObject({
+        findingCount: 1,
+        progress: { status: "complete" },
+      });
+      expect(completed.warnings).toHaveLength(4);
       expect(
-        (await readJson<{ scan: { hardening?: unknown } }>(path)).scan,
-      ).not.toHaveProperty("hardening");
-    }
-  });
+        completed.warnings.filter((warning) =>
+          warning.endsWith("expected an array."),
+        ),
+      ).toHaveLength(3);
+      expect(completed.warnings).toContainEqual(
+        expect.stringMatching(/^Skipped malformed hardening portfolio:/),
+      );
+      expect(await readJson<CoverageDocument>(coveragePath)).toMatchObject({
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      });
+      expect(await readJson<FindingsDocument>(findingsPath)).toMatchObject({
+        findings: [{ summary: findings[0]!.summary }],
+      });
+      const sealed = await readJson<typeof manifest>(manifestPath);
+      expect(sealed.scan.sealedAt).toBeTruthy();
+      expect(sealed.scan).not.toHaveProperty("hardening");
+    },
+  );
 
   test("refuses to repair scan-wide coverage contract violations", async () => {
     const fixture = await startDraftScan();

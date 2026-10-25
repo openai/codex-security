@@ -198,6 +198,28 @@ function commandPath(command: string): string {
   return path;
 }
 
+let cachedNode: string | undefined;
+const node = () => (cachedNode ??= commandPath("node"));
+let fixtureNpm: ReturnType<typeof resolveFixtureNpm> | undefined;
+
+// All consumers use the same Node/npm installation and keep independent npm configs and caches.
+async function resolveFixtureNpm() {
+  const resolved = await execFileAsync(
+    node(),
+    [
+      "--input-type=module",
+      "-e",
+      `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  if (resolved.stderr) throw new Error(resolved.stderr);
+  return JSON.parse(resolved.stdout) as {
+    command: string;
+    args: string[];
+  };
+}
+
 async function installPackage(
   root: string,
   archivePath: string,
@@ -209,20 +231,7 @@ async function installPackage(
     join(consumer, "package.json"),
     JSON.stringify({ name: "synthetic-consumer", private: true }),
   );
-  const resolved = await execFileAsync(
-    commandPath("node"),
-    [
-      "--input-type=module",
-      "-e",
-      `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
-    ],
-    { encoding: "utf8", env: environment, windowsHide: true },
-  );
-  expect(resolved.stderr).toBe("");
-  const npm = JSON.parse(resolved.stdout) as {
-    command: string;
-    args: string[];
-  };
+  const npm = await (fixtureNpm ??= resolveFixtureNpm());
   return runPackageCommand(
     consumer,
     npm.command,
@@ -252,7 +261,7 @@ function checkPackage(
 ): Promise<{ status: number; stderr: string }> {
   return runPackageCommand(
     root,
-    commandPath("node"),
+    node(),
     [
       fileURLToPath(new URL("../scripts/check-package.mjs", import.meta.url)),
       archivePath,

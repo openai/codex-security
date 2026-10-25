@@ -1,34 +1,36 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
 
-const releaseCutWorkflow = readFileSync(
-  new URL("../../../.github/workflows/node-release-cut.yml", import.meta.url),
-  "utf8",
-);
-
-test("starts npm publication only after node-ci succeeds on main", () => {
-  expect(releaseCutWorkflow).toContain("workflow_run:");
-  expect(releaseCutWorkflow).toContain('workflows: ["node-ci"]');
-  expect(releaseCutWorkflow).toContain("types: [completed]");
-  expect(releaseCutWorkflow).toContain(
-    "github.event.workflow_run.conclusion == 'success'",
-  );
-  expect(releaseCutWorkflow).toContain(
-    "github.event.workflow_run.head_branch == 'main'",
-  );
-  expect(releaseCutWorkflow).not.toContain("  push:\n");
-});
-
-test("cuts the protected release tag from the exact successful CI commit", () => {
-  expect(releaseCutWorkflow).toContain(
-    "RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}",
-  );
-  expect(releaseCutWorkflow).toContain(
-    "ref: ${{ github.event.workflow_run.head_sha || github.sha }}",
-  );
-  expect(releaseCutWorkflow).toContain(
-    'git merge-base --is-ancestor "$RELEASE_SHA" origin/main',
-  );
-  expect(releaseCutWorkflow).toContain('git rev-parse "$RELEASE_SHA^"');
-  expect(releaseCutWorkflow).toContain('-f "sha=$RELEASE_SHA"');
+test("checks out the same revision used to cut tags after main CI or a manual dispatch", () => {
+  const workflow = Bun.YAML.parse(
+    readFileSync(
+      new URL(
+        "../../../.github/workflows/node-release-cut.yml",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    on: Record<string, unknown>;
+    jobs: {
+      cut: {
+        env: { RELEASE_SHA: string };
+        steps: { uses?: string; with?: { ref?: string } }[];
+      };
+    };
+  };
+  expect(workflow.on).toEqual({
+    workflow_run: {
+      workflows: ["node-ci"],
+      types: ["completed"],
+      branches: ["main"],
+    },
+    workflow_dispatch: null,
+  });
+  const { env, steps } = workflow.jobs.cut;
+  const verifiedSha = "${{ github.event.workflow_run.head_sha || github.sha }}";
+  expect(env.RELEASE_SHA).toBe(verifiedSha);
+  expect(
+    steps.find(({ uses }) => uses?.startsWith("actions/checkout@"))?.with?.ref,
+  ).toBe(verifiedSha);
 });

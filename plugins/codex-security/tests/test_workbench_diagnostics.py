@@ -40,7 +40,7 @@ def deep_scan(tmp_path: Path):
     return state_dir, str(started["scanId"]), Path(str(started["scanDir"])), environment
 
 
-@pytest.mark.parametrize("message", [LONG_ERROR, LEGACY_ERROR])
+@pytest.mark.parametrize("message", [LONG_ERROR, LEGACY_ERROR], ids=["long", "legacy-truncated"])
 def test_scan_failure_keeps_complete_diagnostic_and_existing_terminal_value(
     tmp_path: Path, message: str
 ) -> None:
@@ -66,7 +66,7 @@ def test_scan_failure_keeps_complete_diagnostic_and_existing_terminal_value(
 
 
 @pytest.mark.parametrize("status", ["failed", "canceled"])
-@pytest.mark.parametrize("message", [LONG_ERROR, LEGACY_ERROR])
+@pytest.mark.parametrize("message", [LONG_ERROR, LEGACY_ERROR], ids=["long", "legacy-truncated"])
 def test_worker_failure_keeps_complete_diagnostic_and_exact_terminal_replay(
     deep_scan, status: str, message: str
 ) -> None:
@@ -106,7 +106,7 @@ def test_worker_failure_keeps_complete_diagnostic_and_exact_terminal_replay(
     assert "terminal state is immutable" in rejected["stderr"]
 
 
-@pytest.mark.parametrize("message", [LONG_ERROR, LEGACY_ERROR])
+@pytest.mark.parametrize("message", [LONG_ERROR, LEGACY_ERROR], ids=["long", "legacy-truncated"])
 def test_deep_failure_keeps_complete_diagnostic_and_existing_terminal_value(
     deep_scan, message: str
 ) -> None:
