@@ -104,6 +104,24 @@ test.each([
     expect(interpolate(ci.concurrency["cancel-in-progress"], context)).toBe(
       action === "push" ? "false" : "true",
     );
+    const sdkGate = ci.jobs["test"]!.if!;
+    expect(ci.jobs["windows-test"]!.if).toBe(sdkGate);
+    const needs = {
+      "classify-changes": { outputs: { "source-required": "true" } },
+      package: { result: "success" },
+      "static-checks": { result: "failure" },
+    };
+    const run = (cancelled = false) =>
+      interpolate(sdkGate, { ...context, needs, cancelled: () => cancelled });
+    expect(run()).toBe(String(action === "push" || action === "edited"));
+    needs["static-checks"].result = "success";
+    expect(run()).toBe("true");
+    expect(run(true)).toBe("false");
+    needs.package.result = "failure";
+    expect(run()).toBe("false");
+    needs.package.result = "success";
+    needs["classify-changes"].outputs["source-required"] = "false";
+    expect(run()).toBe("false");
   },
 );
 

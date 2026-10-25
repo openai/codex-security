@@ -3936,8 +3936,14 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
           "${{ needs.classify-changes.outputs.source-required == 'false' }}",
       },
     });
+    const sdkShards = ["test", "windows-test"];
     for (const [name, job] of checks) {
-      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+      if (sdkShards.includes(name))
+        expect(job.needs).toContain("static-checks");
+      else
+        expect(job.if ?? "", name).not.toMatch(
+          /\b(always|failure|cancelled)\(/u,
+        );
     }
 
     // With no job results, the gate must report exactly the jobs enabled in YAML.
@@ -3965,6 +3971,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         ([name, job]) =>
           name === "static-checks" ||
           !job.if ||
+          (sdkShards.includes(name) && enabled === "source-required") ||
           job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
       );
       expect(

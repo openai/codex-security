@@ -162,9 +162,13 @@ jobs:
           retention-days: 7
 
   test:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: &run-sdk-shards >-
+      ${{ !cancelled() && needs.package.result == 'success' &&
+      needs['classify-changes'].outputs['source-required'] == 'true' &&
+      (github.event_name != 'pull_request' || github.event.action == 'edited' ||
+      needs['static-checks'].result == 'success') }}
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
-    needs: [classify-changes, package]
+    needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -519,9 +523,9 @@ jobs:
           exit 1
 
   windows-test:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: *run-sdk-shards
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
-    needs: [classify-changes, package]
+    needs: *sdk-shard-needs
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:

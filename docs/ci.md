@@ -20,6 +20,11 @@ are discovered from the source tree, including new files without timing data.
 Platform-specific filesystem, credential, process, cancellation, and resumed
 worker cases remain enabled.
 
+SDK shards wait for static checks and a successful package build. A failing
+static check skips the shards when a PR opens, reopens, or receives new commits.
+Pushes to `main`, nightly and manual runs, and PR edits that need full
+qualification still run the shards.
+
 The two Linux MCP jobs discover the same test files as local MCP testing. CI
 assigns files by observed runtimes and starts the longest files first on each
 job's two Node workers. Refresh the
