@@ -2856,6 +2856,9 @@ export class CodexSecurity {
           runtimePaths,
           options.auth,
           git,
+          mode === "deep" && !directDeepScan
+            ? deepScanParentConfig(session.sessionConfig)
+            : undefined,
         );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -5808,6 +5811,32 @@ export function classifyConnectionFailure(
   }
   if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
   return "unknown";
+}
+
+function deepScanParentConfig(config: JsonObject): JsonObject {
+  const resolved = resolveCodexProfile(config);
+  const features = resolved["features"] ?? {};
+  if (!isRecord(features)) return resolved;
+  const mode = features["code_mode"];
+  const settings = typeof mode === "boolean" ? { enabled: mode } : (mode ?? {});
+  // Leave malformed user settings for the native config parser to reject.
+  if (!isRecord(settings)) return resolved;
+  const direct = settings["direct_only_tool_namespaces"] ?? [];
+  if (!Array.isArray(direct)) return resolved;
+  // The native parent waits for direct tool calls before it can end its turn.
+  // A code-mode cell can yield the still-running coordinator to the model.
+  return {
+    ...resolved,
+    features: {
+      ...features,
+      code_mode: {
+        ...settings,
+        direct_only_tool_namespaces: [
+          ...new Set([...direct, "mcp__codex_security", "codex_security"]),
+        ],
+      },
+    },
+  };
 }
 
 export function scanRuntimeCodexConfig(
