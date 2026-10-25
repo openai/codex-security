@@ -17,6 +17,7 @@ import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test, mock } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -176,6 +177,52 @@ async function multiscanInventory(root: string): Promise<void> {
 }
 
 describe("CLI", () => {
+  test("the scan schema accepts runtime failures with stale installed-skills metadata", async () => {
+    const root = await temporaryDirectory("cli-failure-skills-");
+    const previousDataHome = process.env["XDG_DATA_HOME"];
+    const skillPath = join(root, "skills", "codex-security-scan");
+    try {
+      await mkdir(join(root, "incur"), { recursive: true });
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(
+        join(skillPath, "SKILL.md"),
+        "Previously installed skill.",
+      );
+      await writeFile(
+        join(root, "incur", "codex-security.json"),
+        JSON.stringify({
+          hash: "previous-command-hash",
+          skills: ["codex-security-scan"],
+          paths: [skillPath],
+        }),
+      );
+      process.env["XDG_DATA_HOME"] = root;
+      const schema = captureCli(main, "stdout");
+      expect(
+        await schema.run(["scan", "--schema", "--json"], dependencies()),
+      ).toBe(0);
+      const validate = new Ajv2020({
+        strict: false,
+        validateFormats: false,
+      }).compile(JSON.parse(schema.text()).output);
+      const output = captureCli(main, "stdout");
+      const deps = dependencies();
+      deps.createSecurity = () => failingSecurity("Synthetic scan failure.");
+      expect(await output.run(["scan", ".", "--json"], deps)).toBe(2);
+      const failure = JSON.parse(output.text());
+      expect(failure).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        cta: { description: "Skills are out of date:" },
+      });
+      expect(validate(failure), JSON.stringify(validate.errors)).toBe(true);
+    } finally {
+      if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
+      else process.env["XDG_DATA_HOME"] = previousDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("preserves typed local plugin failure origin and diagnostic details", async () => {
     const cause = new Error("Synthetic plugin preparation detail.");
     const localFailure = new LocalPluginBootstrapError(
@@ -840,7 +887,7 @@ describe("CLI", () => {
         message: { type: "string" },
       },
       required: ["status", "code", "message"],
-      additionalProperties: false,
+      additionalProperties: {},
     });
 
     const rerunSchema = captureCli(main, "stdout");
@@ -3468,6 +3515,54 @@ describe("CLI", () => {
     }
   });
 
+  test.each(["openrouter", "fireworks", "amazon-bedrock"])(
+    "requires a model for native %s policy overrides before runtime creation",
+    async (provider) => {
+      for (const profile of [false, true]) {
+        const overrides = profile
+          ? ['profile="review"', `profiles.review.model_provider="${provider}"`]
+          : [`model_provider="${provider}"`];
+        for (const model of [undefined, "synthetic-provider-model"]) {
+          const stderr = capture();
+          const createPolicySecurity = mock((_config: CodexSecurityConfig) => {
+            throw new Error("Synthetic policy runtime reached.");
+          });
+          const deps = dependencies();
+          deps.createPolicySecurity = createPolicySecurity;
+          expect(
+            await main(
+              [
+                "policy",
+                ".",
+                "--headless",
+                "--json",
+                ...overrides.flatMap((value) => ["--codex", value]),
+                ...(model === undefined ? [] : ["--model", model]),
+              ],
+              capture().stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          if (model === undefined) {
+            expect(createPolicySecurity).not.toHaveBeenCalled();
+            expect(stderr.text()).toContain(
+              `--model is required when using --provider ${provider}`,
+            );
+          } else {
+            expect(createPolicySecurity).toHaveBeenCalledTimes(1);
+            expect(
+              createPolicySecurity.mock.lastCall?.[0].codexOverrides,
+            ).toMatchObject({ model });
+            expect(stderr.text()).toContain(
+              "Synthetic policy runtime reached.",
+            );
+          }
+        }
+      }
+    },
+  );
+
   test("ignores override key whitespace and preserves literal string contents", () => {
     expect(
       parseCodexOverrides([
@@ -6026,3 +6121,56 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
   });
 });
+
+for (const format of [["--json"], ["--format", "jsonl"]]) {
+  test(`argument error preserves JSON text and escapes terminal controls (${format})`, async () => {
+    const flag = "--unknown\u001b[2J";
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", ...format, flag],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text()).message).toContain(flag);
+    expect(stderr.text()).not.toContain("\u001b");
+  });
+  test(`argument error reports actual stdout failure (${format})`, async () => {
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("SYNTHETIC_ARGUMENT_STDOUT_FAILED"));
+      },
+    });
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", ...format, "--unknown"],
+        stdout,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("SYNTHETIC_ARGUMENT_STDOUT_FAILED");
+  });
+  test(`ordinary argument error retains its existing JSON response (${format})`, async () => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", ...format, "--unknown"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message: "Unknown flag: --unknown",
+    });
+    expect(stderr.text()).toBe("codex-security: Unknown flag: --unknown\n");
+  });
+}
