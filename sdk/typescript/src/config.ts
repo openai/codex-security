@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
@@ -442,21 +441,6 @@ export function mergeCodexOverrides(
   validateOverrideKeys(base);
   validateOverrideKeys(overrides);
   return deepMerge(structuredClone(base), overrides);
-}
-
-/** @internal Saved tables may include defaults alongside explicit overrides. */
-export function containsCodexOverrides(
-  saved: JsonValue | undefined,
-  requested: JsonValue,
-): boolean {
-  if (!isObject(requested)) return isDeepStrictEqual(saved, requested);
-  return (
-    isObject(saved) &&
-    Object.entries(requested).every(
-      ([key, value]) =>
-        Object.hasOwn(saved, key) && containsCodexOverrides(saved[key], value),
-    )
-  );
 }
 
 /** @internal */

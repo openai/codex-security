@@ -1,7 +1,7 @@
 import { isRecord } from "./record.js";
 import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
-import { inspectTrustedExecutable, isWithin } from "./trusted-executable.js";
+import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
@@ -14,7 +14,6 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
   codexSecurityStateDirectory,
-  environmentWithGit,
   resolvePluginPython,
   runWorkbench,
   workbenchEnvironment,
@@ -25,7 +24,6 @@ interface ScanTarget {
   id: string;
   target_path: string;
   target_id?: string | null;
-  checkout_root?: string | null;
 }
 
 interface BootstrapDatabase {
@@ -39,7 +37,7 @@ interface BootstrapDatabase {
 
 /** Read only enough history to protect Python discovery; the workbench still validates the scan. */
 export async function savedScanWorkbench(
-  selection: string | { workflowId: string } | { resumeId: string },
+  requestedId: string | { workflowId: string },
   options: {
     environment: ProcessEnvironment;
     pluginRoot: string;
@@ -53,9 +51,7 @@ export async function savedScanWorkbench(
   }
 > {
   options.signal?.throwIfAborted();
-  const resuming = typeof selection !== "string" && "resumeId" in selection;
-  const requestedId = resuming ? selection.resumeId : selection;
-  let environment: ProcessEnvironment = workbenchEnvironment(
+  const environment: ProcessEnvironment = workbenchEnvironment(
     options.environment,
   );
   const targets = await readTargets(
@@ -63,10 +59,8 @@ export async function savedScanWorkbench(
     environment,
     options.currentDirectory,
     options.signal,
-    resuming,
   );
-  const latest =
-    !resuming && (requestedId === "latest" || typeof requestedId !== "string");
+  const latest = requestedId === "latest" || typeof requestedId !== "string";
   if (targets.length === 0)
     throw new CodexSecurityError(
       typeof requestedId !== "string"
@@ -105,29 +99,6 @@ export async function savedScanWorkbench(
       )
     ).flat(),
   ];
-  if (resuming) {
-    protectedRoots.unshift(options.currentDirectory);
-    // The original enclosing checkout can outlive the Git marker that identified it.
-    const originalRoot = targets[0]!.checkout_root;
-    if (originalRoot != null) {
-      if (
-        typeof originalRoot !== "string" ||
-        !isAbsolute(originalRoot) ||
-        !isWithin(originalRoot, targets[0]!.target_path)
-      )
-        throw new CodexSecurityError(
-          "Saved scan history has an invalid checkout root.",
-        );
-      protectedRoots.push(originalRoot);
-    }
-    // Git starts configured helpers from PATH while verifying the original checkout.
-    const git = await inspectTrustedExecutable(
-      "git",
-      environment,
-      protectedRoots,
-    );
-    environment = environmentWithGit(environment, git);
-  }
   let python: string | undefined;
   const workbench: SavedScanDependencies["runWorkbench"] = async (
     args,
@@ -135,8 +106,6 @@ export async function savedScanWorkbench(
     signal = options.signal,
   ) => {
     signal?.throwIfAborted();
-    if (resuming && args[0] === "get-cli-scan-resume")
-      args = [args[0], "--scan-id", targets[0]!.id];
     // Return the selected ID directly: probing Python must not revisit unrelated history.
     if (requestedId === "latest" && args[0] === "list-scans")
       return { scans: targets.map((target) => ({ scanId: target.id })) };
@@ -194,9 +163,7 @@ export async function savedScanWorkbench(
   };
   return Object.assign(workbench, {
     environment,
-    protectedRoots: resuming
-      ? protectedRoots
-      : [options.currentDirectory, ...protectedRoots],
+    protectedRoots: [options.currentDirectory, ...protectedRoots],
   });
 }
 
@@ -205,7 +172,6 @@ async function readTargets(
   environment: ProcessEnvironment,
   currentDirectory: string,
   signal?: AbortSignal,
-  resuming = false,
 ): Promise<ScanTarget[]> {
   const require = createRequire(import.meta.url);
   const bun = process.versions["bun"] !== undefined;
@@ -251,20 +217,13 @@ async function readTargets(
         requestedId.workflowId,
       );
     }
-    if (!resuming && requestedId === "latest")
+    if (requestedId === "latest")
       return await latestTargets(
         database,
         currentDirectory,
         environment,
         signal,
       );
-    const fields =
-      resuming &&
-      readRows<{ name: string }>(database, "PRAGMA table_info(scans)").some(
-        (column) => column.name === "recipe_json",
-      )
-        ? "id, target_path, json_extract(recipe_json, '$.checkoutRoot') AS checkout_root"
-        : "id, target_path";
     // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
     const compact = trimBoundary(
       requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
@@ -277,7 +236,7 @@ async function readTargets(
         .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
       return readRows<ScanTarget>(
         database,
-        `SELECT ${fields} FROM scans WHERE id = ?`,
+        "SELECT id, target_path FROM scans WHERE id = ?",
         id,
       );
     }
@@ -287,7 +246,7 @@ async function readTargets(
       );
     return readRows<ScanTarget>(
       database,
-      `SELECT ${fields} FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2`,
+      "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
       requestedId.length,
       requestedId.toLowerCase(),
     );

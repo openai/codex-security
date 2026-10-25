@@ -7,11 +7,10 @@ import {
   mkdir,
   readFile,
   realpath,
-  rename,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
 import { savedScanWorkbench } from "../src/saved-scan-bootstrap.js";
@@ -34,7 +33,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
-async function repositoryFixture(git: boolean) {
+async function fixture(git = false, separateSetupCommands = false) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(join(repository, "src"), { recursive: true });
@@ -72,12 +71,6 @@ async function repositoryFixture(git: boolean) {
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
   const python = await resolvePluginPython({ environment });
-  return { root, repository, environment, python };
-}
-
-async function fixture(git = false, separateSetupCommands = false) {
-  const { root, repository, environment, python } =
-    await repositoryFixture(git);
   const options = { environment, python, pluginRoot: PLUGIN_ROOT };
   const registrationArguments = (scanDir: string) => [
     "register-cli-scan",
@@ -905,121 +898,6 @@ test.skipIf(process.platform === "win32")(
       }),
     ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
     expect(existsSync(marker)).toBe(false);
-  },
-);
-
-async function registeredNestedDeepScan() {
-  const f = await repositoryFixture(true);
-  const target = join(f.repository, "src");
-  const scanDir = join(f.root, "deep");
-  await mkdir(scanDir, { mode: 0o700 });
-  const workbench = (args: string[]) =>
-    runWorkbench({ ...f, pluginRoot: PLUGIN_ROOT }, args);
-  const registered = await workbench([
-    "register-cli-scan",
-    "--repository",
-    target,
-    "--scan-dir",
-    scanDir,
-    "--recipe-json",
-    JSON.stringify({
-      repository: target,
-      checkoutRoot: f.repository,
-      mode: "deep",
-      config: {},
-      target: { kind: "repository", paths: [] },
-    }),
-  ]);
-  const scanId = registered["scanId"] as string;
-  await workbench([
-    "set-scan-thread",
-    "--scan-id",
-    scanId,
-    "--thread-id",
-    "owner",
-  ]);
-  return { ...f, target, scanId };
-}
-
-test.skipIf(process.platform === "win32")(
-  "nested Deep resume protects the recorded checkout after its Git marker disappears",
-  async () => {
-    const f = await registeredNestedDeepScan();
-    await rename(join(f.repository, ".git"), join(f.root, "original-git"));
-    const bin = join(f.repository, "bin");
-    const marker = join(f.root, "checkout-tool-ran");
-    const python = basename(f.python);
-    await mkdir(bin);
-    for (const tool of ["git", python])
-      await writeFile(
-        join(bin, tool),
-        '#!/bin/sh\necho "$0" >> "$TEST_PROBE"\nexit 1\n',
-        { mode: 0o700 },
-      );
-    const workbench = await savedScanWorkbench(
-      { resumeId: f.scanId },
-      {
-        currentDirectory: await temporaryDirectory(),
-        pluginRoot: PLUGIN_ROOT,
-        environment: {
-          ...f.environment,
-          PATH: [bin, dirname(f.python), f.environment.PATH].join(delimiter),
-          PYTHON: python,
-          TEST_PROBE: marker,
-        },
-      },
-    );
-    const result = await workbench([
-      "get-cli-scan-resume",
-      "--scan-id",
-      f.scanId,
-    ]).catch((error: unknown) => error);
-    expect(existsSync(marker)).toBe(false);
-    expect(workbench.environment["PATH"]?.split(delimiter)).not.toContain(bin);
-    expect(result).toMatchObject({
-      message: expect.stringContaining(
-        "original checkout revision or contents changed",
-      ),
-    });
-  },
-);
-
-test.skipIf(process.platform === "win32")(
-  "scans resume rejects a relative Python interpreter in the caller",
-  async () => {
-    const f = await registeredNestedDeepScan();
-    const caller = await temporaryDirectory();
-    const python = ".venv/bin/python";
-    const interpreter = join(caller, python);
-    await mkdir(dirname(interpreter), { recursive: true });
-    await symlink(f.python, join(dirname(interpreter), "host-python"));
-    await writeFile(
-      interpreter,
-      '#!/bin/sh\necho "$@" >> "$0.calls"\nexec "${0%/*}/host-python" "$@"\n',
-      { mode: 0o700 },
-    );
-    await writeFile(
-      join(f.target, "extract.py"),
-      "# Changed since registration\n",
-    );
-    const result = spawnSync(
-      process.execPath,
-      [join(import.meta.dir, "../src/cli.ts"), "scans", "resume", f.scanId],
-      {
-        cwd: caller,
-        encoding: "utf8",
-        env: {
-          ...f.environment,
-          PYTHON: python,
-          CODEX_SECURITY_NO_UPDATE_CHECK: "1",
-        },
-      },
-    );
-    expect(existsSync(interpreter + ".calls")).toBe(false);
-    expect(result.status).toBe(2);
-    expect(result.stderr).toContain(
-      "PYTHON interpreter is unavailable or unusable",
-    );
   },
 );
 

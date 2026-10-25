@@ -10,7 +10,6 @@ import {
   CHEAPERINFERENCE_CODEX_PROVIDER,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
-  containsCodexOverrides,
   scanModelProvider,
   writeCodexConfig,
   type JsonObject,
@@ -503,31 +502,6 @@ describe("CodexSecurity preflight configuration", () => {
     await expect(
       writeCodexConfig(join(root, "large-capacity.toml"), largeCapacity),
     ).resolves.toBeUndefined();
-  });
-
-  test("resume rejects private settings and requires whole arrays to match", () => {
-    const skills = { config: [{ path: "review", enabled: true }] };
-    const saved = scanPreflightCodexConfig({
-      model_provider: "amazon-bedrock",
-      model_providers: { "amazon-bedrock": { aws: { profile: "review" } } },
-      skills,
-    });
-    expect(containsCodexOverrides(saved, { skills })).toBe(true);
-    const omitted: JsonObject[] = [
-      { skills: { config: [{ path: "review" }] } },
-      {
-        skills: {
-          config: [{ path: "review", enabled: true, command: "helper" }],
-        },
-      },
-      { openai_base_url: "fixture" },
-      {
-        model_providers: { "amazon-bedrock": { auth: { command: "helper" } } },
-      },
-      { sandbox_workspace_write: { network_access: true } },
-    ];
-    for (const requested of omitted)
-      expect(containsCodexOverrides(saved, requested)).toBe(false);
   });
 
   test("keeps every valid profile, project, and root marker", () => {

@@ -469,10 +469,5 @@
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
-  },
-  {
-    "version": 58,
-    "name": "record CLI Deep Scan handoff cost",
-    "statements": ["ALTER TABLE scans ADD COLUMN cli_handoff_cost_json TEXT;"]
   }
 ]

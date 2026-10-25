@@ -75,7 +75,15 @@ test.each([
     expect(options.config).toMatchObject({
       model: "gpt-6.1-sol",
       model_reasoning_effort: "high",
-      features: { shell_tool: false },
+      features: {
+        shell_tool: false,
+        code_mode: {
+          direct_only_tool_namespaces:
+            scenario.route === "parent"
+              ? ["existing_tools", "mcp__codex_security", "codex_security"]
+              : ["existing_tools"],
+        },
+      },
     });
     return {
       startThread: () => ({ id: null, runStreamed: parentTurn }),
@@ -86,7 +94,10 @@ test.each([
       codexOverrides: {
         model: "gpt-6.1-sol",
         model_reasoning_effort: "high",
-        features: { shell_tool: false },
+        features: {
+          shell_tool: false,
+          code_mode: { direct_only_tool_namespaces: ["existing_tools"] },
+        },
       },
     },
     {

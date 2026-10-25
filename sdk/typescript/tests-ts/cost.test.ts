@@ -639,18 +639,6 @@ describe("live scan cost tracking", () => {
     });
   });
 
-  test("retains the latest parent receipt alongside measured worker usage", async () => {
-    const { home } = await workerSessionFixture();
-    const tracker = costTracker(home);
-    tracker.start("scan-thread");
-    await tracker.stop();
-    tracker.recordUsage({ input_tokens: 120, output_tokens: 15 });
-    expect(tracker.lastMeasuredCost).toMatchObject({
-      inputTokens: 220,
-      outputTokens: 25,
-    });
-  });
-
   test("keeps freshness with the last reportable token total", async () => {
     const home = await codexHome();
     const parent = await writeSession(home, scanThreadId, {});

@@ -293,7 +293,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         reopened
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        migrations.at(-1)!.version,
+        57,
       );
       for (const { version } of migrations.filter(
         (item) => item.version >= 43,

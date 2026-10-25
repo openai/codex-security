@@ -29,6 +29,8 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
+      native-cache-group: ${{ steps.native-cache.outputs.cold-group }}
+      native-cache-week: ${{ steps.native-cache.outputs.week }}
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
@@ -60,6 +62,14 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_CHANGED: ${{ github.event.action == 'edited' }}
         run: node .github/scripts/select-ci-checks.mjs
+
+      - name: Group protected pushes waiting for the same native cache
+        id: native-cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected && github.run_attempt == 1
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/actions/native-cache-key/key.sh cold-group >> "$GITHUB_OUTPUT"
 
   workflow-quality:
     needs: classify-changes
@@ -119,9 +129,14 @@ jobs:
   native:
     if: needs.classify-changes.outputs.package-required == 'true'
     needs: classify-changes
+    # Hits and PRs keep a unique group. Every entrant restores or rebuilds on its own commit.
+    concurrency:
+      group: native-producer-${{ github.run_attempt == 1 && needs.classify-changes.outputs.native-cache-group || github.run_id }}
+      queue: max
     uses: ./.github/workflows/native-artifacts.yml
     with:
       reuse-verified: true
+      cache-week: ${{ fromJSON(github.run_attempt == 1 && needs.classify-changes.outputs.native-cache-week || '0') }}
 
   container-validate:
     needs: [classify-changes, native, static-checks]

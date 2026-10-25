@@ -2141,31 +2141,12 @@ The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
 
-If a standalone Deep Scan parent stops while discovery is still working, use
-`codex-security scans show SCAN_ID` to inspect it. When the CLI reports that it
-preserved the scan, resume from the original environment to continue with the
-same workers. Scans with a spending limit, a post-scan prompt, a knowledge base
-outside the checkout, or private launch settings that cannot be restored keep
-their usual stopping behavior.
-
-If a scan started with `--validate` or `--patch` fails because its parent
-returned early, retry the original `scan` command with the same options and a
-fresh output directory. This keeps validation or patching with its scan settings.
-
-If the original scan used `--python`, set `PYTHON` to the same interpreter's
-absolute path before running `scans show` or `scans resume`.
-
-When the parent leaves a live scan for resume, `scans show SCAN_ID --json`
-reports the subtotal measured before interruption as `handoffCost`, or `null`
-when no estimate was available. A resumed
-turn can report usage for that turn alone, so a total cost is unavailable.
-Resume retains the scan ID, completed workers, artifacts, and saved settings.
-Knowledge-bearing scans save their extracted documents in
+Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
+settings/instructions. Knowledge-bearing scans save their extracted documents in
 the private `.scan-knowledge.json` continuation file beside the scan artifacts.
 Resume verifies and uses that snapshot even if the original files changed or were
-deleted. If the snapshot is missing, restore the original `.scan-knowledge.json`
-to the scan directory. Canonical reports do not embed its document text.
-Old individual scans without a saved knowledge snapshot require a
+deleted. Preserve it with the scan directory; canonical reports do not embed its
+document text. Old individual scans without a saved knowledge snapshot require a
 new scan when they used a knowledge base. Old scans without a knowledge base and
 bulk campaigns with an already-bound snapshot retain their existing resume path.
 New records save the authentication mode, explicit safety

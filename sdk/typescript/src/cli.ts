@@ -2573,23 +2573,7 @@ export async function main(
       async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
-          const workbench =
-            dependencies.runWorkbench === DEFAULT_DEPENDENCIES.runWorkbench
-              ? await savedScanWorkbench(
-                  { resumeId: args.scanId },
-                  {
-                    environment: {
-                      ...exportEnvironment(dependencies.environment),
-                      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(
-                        dependencies.environment,
-                      ),
-                    },
-                    pluginRoot: await bundledPluginRoot(),
-                    currentDirectory: dependencies.currentDirectory(),
-                  },
-                )
-              : dependencies.runWorkbench;
-          const saved = await workbench(
+          const saved = await dependencies.runWorkbench(
             workbenchArgs("get-cli-scan-resume", { scanId: args.scanId }),
           );
           if (
@@ -9282,7 +9266,6 @@ async function executeScan(
   let repository = "";
   let failed = false;
   let failure: unknown;
-  let incompleteBeforeCleanup: IncompleteScanError | undefined;
   try {
     deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
@@ -9482,9 +9465,6 @@ async function executeScan(
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
-      ...(arguments_.validate || arguments_.patch
-        ? { managedAttempt: true }
-        : {}),
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
@@ -9949,12 +9929,6 @@ async function executeScan(
   } catch (error) {
     failed = true;
     failure = error;
-    if (
-      requestedSignal === null &&
-      arguments_.mode === "deep" &&
-      error instanceof IncompleteScanError
-    )
-      incompleteBeforeCleanup = error;
   } finally {
     stopPresentation();
     if (security !== null) {
@@ -10019,14 +9993,16 @@ async function executeScan(
         },
       };
     }
-    const outcome = interruptedOutcome(
-      requestedSignal,
-      scanDir,
-      errorOutput,
-      incompleteBeforeCleanup,
-    );
+    const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
-    return { ...outcome, data: failureData };
+    return {
+      exitCode,
+      data: failureData,
+      error:
+        requestedSignal === "SIGINT"
+          ? "Scan canceled by Ctrl-C."
+          : "Scan terminated by SIGTERM.",
+    };
   }
   if (failed) {
     const costLimitFailure =
@@ -11172,23 +11148,21 @@ export class Progress {
   }
 }
 
-function interruptedOutcome(
+function interruptedExit(
   signal: SignalName,
   scanDir: string | null,
   errorOutput: Writable,
-  incompleteBeforeCleanup: IncompleteScanError | undefined,
-): Pick<ScanOutcome, "exitCode" | "error"> {
+): number {
   const ctrlC = signal === "SIGINT";
-  const error = incompleteBeforeCleanup
-    ? `Scan cleanup interrupted by ${signal}.\n${diagnosticLines(incompleteBeforeCleanup)}`
-    : `Scan ${ctrlC ? "canceled by Ctrl-C" : "terminated by SIGTERM"}.`;
-  errorOutput.write(`codex-security: ${error}\n`);
+  errorOutput.write(
+    `codex-security: Scan ${ctrlC ? "canceled by Ctrl-C" : "terminated by SIGTERM"}.\n`,
+  );
   errorOutput.write(
     scanDir === null
       ? "codex-security: No partial output was kept.\n"
       : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
   );
-  return { exitCode: ctrlC ? 130 : 143, error };
+  return ctrlC ? 130 : 143;
 }
 
 function invokedAsMain(): boolean {

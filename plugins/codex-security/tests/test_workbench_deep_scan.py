@@ -81,7 +81,6 @@ def begin_target_scan(
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute("ALTER TABLE scans DROP COLUMN cli_handoff_cost_json")
         connection.execute("ALTER TABLE scans DROP COLUMN retained_checkpoint_heads_json")
         connection.execute("ALTER TABLE workspaces DROP COLUMN deep_scan_config_json")
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN pending_target_project_path")

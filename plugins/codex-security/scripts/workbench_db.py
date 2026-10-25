@@ -1513,8 +1513,6 @@ def complete_scan_locked(
     turn_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    if not prepare_only:
-        cost_json = scan_usage.terminal_scan_cost(scan, cost_json)
     if scan["status"] == "complete":
         return saved_results.refresh_completed_scan(
             _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
@@ -2914,7 +2912,7 @@ def scan_result(
         "artifacts": artifacts,
         **model_fields,
         "canceledAt": scan["canceled_at"],
-        **scan_usage.saved_scan_cost_fields(scan),
+        **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),

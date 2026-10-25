@@ -18,7 +18,6 @@ from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
-    BUDGET_COST,
     fail_scan,
     get_scan,
     initialize_git_repository,
@@ -688,86 +687,32 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
     assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
 
 
-@pytest.mark.parametrize(
-    ("full", "partial"),
-    [(True, None), (True, "{"), (False, json.dumps(BUDGET_COST)), (False, "{")],
-    ids=["ordinary", "unrelated-owner", "partial-only", "invalid-partial-only"],
-)
-def test_failed_cli_scan_history_persists_measured_cost(tmp_path: Path, full, partial) -> None:
+def test_failed_cli_scan_history_persists_measured_cost(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
-    cost = {**BUDGET_COST, "model": "gpt-5.6-terra", "estimatedUsd": 0.003125}
-    scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
-    args = ["--cost-json", json.dumps(cost)] if full else []
-    if partial is not None:
-        args.extend(("--preserve-deep-owner", "unrelated", "--handoff-cost-json", partial))
-    failed = fail_scan(state_dir, scan["scanId"], "Scan stopped: cost limit exceeded.", *args)
-
-    assert failed["scan"]["progress"]["status"] == "failed"
-    expected = {"cost": cost} if full else {}
-    for saved in (
-        failed["scan"],
-        run_workbench(state_dir, "list-scans")["scans"][0],
-        get_scan(state_dir, scan["scanId"])["scan"],
-    ):
-        assert {key: saved[key] for key in ("cost", "handoffCost") if key in saved} == expected
-
-
-@pytest.mark.parametrize(
-    ("terminal", "receipt_flag", "receipts"),
-    [
-        ("complete", "--handoff-cost-json", (BUDGET_COST,)),
-        ("failed", "--cost-json", (BUDGET_COST, {**BUDGET_COST, "inputTokens": 2500})),
-        ("canceled", "--cost-json", (None, BUDGET_COST)),
-        ("complete", "--handoff-cost-json", (None,)),
-    ],
-)
-def test_preserved_owner_keeps_cost_subtotal(tmp_path, terminal, receipt_flag, receipts):
-    state, repository = tmp_path / "state", tmp_path / "repository"
-    repository.mkdir()
-    scan = create_cli_scan(state, tmp_path, repository, mode="deep", complete=False)
-    scan_id, scan_dir = scan["scanId"], Path(scan["scanDir"])
-    resume_deep_scan(state, scan_id, "owner", environment={"CODEX_HOME": str(tmp_path / "home")})
-    prepared = scan_command(state, "prepare-scan-completion", scan_id, check=False)
-    assert prepared["returncode"] != 0
-    assert "must finish and persist its manifest" in prepared["stderr"]
-    guard = ("--preserve-deep-owner", "owner")
-    for receipt in receipts:
-        args = (receipt_flag, json.dumps(receipt)) if receipt else ()
-        result = fail_scan(state, scan_id, "Parent interrupted.", *guard, *args)
-        assert result == {"preserved": True}
-    resume = scan_command(state, "get-cli-scan-resume", scan_id)
-    assert resume["threadId"] == "owner"
-    measured = BUDGET_COST in receipts
-    assert resume["handoffCost"] == (BUDGET_COST if measured else None)
-
-    later = {**BUDGET_COST, "inputTokens": 2500, "outputTokens": 60, "estimatedUsd": 0.0125}
-    usage = {
-        **{key: value for key, value in BUDGET_COST.items() if key.endswith("Tokens")},
-        "outputTokens": 90,
-        "reasoningOutputTokens": 0,
-        "totalTokens": 1340,
-        "source": "codex_rollout",
-        "coverage": "complete",
-        "threadCount": 1,
+    cost = {
+        "model": "gpt-5.6-terra",
+        "inputTokens": 1250,
+        "cachedInputTokens": 200,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 30,
+        "estimatedUsd": 0.003125,
     }
-    if terminal == "complete":
-        mark_deep_coordinator_succeeded(state, scan_id, scan_dir)
-        write_completed_contract(scan_dir, scan_id, repository, coverage_mode="deep_repository")
-        complete = ("complete-scan", scan_id, "--cost-json")
-        scan_command(state, *complete, json.dumps({"usage": usage}))
-        scan_command(state, *complete, json.dumps(later))
-    elif terminal == "failed":
-        fail_scan(state, scan_id, "Could not resume.", "--cost-json", json.dumps(later))
-    else:
-        scan_command(state, "cancel-scan", scan_id, "--thread-id", "owner")
-    saved = get_scan(state, scan_id)["scan"]
-    assert saved["progress"]["status"] == terminal
-    assert saved["handoffCost"] == (BUDGET_COST if measured else None)
-    assert "cost" not in saved
-    if terminal == "complete":
-        assert saved["usage"] == usage
+    scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
+
+    failed = fail_scan(
+        state_dir,
+        scan["scanId"],
+        "Scan stopped: cost limit exceeded.",
+        "--cost-json",
+        json.dumps(cost),
+    )
+
+    assert failed["scan"]["cost"] == cost
+    assert failed["scan"]["progress"]["status"] == "failed"
+    assert run_workbench(state_dir, "list-scans")["scans"][0]["cost"] == cost
+    assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
 
 
 def test_scan_failure_rejects_invalid_cost_without_stopping_the_scan(tmp_path: Path) -> None:
