@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
-import test, { after } from "node:test";
+import test, { after, type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
 import { beforeAll } from "./triage-provider.mts";
@@ -289,30 +289,38 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   },
 );
 
-// Exercise the pinned provider and Codex SDK subprocess without a model request.
-// The normal setup command supplies the host helper build used by the runner.
-test(
-  "provider preserves proxies and rebinds saved evaluations to fresh runtimes",
-  { skip: process.platform === "win32", timeout: 120000 },
-  async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-")),
+// Reuse the immutable Node binaries; captures and Promptfoo databases belong to each test.
+function providerNode(...parts: string[]) {
+  const executable = path.join(fixtureRoot, ...parts);
+  if (!fs.existsSync(executable)) {
+    fs.mkdirSync(path.dirname(executable), { recursive: true });
+    fs.copyFileSync(
+      process.execPath,
+      executable,
+      fs.constants.COPYFILE_FICLONE,
     );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const capture = path.join(root, "captures.jsonl");
-    const fakeCodex = path.join(root, "codex");
-    const fail = path.join(root, "fail");
-    function writeCaptureCodex(executable: string, probeEveryCall: boolean) {
-      fs.writeFileSync(
-        executable,
-        `#!${process.execPath}
+  }
+  return executable;
+}
+
+function captureProvider(t: TestContext, mode: "launcher" | "replay") {
+  const root = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-")),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const capture = path.join(root, "captures.jsonl");
+  const fakeCodex = path.join(root, "codex");
+  const fail = path.join(root, "fail");
+  fs.writeFileSync(
+    fakeCodex,
+    `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
 // Each replay has a fresh cwd. One concurrent caller claims its helper probe.
 let capturedPolicy = '';
-if (${probeEveryCall} || (!fs.existsSync(${JSON.stringify(fail)}) && fs.mkdirSync(path.join(cwd, '.policy-probe'), {recursive: true}))) {
+if (${mode === "launcher"} || (!fs.existsSync(${JSON.stringify(fail)}) && fs.mkdirSync(path.join(cwd, '.policy-probe'), {recursive: true}))) {
   ${probeFixturePolicy}
   capturedPolicy = policy;
 }
@@ -327,26 +335,52 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
 }
 `,
-        { mode: 0o755 },
-      );
-    }
-    writeCaptureCodex(fakeCodex, true);
-    const ambientNode = path.join(root, "ambient-node", "bin", "node");
-    fs.mkdirSync(path.dirname(ambientNode), { recursive: true });
-    fs.copyFileSync(
-      process.execPath,
+    { mode: 0o755 },
+  );
+  const ambientNode = providerNode("ambient-node", "bin", "node");
+  const customNode = providerNode("custom-node", "bin", "node");
+  const selectedNode = providerNode("selected-node", "bin", "synthetic-node");
+  const environment = {
+    ...proxies,
+    CODEX_MCP_NODE_PATH: ambientNode,
+    OPENAI_API_KEY: "synthetic-test-key",
+    PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+    PROMPTFOO_DISABLE_WAL_MODE: "true",
+    PROMPTFOO_DISABLE_TELEMETRY: "1",
+    PROMPTFOO_DISABLE_UPDATE: "1",
+  };
+  const readRows = (): Capture[] =>
+    fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Capture);
+  return {
+    root,
+    fakeCodex,
+    fail,
+    ambientNode,
+    customNode,
+    selectedNode,
+    environment,
+    readRows,
+  };
+}
+
+// Exercise the pinned provider and Codex SDK subprocess without a model request.
+test(
+  "provider preserves proxies and selects each Node launcher",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const {
+      root,
+      fakeCodex,
       ambientNode,
-      fs.constants.COPYFILE_FICLONE,
-    );
-    const environment = {
-      ...proxies,
-      CODEX_MCP_NODE_PATH: ambientNode,
-      OPENAI_API_KEY: "synthetic-test-key",
-      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-      PROMPTFOO_DISABLE_WAL_MODE: "true",
-      PROMPTFOO_DISABLE_TELEMETRY: "1",
-      PROMPTFOO_DISABLE_UPDATE: "1",
-    };
+      customNode,
+      selectedNode,
+      environment,
+      readRows,
+    } = captureProvider(t, "launcher");
     const configPath = path.join(root, "config.json");
     const provider = providerConfig("triage");
     provider.config.codex_path_override = fakeCodex;
@@ -361,26 +395,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     const calibration = providerConfig("calibration");
     calibration.id = provider.id;
     calibration.config.codex_path_override = fakeCodex;
-    const customNode = path.join(root, "custom-node", "bin", "node");
-    fs.mkdirSync(path.dirname(customNode), { recursive: true });
-    fs.copyFileSync(
-      process.execPath,
-      customNode,
-      fs.constants.COPYFILE_FICLONE,
-    );
     calibration.config.cli_env.CODEX_MCP_NODE_PATH = customNode;
-    const selectedNode = path.join(
-      root,
-      "selected-node",
-      "bin",
-      "synthetic-node",
-    );
-    fs.mkdirSync(path.dirname(selectedNode), { recursive: true });
-    fs.copyFileSync(
-      process.execPath,
-      selectedNode,
-      fs.constants.COPYFILE_FICLONE,
-    );
     const nodeAlias = path.join(root, "node-alias");
     const nodeDispatcher = path.join(root, "node-runtime", "dispatcher");
     fs.mkdirSync(path.dirname(nodeDispatcher));
@@ -452,11 +467,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
     );
     for (const result of simultaneous)
       assert.equal(result.code, 0, result.output);
-    const rows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture);
+    const rows = readRows();
     assert.equal(rows.length, 8);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 3);
     for (const row of rows) {
@@ -485,11 +496,23 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         .length,
       1,
     );
+  },
+);
 
-    // Prompt-specific settings merge and render separately for each concurrent
-    // case, including the original configuration saved for retry and resume.
-    const templatedCodex = path.join(root, "templated-codex");
-    writeCaptureCodex(templatedCodex, false);
+test(
+  "provider rebinds saved templated settings for retry and resume",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const {
+      root,
+      fakeCodex,
+      fail,
+      customNode,
+      selectedNode,
+      environment,
+      readRows,
+    } = captureProvider(t, "replay");
+    const provider = providerConfig("triage");
     const templatedConfig = path.join(root, "templated.json");
     fs.writeFileSync(
       templatedConfig,
@@ -499,7 +522,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
             ...provider,
             config: {
               ...provider.config,
-              codex_path_override: templatedCodex,
+              codex_path_override: fakeCodex,
               cli_env: {
                 ...provider.config.cli_env,
                 CODEX_MCP_NODE_PATH: "{{node_path}}",
@@ -536,11 +559,6 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         })),
       }),
     );
-    const templatedEnvironment = {
-      ...environment,
-      PROMPTFOO_CONFIG_DIR: path.join(root, "templated-state"),
-    };
-    const startingRows = rows.length;
     fs.writeFileSync(fail, "");
     const templatedInitial = await invoke(
       [
@@ -553,7 +571,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         "--no-share",
         "--no-progress-bar",
       ],
-      templatedEnvironment,
+      environment,
     );
     assert.notEqual(templatedInitial.code, 0, templatedInitial.output);
     assert.match(templatedInitial.output, /synthetic retryable failure/);
@@ -566,26 +584,21 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         "--no-share",
         "--no-progress-bar",
       ],
-      templatedEnvironment,
+      environment,
     );
     assert.equal(templatedRetry.code, 0, templatedRetry.output);
     const templatedDatabase = new DatabaseSync(
-      path.join(templatedEnvironment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
       { enableForeignKeyConstraints: false },
     );
     templatedDatabase.prepare("DELETE FROM eval_results").run();
     templatedDatabase.close();
     const templatedResume = await invoke(
       ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-      templatedEnvironment,
+      environment,
     );
     assert.equal(templatedResume.code, 0, templatedResume.output);
-    const templatedRows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture)
-      .slice(startingRows);
+    const templatedRows = readRows();
     assert.equal(templatedRows.length, 12);
     assert.equal(new Set(templatedRows.map((row) => row.cwd)).size, 3);
     const replayProbes = templatedRows.filter((row) => row.policy);
@@ -608,7 +621,7 @@ case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "
         path.dirname(row.nodePath),
         path.dirname(row.nodePath),
         path.dirname(row.nodePath),
-        path.dirname(templatedCodex),
+        path.dirname(fakeCodex),
       ]);
     }
   },
