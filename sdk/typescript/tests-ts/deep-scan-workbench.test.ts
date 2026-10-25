@@ -249,7 +249,7 @@ test.each([
     });
 
     const templates =
-      /\/\/ templates\/deep-scan\/discovery\.md\n([\s\S]*?)\/\/ src\/deep-scan\/worker-runner\.ts/u.exec(
+      /\/\/ templates\/deep-scan\/discovery\.md\n([\s\S]*?\/\/ src\/deep-scan\/templates\.ts\n[\s\S]*?)(?=\n\/\/ (?:src|node_modules)\/)/u.exec(
         await loadBundledRuntime(),
       )?.[1];
     expect(templates).toBeDefined();

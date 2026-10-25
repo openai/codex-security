@@ -67,6 +67,21 @@ const result = await deduplicateScan("scan_example_001", {
 console.log(result.duplicateGroups);
 ```
 
+Both saved-scan APIs accept `onEmbeddingUsage` for the built-in local adapter.
+It receives one observation per processed batch: model, tokenized input count
+(including chunks of long findings), provider-reported input tokens, outcome,
+and duration in milliseconds. `inputTokens: null` means usage was unavailable,
+including responses that omit usage; it does not mean zero tokens. Cached
+embeddings generate no new observations. Observers are best effort: throws,
+rejections, and pending promises do not fail or block embedding work. No finding
+text, vectors, credentials, or endpoint is included.
+
+Embedding tokens remain separate from scan model-token and cost totals. A batch
+can contain several HTTP attempts when the local adapter retries, and its
+observation only includes usage from the final response. Remote services and
+custom embedding bindings own their usage reporting; set an observer directly on
+`OpenAiFindingEmbedder` when using it in a custom binding.
+
 For a different embedding provider or model, both saved-scan SDK methods accept
 an `embedding` binding. Reuse the `FindingEmbedder` interface: return one
 `{ model, vector }` per input finding, in input order. The adapter owns its
@@ -323,6 +338,20 @@ const receipt = await publishScanToCustom("/path/to/completed-scan", {
 console.log(receipt.repositoryId, receipt.findingIds);
 ```
 
+The Linear and custom publication SDKs return a content-free `telemetry`
+summary and accept `onTelemetry` for outcomes, including preparation failure and
+cancellation. Existing Linear receipts and custom workflow results retain this
+summary. It includes an attempt ID, destination family, duration, outcome, and
+counts of selected, submitted, created, reused, acknowledged, and failed findings.
+Submitted counts describe findings handed to publication, not HTTP attempts.
+`null` denotes unknown counts; in particular, the custom bulk API acknowledges
+IDs without distinguishing creation from upsert. Unknown mutation outcomes are
+`indeterminate`, and dry runs have `outcome: "preview"` and `attempted: false`.
+Reusing a saved custom workflow receipt produces a new attempt summary with no
+submitted findings. Hosts should group repeated receipt snapshots by attempt ID
+and use the latest observation. Callback failures do not change publication
+results, and these callbacks add no network destination or separate files.
+
 ## Compatible endpoint contract
 
 The retained HTTP clients use these endpoints on the supplied base URL,
@@ -370,6 +399,8 @@ the callback before each HTTP batch; the caller handles token acquisition.
 Cancellation prevents a new callback or HTTP request. Direct embedder callers
 still await a key callback that has already started.
 Pass `fetch` as the second argument and the full endpoint URL as the third.
+The fourth argument accepts an `AbortSignal`; the fifth accepts an
+`EmbeddingUsageObserver`.
 By default, the saved-scan deduplication APIs use environment credentials. A
 custom SDK `embedding` binding can supply an adapter with its own credentials,
 including an `OpenAiFindingEmbedder` with a renewable key callback.

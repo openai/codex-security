@@ -1,6 +1,11 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
+import {
+  OperationTelemetry,
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "../src/operation-telemetry.js";
 import { runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
@@ -90,6 +95,7 @@ test.each([
       return TestClient.withDependencies({
         environment,
         ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) => new OperationTelemetry(options),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "finding-workflow") {
             const payload = JSON.parse(input!);
@@ -190,6 +196,35 @@ test.each([
           expect(await readFile(ownerPath, "utf8")).toBe("{}\n");
       }
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
+      const { events } = await readOperationTelemetry(
+        environment.CODEX_SECURITY_STATE_DIR,
+      );
+      const starts = events.filter((event) => event.type === "attempt_started");
+      expect(starts).toHaveLength(2);
+      const terminal = events.filter(
+        (event) => event.type === "attempt_finished",
+      );
+      expect(terminal).toHaveLength(2);
+      for (const start of starts) {
+        expect(
+          terminal.find((event) => event.attemptId === start.attemptId),
+        ).toMatchObject({ operationId: start.operationId });
+      }
+      expect(summarizeOperationTelemetry(events).reusedAttempts).toBe(
+        scenario === "scan-interrupted" ? 0 : 1,
+      );
+      const reused = terminal.find((event) => event.reusedResult === true);
+      if (scenario === "scan-interrupted") {
+        expect(terminal.every((event) => event.reusedResult === false)).toBe(
+          true,
+        );
+      } else {
+        expect(reused).toMatchObject({
+          outcome: "completed",
+          findingCount: result.findings.findings.length,
+        });
+        expect(reused?.measurement).toBeUndefined();
+      }
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
           .status,

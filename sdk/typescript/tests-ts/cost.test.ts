@@ -3,7 +3,8 @@ import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
-import { join, parse, sep } from "node:path";
+import { dirname, join, parse, sep } from "node:path";
+import zlib from "node:zlib";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -12,6 +13,7 @@ import {
   type ScanSessionEvent,
   type ScanUsageObservation,
   type ScanWorkerEvent,
+  type ScanUsageMeasurement,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
@@ -218,7 +220,11 @@ describe("scan cost", () => {
       onUsageObservation: (observation) => observations.push(observation),
     });
     tracker.start(scanThreadId);
-    expect((await tracker.stop()).usage).toEqual(ownedSdkUsage);
+    expect((await tracker.stop()).measurement).toMatchObject({
+      coverage: "partial",
+      usage: ownedSdkUsage,
+      missingThreadCount: 1,
+    });
     expect(observations).toEqual([
       {
         tokensUpdatedAt: "2026-07-26T12:02:00.250Z",
@@ -1258,6 +1264,300 @@ describe("live scan cost tracking", () => {
     expect(events).toHaveLength(6);
   });
 
+  for (const compressed of [false, true]) {
+    test
+      .skipIf(compressed && typeof zlib.zstdCompressSync !== "function")
+      .each(["initial copies", "copy", "move"] as const)(
+      `forwards archived session events once after %s (compressed=${compressed})`,
+      async (mode) => {
+        const { home, worker } = await workerSessionFixture();
+        const message = {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Checking the next file." }],
+          },
+        };
+        const call = {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "call-one",
+            arguments: '{"cmd":"pwd"}',
+          },
+        };
+        // Identical messages at different positions are separate real events.
+        await appendFile(worker, jsonLines([message, call, message]) + "\n");
+        const contents = await fs.readFile(worker);
+        const expected = contents
+          .toString()
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        const archive = join(home, "archived_sessions");
+        await fs.mkdir(archive);
+        const archived = join(archive, "rollout-worker.jsonl");
+        const copy = () =>
+          writeFile(
+            `${archived}${compressed ? ".zst" : ""}`,
+            compressed ? zlib.zstdCompressSync(contents) : contents,
+          );
+        if (mode === "initial copies") await copy();
+        const events: ScanSessionEvent[] = [];
+        const tracker = costTracker(home, {
+          onSessionEvent: (event) => events.push(event),
+        });
+        const workerEvents = () =>
+          events
+            .filter((event) => event.threadId === "worker-thread")
+            .map((event) => event.event);
+        tracker.start("scan-thread");
+        try {
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+          if (mode !== "initial copies") await copy();
+          if (mode === "move") await fs.unlink(worker);
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+
+          // Resuming cold history materializes the same bytes before appending.
+          if (compressed) await writeFile(archived, contents);
+          const continuation = [
+            message,
+            {
+              type: "response_item",
+              payload: {
+                type: "function_call_output",
+                call_id: "call-one",
+                output: "/synthetic/repository",
+              },
+            },
+          ];
+          await appendFile(archived, jsonLines(continuation) + "\n");
+          expected.push(...continuation);
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+
+          // A lagging copy catching up must not replay the new suffix.
+          if (mode !== "move") {
+            await appendFile(worker, jsonLines(continuation) + "\n");
+            await tracker.refresh();
+            expect(workerEvents()).toEqual(expected);
+          }
+          const latest = [
+            message,
+            legacyUsageRecord({ input_tokens: 400, output_tokens: 40 }),
+          ];
+          await appendFile(
+            mode === "move" ? archived : worker,
+            jsonLines(latest) + "\n",
+          );
+          expected.push(...latest);
+          const snapshot = await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+          expect(snapshot.measurement).toMatchObject({
+            coverage: "complete",
+            threadCount: 2,
+            usage: { input_tokens: 500, output_tokens: 50 },
+          });
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+        } finally {
+          await tracker.stop();
+        }
+      },
+    );
+  }
+
+  test("forwards a new rollout generation for an existing thread", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(home, "worker-thread", usage, {
+      parent: "scan-thread",
+      timestamp: "2026-07-26T12:00:00.000Z",
+    });
+    const events: ScanSessionEvent[] = [];
+    const tracker = costTracker(home, {
+      onSessionEvent: (event) => events.push(event),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      const oldEvents = events
+        .filter((event) => event.threadId === "worker-thread")
+        .map((event) => event.event);
+      expect(oldEvents).toHaveLength(2);
+      // Revert keeps the thread ID but creates a new rollout and timestamp.
+      const metadata = oldEvents[0]!;
+      const newEvents = [
+        {
+          ...metadata,
+          payload: {
+            ...(metadata["payload"] as Record<string, unknown>),
+            timestamp: "2026-07-26T12:01:00.000Z",
+          },
+        },
+        oldEvents[1]!,
+      ];
+      await writeFile(
+        `${worker.slice(0, -6)}_reverted.jsonl`,
+        jsonLines(newEvents) + "\n",
+      );
+      await tracker.refresh();
+      await tracker.refresh();
+      expect(
+        events
+          .filter((event) => event.threadId === "worker-thread")
+          .map((event) => event.event),
+      ).toEqual([...oldEvents, ...newEvents]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("does not replay stale worker activity or progress from archived copies", async () => {
+    const { home, worker } = await workerSessionFixture();
+    const otherWorker = await writeSession(
+      home,
+      "second-worker",
+      { input_tokens: 100, output_tokens: 10 },
+      { parent: "scan-thread" },
+    );
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "exec_command",
+      call_id: "call-one",
+      arguments: '{"cmd":"pwd"}',
+    });
+    await appendSessionItem(worker, progressMessage(1, 8));
+    const stale = await fs.readFile(worker);
+    const activities: ScanActivity[] = [];
+    const progress: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      repository: "/synthetic/repository",
+      expectedFilesTotal: 16,
+      onActivity: (activity) => activities.push(activity),
+      onProgress: (update) => progress.push(update),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      await appendSessionItem(worker, {
+        type: "function_call_output",
+        call_id: "call-one",
+        output: "/synthetic/repository",
+      });
+      await appendSessionItem(worker, progressMessage(3, 8));
+      await tracker.refresh();
+      const archive = join(home, "archived_sessions");
+      await fs.mkdir(archive);
+      await writeFile(join(archive, "rollout-worker.jsonl"), stale);
+      await tracker.refresh();
+      await appendSessionItem(otherWorker, progressMessage(1, 8));
+      await tracker.refresh();
+      expect({
+        toolStatuses: activities
+          .filter((activity) => activity.id === "worker-thread:call-one")
+          .map((activity) => activity.status),
+        completedFiles: progress.map((update) => update.filesCompleted),
+      }).toEqual({
+        toolStatuses: ["running", "completed"],
+        completedFiles: [1, 3, 4],
+      });
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("recovers raw session events after their replay read fails", async () => {
+    const { home, worker } = await workerSessionFixture();
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "exec_command",
+      call_id: "call-one",
+      arguments: '{"cmd":"pwd"}',
+    });
+    await appendSessionItem(worker, progressMessage(1));
+    const expected = (await fs.readFile(worker, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    let denied = true;
+    let reads = 0;
+    const opened = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) === worker && ++reads > 1 && denied) {
+          throw Object.assign(new Error("Synthetic replay read failure"), {
+            code: "EACCES",
+            syscall: "open",
+            path: worker,
+          });
+        }
+        return await opened(...args);
+      },
+    );
+    const events: ScanSessionEvent[] = [];
+    const activities: ScanActivity[] = [];
+    const progress: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      repository: "/synthetic/repository",
+      onSessionEvent: (event) => events.push(event),
+      onActivity: (activity) => activities.push(activity),
+      onProgress: (update) => progress.push(update),
+    });
+    const workerEvents = () =>
+      events
+        .filter((event) => event.threadId === "worker-thread")
+        .map((event) => event.event);
+    const toolStatuses = () =>
+      activities
+        .filter((activity) => activity.id === "worker-thread:call-one")
+        .map((activity) => activity.status);
+    tracker.start("scan-thread");
+    try {
+      await expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
+      expect(workerEvents()).toEqual([]);
+      expect(toolStatuses()).toEqual(["running"]);
+      expect(progress.map((update) => update.filesCompleted)).toEqual([1]);
+
+      denied = false;
+      const snapshot = await tracker.refresh();
+      expect(workerEvents()).toEqual(expected);
+      expect(toolStatuses()).toEqual(["running"]);
+      expect(progress.map((update) => update.filesCompleted)).toEqual([1]);
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "complete",
+        usage: { input_tokens: 200, output_tokens: 20 },
+      });
+      const continuation = [
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call-one",
+            output: "/synthetic/repository",
+          },
+        },
+        { type: "response_item", payload: progressMessage(0) },
+        { type: "response_item", payload: progressMessage(2) },
+      ];
+      await appendFile(worker, jsonLines(continuation) + "\n");
+      await tracker.refresh();
+      await tracker.refresh();
+      expect(workerEvents()).toEqual([...expected, ...continuation]);
+      expect(toolStatuses()).toEqual(["running", "completed"]);
+      expect(progress.map((update) => update.filesCompleted)).toEqual([1, 2]);
+    } finally {
+      denied = false;
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  });
+
   test.each(["parent", "main"] as const)(
     "replays early worker events when the %s session arrives later",
     async (missing) => {
@@ -1927,8 +2227,8 @@ describe("live scan cost tracking", () => {
     const python = readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, rolloutPath);
 
     expect({
-      trackedUsage: tracked.usage,
-      estimatedUsd: tracked.cost?.estimatedUsd,
+      trackedUsage: tracked.measurement.usage,
+      estimatedUsd: tracked.measurement.cost?.estimatedUsd,
       python,
     }).toMatchObject({
       trackedUsage: ownedSdkUsage,
@@ -1938,6 +2238,8 @@ describe("live scan cost tracking", () => {
         warnings: [],
       },
     });
+    expect(tracked.measurement.coverage).toBe("partial");
+    expect(tracked.measurement.missingThreadCount).toBe(1);
     expect(observedCosts.length).toBeGreaterThan(0);
     expect(observedCosts.every((cost) => cost < maxCostUsd)).toBe(true);
     const forwardedTurnIds = forwardedEvents.flatMap(({ event }) => {
@@ -2777,9 +3079,11 @@ describe("live scan cost tracking", () => {
     await writeSession(home, "scan-thread", parentUsage);
     const costs: Array<[number, boolean]> = [];
     const usages: unknown[] = [];
+    const measurements: Readonly<ScanUsageMeasurement>[] = [];
     const tracker = costTracker(home, {
       onCost: (cost, complete) => costs.push([cost.estimatedUsd, complete]),
       onUsage: (usage) => usages.push(usage),
+      onMeasurement: (measurement) => measurements.push(measurement),
     });
     tracker.start("scan-thread");
     expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
@@ -2792,9 +3096,16 @@ describe("live scan cost tracking", () => {
         parent: "scan-thread",
       },
     );
-    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(await tracker.refresh()).toMatchObject({ usage: null, cost: null });
     expect(costs.at(-1)).toEqual([6, false]);
     expect(usages).toHaveLength(1);
+    expect(measurements.at(-1)).toMatchObject({
+      coverage: "partial",
+      threadCount: 1,
+      missingThreadCount: 1,
+      usage: { input_tokens: 1_000_000 },
+      coverageScope: ["thread:scan-thread", "thread:worker-thread"],
+    });
 
     await appendFile(
       worker,
@@ -2806,6 +3117,12 @@ describe("live scan cost tracking", () => {
       total_tokens: 1_100_000,
     });
     expect(costs.at(-1)).toEqual([6, true]);
+    expect(measurements.at(-1)).toMatchObject({
+      coverage: "complete",
+      threadCount: 2,
+      missingThreadCount: 0,
+      coverageScope: ["thread:scan-thread", "thread:worker-thread"],
+    });
     expect(usages).toHaveLength(1);
 
     await appendFile(
@@ -2826,6 +3143,656 @@ describe("live scan cost tracking", () => {
       [9, true],
     ]);
     expect(usages).toHaveLength(2);
+  });
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function").each([true, false])(
+    "counts compressed independent workers in active and archived sessions once (native=%p)",
+    async (native) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scans", "compressed");
+      const parentUsage = { input_tokens: 100, output_tokens: 10 };
+      await writeSession(home, "scan-thread", parentUsage, {
+        timestamp: "2026-07-26T12:00:00Z",
+      });
+      const worker = await writeSession(
+        home,
+        "compressed-worker",
+        {
+          input_tokens: 900,
+          output_tokens: 90,
+        },
+        {
+          cwd: join(
+            scanDirectory,
+            "artifacts",
+            "deep_discovery",
+            "workers",
+            "one",
+            "output",
+          ),
+          timestamp: "2026-07-26T12:01:00Z",
+        },
+      );
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "event_msg",
+            timestamp: "2026-07-26T12:03:00Z",
+            payload: {
+              type: "token_count",
+              info: null,
+              rate_limits: { primary: { used_percent: 5 } },
+            },
+          },
+        ]) + "\n",
+      );
+      const compressed = zlib.zstdCompressSync(await fs.readFile(worker));
+      await writeFile(`${worker}.zst`, compressed);
+      const archive = join(home, "archived_sessions");
+      await fs.mkdir(archive);
+      await writeFile(join(archive, "rollout-copy.jsonl.zst"), compressed);
+      await writeFile(
+        join(archive, "rollout-unrelated.jsonl.zst"),
+        zlib.zstdCompressSync(
+          Buffer.from(
+            JSON.stringify({
+              type: "session_meta",
+              payload: { id: "unrelated-history" },
+            }) +
+              "\nnot a valid event; unrelated historical bodies must not be parsed\n",
+          ),
+        ),
+      );
+      await fs.unlink(worker);
+      const observations: ScanUsageObservation[] = [];
+      const tracker = costTracker(home, {
+        scanDirectory,
+        onUsageObservation: (value) => observations.push(value),
+      });
+      tracker.start("scan-thread");
+      const original = Object.getOwnPropertyDescriptor(
+        zlib,
+        "createZstdDecompress",
+      );
+      if (!native)
+        Object.defineProperty(zlib, "createZstdDecompress", {
+          value: undefined,
+        });
+      let snapshot;
+      try {
+        snapshot = await tracker.stop(parentUsage);
+      } finally {
+        if (original)
+          Object.defineProperty(zlib, "createZstdDecompress", original);
+      }
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+        usage: { input_tokens: 1_000, output_tokens: 100 },
+      });
+      expect(snapshot.cost?.inputTokens).toBe(1_000);
+      expect(observations).toEqual([
+        {
+          tokensUpdatedAt: null,
+          accountRateLimits: [
+            {
+              limitId: "codex",
+              observedAt: "2026-07-26T12:03:00.000Z",
+              primary: { usedPercent: 5, windowMinutes: null, resetsAt: null },
+              secondary: null,
+            },
+          ],
+        },
+      ]);
+    },
+  );
+
+  for (const compressed of [false, true]) {
+    test
+      .skipIf(compressed && typeof zlib.zstdCompressSync !== "function")
+      .each([false, true])(
+      `retains SDK budget receipts when a rollout changes after enumeration (compressed=${compressed}, missing=%p)`,
+      async (missing) => {
+        const home = await codexHome();
+        const costs: number[] = [];
+        const tracker = costTracker(home, {
+          maxCostUsd: 0.003,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        });
+        tracker.start("scan-thread");
+        await tracker.stop();
+        const plain = await writeSession(home, "scan-thread", {
+          input_tokens: 1_000,
+          output_tokens: 0,
+        });
+        const contents = await fs.readFile(plain);
+        const path = `${plain}${compressed ? ".zst" : ""}`;
+        const encoded = compressed ? zlib.zstdCompressSync(contents) : contents;
+        if (compressed) {
+          await writeFile(path, encoded);
+          await fs.rm(plain);
+        }
+        let changed = false;
+        const originalRead = filesystem.readdir;
+        const reading = spyOn(filesystem, "readdir").mockImplementation(
+          async (...args) => {
+            const entries = await Reflect.apply(originalRead, filesystem, args);
+            if (!changed && args[0] === dirname(path)) {
+              changed = true;
+              await fs.rm(path);
+              if (!missing) await fs.mkdir(path);
+            }
+            return entries;
+          },
+        );
+        const originalStat = filesystem.stat;
+        const stating = spyOn(filesystem, "stat").mockImplementation(
+          async (...args: unknown[]) => {
+            const result = await Reflect.apply(originalStat, filesystem, args);
+            // Windows directories can report zero bytes, like an unread empty file.
+            if (args[0] === path && result.isDirectory()) result.size = 0;
+            return result;
+          },
+        );
+        try {
+          const stopped = tracker.stop({ input_tokens: 500, output_tokens: 0 });
+          if (missing) {
+            expect(await stopped).toMatchObject({
+              usage: { input_tokens: 500 },
+              cost: { estimatedUsd: 0.002 },
+              measurement: { coverage: "complete" },
+            });
+            await writeFile(path, encoded);
+            expect(await tracker.stop()).toMatchObject({
+              usage: { input_tokens: 1_000 },
+              cost: { estimatedUsd: 0.004 },
+              measurement: { coverage: "complete" },
+            });
+            expect(costs).toEqual([0.002, 0.004]);
+          } else {
+            await expect(stopped).rejects.toMatchObject({ code: "EISDIR" });
+            expect(costs).toEqual([0.002]);
+          }
+          expect(changed).toBe(true);
+        } finally {
+          reading.mockRestore();
+          stating.mockRestore();
+          await tracker.stop().catch(() => {});
+        }
+      },
+    );
+  }
+
+  test.each([false, true])(
+    "retains SDK usage after a collection error with prior native usage=%p",
+    async (previouslyMeasured) => {
+      const home = await codexHome();
+      if (previouslyMeasured) {
+        await writeSession(home, "scan-thread", {
+          input_tokens: 100,
+          output_tokens: 10,
+        });
+        await writeSession(
+          home,
+          "worker-thread",
+          { input_tokens: 200, output_tokens: 20 },
+          { parent: "scan-thread" },
+        );
+      }
+      const measurements: Readonly<ScanUsageMeasurement>[] = [];
+      const tracker = costTracker(home, {
+        onMeasurement: (measurement) => measurements.push(measurement),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      const originalRead = filesystem.readdir;
+      const failure = Object.assign(new Error("Session directory unreadable"), {
+        code: "EACCES",
+      });
+      const read = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          if (args[0] === join(home, "sessions")) throw failure;
+          return Reflect.apply(originalRead, filesystem, args);
+        },
+      );
+      const usage = {
+        input_tokens: previouslyMeasured ? 1_200 : 1_000,
+        output_tokens: previouslyMeasured ? 120 : 100,
+      };
+      try {
+        await expect(
+          tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+        ).rejects.toBe(failure);
+        expect(measurements.at(-1)).toMatchObject({
+          coverage: "partial",
+          threadCount: previouslyMeasured ? 2 : 1,
+          missingThreadCount: 1,
+          usage,
+          cost: estimateScanCost("gpt-5.6-sol", usage),
+        });
+      } finally {
+        read.mockRestore();
+        await tracker.stop().catch(() => {});
+      }
+    },
+  );
+
+  test.each([
+    ["reported zero", { cache_write_input_tokens: 0 }, {}, 0],
+    ["missing writes", {}, { cache_write_input_tokens: 12 }, 12],
+    [
+      "defaulted zero",
+      {
+        cache_write_input_tokens: 0,
+        cache_write_input_tokens_reported: false,
+      },
+      { cache_write_input_tokens: 12 },
+      12,
+    ],
+  ] as const)(
+    "preserves worker receipt provenance for %s during native reconciliation",
+    async (_name, receiptWrites, nativeWrites, expectedWrites) => {
+      const home = await codexHome();
+      const scanId = "receipt-provenance";
+      const directory = join(home, "worker-usage", scanId);
+      await fs.mkdir(directory, { recursive: true });
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        cache_write_input_tokens: 0,
+        output_tokens: 10,
+      });
+      const workerUsage = { input_tokens: 200, output_tokens: 20 };
+      await writeFile(
+        join(directory, "worker-attempt.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
+          scanId,
+          attemptId: "worker-attempt",
+          threadId: "worker-thread",
+          usage: { ...workerUsage, ...receiptWrites },
+        }),
+      );
+      await writeSession(
+        home,
+        "worker-thread",
+        { ...workerUsage, ...nativeWrites },
+        { parent: "scan-thread" },
+      );
+      const tracker = costTracker(home, {
+        workerReceipts: { directory, scanId },
+      });
+      tracker.start("scan-thread");
+      const snapshot = await tracker.stop();
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+      });
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 300,
+        cache_write_input_tokens: expectedWrites,
+        output_tokens: 30,
+      });
+      expect(snapshot.usage).not.toHaveProperty(
+        "cache_write_input_tokens_reported",
+      );
+      expect(snapshot.cost).not.toHaveProperty("cacheWriteInputTokensReported");
+    },
+  );
+
+  test("retains cumulative resumed worker receipts without counting earlier turns twice", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "receipts");
+    const scanId = "receipts";
+    const receipts = join(home, "worker-usage", scanId);
+    await fs.mkdir(receipts, { recursive: true });
+    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", parentUsage);
+    for (const [attemptId, input] of [
+      ["first", 100],
+      ["second", 150],
+    ] as const) {
+      await writeFile(
+        join(receipts, `${attemptId}.json`),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
+          scanId,
+          attemptId,
+          threadId: "resumed-worker",
+          usage: { input_tokens: input, output_tokens: 10 },
+        }),
+      );
+    }
+    const measurements: Readonly<ScanUsageMeasurement>[] = [];
+    const tracker = costTracker(home, {
+      scanDirectory,
+      workerReceipts: { directory: receipts, scanId },
+      onMeasurement: (measurement) => measurements.push(measurement),
+    });
+    tracker.start("scan-thread");
+    const partial = await tracker.refresh();
+    expect(partial).toMatchObject({
+      usage: null,
+      cost: null,
+      measurement: {
+        coverage: "partial",
+        threadCount: 2,
+        missingThreadCount: 1,
+        usage: { input_tokens: 250, output_tokens: 20 },
+        coverageScope: [
+          "thread:resumed-worker",
+          "thread:scan-thread",
+          "worker-attempt:first",
+          "worker-attempt:second",
+        ],
+      },
+    });
+    // Re-reading the same durable attempts does not increment their usage.
+    expect((await tracker.refresh()).measurement.usage).toEqual(
+      partial.measurement.usage,
+    );
+    const resumed = costTracker(home, {
+      scanDirectory,
+      workerReceipts: { directory: receipts, scanId },
+    });
+    resumed.start("scan-thread");
+    expect((await resumed.stop(parentUsage)).measurement).toEqual(
+      expect.objectContaining({
+        coverage: "partial",
+        usage: partial.measurement.usage,
+        coverageScope: partial.measurement.coverageScope,
+      }),
+    );
+    await writeSession(home, "resumed-worker", {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    expect((await tracker.stop(parentUsage)).measurement).toMatchObject({
+      coverage: "complete",
+      threadCount: 2,
+      missingThreadCount: 0,
+      usage: { input_tokens: 250, output_tokens: 20 },
+      coverageScope: partial.measurement.coverageScope,
+    });
+    expect(measurements.map((measurement) => measurement.coverage)).toEqual([
+      "partial",
+      "complete",
+    ]);
+  });
+
+  test.each([
+    "EIO",
+    "ENOENT",
+    "invalid",
+    "missing-file",
+    "missing-directory",
+  ] as const)(
+    "retains measured worker receipts through %s collection failures",
+    async (failure) => {
+      const home = await codexHome();
+      const scanId = "receipt-recovery";
+      const directory = join(home, "worker-usage", scanId);
+      await fs.mkdir(directory, { recursive: true });
+      const save = async (
+        attemptId: string,
+        threadId: string | null,
+        usage: { input_tokens: number; output_tokens: number } | null,
+      ) =>
+        writeFile(
+          join(directory, `${attemptId}.json`),
+          JSON.stringify({
+            schemaVersion: 1,
+            source: "codex_sdk",
+            usageScope: "thread_cumulative",
+            scanId,
+            attemptId,
+            threadId,
+            usage,
+          }),
+        );
+      await save("earlier", "worker", { input_tokens: 500, output_tokens: 5 });
+      await save("latest", "worker", {
+        input_tokens: 1_000,
+        output_tokens: 10,
+      });
+      await save("unknown", null, null);
+      const measurements: Readonly<ScanUsageMeasurement>[] = [];
+      const tracker = costTracker(home, {
+        workerReceipts: { directory, scanId },
+        maxCostUsd: 1,
+        onMeasurement: (measurement) => measurements.push(measurement),
+      });
+      tracker.start("scan-thread");
+      const before = (
+        await tracker.stop({ input_tokens: 100, output_tokens: 1 })
+      ).measurement;
+      expect(before).toMatchObject({
+        coverage: "partial",
+        threadCount: 2,
+        missingThreadCount: 2,
+        usage: { total_tokens: 1_111 },
+        cost: { inputTokens: 1_100, outputTokens: 11, estimatedUsd: 0.00462 },
+      });
+      const latest = join(directory, "latest.json");
+      const originalRead = filesystem.readFile;
+      const reading =
+        failure === "EIO" || failure === "ENOENT"
+          ? spyOn(filesystem, "readFile").mockImplementation((async (
+              ...args: Parameters<typeof filesystem.readFile>
+            ) => {
+              if (args[0] === latest)
+                throw Object.assign(new Error(`Synthetic receipt ${failure}`), {
+                  code: failure,
+                });
+              return Reflect.apply(originalRead, filesystem, args);
+            }) as typeof filesystem.readFile)
+          : null;
+      let moved = false;
+      try {
+        if (failure === "invalid") await writeFile(latest, "{invalid");
+        if (failure === "missing-file") await fs.rm(latest);
+        if (failure === "missing-directory") {
+          await fs.rename(directory, `${directory}-unavailable`);
+          moved = true;
+        }
+        const update = tracker.refresh();
+        if (failure === "EIO")
+          await expect(update).rejects.toMatchObject({ code: "EIO" });
+        else if (failure === "invalid")
+          await expect(update).rejects.toBeInstanceOf(SyntaxError);
+        else await update;
+        expect(measurements.at(-1)).toMatchObject({
+          coverage: "partial",
+          threadCount: 2,
+          missingThreadCount: 2,
+          usage: before.usage,
+          cost: before.cost,
+        });
+        expect(measurements.at(-1)?.coverageScope).toEqual(
+          failure === "EIO" || failure === "invalid"
+            ? undefined
+            : before.coverageScope,
+        );
+        reading?.mockRestore();
+        if (moved) {
+          await fs.rename(`${directory}-unavailable`, directory);
+          moved = false;
+        }
+        await save("latest", "worker", {
+          input_tokens: 1_200,
+          output_tokens: 12,
+        });
+        await save("unknown", "other-worker", {
+          input_tokens: 0,
+          output_tokens: 0,
+        });
+        await writeSession(home, "worker", {
+          input_tokens: 1_200,
+          output_tokens: 12,
+        });
+        await writeSession(home, "other-worker", {
+          input_tokens: 0,
+          output_tokens: 0,
+        });
+        const recovered = (await tracker.stop()).measurement;
+        expect(recovered).toMatchObject({
+          coverage: "complete",
+          threadCount: 3,
+          missingThreadCount: 0,
+          usage: {
+            input_tokens: 1_300,
+            output_tokens: 13,
+            total_tokens: 1_313,
+          },
+          cost: { inputTokens: 1_300, outputTokens: 13, estimatedUsd: 0.00546 },
+          coverageScope: [
+            "thread:other-worker",
+            "thread:scan-thread",
+            "thread:worker",
+            "worker-attempt:earlier",
+            "worker-attempt:latest",
+            "worker-attempt:unknown",
+          ],
+        });
+        await fs.rm(latest);
+        expect((await tracker.stop()).measurement).toMatchObject({
+          coverage: "complete",
+          missingThreadCount: 0,
+          usage: recovered.usage,
+          cost: recovered.cost,
+          coverageScope: recovered.coverageScope,
+        });
+      } finally {
+        reading?.mockRestore();
+        if (moved) await fs.rename(`${directory}-unavailable`, directory);
+        await tracker.stop().catch(() => {});
+      }
+    },
+  );
+
+  test.each(["standard", "deep"])(
+    "%s scans ignore model-written worker receipts for budgets and session events",
+    async (mode) => {
+      const home = await codexHome();
+      const scanId = "owned-scan";
+      const scanDirectory = join(home, "scans", scanId);
+      const artifacts = join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "usage",
+      );
+      await fs.mkdir(artifacts, { recursive: true });
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const foreign = await writeSession(home, "foreign-thread", {
+        input_tokens: 999_999,
+        output_tokens: 999_999,
+      });
+      await appendSessionItem(foreign, {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Unrelated session output." }],
+      });
+      for (const [attemptId, threadId, receiptUsage] of [
+        [
+          "forged-cost",
+          "scan-thread",
+          { input_tokens: 1_000_000_000, output_tokens: 0 },
+        ],
+        ["forged-membership", "foreign-thread", null],
+      ] as const) {
+        await writeFile(
+          join(artifacts, `${attemptId}.json`),
+          JSON.stringify({
+            schemaVersion: 1,
+            source: "codex_sdk",
+            usageScope: "thread_cumulative",
+            scanId,
+            attemptId,
+            threadId,
+            usage: receiptUsage,
+          }),
+        );
+      }
+      const events: ScanSessionEvent[] = [];
+      let budgetExceeded = false;
+      const tracker = costTracker(home, {
+        scanDirectory,
+        ...(mode === "deep"
+          ? {
+              workerReceipts: {
+                directory: join(home, "worker-usage", scanId),
+                scanId,
+              },
+            }
+          : {}),
+        onCost: (cost) => {
+          budgetExceeded ||= cost.estimatedUsd > 1;
+        },
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+      const result = await tracker.stop(usage);
+      expect(result.measurement).toMatchObject({
+        coverage: "complete",
+        threadCount: 1,
+        usage: tokenUsage(usage),
+        coverageScope: ["thread:scan-thread"],
+      });
+      expect(budgetExceeded).toBe(false);
+      expect(events.every((event) => event.threadId === "scan-thread")).toBe(
+        true,
+      );
+    },
+  );
+
+  test("binds protected worker receipts to the scan and durable attempt", async () => {
+    const home = await codexHome();
+    const scanId = "owned-scan";
+    const directory = join(home, "worker-usage", scanId);
+    const unrelated = join(home, "worker-usage", "other-scan");
+    await fs.mkdir(directory, { recursive: true });
+    await fs.mkdir(unrelated, { recursive: true });
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const receipt = {
+      schemaVersion: 1,
+      source: "codex_sdk",
+      usageScope: "thread_cumulative",
+      scanId: "other-scan",
+      attemptId: "other-attempt",
+      threadId: "unrelated-worker",
+      usage: { input_tokens: 1_000_000, output_tokens: 0 },
+    };
+    await writeFile(
+      join(unrelated, "other-attempt.json"),
+      JSON.stringify(receipt),
+    );
+    await writeFile(
+      join(directory, "other-attempt.json"),
+      JSON.stringify(receipt),
+    );
+    await writeFile(
+      join(directory, "wrong-attempt.json"),
+      JSON.stringify({ ...receipt, scanId }),
+    );
+    const tracker = costTracker(home, {
+      workerReceipts: { directory, scanId },
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.stop(usage)).measurement).toMatchObject({
+      coverage: "complete",
+      threadCount: 1,
+      usage: tokenUsage(usage),
+      coverageScope: ["thread:scan-thread"],
+    });
   });
 
   test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {
@@ -2854,7 +3821,7 @@ describe("live scan cost tracking", () => {
     );
     const tracker = costTracker(home, { scanDirectory });
     tracker.start("scan-thread");
-    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(await tracker.refresh()).toMatchObject({ usage: null, cost: null });
 
     tracker.recordUsage({ input_tokens: 50, output_tokens: 5 }, "deep-worker");
     expect((await tracker.stop(parentUsage)).usage).toMatchObject({
@@ -2882,8 +3849,48 @@ describe("live scan cost tracking", () => {
         output_tokens: 0,
       });
       if (source === "unknown")
-        expect(snapshot).toEqual({ usage: null, cost: null });
+        expect(snapshot).toMatchObject({ usage: null, cost: null });
       else expect(snapshot.cost?.inputTokens).toBe(1_500);
+      expect(snapshot.measurement.coverageScope).toEqual([
+        "thread:scan-thread",
+        "thread:validation-thread",
+      ]);
     },
   );
+
+  test("includes a separate validation root and its missing child in coverage scope", async () => {
+    const home = await codexHome();
+    await writeSession(home, "validation-thread", {
+      input_tokens: 500,
+      output_tokens: 0,
+    });
+    await writeSession(
+      home,
+      "validation-child",
+      {},
+      {
+        parent: "validation-thread",
+      },
+    );
+    const tracker = costTracker(home);
+    tracker.start("scan-thread");
+    tracker.recordUsage(
+      { input_tokens: 500, output_tokens: 0 },
+      "validation-thread",
+    );
+    const snapshot = await tracker.stop({
+      input_tokens: 1_000,
+      output_tokens: 0,
+    });
+    expect(snapshot.measurement).toMatchObject({
+      coverage: "partial",
+      missingThreadCount: 1,
+      usage: { input_tokens: 1_500 },
+      coverageScope: [
+        "thread:scan-thread",
+        "thread:validation-child",
+        "thread:validation-thread",
+      ],
+    });
+  });
 });

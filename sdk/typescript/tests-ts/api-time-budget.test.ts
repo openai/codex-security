@@ -177,8 +177,11 @@ test("explicit cancellation remains authoritative with an advisory allowance", a
       signal: controller.signal,
     }),
   ).rejects.toBeInstanceOf(ScanInterruptedError);
-  expect(state.commands).toContain("fail-scan");
-  expect(state.commands).not.toContain("complete-scan");
+  expect(
+    state.commands.filter((command) =>
+      ["cancel-scan", "fail-scan", "complete-scan"].includes(command),
+    ),
+  ).toEqual(["cancel-scan"]);
 });
 
 test("preflight exposes the effective Deep limit in minutes and leaves Standard unset", async () => {

@@ -8,6 +8,11 @@ import {
   workflowDestination,
   workflowDigest,
 } from "./finding-workflow.js";
+import {
+  PublicationTelemetryRecorder,
+  type PublicationTelemetry,
+  type PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
 
 export interface PublishScanToCustomOptions {
   /** Resume publication within the named local findings workflow. */
@@ -18,6 +23,8 @@ export interface PublishScanToCustomOptions {
   dryRun?: boolean;
   expectedScanId?: string;
   signal?: AbortSignal;
+  /** Best-effort content-free outcome accounting, including preparation failures. */
+  onTelemetry?: PublicationTelemetryObserver;
 }
 
 export interface CustomPublicationResult {
@@ -27,6 +34,13 @@ export interface CustomPublicationResult {
   findingCount: number;
   dryRun?: true;
   findings?: Finding[];
+  telemetry?: PublicationTelemetry;
+}
+
+interface CustomPublicationDependencies {
+  fetch?: FindingsRequest;
+  environment?: NodeJS.ProcessEnv;
+  runWorkbench?: typeof runWorkbench;
 }
 
 /** Publish complete, sealed findings to a findings API without changing scan artifacts. */
@@ -41,11 +55,40 @@ export async function publishScanToCustom(
 export async function publishScanToCustomInternal(
   scanDirectory: string,
   options: PublishScanToCustomOptions,
-  dependencies: {
-    fetch?: FindingsRequest;
-    environment?: NodeJS.ProcessEnv;
-    runWorkbench?: typeof runWorkbench;
-  } = {},
+  dependencies: CustomPublicationDependencies = {},
+): Promise<CustomPublicationResult> {
+  const telemetry = new PublicationTelemetryRecorder(
+    "custom",
+    options.onTelemetry,
+  );
+  try {
+    const result = await publishScanToCustomAttempt(
+      scanDirectory,
+      options,
+      dependencies,
+      telemetry,
+    );
+    telemetry.notify(result.telemetry!);
+    return result;
+  } catch (error) {
+    telemetry.notify(
+      telemetry.snapshot(
+        telemetry.outcome === "indeterminate"
+          ? "indeterminate"
+          : options.signal?.aborted
+            ? "canceled"
+            : "failed",
+      ),
+    );
+    throw error;
+  }
+}
+
+async function publishScanToCustomAttempt(
+  scanDirectory: string,
+  options: PublishScanToCustomOptions,
+  dependencies: CustomPublicationDependencies,
+  telemetry: PublicationTelemetryRecorder,
 ): Promise<CustomPublicationResult> {
   const { contract, scanDirectory: canonicalDirectory } =
     await loadContractWithScanDirectory(scanDirectory, {
@@ -54,26 +97,47 @@ export async function publishScanToCustomInternal(
       expectedScanId: options.expectedScanId,
     });
   const { manifest, findings } = contract;
+  telemetry.counts.selected = findings.findings.length;
   if (findings.findings.length === 0 && options.workflowId === undefined) {
     throw new CodexSecurityError(
       "The completed scan has no findings to publish.",
     );
   }
   const repositoryId = manifest.scan.target.targetId;
+  let invoked = false;
   const publish = async (): Promise<CustomPublicationResult> => {
-    const findingIds = options.dryRun
-      ? findings.findings.map((finding) => finding.findingId)
-      : await new FindingsClient(
+    invoked = true;
+    const client = options.dryRun
+      ? null
+      : new FindingsClient(
           options.findingsUrl,
           options.signal,
           dependencies.fetch,
-        ).publish(findings.findings, repositoryId);
+        );
+    if (client !== null) {
+      telemetry.attempted = true;
+      telemetry.counts.submitted = findings.findings.length;
+      // The bulk API acknowledges IDs; it does not distinguish inserts from upserts.
+      telemetry.counts.created = null;
+      telemetry.counts.reused = null;
+      telemetry.counts.acknowledged = null;
+      telemetry.counts.failed = null;
+      telemetry.outcome = "indeterminate";
+    }
+    const findingIds =
+      client === null
+        ? findings.findings.map((finding) => finding.findingId)
+        : await client.publish(findings.findings, repositoryId);
+    telemetry.outcome = options.dryRun ? "preview" : "completed";
+    telemetry.counts.acknowledged = options.dryRun ? 0 : findingIds.length;
+    telemetry.counts.failed = 0;
     return {
       scanId: manifest.scan.id,
       repositoryId,
       findingIds,
       findingCount: findingIds.length,
       ...(options.dryRun ? { dryRun: true, findings: findings.findings } : {}),
+      telemetry: telemetry.snapshot(),
     };
   };
   if (options.workflowId === undefined || options.dryRun)
@@ -91,5 +155,8 @@ export async function publishScanToCustomInternal(
     destination: workflowDestination(options.findingsUrl),
   });
   await workflow.complete("scan", null);
-  return await workflow.run("publish", publish);
+  const result = await workflow.run("publish", publish);
+  if (invoked) return result;
+  telemetry.counts.reused = result.findingCount;
+  return { ...result, telemetry: telemetry.snapshot("completed") };
 }

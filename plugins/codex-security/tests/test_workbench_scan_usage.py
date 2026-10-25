@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     begin_deep_scan,
+    cancel_scan,
     create_saved_workspace,
     fail_scan,
     initialize_git_repository,
@@ -39,6 +40,10 @@ class ScanFixture:
     environment: dict[str, str]
     mode: str = "standard"
     diff_target: dict[str, Any] | None = None
+
+
+def _worker_usage_directory(fixture: ScanFixture) -> Path:
+    return fixture.state_dir / "codex-home" / "worker-usage" / fixture.scan_id
 
 
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
@@ -912,6 +917,26 @@ def test_scan_cost_preserves_diagnostics_for_non_scalar_coverage(workbench_api, 
     assert str(error.value) == "Scan cost includes invalid measured token usage."
 
 
+@pytest.mark.parametrize(
+    "warning", ["cost_estimate_covers_earlier_usage", "token_usage_unavailable"]
+)
+def test_only_price_warning_can_accompany_complete_token_coverage(workbench_api, warning) -> None:
+    value = {
+        "usage": {
+            "coverage": "complete",
+            "source": "codex_runtime",
+            "threadCount": 1,
+            "warnings": [warning],
+            **_counts(120, 30, 15),
+        }
+    }
+    if warning == "cost_estimate_covers_earlier_usage":
+        assert json.loads(workbench_api["parse_scan_cost"](json.dumps(value))) == value
+    else:
+        with pytest.raises(SystemExit, match="invalid measured token usage"):
+            workbench_api["parse_scan_cost"](json.dumps(value))
+
+
 @pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
 def test_completion_includes_cached_and_cache_write_tokens(
     tmp_path: Path,
@@ -937,6 +962,34 @@ def test_completion_includes_cached_and_cache_write_tokens(
             "threadCount": 1,
         }.items()
     )
+
+
+@pytest.mark.parametrize("cache_writes", [None, 0, 12])
+def test_completion_distinguishes_missing_cache_writes_from_zero(
+    tmp_path: Path, cache_writes: int | None
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    event = _token_event(counted, 120, 15, cached_input_tokens=30)
+    reported = event["payload"]["info"]["total_token_usage"]
+    if cache_writes is None:
+        reported.pop("cache_write_input_tokens")
+    else:
+        reported["cache_write_input_tokens"] = cache_writes
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [event])},
+        [],
+    )
+    measurement = _complete_scan(fixture)["scan"]["usage"]
+    assert measurement["totalTokens"] == 135
+    assert measurement["cacheWriteInputTokens"] == (cache_writes or 0)
+    assert measurement["coverage"] == "complete"
+    if cache_writes is None:
+        assert measurement["cacheWriteInputTokensReported"] is False
+        assert measurement["byRole"]["parent"]["cacheWriteInputTokensReported"] is False
+    else:
+        assert "cacheWriteInputTokensReported" not in measurement
 
 
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
@@ -1338,9 +1391,7 @@ def test_usage_counts_registered_worker_when_its_parent_rollout_is_missing(
 
 
 @pytest.mark.parametrize("delayed_cache_counts", [False, True])
-def test_completion_preserves_explicit_legacy_cost(
-    tmp_path: Path, delayed_cache_counts: bool
-) -> None:
+def test_completion_preserves_large_legacy_cost(tmp_path: Path, delayed_cache_counts: bool) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     _state_graph(
@@ -1376,7 +1427,7 @@ def test_completion_preserves_explicit_legacy_cost(
         "complete-scan",
         fixture.scan_id,
         "--cost-json",
-        json.dumps(cost),
+        json.dumps(cost) + " " * 8192,
         environment=fixture.environment,
     )["scan"]
     assert completed["cost"] == cost
@@ -1387,6 +1438,85 @@ def test_completion_preserves_explicit_legacy_cost(
         assert "totalTokens" not in completed["usage"]
     else:
         assert completed["usage"]["totalTokens"] == 21
+
+
+@pytest.mark.parametrize(
+    "native_state",
+    ["complete", "missing-worker", "missing-turn", "unavailable", "unavailable-turn"],
+)
+def test_completion_reconciles_supplied_usage_with_native_evidence(
+    tmp_path: Path, native_state: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = [_token_event(counted, 15, 6), _allowance_event(counted, 6)]
+    if native_state == "missing-turn":
+        events.extend(
+            _event(counted, "event_msg", {"type": kind, "turn_id": "unmeasured-turn"})
+            for kind in ("task_started", "task_complete")
+        )
+    if native_state not in {"unavailable", "unavailable-turn"}:
+        _state_graph(
+            fixture.environment,
+            {"scan-parent": _rollout(tmp_path, "scan-parent", events)},
+            [("scan-parent", "missing-worker")] if native_state == "missing-worker" else [],
+        )
+    runtime = {
+        "source": "codex_runtime",
+        "coverage": "complete",
+        "observedAt": counted.isoformat(),
+        "threadCount": 1,
+        "missingThreadCount": 0,
+        "coverageScope": ["thread:scan-parent"],
+        **_counts(15, 0, 6),
+    }
+    cost = {
+        "model": "gpt-5.6-sol",
+        "inputTokens": 15,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    arguments = ["--cost-json", json.dumps({"usage": runtime, "cost": cost})]
+    if native_state == "unavailable-turn":
+        arguments.extend(["--thread-id", "scan-parent", "--turn-id", "completion-turn"])
+    completed = _complete_scan(fixture, *arguments)["scan"]
+    assert completed["cost"] == cost
+    usage = completed["usage"]
+    if native_state == "unavailable":
+        assert usage == runtime
+        return
+    if native_state == "unavailable-turn":
+        assert usage == {
+            **runtime,
+            "coverage": "partial",
+            "warnings": ["turn_in_progress"],
+            "completion": {
+                "threadId": "scan-parent",
+                "turnId": "completion-turn",
+                "finalized": False,
+            },
+        }
+        return
+    assert usage["totalTokens"] == 21
+    assert usage["source"] == "codex_rollout"
+    assert usage["byRole"] == {
+        "parent": {**_counts(15, 0, 6), "threadCount": 1},
+        "workers": {**_counts(0, 0, 0), "threadCount": 0},
+    }
+    assert datetime.fromisoformat(usage["window"]["startedAt"]) == fixture.started_at
+    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == counted
+    assert usage["accountRateLimits"][0]["primary"]["usedPercent"] == 6
+    assert usage["coverage"] == ("complete" if native_state == "complete" else "partial")
+    if native_state == "missing-worker":
+        assert usage["missingThreadCount"] == 1
+        assert usage["coverageScope"] == ["thread:missing-worker", "thread:scan-parent"]
+        assert usage["warnings"] == ["rollout_unavailable"]
+    elif native_state == "missing-turn":
+        assert usage["warnings"] == ["token_record_missing"]
+    else:
+        assert not usage.get("warnings")
 
 
 @pytest.mark.parametrize(
@@ -1563,9 +1693,144 @@ def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path
     assert "invalid choice" in str(extra_command["stderr"])
 
 
+@pytest.mark.parametrize("sdk_ahead", [False, True])
+def test_cli_completion_refresh_preserves_native_detail_and_sdk_subtotal(
+    tmp_path: Path, sdk_ahead: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n", encoding="utf-8")
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    environment = {
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
+        "CODEX_STATE_DB": "",
+    }
+    registration = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        json.dumps(
+            {
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+                "mode": "standard",
+                "config": {},
+            }
+        ),
+        environment=environment,
+    )
+    scan_id = registration["scanId"]
+    thread_id = str(uuid.uuid4())
+    turn_id = "completion-turn"
+    scan_command(
+        state_dir, "set-scan-thread", scan_id, "--thread-id", thread_id, environment=environment
+    )
+    counted = datetime.now().astimezone()
+    parent = _rollout(
+        tmp_path,
+        thread_id,
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": turn_id}),
+            _token_event(counted, 15, 6),
+            _allowance_event(counted, 6),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": turn_id}),
+        ],
+    )
+    _state_graph(environment, {thread_id: parent}, [])
+    write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
+    arguments = ["--thread-id", thread_id, "--turn-id", turn_id]
+    initial = scan_command(
+        state_dir, "complete-scan", scan_id, *arguments, environment=environment
+    )["scan"]["usage"]
+    runtime = {
+        "source": "codex_runtime",
+        "coverage": "complete",
+        "observedAt": datetime.now().astimezone().isoformat(),
+        "threadCount": 1,
+        "missingThreadCount": 0,
+        "coverageScope": [f"thread:{thread_id}"],
+        **_counts(40 if sdk_ahead else 15, 0, 6),
+    }
+    refreshed = scan_command(
+        state_dir,
+        "complete-scan",
+        scan_id,
+        "--cost-json",
+        json.dumps({"usage": runtime}),
+        environment=environment,
+    )["scan"]["usage"]
+    assert refreshed["totalTokens"] == runtime["totalTokens"]
+    assert refreshed["completion"] == initial["completion"]
+    assert refreshed["coverage"] == "partial"
+    assert refreshed["warnings"] == ["turn_in_progress"]
+    assert refreshed["accountRateLimits"] == initial["accountRateLimits"]
+    if not sdk_ahead:
+        for key in ("byRole", "window", "tokensUpdatedAt", "accountRateLimits"):
+            assert refreshed[key] == initial[key]
+    finalized = scan_command(
+        state_dir, "finalize-scan-usage", scan_id, *arguments, environment=environment
+    )["scan"]["usage"]
+    assert finalized["totalTokens"] == runtime["totalTokens"]
+    assert finalized["completion"] == {**initial["completion"], "finalized": True}
+    assert finalized["coverage"] == "complete"
+    assert not finalized.get("warnings")
+    assert finalized["accountRateLimits"] == initial["accountRateLimits"]
+
+
+def test_finalized_completion_identity_survives_unknown_usage_scope(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    turn_id = "completion-turn"
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": turn_id}),
+            _token_event(counted, 15, 6),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": turn_id}),
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    supplied = {
+        "source": "codex_runtime",
+        "coverage": "partial",
+        "threadCount": 1,
+        "missingThreadCount": 1,
+        "warnings": ["worker_usage_unavailable"],
+        "observedAt": counted.isoformat(),
+        **_counts(40, 0, 6),
+    }
+    arguments = ["--thread-id", "scan-parent", "--turn-id", turn_id]
+    _complete_scan(fixture, *arguments, "--cost-json", json.dumps({"usage": supplied}))
+    finalized = scan_command(
+        fixture.state_dir,
+        "finalize-scan-usage",
+        fixture.scan_id,
+        *arguments,
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert finalized["totalTokens"] == 46
+    assert finalized["coverage"] == "partial"
+    assert finalized["missingThreadCount"] == 1
+    assert "worker_usage_unavailable" in finalized["warnings"]
+    assert finalized["completion"] == {
+        "threadId": "scan-parent",
+        "turnId": turn_id,
+        "finalized": True,
+    }
+
+
 @pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("supplied_usage", [False, True])
 def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
-    tmp_path: Path, native: bool
+    tmp_path: Path, native: bool, supplied_usage: bool
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1591,7 +1856,26 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
         {"scan-parent": parent, "scan-worker": worker},
         [("scan-parent", "scan-worker")],
     )
-    initial = _complete_scan(fixture, "--thread-id", "scan-parent", "--turn-id", turn_id)["scan"]
+    arguments = ["--thread-id", "scan-parent", "--turn-id", turn_id]
+    if supplied_usage:
+        arguments.extend(
+            [
+                "--cost-json",
+                json.dumps(
+                    {
+                        "usage": {
+                            "source": "codex_runtime",
+                            "coverage": "complete",
+                            "observedAt": counted.isoformat(),
+                            "threadCount": 2,
+                            "coverageScope": ["thread:scan-parent", "thread:scan-worker"],
+                            **_counts(30, 0, 5),
+                        }
+                    }
+                ),
+            ]
+        )
+    initial = _complete_scan(fixture, *arguments)["scan"]
     completion = {"threadId": "scan-parent", "turnId": turn_id, "finalized": False}
     assert (
         initial["usage"].items()
@@ -1863,7 +2147,8 @@ def test_host_final_usage_does_not_invent_an_unrecorded_completion_turn(tmp_path
     assert finalized["completion"]["finalized"] is True
 
 
-def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
+@pytest.mark.parametrize("outcome", ["failed", "canceled"])
+def test_stopped_scan_retains_measured_usage(tmp_path: Path, outcome: str) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     _state_graph(
@@ -1871,15 +2156,984 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
         {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])},
         [],
     )
-    failed = fail_scan(
-        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    if outcome == "failed":
+        fail_scan(
+            fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        )
+    else:
+        cancel_scan(
+            fixture.state_dir, fixture.scan_id, "scan-parent", environment=fixture.environment
+        )
+    stopped = scan_command(
+        fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
     )["scan"]
+    assert stopped["progress"]["status"] == outcome
+    assert stopped["usage"]["totalTokens"] == 29
+    assert stopped["usage"]["coverage"] == "complete"
+    assert "cost" not in stopped
+
+
+def test_failed_scan_reconciles_runtime_subtotals_without_double_counting(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    runtime = {
+        "coverage": "partial",
+        "coverageScope": ["thread:scan-parent"],
+        "source": "codex_runtime",
+        "threadCount": 1,
+        "missingThreadCount": 1,
+        "cacheWriteInputTokensReported": False,
+        **_counts(40, 0, 5),
+    }
+    cost = {
+        "model": "fixture-model",
+        "inputTokens": 40,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.01,
+    }
+    for _ in range(2):
+        failed = fail_scan(
+            fixture.state_dir,
+            fixture.scan_id,
+            "Fixture failure.",
+            "--cost-json",
+            json.dumps({"usage": runtime, "cost": cost}),
+            environment=fixture.environment,
+        )["scan"]
+        assert failed["usage"] == runtime
+        assert failed["cost"] == cost
+
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 50, 8)])},
+        [],
+    )
+    # A terminal retry can reconcile records flushed after the original stop.
+    reconciled = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Do not replace failure.",
+        environment=fixture.environment,
+    )["scan"]
+    assert reconciled["usage"]["totalTokens"] == 58
+    assert reconciled["usage"]["source"] == "codex_rollout"
+    assert reconciled["usage"]["coverage"] == "complete"
+    assert reconciled["usage"]["warnings"] == ["cost_estimate_covers_earlier_usage"]
+    assert reconciled["cost"] == cost
+    assert reconciled["failureMessage"] == "Fixture failure."
+    assert reconciled["progress"] == failed["progress"]
+    refreshed_cost = {**cost, "inputTokens": 50, "outputTokens": 8, "estimatedUsd": 0.02}
+    reconciled = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Do not replace failure.",
+        "--cost-json",
+        json.dumps(refreshed_cost),
+        environment=fixture.environment,
+    )["scan"]
+    assert reconciled["cost"] == refreshed_cost
+    assert reconciled["usage"]["coverage"] == "complete"
+    assert "cost_estimate_covers_earlier_usage" not in reconciled["usage"].get("warnings", [])
+
+
+def test_scan_accounting_failure_does_not_replace_stopped_outcome(
+    tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    fixture = _start_scan(tmp_path)
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+
+    def unavailable(*args, **kwargs):
+        raise OSError("Synthetic accounting storage failure.")
+
+    monkeypatch.setattr(context.scan_usage, "collect_scan_usage", unavailable)
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        failed = context.saved_results.fail_scan_locked(
+            context,
+            connection,
+            SimpleNamespace(
+                scan_id=fixture.scan_id,
+                message="Original scan failure.",
+                claim_token=None,
+                cost_json=None,
+            ),
+        )["scan"]
     assert failed["progress"]["status"] == "failed"
-    assert "usage" not in failed
+    assert failed["failureMessage"] == "Original scan failure."
+    assert failed["usage"]["coverage"] == "unavailable"
+    assert failed["usage"]["warnings"] == ["usage_collection_failed"]
+    assert "Synthetic accounting storage failure." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("runtime_ahead", [False, True])
+def test_late_missing_worker_invalidates_saved_complete_coverage(
+    tmp_path: Path, runtime_ahead: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    arguments = (
+        (
+            "--cost-json",
+            json.dumps(
+                {
+                    "usage": {
+                        "coverage": "complete",
+                        "coverageScope": ["thread:scan-parent"],
+                        "source": "codex_runtime",
+                        "threadCount": 1,
+                        "observedAt": counted.isoformat(),
+                        "tokensUpdatedAt": counted.isoformat(),
+                        **_counts(37, 0, 8),
+                    }
+                }
+            ),
+        )
+        if runtime_ahead
+        else ()
+    )
+    complete = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        *arguments,
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert complete["coverage"] == "complete"
+    with sqlite3.connect(
+        Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    ) as connection:
+        connection.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?, ?)",
+            ("scan-parent", "late-worker"),
+        )
+    partial = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert partial["totalTokens"] == complete["totalTokens"] == (45 if runtime_ahead else 29)
+    assert partial["coverage"] == "partial"
+    assert partial["missingThreadCount"] == 1
+    assert partial["coverageScope"] == ["thread:late-worker", "thread:scan-parent"]
+    assert partial["observedAt"] > complete["observedAt"]
+    assert partial["tokensUpdatedAt"] == complete["tokensUpdatedAt"]
+
+    # A delayed complete snapshot and vanished logs cannot erase the newer gap
+    # or make the retained observation appear fresh.
+    parent.unlink()
+    replayed = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": complete}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert replayed == partial
+
+    _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])
+    worker = _rollout(
+        tmp_path,
+        "late-worker",
+        [_token_event(counted, 0, 0)],
+        parent_thread_id="scan-parent",
+    )
+    with sqlite3.connect(
+        Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    ) as connection:
+        connection.execute(
+            "INSERT INTO threads (id, rollout_path) VALUES (?, ?)", ("late-worker", str(worker))
+        )
+    resolved = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert resolved["totalTokens"] == partial["totalTokens"]
+    assert resolved["coverage"] == "complete"
+    assert resolved["threadCount"] == 2
+    if runtime_ahead:
+        assert "byRole" not in resolved
+    else:
+        assert resolved["byRole"]["parent"]["threadCount"] == 1
+        assert resolved["byRole"]["workers"]["threadCount"] == 1
+    assert resolved.get("missingThreadCount", 0) == 0
+    assert not resolved.get("warnings")
+    assert resolved["observedAt"] > partial["observedAt"]
+
+    parent.unlink()
+    worker.unlink()
+    replayed = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": partial}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert replayed == resolved
+
+
+def test_narrower_observations_preserve_other_thread_gaps(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    runtime = {
+        "coverage": "partial",
+        "coverageScope": ["thread:scan-parent", "thread:validation", "thread:validation-child"],
+        "source": "codex_runtime",
+        "threadCount": 2,
+        "missingThreadCount": 1,
+        "observedAt": counted.isoformat(),
+        **_counts(37, 0, 8),
+    }
+    partial = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": runtime}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert partial["coverage"] == "partial"
+    assert partial["totalTokens"] == 45
+    assert partial["missingThreadCount"] == 1
+    assert partial["coverageScope"] == runtime["coverageScope"]
+    with sqlite3.connect(
+        Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    ) as connection:
+        connection.execute(
+            "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?, ?)",
+            ("scan-parent", "late-worker"),
+        )
+    narrower_partial = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert narrower_partial["coverage"] == "partial"
+    assert narrower_partial["coverageScope"] == [
+        "thread:late-worker",
+        *runtime["coverageScope"],
+    ]
+    worker = _rollout(
+        tmp_path,
+        "late-worker",
+        [_token_event(counted, 0, 0)],
+        parent_thread_id="scan-parent",
+    )
+    with sqlite3.connect(
+        Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    ) as connection:
+        connection.execute(
+            "INSERT INTO threads (id, rollout_path) VALUES (?, ?)", ("late-worker", str(worker))
+        )
+    narrower_complete = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert narrower_complete["coverage"] == "partial"
+    assert narrower_complete["coverageScope"] == narrower_partial["coverageScope"]
+    assert narrower_complete["totalTokens"] == 45
+
+    # Complete evidence must include every retained branch before it can clear
+    # the gap, even when its native subtotal is behind the SDK receipt.
+    for thread in ["validation", "validation-child"]:
+        path = _rollout(
+            tmp_path,
+            thread,
+            [_token_event(counted, 0, 0)],
+            parent_thread_id="scan-parent" if thread == "validation" else "validation",
+        )
+        with sqlite3.connect(
+            Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+        ) as connection:
+            connection.execute(
+                "INSERT INTO threads (id, rollout_path) VALUES (?, ?)", (thread, str(path))
+            )
+            connection.execute(
+                "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?, ?)",
+                ("scan-parent" if thread == "validation" else "validation", thread),
+            )
+    complete = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert complete["coverage"] == "complete"
+    assert complete["totalTokens"] == 45
+    assert complete["threadCount"] == 4
+    assert "byRole" not in complete
+    assert complete["coverageScope"] == narrower_partial["coverageScope"]
+    assert not complete.get("missingThreadCount")
+    assert not complete.get("warnings")
+    parent.unlink()
+    worker.unlink()
+    # Entirely unavailable fresh reads and stale partial payloads cannot
+    # resurrect a gap covered by the newer encompassing observation.
+    replayed = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": narrower_partial}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert replayed == complete
+
+
+def test_stopped_scan_preserves_incomparable_scope_uncertainty(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 800, 0)]),
+            "late-worker": _rollout(
+                tmp_path,
+                "late-worker",
+                [_token_event(counted, 400, 0)],
+                parent_thread_id="scan-parent",
+            ),
+        },
+        [("scan-parent", "late-worker")],
+    )
+    # SDK usage includes 800 parent + 200 independent validation tokens, while
+    # native collection sees 800 parent + 400 late-worker tokens. Neither
+    # aggregate measures the full 1,400-token execution.
+    runtime = {
+        "coverage": "complete",
+        "coverageScope": ["thread:scan-parent", "thread:validation"],
+        "source": "codex_runtime",
+        "threadCount": 2,
+        "observedAt": counted.isoformat(),
+        **_counts(1_000, 0, 0),
+    }
+    cost = {
+        "model": "fixture-model",
+        "inputTokens": 1_000,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0.01,
+    }
+    stopped = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": runtime, "cost": cost}),
+        environment=fixture.environment,
+    )["scan"]
+    usage = stopped["usage"]
+    assert usage["totalTokens"] == 1_200
+    assert usage["coverage"] == "partial"
+    assert usage["coverageScope"] == [
+        "thread:late-worker",
+        "thread:scan-parent",
+        "thread:validation",
+    ]
+    assert usage["warnings"] == [
+        "cost_estimate_covers_earlier_usage",
+        "usage_scope_incomplete",
+    ]
+    assert (
+        scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]["usage"]
+        == usage
+    )
+    # Refreshing the price of this lower bound must not restore complete usage.
+    repriced = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({**cost, "inputTokens": 1_200, "estimatedUsd": 0.012}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert repriced["totalTokens"] == 1_200
+    assert repriced["coverage"] == "partial"
+    assert repriced["warnings"] == ["usage_scope_incomplete"]
+
+
+@pytest.mark.parametrize(
+    ("previous_input", "previous_output", "latest_roles"),
+    [(21, 8, True), (37, 8, True), (20, 9, True), (21, 8, False)],
+    ids=["equal-subtotal", "older-larger-subtotal", "different-token-fields", "no-latest-roles"],
+)
+def test_coverage_counts_and_roles_follow_the_latest_observation(
+    workbench_api, previous_input: int, previous_output: int, latest_roles: bool
+) -> None:
+    merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
+    previous = {
+        "coverage": "complete",
+        "coverageScope": ["thread:parent"],
+        "source": "codex_runtime",
+        "threadCount": 1,
+        "observedAt": "2026-01-01T00:00:00Z",
+        **_counts(previous_input, 0, previous_output),
+        "byRole": {
+            "parent": {"threadCount": 1, **_counts(previous_input, 0, previous_output)},
+            "workers": {"threadCount": 0, **_counts(0, 0, 0)},
+        },
+    }
+    observed = {
+        "coverage": "complete",
+        "coverageScope": ["thread:parent", "thread:worker"],
+        "source": "codex_rollout" if latest_roles else "codex_runtime",
+        "threadCount": 2,
+        "observedAt": "2026-01-01T00:00:01Z",
+        "cacheWriteInputTokensReported": False,
+        **_counts(21, 0, 8),
+    }
+    if latest_roles:
+        observed["byRole"] = {
+            "parent": {
+                "threadCount": 1,
+                "cacheWriteInputTokensReported": False,
+                **_counts(21, 0, 8),
+            },
+            "workers": {"threadCount": 1, **_counts(0, 0, 0)},
+        }
+    for observation in [previous, observed]:
+        workbench_api["parse_scan_cost"](json.dumps({"usage": observation}))
+
+    merged = merge({"usage": previous}, {"usage": observed})
+    usage = merged["usage"]
+    assert usage["threadCount"] == 2
+    assert usage["coverage"] == "complete"
+    assert usage["coverageScope"] == observed["coverageScope"]
+    assert usage["observedAt"] == observed["observedAt"]
+    for field, value in _counts(previous_input, 0, previous_output).items():
+        assert usage[field] == value
+    if latest_roles and (previous_input, previous_output) == (21, 8):
+        assert usage["byRole"] == observed["byRole"]
+    else:
+        assert "byRole" not in usage
+    assert json.loads(workbench_api["parse_scan_cost"](json.dumps(merged))) == merged
+    assert merge({"usage": observed}, {"usage": previous}) == merged
+    assert merge(merged, {"usage": previous}) == merged
+
+
+@pytest.mark.parametrize(
+    ("previous_threads", "previous_tokens", "new_threads", "new_tokens", "combined_tokens"),
+    [
+        (["parent", "validation"], 1_000, ["parent", "worker"], 1_200, 1_400),
+        (["parent", "validation"], 1_000, ["parent"], 1_200, 1_400),
+        (["parent", "validation", "worker"], 1_010, ["parent", "worker"], 910, 1_110),
+        (["validation"], 200, ["parent"], 800, 1_000),
+    ],
+    ids=["incomparable", "narrower-larger", "narrower-smaller", "disjoint"],
+)
+def test_newer_scoped_subtotals_need_encompassing_complete_evidence(
+    workbench_api,
+    previous_threads: list[str],
+    previous_tokens: int,
+    new_threads: list[str],
+    new_tokens: int,
+    combined_tokens: int,
+) -> None:
+    merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
+    previous = {
+        "coverage": "complete",
+        "coverageScope": [f"thread:{thread}" for thread in previous_threads],
+        "source": "codex_runtime",
+        "threadCount": len(previous_threads),
+        "observedAt": "2026-01-01T00:00:00Z",
+        **_counts(previous_tokens, 0, 0),
+    }
+    observed = {
+        "coverage": "complete",
+        "coverageScope": [f"thread:{thread}" for thread in new_threads],
+        "source": "codex_rollout",
+        "threadCount": len(new_threads),
+        "observedAt": "2026-01-01T00:00:01Z",
+        **_counts(new_tokens, 0, 0),
+    }
+    partial = merge({"usage": previous}, {"usage": observed})
+    assert partial["usage"]["totalTokens"] == max(previous_tokens, new_tokens)
+    assert partial["usage"]["coverage"] == "partial"
+    assert partial["usage"]["warnings"] == ["usage_scope_incomplete"]
+    assert partial["usage"]["coverageScope"] == sorted(
+        set(previous["coverageScope"]) | set(observed["coverageScope"])
+    )
+    assert partial["usage"]["observedAt"] == observed["observedAt"]
+    assert partial["usage"]["threadCount"] == len(new_threads)
+    assert merge({"usage": observed}, {"usage": previous}) == partial
+    assert merge(partial, {"usage": previous}) == partial
+
+    complete = {
+        **previous,
+        "coverageScope": partial["usage"]["coverageScope"],
+        "threadCount": len(partial["usage"]["coverageScope"]),
+        "observedAt": "2026-01-01T00:00:02Z",
+        **_counts(combined_tokens, 0, 0),
+    }
+    resolved = merge(partial, {"usage": complete})
+    assert resolved["usage"] == complete
+    assert merge(resolved, partial) == resolved
+    assert merge(resolved, {"usage": observed}) == resolved
+
+
+def test_legacy_partial_without_scope_does_not_claim_resolved_coverage(workbench_api) -> None:
+    merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
+    partial = {
+        "coverage": "partial",
+        "source": "codex_runtime",
+        "threadCount": 1,
+        "missingThreadCount": 1,
+        **_counts(40, 0, 5),
+    }
+    complete = {
+        "coverage": "complete",
+        "coverageScope": ["thread:scan-parent"],
+        "source": "codex_rollout",
+        "threadCount": 1,
+        **_counts(50, 0, 8),
+    }
+    merged = merge({"usage": partial}, {"usage": complete})["usage"]
+    assert merged["coverage"] == "partial"
+    assert merged["totalTokens"] == 58
+    assert merged["missingThreadCount"] == 1
+    assert "coverageScope" not in merged
+
+
+def test_unscoped_complete_observation_keeps_known_gap_identity(workbench_api) -> None:
+    merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
+    partial = {
+        "coverage": "partial",
+        "coverageScope": ["thread:scan-parent", "thread:missing-worker"],
+        "source": "codex_runtime",
+        "threadCount": 1,
+        "missingThreadCount": 1,
+        **_counts(40, 0, 5),
+    }
+    legacy_complete = {
+        "coverage": "complete",
+        "source": "codex_runtime",
+        "threadCount": 2,
+        **_counts(50, 0, 8),
+    }
+    merged = merge({"usage": partial}, {"usage": legacy_complete})
+    assert merged["usage"]["coverage"] == "partial"
+    assert merged["usage"]["coverageScope"] == partial["coverageScope"]
+    resolved = merge(
+        merged,
+        {"usage": {**legacy_complete, "coverageScope": partial["coverageScope"]}},
+    )
+    assert resolved["usage"]["coverage"] == "complete"
+    assert not resolved["usage"].get("missingThreadCount")
+
+
+def test_large_measured_scope_survives_saved_scan_round_trip(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    runtime = {
+        "coverage": "partial",
+        "coverageScope": [f"thread:{uuid.UUID(int=index)}" for index in range(1, 401)],
+        "source": "codex_runtime",
+        "threadCount": 399,
+        "missingThreadCount": 1,
+        **_counts(400, 0, 5),
+    }
+    encoded = json.dumps({"usage": runtime})
+    assert len(encoded.encode("utf-8")) > 8192
+    stopped = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        encoded,
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert stopped == runtime
+    assert (
+        scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]["usage"]
+        == runtime
+    )
+
+
+def test_completed_scan_reconciles_late_runtime_usage_envelopes(
+    tmp_path: Path, workbench_api: dict[str, Any]
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])},
+        [],
+    )
+    _complete_scan(fixture)
+    runtime = {
+        "coverage": "complete",
+        "source": "codex_runtime",
+        "threadCount": 1,
+        **_counts(40, 0, 5),
+    }
+    for _ in range(2):
+        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+            scan = context.require_scan(connection, fixture.scan_id)
+            context.scan_usage.reconcile_completed_scan_cost(
+                connection, scan, json.dumps({"usage": runtime})
+            )
+        reconciled = scan_command(
+            fixture.state_dir,
+            "get-scan",
+            fixture.scan_id,
+            environment=fixture.environment,
+        )["scan"]
+        assert reconciled["usage"] == {
+            **runtime,
+            "coverageScope": ["thread:scan-parent"],
+        }
+        assert "cost" not in reconciled
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_model_artifact_worker_receipts_do_not_affect_saved_usage(
+    tmp_path: Path, mode: str
+) -> None:
+    fixture = _start_scan(tmp_path, mode=mode)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory.mkdir(parents=True)
+    for thread_id in ["scan-parent", "unrelated-worker"]:
+        attempt_id = str(uuid.uuid4())
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "thread_cumulative",
+                    "scanId": fixture.scan_id,
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "threadId": thread_id,
+                    "startedAt": counted.isoformat(),
+                    "observedAt": counted.isoformat(),
+                    "usage": _token_event(counted, 1_000_000, 0)["payload"]["info"][
+                        "total_token_usage"
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 2)]),
+            "unrelated-worker": _rollout(
+                tmp_path, "unrelated-worker", [_token_event(counted, 1_000_000, 0)]
+            ),
+        },
+        [],
+    )
+    measurement = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert measurement["coverage"] == "complete"
+    assert measurement["totalTokens"] == 12
+    assert measurement["threadCount"] == 1
+    assert measurement["coverageScope"] == ["thread:scan-parent"]
+
+
+def test_deep_worker_receipt_storage_is_isolated_between_scans(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = _worker_usage_directory(fixture)
+    directory.mkdir(parents=True)
+    another_scan = str(uuid.uuid4())
+    unrelated_directory = directory.parent / another_scan
+    unrelated_directory.mkdir()
+    attempt_id = str(uuid.uuid4())
+    receipt = {
+        "schemaVersion": 1,
+        "source": "codex_sdk",
+        "usageScope": "thread_cumulative",
+        "scanId": another_scan,
+        "kind": "discovery",
+        "attemptId": attempt_id,
+        "threadId": "unrelated-worker",
+        "startedAt": counted.isoformat(),
+        "observedAt": counted.isoformat(),
+        "usage": _token_event(counted, 1_000_000, 0)["payload"]["info"]["total_token_usage"],
+    }
+    (unrelated_directory / f"{attempt_id}.json").write_text(json.dumps(receipt), encoding="utf-8")
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 2)])},
+        [],
+    )
+    measurement = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert measurement["coverage"] == "complete"
+    assert measurement["totalTokens"] == 12
+    assert measurement["coverageScope"] == ["thread:scan-parent"]
+    # A misplaced host receipt also cannot attribute another scan's usage here.
+    (directory / f"{attempt_id}.json").write_text(json.dumps(receipt), encoding="utf-8")
+    measurement = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert measurement["totalTokens"] == 12
+    assert "thread:unrelated-worker" not in measurement["coverageScope"]
+
+
+@pytest.mark.parametrize(
+    ("native_database", "native_worker_tokens", "unmeasured_attempt"),
+    [(False, None, True), (True, None, True), (True, 150, True), (True, 150, False)],
+)
+def test_stopped_deep_scan_reconciles_cumulative_worker_receipts(
+    tmp_path: Path,
+    native_database: bool,
+    native_worker_tokens: int | None,
+    unmeasured_attempt: bool,
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    timestamp = counted.isoformat()
+    directory = _worker_usage_directory(fixture)
+    directory.mkdir(parents=True)
+    for index, amount in enumerate([100, 150, None] if unmeasured_attempt else [100, 150]):
+        attempt_id = str(uuid.uuid4())
+        token_counts = (
+            _token_event(counted, amount, 0)["payload"]["info"]["total_token_usage"]
+            if amount is not None
+            else None
+        )
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "thread_cumulative",
+                    "scanId": fixture.scan_id,
+                    "workerId": "synthetic-worker",
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "attempt": index + 1,
+                    "resumed": index > 0,
+                    "threadId": "receipt-worker" if amount is not None else "unmeasured-worker",
+                    "startedAt": timestamp,
+                    "observedAt": timestamp,
+                    "outcome": "succeeded" if index == 0 else "failed",
+                    "usage": token_counts,
+                }
+            ),
+            encoding="utf-8",
+        )
+    paths = {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)])}
+    edges = []
+    if native_worker_tokens is not None:
+        paths["receipt-worker"] = _rollout(
+            tmp_path,
+            "receipt-worker",
+            [_token_event(counted, native_worker_tokens, 0)],
+            parent_thread_id="scan-parent",
+        )
+        edges.append(("scan-parent", "receipt-worker"))
+    if native_database:
+        _state_graph(fixture.environment, paths, edges)
+    for _ in range(2):
+        measurement = fail_scan(
+            fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        )["scan"]["usage"]
+        assert measurement["coverage"] == (
+            "partial" if unmeasured_attempt or native_worker_tokens is None else "complete"
+        )
+        assert measurement["totalTokens"] == 150
+        assert measurement["byRole"]["workers"]["totalTokens"] == 150
+        assert measurement["threadCount"] == (2 if native_database else 1)
+        assert measurement.get("missingThreadCount", 0) == (
+            int(unmeasured_attempt) + int(native_worker_tokens is None) + int(not native_database)
+        )
+        assert ("worker_usage_unavailable" in measurement.get("warnings", [])) == unmeasured_attempt
+        assert measurement["source"] == (
+            "codex_rollout" if native_worker_tokens is not None else "codex_runtime"
+        )
+
+
+@pytest.mark.parametrize("reverse_files", [False, True])
+@pytest.mark.parametrize("native_workers", [False, True])
+def test_worker_receipts_preserve_cumulative_totals_and_known_cache_writes(
+    tmp_path: Path, reverse_files: bool, native_workers: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = _worker_usage_directory(fixture)
+    directory.mkdir(parents=True)
+    snapshots = [
+        ("first-worker", 100, 5, True, 0),
+        ("first-worker", 150, 8, True, 1),
+        ("first-worker", 150, 12, True, 2),
+        ("first-worker", 150, 0, False, 3),
+        ("second-worker", 40, 4, True, 1),
+    ]
+    for index, (thread_id, amount, cache_writes, reported, delay) in enumerate(snapshots):
+        attempt_id = str(uuid.UUID(int=len(snapshots) - index if reverse_files else index + 1))
+        tokens = _token_event(counted, amount, 0)["payload"]["info"]["total_token_usage"]
+        tokens["cache_write_input_tokens"] = cache_writes
+        if not reported:
+            tokens["cache_write_input_tokens_reported"] = False
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "thread_cumulative",
+                    "scanId": fixture.scan_id,
+                    "workerId": thread_id,
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "attempt": index + 1,
+                    "resumed": index > 0,
+                    "threadId": thread_id,
+                    "startedAt": counted.isoformat(),
+                    "observedAt": (counted + timedelta(microseconds=delay)).isoformat(),
+                    "outcome": "succeeded",
+                    "usage": tokens,
+                }
+            ),
+            encoding="utf-8",
+        )
+    paths = {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)])}
+    edges = []
+    if native_workers:
+        for thread_id, amount in (("first-worker", 150), ("second-worker", 40)):
+            event = _token_event(counted, amount, 0)
+            event["payload"]["info"]["total_token_usage"].pop("cache_write_input_tokens")
+            paths[thread_id] = _rollout(
+                tmp_path, thread_id, [event], parent_thread_id="scan-parent"
+            )
+            edges.append(("scan-parent", thread_id))
+    _state_graph(fixture.environment, paths, edges)
+    for _ in range(2):
+        measurement = fail_scan(
+            fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        )["scan"]["usage"]
+        assert measurement["totalTokens"] == 190
+        assert measurement["cacheWriteInputTokens"] == 16
+        assert "cacheWriteInputTokensReported" not in measurement
+        assert measurement["source"] == "codex_runtime"
+        assert measurement["threadCount"] == 3
+        assert measurement["coverage"] == ("complete" if native_workers else "partial")
+        assert measurement.get("missingThreadCount", 0) == (0 if native_workers else 2)
+
+
+@pytest.mark.parametrize(
+    "native_state",
+    ["complete", "partial", "absent", "unknown_thread", "late_thread_id", "sdk_subtotal_larger"],
+)
+def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
+    tmp_path: Path, native_state: str
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = _worker_usage_directory(fixture)
+    directory.mkdir(parents=True)
+    for amount in [None, 30] if native_state == "sdk_subtotal_larger" else [None]:
+        attempt_id = str(uuid.uuid4())
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "thread_cumulative",
+                    "scanId": fixture.scan_id,
+                    "workerId": "synthetic-worker",
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "attempt": 1 if amount is None else 2,
+                    "resumed": amount is not None,
+                    "threadId": (
+                        None
+                        if native_state in ("unknown_thread", "late_thread_id")
+                        else "receipt-worker"
+                    ),
+                    "startedAt": counted.isoformat(),
+                    "observedAt": counted.isoformat(),
+                    "outcome": "failed",
+                    "usage": (
+                        _token_event(counted, amount, 0)["payload"]["info"]["total_token_usage"]
+                        if amount is not None
+                        else None
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)])
+    worker = parent.with_name("receipt-worker.jsonl")
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "receipt-worker": worker},
+        [("scan-parent", "receipt-worker")],
+    )
+    initial = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert initial["coverage"] == "partial"
+    assert "worker_usage_unavailable" in initial["warnings"]
+    attempt_scope = {f"worker-attempt:{path.stem}" for path in directory.glob("*.json")}
+    assert attempt_scope.issubset(initial["coverageScope"])
+    if native_state == "late_thread_id":
+        path = directory / f"{attempt_id}.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt["threadId"] = "receipt-worker"
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    if native_state != "absent":
+        _rollout(
+            tmp_path,
+            "receipt-worker",
+            [_token_event(counted, 20, 5)],
+            parent_thread_id="scan-parent",
+            include_task_complete=native_state != "partial",
+        )
+    for _ in range(2):
+        measurement = fail_scan(
+            fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        )["scan"]["usage"]
+        complete = native_state in ("complete", "late_thread_id")
+        assert measurement["coverage"] == ("complete" if complete else "partial")
+        assert measurement["totalTokens"] == (
+            30 if native_state == "sdk_subtotal_larger" else 0 if native_state == "absent" else 25
+        )
+        assert measurement.get("missingThreadCount", 0) == int(not complete)
+        assert ("worker_usage_unavailable" in measurement.get("warnings", [])) == (not complete)
+        assert attempt_scope.issubset(measurement["coverageScope"])
+        if native_state == "partial":
+            assert "turn_in_progress" in measurement["warnings"]
+
+
+def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    runtime = {
+        "coverage": "complete",
+        "source": "codex_runtime",
+        "threadCount": 1,
+        **_counts(40, 0, 5),
+    }
+    for _ in range(2):
+        scan_command(
+            fixture.state_dir,
+            "cancel-scan",
+            fixture.scan_id,
+            "--cost-json",
+            json.dumps({"usage": runtime}),
+            environment=fixture.environment,
+        )
+        saved = scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]
+        assert saved["progress"]["status"] == "canceled"
+        assert saved["usage"] == runtime
 
 
 @pytest.mark.parametrize("worker_kind", ["discovery", "dedup"])
 def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker_kind: str) -> None:
+    # Compressed variants exercise the real Node decoder in the SDK runtime lane
+    # (workbench-compressed-usage.test.ts); source-only tests need no built assets.
     fixture = _start_scan(tmp_path, mode="deep")
     fixture = replace(
         fixture,

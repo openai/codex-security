@@ -17,6 +17,7 @@ import { runHostedScanProtocol } from "../src/hosted-scan-protocol.js";
 import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
+import { readOperationTelemetry } from "../src/operation-telemetry.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import * as ownerSuggestions from "../src/suggest-owners.js";
 import {
@@ -865,6 +866,47 @@ test.each([
   },
 );
 
+test.each(
+  [undefined, "measured-host-session"].flatMap((sessionId) =>
+    (["failed", "acceptance_unknown"] as const).map((status) => ({
+      sessionId,
+      status,
+    })),
+  ),
+)(
+  "$status hosted scans report measured usage with session $sessionId",
+  async ({ sessionId, status }) => {
+    const input = await fixture();
+    const terminal = await runHostedScan(input, {
+      executor: {
+        async run(request) {
+          return receipt(request, {
+            status,
+            sessionId,
+            usage: {
+              input_tokens: 123,
+              cached_input_tokens: 0,
+              output_tokens: 7,
+            },
+            message: "Synthetic measured failure",
+          });
+        },
+      },
+    });
+    expect(terminal.status).toBe(status);
+    const journal = await readOperationTelemetry(input.stateDirectory);
+    expect(
+      journal.events.find((event) => event.type === "attempt_finished"),
+    ).toMatchObject({
+      outcome: status === "acceptance_unknown" ? "unresolved" : "failed",
+      measurement: {
+        coverage: "complete",
+        usage: { input_tokens: 123, output_tokens: 7, total_tokens: 130 },
+      },
+    });
+  },
+);
+
 test("failed hosted config preparation removes its temporary runtime home", async () => {
   const input = await fixture();
   const executor = noExecution();
@@ -1066,7 +1108,7 @@ test("cancellation after registration retains scan identity before executor disp
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "canceled" },
     },
   ]);
 });
@@ -1097,25 +1139,55 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
   });
 });
 
-test("mismatched execution receipts are never accepted or retried", async () => {
-  const input = await fixture();
-  const executor = {
-    run: mock(async () =>
-      receipt(
-        { requestId: "other-request" },
-        {
-          sessionId: "known-session",
-          usage: { input_tokens: 9 },
-        },
+test.each([
+  { status: "completed" as const, sessionId: "known-session" },
+  { status: "failed" as const, sessionId: undefined },
+])(
+  "$status mismatched execution receipts are retained without accounting or retry",
+  async ({ status, sessionId }) => {
+    const input = await fixture();
+    const usage = { input_tokens: 9, output_tokens: 1 };
+    const executor = {
+      run: mock(async () =>
+        receipt({ requestId: "other-request" }, { status, sessionId, usage }),
       ),
-    ),
-  };
-  const result = await runHostedScan(input, { executor });
-  expect(executor.run).toHaveBeenCalledTimes(1);
-  expect(result.status).toBe("acceptance_unknown");
-  expect(result.execution?.sessionId).toBe("known-session");
-  expect(result.artifacts).toEqual([]);
-});
+    };
+    const result = await runHostedScan(input, { executor });
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("acceptance_unknown");
+    expect(result.execution?.requestId).toBe("other-request");
+    expect(result.execution?.sessionId).toBe(sessionId);
+    expect(result.execution?.usage).toEqual(usage);
+    expect(result.artifacts).toEqual([]);
+    const journal = await readOperationTelemetry(input.stateDirectory);
+    const terminal = journal.events.find(
+      (event) => event.type === "attempt_finished",
+    );
+    expect(terminal).toMatchObject({ outcome: "unresolved" });
+    expect(terminal?.measurement?.usage ?? null).toBeNull();
+    expect(terminal?.measurement?.cost ?? null).toBeNull();
+    const saved = await runWorkbench(
+      {
+        python: pythonExecutable()!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          SYSTEMROOT: process.env["SYSTEMROOT"],
+          CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+        },
+      },
+      ["get-scan", "--scan-id", result.scanId!],
+    );
+    const scan = saved["scan"] as Record<string, unknown>;
+    expect(scan).toBeDefined();
+    expect(scan["usage"]).toMatchObject({
+      coverage: "unavailable",
+      threadCount: 0,
+    });
+    expect(scan["usage"]).not.toHaveProperty("totalTokens");
+    expect(scan["cost"] ?? null).toBeNull();
+  },
+);
 
 test("same Cloud attempt does not create CLI cross-invocation replay decisions", async () => {
   const input = await fixture();

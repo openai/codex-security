@@ -1643,6 +1643,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const workerUsageDirectory = path.join(
+            fixture.root,
+            `state-${index}`,
+            "codex-home",
+            "worker-usage",
+            `scan-${index}`,
+          );
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
@@ -1701,6 +1708,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeProfile,
             profilePath,
             parentSandbox,
+            workerUsageDirectory,
             permissionProfile: {
               ...deniedWorkerPermissionProfile,
               filesystem: {
@@ -1708,6 +1716,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
                 [literalDeniedPath]: { ".": "deny" },
+                [workerUsageDirectory]: { ".": "deny" },
               },
             },
             provider,
@@ -1946,6 +1955,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       const nodePaths = settings.map((_, index) =>
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
+      await Promise.all(
+        settings.map(async (_, index) => {
+          const directory = path.join(
+            fixture.root,
+            `plugin-${index}`,
+            ".codex-plugin",
+          );
+          await mkdir(directory, { recursive: true });
+          await writeJson(path.join(directory, "plugin.json"), {
+            version: `9.9.${index}`,
+          });
+        }),
+      );
 
       const executors = settings.map(
         (modelSettings, index) =>
@@ -2002,6 +2024,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               );
               return executor.run(
                 workerRequest(promptPath, fixture.root, {
+                  attemptId: `worker-${index}-${kind}-${resumeThreadId ?? "new"}`,
+                  workerUsageDirectory:
+                    workerConfigurations[index].workerUsageDirectory,
                   kind,
                   resumeThreadId,
                   ...(resumeThreadId
@@ -2034,6 +2059,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index,
             { model, reasoningEffort },
           ] of settings.entries()) {
+            const workerConfig = workerConfigurations[index];
             const workerLaunch = workerLaunches.find(({ args }) =>
               model === undefined
                 ? !args.includes("--model")
@@ -2060,11 +2086,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
-              workerConfigurations[index].path,
+              workerConfig.path,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-              workerConfigurations[index].workerConfigPath,
+              workerConfig.workerConfigPath,
             );
             assert.deepEqual(
               JSON.parse(
@@ -2074,8 +2100,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ),
               {
-                codex_security_deep_scan_worker:
-                  workerConfigurations[index].permissionProfile,
+                codex_security_deep_scan_worker: workerConfig.permissionProfile,
               },
             );
             assert.equal(
@@ -2085,8 +2110,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               false,
             );
             assert.equal(
+              workerConfig.parentSandbox.literalFilesystemDenies.includes(
+                workerConfig.workerUsageDirectory,
+              ),
+              false,
+              "The receipt deny is scoped to this launch without changing parent settings.",
+            );
+            assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
-              workerConfigurations[index].knowledgePath,
+              workerConfig.knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
             if (
@@ -2112,13 +2144,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 workerLaunch.environment![name],
               );
             }
-            assert.equal(
-              invocation.knowledgePath,
-              workerConfigurations[index].knowledgePath,
-            );
+            assert.equal(invocation.knowledgePath, workerConfig.knowledgePath);
             assert.deepEqual(
               invocation.knowledgeDocuments,
-              workerConfigurations[index].knowledgeDocuments,
+              workerConfig.knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.deepEqual(invocation.temporaryEnvironment, {
@@ -2135,7 +2164,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             }
             assert.equal(
               invocation.deepConfigPath,
-              workerConfigurations[index].workerConfigPath,
+              workerConfig.workerConfigPath,
             );
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
@@ -2149,24 +2178,22 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
               workerLaunch.environment!.CODEX_SQLITE_HOME,
-              workerConfigurations[index].environment?.CODEX_SQLITE_HOME,
+              workerConfig.environment?.CODEX_SQLITE_HOME,
             );
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
-              ...workerConfigurations[index].authentication,
-              openai_base_url: workerConfigurations[index].endpoint,
+              ...workerConfig.authentication,
+              openai_base_url: workerConfig.endpoint,
               model_reasoning_summary: expected,
-              service_tier: workerConfigurations[index].serviceTier,
-              model_instructions_file:
-                workerConfigurations[index].instructionsFile,
-              model_verbosity: workerConfigurations[index].verbosity,
-              model_context_window:
-                workerConfigurations[index].modelContextWindow,
+              service_tier: workerConfig.serviceTier,
+              model_instructions_file: workerConfig.instructionsFile,
+              model_verbosity: workerConfig.verbosity,
+              model_context_window: workerConfig.modelContextWindow,
               model_auto_compact_token_limit:
-                workerConfigurations[index].autoCompactTokenLimit,
-              web_search: workerConfigurations[index].webSearch,
-              "windows.sandbox": workerConfigurations[index].windowsSandbox,
+                workerConfig.autoCompactTokenLimit,
+              web_search: workerConfig.webSearch,
+              "windows.sandbox": workerConfig.windowsSandbox,
             });
             assert.deepEqual(
               nativeConfigOverrides(invocation.argv).filter((override) =>
@@ -2185,7 +2212,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ),
                 ),
               )["skills"],
-              workerConfigurations[index].skills,
+              workerConfig.skills,
               "Discovery, reducer and resumed concurrent launches retain their own skill selection.",
             );
             assert.deepEqual(
@@ -2203,14 +2230,23 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ),
               {
-                ...workerConfigurations[index].telemetry,
+                ...workerConfig.telemetry,
                 responses_api_metadata: {
                   codex_security_surface: "plugin",
                   codex_security_command: "scan",
                   codex_security_scan_mode: "deep",
-                  ...workerConfigurations[index].telemetry
-                    .responses_api_metadata,
+                  codex_security_plugin_version: `9.9.${index}`,
+                  ...workerConfig.telemetry.responses_api_metadata,
                   codex_security_worker_role: kind,
+                  codex_security_operation_id:
+                    workerConfig.telemetry.responses_api_metadata
+                      ?.codex_security_operation_id ??
+                    `fixture-scan-${model ?? "inherited"}`,
+                  codex_security_attempt_id: `worker-${index}-${kind}-${resumeThreadId ?? "new"}`,
+                  ...(workerConfig.telemetry.responses_api_metadata
+                    ?.codex_security_attempt_id
+                    ? { codex_security_parent_attempt_id: `parent-${index}` }
+                    : {}),
                 },
               },
             );
@@ -2235,12 +2271,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,
             );
-            assert.equal(
-              invocation.configPath,
-              workerConfigurations[index].path,
-            );
-            const selectedProvider = workerConfigurations[index];
-            if (selectedProvider.provider === undefined) {
+            assert.equal(invocation.configPath, workerConfig.path);
+            if (workerConfig.provider === undefined) {
               assert.equal(
                 invocation.argv.some(
                   (arg: string) =>
@@ -2252,18 +2284,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             } else {
               assert.ok(
                 invocation.argv.includes(
-                  `model_provider=${JSON.stringify(selectedProvider.provider)}`,
+                  `model_provider=${JSON.stringify(workerConfig.provider)}`,
                 ),
               );
             }
             if (
-              selectedProvider.provider !== undefined &&
-              selectedProvider.providerConfig
+              workerConfig.provider !== undefined &&
+              workerConfig.providerConfig
             ) {
               assertFlagPair(
                 invocation.argv,
                 "--profile",
-                selectedProvider.nativeProfile!,
+                workerConfig.nativeProfile!,
               );
               assert.deepEqual(
                 JSON.parse(
@@ -2272,7 +2304,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ),
                 ),
                 {
-                  [selectedProvider.provider]: selectedProvider.providerConfig,
+                  [workerConfig.provider]: workerConfig.providerConfig,
                 },
               );
             }
@@ -2355,7 +2387,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
-              workerConfigurations[index].workerConfigPath,
+              workerConfig.workerConfigPath,
             );
             assert.deepEqual(
               JSON.parse(
@@ -2369,7 +2401,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ),
                 ),
               ).shell_environment_policy,
-              workerConfigurations[index].shellPolicy,
+              workerConfig.shellPolicy,
             );
             const workerFeatures = parseToml(
               invocation.argv
@@ -2377,7 +2409,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 .join("\n"),
             ).features;
             assert.deepEqual(JSON.parse(JSON.stringify(workerFeatures)), {
-              ...workerConfigurations[index].features,
+              ...workerConfig.features,
               multi_agent_v2: {
                 enabled: false,
                 max_concurrent_threads_per_session: 1,
@@ -2385,7 +2417,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               enable_fanout: false,
             });
             assertConfigOverrides(invocation.argv, {
-              ...selectedProvider.nativePaths,
+              ...workerConfig.nativePaths,
               sandbox_mode: undefined,
               "mcp_servers.parent": undefined,
             });
@@ -3244,7 +3276,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
               (worker: { id: string }) => worker.id === workerId,
             );
             assert.equal(worker.attempt, 1);
-            assert.ok(worker.error.includes(persistedDiagnostic));
+            assert.ok(worker.error.includes(persistedDiagnostic), worker.error);
             assert.equal(
               (await readJson(fixture.markerPath)).argv.includes("resume"),
               false,
@@ -3288,7 +3320,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
     } finally {
       for (const [name, value] of saved) restoreEnv(name, value);
     }
-  });
+  }, null);
 }
 
 async function testOwnedArtifactToolFailureDiagnosticIsPreserved() {
@@ -3480,6 +3512,7 @@ async function testAbortPropagation() {
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
+  await completedWorkerSettlesWithoutWaitingForProcessExit(undefined, true);
   for (const kind of ["discovery", "dedup"] as const) {
     for (const resumed of [false, true]) {
       await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
@@ -3583,6 +3616,10 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       result.threadId,
       resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
     );
+    assert.equal(result.usage?.cache_write_input_tokens, 0);
+    assert.equal(result.usage?.cache_write_input_tokens_reported, false);
+    assert.equal(result.usage?.input_tokens, resumed ? 2 : 1);
+    assert.equal(result.usage?.total_tokens, resumed ? 4 : 2);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
     assert.equal(invocation.argv.includes("resume"), resumed);

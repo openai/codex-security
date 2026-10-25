@@ -30,11 +30,9 @@ Supported runtimes:
 - Python 3.10+ for scans, policy generation, exports, scan history, and saved
   findings. Python 3.10 also needs `tomli`.
 
-Reading compressed Codex session logs (`.jsonl.zst`) requires Node.js 22.15.0+
-within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14, compressed sessions
-are unavailable when reading saved activity or attaching scan logs to feedback, and
-scans whose original session is compressed cannot resume. Plain `.jsonl` logs
-work on all supported runtimes.
+Compressed Codex session logs (`.jsonl.zst`) are readable on all supported Node.js
+versions. The bundled streaming decoder reads concatenated frames and reports
+truncated streams as collection errors.
 
 ### Install the CLI
 
@@ -384,11 +382,14 @@ Deep discovery retains its enforced deadline, with a default and maximum of
 
 ### Progress and cost
 
-Use `onProgress` for scan progress and `onCost` for cost updates.
-Use `onUsageObservation` for the last reported token measurement time
+Use `onProgress` for scan progress and `onMeasurement` for observed token/cost
+subtotals, coverage, and collection time. `onCost` and `onUsage` report complete
+totals. `onUsageObservation` reports the native token measurement time
 (`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).
-Each reading includes its own `observedAt` timestamp and the percentage used in
-each reported window. A limit-only update can arrive before any token measurement.
+Each reading has its own `observedAt` timestamp and percentages used in each
+reported window. An allowance can arrive before any token measurement. See
+[telemetry and measurement](docs/telemetry.md) for operation receipts, collection
+controls, replay, and reporting definitions.
 
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 persisted worker sessions discovered by the SDK's existing session tracker,

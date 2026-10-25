@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_config
 from workbench.handoff import require_current_continuation
-from workbench.storage import create_private_directory
+from workbench.storage import create_private_directory, worker_usage_directory
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
@@ -438,6 +438,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
             else scan["user_context"]
         ),
         "scanDir": scan["scan_dir"],
+        "workerUsageDirectory": str(worker_usage_directory(run["scan_id"])),
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
         "coordinatorGeneration": run["coordinator_generation"],

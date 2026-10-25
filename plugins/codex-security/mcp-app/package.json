@@ -13,6 +13,7 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@openai/codex-sdk": "0.164.0",
     "ajv": "8.20.0",
+    "fzstd": "0.1.1",
     "smol-toml": "1.9.1",
     "zod": "^4.6.7"
   },

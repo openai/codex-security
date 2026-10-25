@@ -51,6 +51,11 @@ import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import {
+  OperationTelemetry,
+  readOperationTelemetry,
+  type OperationTelemetryEvent,
+} from "../src/operation-telemetry.js";
 import { VERSION } from "../src/version.js";
 import { nodeCommand, gitText } from "./support/shell.js";
 import { fail, throwing } from "./support/errors.js";
@@ -146,6 +151,7 @@ describe("CodexSecurity finding validation", () => {
     const root = fixtureRoot ?? (await temporaryDirectory());
     const repository = join(root, "repository");
     const codexHome = await temporaryDirectory();
+    let telemetryEnabled = false;
     const stateDirectory =
       environmentOverrides["CODEX_SECURITY_STATE_DIR"] ?? join(root, "state");
     await mkdir(repository, { recursive: true });
@@ -187,6 +193,8 @@ describe("CodexSecurity finding validation", () => {
       },
       {
         environment,
+        createOperationTelemetry: (options) =>
+          telemetryEnabled ? new OperationTelemetry(options) : null,
         prepareRuntime: runtimePreparer(codexHome, () => ({
           plugin: { ...preparedRuntime(codexHome).plugin, pluginRoot },
           environment,
@@ -224,6 +232,9 @@ describe("CodexSecurity finding validation", () => {
       workbench,
       root,
       codexHome,
+      enableTelemetry() {
+        telemetryEnabled = true;
+      },
     };
   }
 
@@ -292,6 +303,7 @@ describe("CodexSecurity finding validation", () => {
               destination === "state" ? storage : join(root, "state"),
             OPENAI_API_KEY: "synthetic-validation-key",
           },
+          createOperationTelemetry: undefined,
           prepareRuntime,
           resolvePluginPython: async () => "/managed/python",
           createCodex,
@@ -861,13 +873,22 @@ describe("CodexSecurity finding validation", () => {
       yield* validationEvents();
     }
     const fixture = await persistedValidationClient(events);
+    fixture.enableTelemetry();
     await using client = fixture.client;
     const workflowId = await fixture.bindWorkflow(
       "explicit-validation-evidence",
     );
-    const request = { ...fixture.options, workflowId };
+    const request = {
+      ...fixture.options,
+      workflowId,
+      outputDir: join(fixture.stateDirectory, "telemetry"),
+    };
     const first = await client.validate(request);
     expect(await client.validate(request)).toEqual(first);
+    expect(await client.validate({ ...request, outputDir: undefined })).toEqual(
+      first,
+    );
+    expect(await readdir(first.outputDir)).toEqual(["proof.txt"]);
     expect(modelCalls).toBe(1);
     if (process.platform !== "win32") {
       await chmod(first.outputDir, 0o770);
@@ -884,6 +905,23 @@ describe("CodexSecurity finding validation", () => {
     expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
       "Changed evidence.\n",
     );
+    if (process.platform !== "win32") {
+      await writeFile(
+        join(first.outputDir, "proof.txt"),
+        "Original evidence.\n",
+      );
+      await chmod(first.outputDir, 0o770);
+      const regenerated = await client.validate({
+        ...request,
+        outputDir: undefined,
+      });
+      expect(regenerated.outputDir).not.toBe(first.outputDir);
+      expect(modelCalls).toBe(2);
+      expect(await readdir(first.outputDir)).toEqual(["proof.txt"]);
+      expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
+        "Original evidence.\n",
+      );
+    }
   });
 
   test.each(["empty", "nonempty"])(
@@ -1003,15 +1041,20 @@ describe("CodexSecurity finding validation", () => {
       yield* validationEvents();
     }
     const original = await persistedValidationClient(events);
+    original.enableTelemetry();
     usePersistedValidationWorkbench(original, () => targetChanged);
     await using originalClient = original.client;
     await original.bindWorkflow("validation-retry");
+    const finished: Readonly<OperationTelemetryEvent>[] = [];
     const request = {
       ...original.options,
       outputDir: undefined,
       scanId: "recorded-scan",
       workflowId: "validation-retry",
       safetyIdentifier: "synthetic-validation-first",
+      onTelemetry: (event: Readonly<OperationTelemetryEvent>) => {
+        if (event.type === "attempt_finished") finished.push(event);
+      },
     };
     const first = await originalClient.validate(request);
     await expect(
@@ -1024,6 +1067,7 @@ describe("CodexSecurity finding validation", () => {
       PLUGIN_ROOT,
       original.root,
     );
+    resumed.enableTelemetry();
     usePersistedValidationWorkbench(resumed, () => targetChanged);
     await using client = resumed.client;
     expect(await client.validate(request)).toEqual(first);
@@ -1035,6 +1079,17 @@ describe("CodexSecurity finding validation", () => {
       "scan target changed",
     );
     expect(modelCalls).toBe(3);
+    expect(finished.map((event) => event.reusedResult)).toEqual([
+      false,
+      false,
+      true,
+      false,
+      false,
+    ]);
+    const { events: journal } = await readOperationTelemetry(
+      original.stateDirectory,
+    );
+    expect(journal.filter((event) => event.reusedResult)).toHaveLength(1);
   });
 
   test("separates persisted validation by model and access program across clients", async () => {

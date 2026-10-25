@@ -22,6 +22,11 @@ def resolve_scan_root(scan_root: str | None) -> Path:
     return Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
 
 
+def worker_usage_directory(scan_id: str) -> Path:
+    """Bind host-observed receipts beneath the persistent protected native home."""
+    return state_dir() / "codex-home" / "worker-usage" / scan_id
+
+
 def create_private_directory(path: Path) -> None:
     """Create missing directories privately without changing existing permissions."""
     try:

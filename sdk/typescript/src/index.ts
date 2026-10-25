@@ -93,6 +93,7 @@ export type {
   ScanAccountRateLimitWindow,
   ScanCost,
   ScanSessionEvent,
+  ScanUsageMeasurement,
   ScanUsageObservation,
   ScanWorkerEvent,
 } from "./cost.js";
@@ -205,10 +206,18 @@ export type {
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
 export type { FindingEmbeddingBinding } from "./deduplication/local.js";
 export type {
+  PublicationTelemetry,
+  PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
+export type {
   DeduplicationDiagnostic,
   DeduplicationDiagnosticObserver,
 } from "./deduplication/diagnostics.js";
-export type { FindingEmbedder } from "./server/embeddings.js";
+export type {
+  FindingEmbedder,
+  EmbeddingUsageObservation,
+  EmbeddingUsageObserver,
+} from "./server/embeddings.js";
 export {
   ExternalPublicationError,
   prepareExternalPublication,
@@ -327,6 +336,16 @@ export type {
   ValidateRecordsOptions,
   ValidationReviewRequest,
 } from "./validation-records.js";
+
+export {
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "./operation-telemetry.js";
+export type {
+  OperationTelemetryEvent,
+  OperationOutcome,
+  OperationFailureCategory,
+} from "./operation-telemetry.js";
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
 export {

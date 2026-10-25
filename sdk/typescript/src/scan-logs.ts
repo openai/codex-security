@@ -1,9 +1,6 @@
-import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { createInterface } from "node:readline";
-import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
-import zlib from "node:zlib";
+import { sessionLines } from "./session-lines.js";
 import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
@@ -66,17 +63,10 @@ export function readSavedScanLogs(
   });
 }
 
-// Codex can compress cold rollouts to `.jsonl.zst`. Node 22.13 and 22.14 lack
-// zstd, so they still read plain rollouts only.
-const readsCompressedSessions = typeof zlib.createZstdDecompress === "function";
-
 type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
-  for await (const path of sessionFiles(
-    join(codexHome, directory),
-    readsCompressedSessions,
-  )) {
+  for await (const path of sessionFiles(join(codexHome, directory), true)) {
     for await (const first of sessionEvents(path)) {
       if (first["type"] !== "session_meta" || !isRecord(first["payload"])) {
         break;
@@ -262,13 +252,8 @@ async function extendsSessionLog(
 async function* sessionEvents(
   path: string,
 ): AsyncGenerator<Record<string, unknown>> {
-  const file = createReadStream(path);
-  const stream = path.endsWith(".zst")
-    ? pipeline(file, zlib.createZstdDecompress(), () => {})
-    : file;
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
   try {
-    for await (const line of lines) {
+    for await (const line of sessionLines(path)) {
       if (line.trim() === "") continue;
       try {
         const event: unknown = JSON.parse(line);
@@ -279,8 +264,5 @@ async function* sessionEvents(
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  } finally {
-    lines.close();
-    stream.destroy();
   }
 }

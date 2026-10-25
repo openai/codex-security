@@ -342,6 +342,24 @@ test("reuses publication after dedupe failure and persists a successful empty du
     environment,
     fetch: request,
   });
+  const reused = await publishScanToCustomInternal(scanDir, options, {
+    environment,
+    fetch: rejecting("A completed publication must reuse its saved receipt"),
+  });
+  expect(reused.telemetry).toMatchObject({
+    destination: "custom",
+    outcome: "completed",
+    attempted: false,
+    counts: {
+      selected: document.findings.length,
+      submitted: 0,
+      created: 0,
+      reused: document.findings.length,
+      acknowledged: 0,
+      failed: 0,
+    },
+  });
+  expect(reused.telemetry!.attemptId).not.toBe(receipt.telemetry!.attemptId);
   await expect(
     deduplicateScanInternal(document.scanId, options, {
       environment,

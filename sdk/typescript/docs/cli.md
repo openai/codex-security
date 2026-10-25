@@ -920,8 +920,10 @@ publication uses the same request attribution; embedding requests identify
 the package and version in their `User-Agent`.
 
 These fields provide request attribution for supported inference providers, including
-Bedrock. They do not create a separate telemetry collector, record command
-starts or outcomes, or make another provider's traffic visible to OpenAI.
+Bedrock. They do not create a separate telemetry collector or make another
+provider's traffic visible to OpenAI. Local operation receipts separately record
+starts, outcomes, duration, and usage coverage; see
+[telemetry and measurement](telemetry.md).
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
@@ -2124,11 +2126,10 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
-Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
-Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
-compressed sessions are unavailable to `scans logs`, feedback attachments, and
-`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
-logs work on all supported runtimes.
+Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
+work on all supported Node.js versions, including logs, feedback attachments,
+usage accounting, and saved-session discovery for resume. A bundled decoder
+reads concatenated frames and reports truncated streams as collection errors.
 
 ### Resuming an interrupted Deep Scan
 

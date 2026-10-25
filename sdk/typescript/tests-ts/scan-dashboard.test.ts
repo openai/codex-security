@@ -57,6 +57,57 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("invalidates complete totals when usage becomes partial or unavailable", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, { showCost: true });
+    dashboard.start();
+    const usage = {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 5,
+      reasoning_output_tokens: 0,
+      total_tokens: 105,
+    };
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      estimatedUsd: 0.001,
+    };
+    dashboard.setMeasurement({
+      usage,
+      cost,
+      coverage: "complete",
+      observedAt: new Date().toISOString(),
+      threadCount: 1,
+      missingThreadCount: 0,
+    });
+    expect(lastFrame(stderr)).not.toContain("(partial)");
+    dashboard.setMeasurement({
+      usage,
+      cost,
+      coverage: "partial",
+      observedAt: new Date().toISOString(),
+      threadCount: 1,
+      missingThreadCount: 1,
+    });
+    expect(lastFrame(stderr)).toContain("(partial)");
+    dashboard.setMeasurement({
+      usage: null,
+      cost: null,
+      coverage: "unavailable",
+      observedAt: new Date().toISOString(),
+      threadCount: 0,
+      missingThreadCount: 2,
+    });
+    expect(lastFrame(stderr)).toContain("usage unavailable");
+    expect(lastFrame(stderr)).not.toContain("105");
+    dashboard.stop();
+  });
+
   test("flushes queued activity before stopping without rendering afterward", () => {
     const stderr = capture(true);
     const pending: (() => void)[] = [];

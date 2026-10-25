@@ -22,6 +22,7 @@ import {
   EMBEDDING_MODEL,
   OpenAiFindingEmbedder,
   type FindingEmbedder,
+  type EmbeddingUsageObservation,
 } from "../src/server/embeddings.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
@@ -235,6 +236,53 @@ test("local dedupe indexes a sealed directory, reuses vectors and never calls th
   expect(await readFile(join(f.scanDir, "findings.json"), "utf8")).toBe(
     original,
   );
+});
+
+test("saved-scan dedupe observes built-in embedding batches and skips cached embeddings", async () => {
+  const f = await fixture();
+  const observations: EmbeddingUsageObservation[] = [];
+  const request = spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      model: EMBEDDING_MODEL,
+      data: f.document.findings.map((_, index) => ({
+        index,
+        embedding: vector,
+      })),
+      usage: { prompt_tokens: 41 },
+    }),
+  );
+  const options = {
+    repository: f.repository,
+    onEmbeddingUsage: (observation: EmbeddingUsageObservation) =>
+      observations.push(observation),
+  };
+  const dependencies = {
+    environment: { ...f.environment, OPENAI_API_KEY: "synthetic-key" },
+    reviewer: emptyNeighborhoodReviewer(),
+    fetch: rejecting("Unexpected findings HTTP call"),
+  };
+  try {
+    const first = await deduplicateScanDirectoryInternal(
+      f.scanDir,
+      options,
+      dependencies,
+    );
+    expect(first.deduplicationStatus).toBe("completed");
+    expect(observations).toEqual([
+      {
+        model: EMBEDDING_MODEL,
+        inputCount: f.document.findings.length,
+        inputTokens: 41,
+        outcome: "completed",
+        durationMs: expect.any(Number),
+      },
+    ]);
+    await deduplicateScanDirectoryInternal(f.scanDir, options, dependencies);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(observations).toHaveLength(1);
+  } finally {
+    request.mockRestore();
+  }
 });
 
 test("saved-scan local review persists a group with an existing repository finding", async () => {

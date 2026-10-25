@@ -100,7 +100,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     thread_count = usage.get("threadCount")
     if (
         coverage not in ("complete", "partial", "unavailable")
-        or usage.get("source") != "codex_rollout"
+        or usage.get("source") not in ("codex_rollout", "codex_runtime")
         or type(thread_count) is not int
         or thread_count < 0
     ):
@@ -142,6 +142,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 
     allowed_keys = {
         "coverage",
+        "coverageScope",
         "source",
         "threadCount",
         "missingThreadCount",
@@ -152,19 +153,32 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "observedAt",
         "tokensUpdatedAt",
         "accountRateLimits",
+        "cacheWriteInputTokensReported",
         *SCAN_USAGE_TOKEN_KEYS,
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
         return False
+    if "coverageScope" in usage:
+        scope = usage["coverageScope"]
+        if (
+            not isinstance(scope, list)
+            or any(not isinstance(identity, str) or not identity for identity in scope)
+            or len(set(scope)) != len(scope)
+        ):
+            return False
     if (
         not all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
         or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
+        or "cacheWriteInputTokensReported" in usage
+        and type(usage["cacheWriteInputTokensReported"]) is not bool
     ):
         return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
         return False
-    if coverage == "complete" and (warnings or missing):
+    if coverage == "complete" and (
+        any(warning != "cost_estimate_covers_earlier_usage" for warning in warnings) or missing
+    ):
         return False
     if coverage == "partial" and not (warnings or missing):
         return False
@@ -185,8 +199,11 @@ def _valid_measured_scan_usage(usage: object) -> bool:
             return False
         if any(
             not isinstance(role, dict)
-            or set(role) != keys
+            or not keys.issubset(role)
+            or not set(role).issubset({*keys, "cacheWriteInputTokensReported"})
             or any(type(role[key]) is not int or role[key] < 0 for key in keys)
+            or "cacheWriteInputTokensReported" in role
+            and type(role["cacheWriteInputTokensReported"]) is not bool
             for role in roles.values()
         ):
             return False

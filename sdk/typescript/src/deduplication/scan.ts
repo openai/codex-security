@@ -42,6 +42,7 @@ import {
 } from "./checkpointed-review.js";
 import { normalizeRepository } from "../targets.js";
 import { LocalDeduplication, type FindingEmbeddingBinding } from "./local.js";
+import type { EmbeddingUsageObserver } from "../server/embeddings.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import { CodexSecurityError } from "../errors.js";
 import { comparisonEnvironment } from "../scan-comparison.js";
@@ -67,6 +68,8 @@ export interface DeduplicateScanOptions {
   concurrency?: number;
   /** Best-effort progress and native review diagnostics; observer failures are ignored. */
   onDiagnostic?: DeduplicationDiagnosticObserver;
+  /** Built-in local embedding batch usage; excluded from scan model-token totals. */
+  onEmbeddingUsage?: EmbeddingUsageObserver;
   signal?: AbortSignal;
 }
 
@@ -204,6 +207,7 @@ async function deduplicateResolvedScan(
           options.signal,
           workbench,
           options.embedding,
+          options.onEmbeddingUsage,
         )
       : undefined;
   const client =

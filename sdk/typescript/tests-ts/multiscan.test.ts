@@ -1436,6 +1436,49 @@ describe("multiscan", () => {
     ]);
   });
 
+  test.each([false, true])(
+    "retains usage for failed or canceled bulk attempts: canceled=%p",
+    async (cancel) => {
+      const { paths } = await repositoryFixture("synthetic-usage");
+      const controller = new AbortController();
+      const measurement = {
+        coverage: "partial" as const,
+        cost: null,
+        observedAt: "2026-10-01T00:00:00.000Z",
+        threadCount: 1,
+        missingThreadCount: 1,
+        usage: {
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 5,
+          reasoning_output_tokens: 0,
+          total_tokens: 105,
+        },
+      };
+      const run = runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scanOptions.onMeasurement?.(measurement);
+            if (cancel) controller.abort(new Error("Synthetic cancellation"));
+            throw new Error("Synthetic execution failure");
+          }),
+          { maxAttempts: 1, signal: controller.signal },
+        ),
+      );
+      if (cancel) await expect(run).rejects.toThrow("Synthetic cancellation");
+      else expect(await run).toMatchObject({ completed: 0, failed: 1 });
+      expect(await results(join(paths.output, "results.jsonl"))).toMatchObject([
+        {
+          status: "failed",
+          outcome: cancel ? "canceled" : "failed",
+          measurement,
+        },
+      ]);
+    },
+  );
+
   test("records an exhausted repository budget without retrying the scan", async () => {
     const { paths } = await repositoryFixture("over-budget");
     const cost = {
@@ -2844,11 +2887,14 @@ describe("multiscan", () => {
     const knowledgeBasePaths = [document];
 
     let attempts = 0;
+    const operationIds: string[] = [];
     const summary = await runMultiscan(
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
           expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
+          expect(scanOptions.telemetryContext?.operationId).toBeString();
+          operationIds.push(scanOptions.telemetryContext!.operationId);
           attempts += 1;
           if (attempts === 1) {
             scanOptions.onWarning?.("Warning from the failed attempt.");
@@ -2861,6 +2907,7 @@ describe("multiscan", () => {
     );
 
     expect(attempts).toBe(2);
+    expect(new Set(operationIds).size).toBe(1);
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(summary).not.toHaveProperty("warnings");
     expect(await results(summary.resultsPath)).toMatchObject([
@@ -2868,10 +2915,16 @@ describe("multiscan", () => {
         id: "retry",
         status: "failed",
         attempt: 1,
+        operationId: operationIds[0],
         error: failure,
         warnings: ["Warning from the failed attempt."],
       },
-      { id: "retry", status: "completed", attempt: 2 },
+      {
+        id: "retry",
+        status: "completed",
+        attempt: 2,
+        operationId: operationIds[0],
+      },
     ]);
   });
 

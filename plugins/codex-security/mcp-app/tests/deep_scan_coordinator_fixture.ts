@@ -18,8 +18,8 @@ import { sourceReferences } from "./support/source-references.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { once } from "node:events";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importModule } from "./import-module.ts";
 
@@ -66,14 +66,23 @@ export async function fixtureRun(
   const root = await temporaryDirectories.create(
     "codex-security-deep-coordinator-",
   );
+  const scanId = randomUUID();
+  const stateDirectory = path.join(root, "state");
+  await mkdir(stateDirectory, { mode: 0o700 });
   return {
     pluginRoot: path.join(root, "plugin"),
     run: {
-      scanId: randomUUID(),
+      scanId,
       status: "running" as const,
       targetPath: path.join(root, "target"),
       scope: ".",
       scanDir: path.join(root, "scan"),
+      workerUsageDirectory: path.join(
+        stateDirectory,
+        "codex-home",
+        "worker-usage",
+        scanId,
+      ),
       config: {
         workers: 1,
         subagents: 0,

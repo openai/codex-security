@@ -3,7 +3,10 @@ import { classificationRunsSchema } from "./severity-review.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
-import { withCodexPreflightLock } from "./provider-profile.js";
+import {
+  providerPreflightCommand,
+  withCodexPreflightLock,
+} from "./provider-profile.js";
 import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
 
@@ -165,6 +168,7 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -284,6 +288,10 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import {
+  OperationTelemetry,
+  type OperationTelemetryEvent,
+} from "./operation-telemetry.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
@@ -1121,6 +1129,7 @@ interface SkillCommandOutput {
   readonly modelProvider?: string;
   readonly codexOverrides?: JsonObject;
   readonly command: "validate" | "patch" | "verify-fix";
+  readonly telemetryCommand?: OperationTelemetryEvent["command"];
   readonly stdout: Writable;
   readonly stderr: Writable;
   readonly appServer?: {
@@ -1466,6 +1475,83 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
+  let journal: OperationTelemetry | null = null;
+  if (output !== undefined) {
+    try {
+      journal = new OperationTelemetry({
+        directory: codexSecurityStateDirectory(processEnvironment),
+        protectedRepository: output.directory ?? output.appServer?.directory,
+        command: output.telemetryCommand ?? output.command,
+        surface: "cli",
+        onError: (error) => {
+          void writeCliOutput(
+            output.stderr,
+            `codex-security: Could not save operation telemetry: ${errorMessage(error)}\n`,
+          ).catch(() => {});
+        },
+      });
+      await journal.start();
+      args = [
+        ...args,
+        ...Object.entries({
+          codex_security_operation_id: journal.operationId,
+          codex_security_attempt_id: journal.attemptId,
+        }).flatMap(([key, value]) => [
+          "--config",
+          `responses_api_metadata.${key}=${inlineToml(value)}`,
+        ]),
+      ];
+    } catch (error) {
+      void writeCliOutput(
+        output.stderr,
+        `codex-security: Could not start operation telemetry: ${errorMessage(error)}\n`,
+      ).catch(() => {});
+    }
+  }
+  try {
+    const status = await runCodexSkillProcess(
+      args,
+      output,
+      command,
+      processEnvironment,
+      input,
+    );
+    await journal?.finish(
+      status === 0
+        ? "completed"
+        : status === 130 || status === 143
+          ? "canceled"
+          : "failed",
+      status === 0
+        ? {}
+        : {
+            failureCategory:
+              status === 130 || status === 143 ? "canceled" : "execution",
+          },
+    );
+    return status;
+  } catch (error) {
+    await journal?.finish("failed", {
+      failureCategory:
+        error instanceof AuthenticationRequiredError
+          ? "authentication"
+          : error instanceof ConfigurationError
+            ? "configuration"
+            : error instanceof InvalidTargetError
+              ? "input"
+              : "execution",
+    });
+    throw error;
+  }
+}
+
+async function runCodexSkillProcess(
+  args: readonly string[],
+  output: SkillCommandOutput | undefined,
+  command: CodexCommand,
+  processEnvironment: NodeJS.ProcessEnv,
+  input?: string,
+): Promise<number> {
   let releaseCredentialHome: (() => Promise<void>) | undefined;
   try {
     let apiKey: string | undefined;
@@ -1556,7 +1642,12 @@ export async function runCodexSkillCommand(
         };
         if (
           !credentialsAvailable &&
-          !(await accountStatus(command, selected)).authenticated
+          !(
+            await accountStatus(
+              await providerPreflightCommand(command, resolved.config),
+              selected,
+            )
+          ).authenticated
         ) {
           throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
         }
@@ -1575,7 +1666,7 @@ export async function runCodexSkillCommand(
           try {
             args = [
               ...args,
-              ...(await skillDaybreakConfigOverrides(
+              ...(await skillStartupConfigOverrides(
                 args,
                 command,
                 selected,
@@ -1807,9 +1898,9 @@ export async function runCodexSkillCommand(
 
 /**
  * Stored auth switches homes. Native origins preserve ambient settings at
- * app-server startup, where model discovery gates cannot be set per thread.
+ * app-server startup, including telemetry controls and model discovery gates.
  */
-async function skillDaybreakConfigOverrides(
+async function skillStartupConfigOverrides(
   args: readonly string[],
   command: CodexCommand,
   environment: NodeJS.ProcessEnv,
@@ -1831,7 +1922,15 @@ async function skillDaybreakConfigOverrides(
       ambientFeatures[key],
     ]),
   ];
-  if (settings.every(([, value]) => value === undefined)) return [];
+  // App-server has no private profile-file option. Keep inherited exporter
+  // credentials in their native home rather than exposing them in arguments or
+  // temporarily changing shared settings while other scans are running.
+  const telemetryKeys = ["analytics", "responses_api_metadata"] as const;
+  if (
+    settings.every(([, value]) => value === undefined) &&
+    telemetryKeys.every((key) => ambientConfig[key] === undefined)
+  )
+    return [];
   const nativeEnvironment = Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
@@ -1846,25 +1945,43 @@ async function skillDaybreakConfigOverrides(
       ),
     ).href
   );
-  const response = (await withCodexPreflightLock(
-    nativeEnvironment,
-    signal,
-    () =>
+  // A private user-file layer applies consent before native startup without
+  // sharing it across scans or overriding native project/CLI precedence.
+  const preflightHome = await mkdtemp(
+    join(configuredCodexHome(environment), ".startup-"),
+  );
+  let response: JsonObject;
+  try {
+    const preflightConfig = await readCodexHomeConfig(environment);
+    for (const key of telemetryKeys) {
+      const value = ambientConfig[key];
+      if (value === undefined) delete preflightConfig[key];
+      else preflightConfig[key] = value;
+    }
+    await writeCodexConfig(join(preflightHome, "config.toml"), preflightConfig);
+    const preflightEnvironment = {
+      ...nativeEnvironment,
+      CODEX_HOME: preflightHome,
+    };
+    response = (await withCodexPreflightLock(preflightEnvironment, signal, () =>
       native.readDeepScanRuntimeConfigWithOrigins({
         codexPath: command.command,
         appServerArgs: args,
         cwd: directory,
         configOverrides: [],
-        env: nativeEnvironment,
+        env: preflightEnvironment,
         signal,
         context: "helper",
       }),
-  )) as JsonObject;
+    )) as JsonObject;
+  } finally {
+    await rm(preflightHome, { recursive: true, force: true });
+  }
   const origins = response["origins"];
   const layers = response["layers"];
   const malformed = () =>
     new CodexSecurityError(
-      "Codex did not return configuration origins for Daybreak settings.",
+      "Codex did not return configuration origins for inherited startup settings.",
     );
   if (!isJsonObject(origins) || !Array.isArray(layers)) throw malformed();
   const userLayer = layers.findIndex((layer) => {
@@ -1892,6 +2009,26 @@ async function skillDaybreakConfigOverrides(
       if (layer < userLayer) continue;
     }
     overrides.push("--config", `${key}=${inlineToml(value)}`);
+  }
+  for (const key of telemetryKeys) {
+    const value = ambientConfig[key];
+    if (value === undefined) continue;
+    let inherited: JsonObject = { [key]: value };
+    // Native layers are already filtered for project trust and supported keys.
+    // Preserve their precedence and literal metadata keys as whole tables.
+    for (const layer of layers.slice(0, userLayer).reverse()) {
+      if (
+        !isJsonObject(layer) ||
+        layer["disabledReason"] != null ||
+        !isJsonObject(layer["config"])
+      )
+        continue;
+      const override = layer["config"][key];
+      if (override !== undefined) {
+        inherited = deepMerge(inherited, { [key]: override });
+      }
+    }
+    overrides.push("--config", `${key}=${inlineToml(inherited[key]!)}`);
   }
   return overrides;
 }
@@ -5373,6 +5510,7 @@ export async function main(
                         cost:
                           (scan["cost"] as unknown as ScanCost | undefined) ??
                           null,
+                        usage: scan["usage"] as JsonObject | undefined,
                       };
                     }
                     if (status !== "running" || scan["mode"] !== "deep")
@@ -5426,6 +5564,9 @@ export async function main(
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
+                        telemetryContext: prompts.telemetryContext,
+                        onTelemetry: prompts.onTelemetry,
+                        onMeasurement: prompts.onMeasurement,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
@@ -8606,6 +8747,7 @@ async function runSkill(
     ],
     {
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
+      ...(assess ? { telemetryCommand: "assess-patch-risk" as const } : {}),
       auth: options.auth ?? "auto",
       directory,
       modelProvider: provider,
@@ -9166,7 +9308,10 @@ async function executeScan(
   let deepProgress: DeepScanProgress | null = null;
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
+  let costUpdateCount = 0;
+  let usageUpdateCount = 0;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
+  let runningCoverage: "complete" | "partial" | "unavailable" | null = null;
   let usageFreshness: string | null = null;
   let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
@@ -9432,9 +9577,12 @@ async function executeScan(
         runningCost !== null
           ? formatScanCostTokens(runningCost)
           : formatTokenUsage(runningUsage);
-      if (tokens !== null) details.push(`Tokens: ${tokens}`);
+      const coverageNote = runningCoverage === "partial" ? " (partial)" : "";
+      if (tokens !== null) details.push(`Tokens: ${tokens}${coverageNote}`);
+      else if (runningCoverage === "unavailable")
+        details.push("Usage unavailable");
       if (showCost && runningCost !== null) {
-        details.push(`Cost: ${formatScanCost(runningCost)}`);
+        details.push(`Cost: ${formatScanCost(runningCost)}${coverageNote}`);
       }
       if (tokens !== null)
         details.push(usageFreshness ?? USAGE_TIME_UNAVAILABLE);
@@ -9478,6 +9626,56 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onTelemetry: (event) =>
+        diagnostic("telemetry.operation", {
+          event_id: event.eventId,
+          operation_id: event.operationId,
+          attempt_id: event.attemptId,
+          type: event.type,
+          outcome: event.outcome,
+          duration_ms: event.durationMs,
+          failure_category: event.failureCategory,
+          usage_coverage: event.measurement?.coverage,
+        }),
+      onMeasurement: async (measurement) => {
+        const previous = runningCoverage;
+        runningCoverage = measurement.coverage;
+        runningUsage = measurement.usage;
+        runningCost = measurement.cost;
+        diagnostic("usage.observed", {
+          coverage: measurement.coverage,
+          observed_at: measurement.observedAt,
+          thread_count: measurement.threadCount,
+          missing_thread_count: measurement.missingThreadCount,
+          input_tokens: measurement.usage?.input_tokens,
+          output_tokens: measurement.usage?.output_tokens,
+        });
+        if (dashboard !== null) {
+          dashboard.setMeasurement(measurement);
+        } else if (measurement.coverage !== "complete") {
+          progress?.stopTimer();
+          if (previous !== measurement.coverage) {
+            progress?.stage(
+              measurement.coverage === "partial"
+                ? "Usage is partial; showing the observed subtotal."
+                : "Usage is unavailable.",
+            );
+          }
+          progress?.startTimer(runningMessage());
+        } else if (previous !== null && previous !== "complete") {
+          const priorUsageUpdateCount = usageUpdateCount;
+          const priorCostUpdateCount = costUpdateCount;
+          // A recovered coverage label can change without a legacy totals update.
+          await Promise.resolve();
+          if (
+            usageUpdateCount !== priorUsageUpdateCount ||
+            costUpdateCount !== priorCostUpdateCount
+          )
+            return;
+          progress?.stopTimer();
+          progress?.startTimer(runningMessage());
+        }
+      },
       onUsageObservation: async (observation) => {
         if (dashboard !== null) {
           dashboard.setUsageObservation(observation);
@@ -9495,20 +9693,22 @@ async function executeScan(
         }
       },
       onUsage: async (usage) => {
+        usageUpdateCount += 1;
         runningUsage = usage;
         if (dashboard !== null) {
           dashboard.setUsage(usage);
           return;
         }
-        const priorCost = runningCost;
+        const priorCostUpdateCount = costUpdateCount;
         // The tracker queues usage before cost; let the paired cost update render once.
         await Promise.resolve();
-        if (runningCost !== priorCost) return;
+        if (costUpdateCount !== priorCostUpdateCount) return;
         progress?.stopTimer();
         progress?.stage(`Tokens: ${formatTokenUsage(usage)}.`);
         progress?.startTimer(runningMessage());
       },
       onCost: (cost, limit = maxCostUsd) => {
+        costUpdateCount += 1;
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
         }
