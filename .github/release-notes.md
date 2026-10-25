@@ -61,6 +61,7 @@
 - preserve required checks after pull request edits ([#1944](https://github.com/openai/codex-security/pull/1944))
 - let reducers page inputs without code mode ([#1910](https://github.com/openai/codex-security/pull/1910))
 - show scan usage timestamps and account allowance ([#1911](https://github.com/openai/codex-security/pull/1911))
+- keep local action dependencies up to date ([#1961](https://github.com/openai/codex-security/pull/1961))
 
 <!-- release-section: highlights:end -->
 
