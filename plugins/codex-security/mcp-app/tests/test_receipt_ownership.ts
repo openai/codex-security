@@ -133,24 +133,26 @@ def capture(*args, **kwargs):
     return captured
 saved._capture_saved_source = capture
 retained._capture_saved_source = capture
-frozen = None
+frozen = heads = None
 if sys.argv[9] == "true":
     db = SimpleNamespace(require_canonical_scan_directory=lambda path: path, artifact_path=lambda *args, **kwargs: None, ARTIFACTS={"manifest": "scan-manifest.json"})
     connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchall=lambda: [worker]))
-    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "seal_manifest_digest": None}
-    frozen, _ = saved._recovery_source_digests(db, connection, scan)
-merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen)
+    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "retained_checkpoint_heads_json": None, "seal_manifest_digest": None}
+    frozen, _, heads = saved._recovery_source_digests(db, connection, scan)
+merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen, checkpoint_heads=heads)
 saved._capture_saved_source = original_capture
 retained._capture_saved_source = original_retained_capture
-replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
-assert merged[2] == replay[2]
+snapshot = merged[0]["scan"]
+def replay():
+    return merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=snapshot["preservedSources"], checkpoint_heads=snapshot["preservedCheckpointHeads"])
+assert merged[2] == replay()[2]
 rejects_changed_checkpoint = None
 if published:
     checkpoint = root / published[-1]
     original = checkpoint.read_bytes()
     checkpoint.write_text("{}")
     try:
-        merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
+        replay()
     except saved.ContractError:
         rejects_changed_checkpoint = True
     else:
@@ -161,7 +163,7 @@ refs = merged[2]["surfaces"][0]["receiptRefs"]
 warnings = []
 coverage = merged[2]
 _recover_unsealed_coverage(coverage, plugin / "schemas", root, warnings, [])
-print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings, "published": published, "captured": merged[0]["scan"]["preservedSources"], "rejectsChangedCheckpoint": rejects_changed_checkpoint}))
+print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings, "published": published, "captured": snapshot["preservedSources"], "rejectsChangedCheckpoint": rejects_changed_checkpoint}))
 `,
         path.resolve(import.meta.dirname, "../.."),
         f.root,

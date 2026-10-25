@@ -65,6 +65,8 @@
 - distinguish file inventory from review progress ([#1960](https://github.com/openai/codex-security/pull/1960))
 - omit excerpts for unknown diff target kinds ([#515](https://github.com/openai/codex-security/pull/515))
 - finalize runs, preserve findings, and honor project budgets ([#1912](https://github.com/openai/codex-security/pull/1912))
+- select the mutation test runtime in one setup step ([#1985](https://github.com/openai/codex-security/pull/1985))
+- keep selected results stable during retries ([#915](https://github.com/openai/codex-security/pull/915))
 
 <!-- release-section: highlights:end -->
 
