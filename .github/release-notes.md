@@ -78,6 +78,8 @@
 - constrain deferred coverage paths ([#558](https://github.com/openai/codex-security/pull/558))
 - compile evals with separate Ajv installations ([#2009](https://github.com/openai/codex-security/pull/2009))
 - require opt-in for external import workflows ([#1863](https://github.com/openai/codex-security/pull/1863))
+- require Marketplace publication for Action releases ([#2008](https://github.com/openai/codex-security/pull/2008))
+- wait for the coordinator before ending CLI scans ([#2007](https://github.com/openai/codex-security/pull/2007))
 
 <!-- release-section: highlights:end -->
 
