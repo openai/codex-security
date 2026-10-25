@@ -3815,24 +3815,43 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
     expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
-    expect(githubReleaseWorkflow).toContain(
-      'if [[ "$(npm --version)" != "11.12.1" ]]; then',
-    );
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
   });
 
-  test("installs the exact attestation-capable npm through the Socket Firewall", () => {
-    for (const workflow of [githubReleaseWorkflow, protectedReleaseWorkflow]) {
-      expect(workflow).toContain("Install provenance-capable npm");
-      expect(workflow).toContain("npm@11.12.1");
-      expect(workflow).toContain(
-        "--registry=https://openai.firewall.socket.dev/npm/",
-      );
-      expect(workflow).toContain('>> "$GITHUB_PATH"');
-      expect(workflow).not.toContain("npm install --global");
-    }
+  test("both release jobs require the npm installed through the Socket Firewall", async () => {
+    const both = (name: string) => {
+      const script = workflowStepShell(protectedReleaseWorkflow, name);
+      expect(workflowStepShell(githubReleaseWorkflow, name)).toBe(script);
+      return script;
+    };
+    const result = await runShell(
+      `RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
+GITHUB_PATH="$RUNNER_TEMP/path"
+npm() {
+  printf '<%s>' "$1" "$2" "\${3#"$RUNNER_TEMP/"}" "\${@:4}"
+  mkdir -p "$3/node_modules/.bin"
+  printf '#!/bin/sh\\necho "\${TEST_NPM_VERSION:-11.12.1}"\\n' > "$3/node_modules/.bin/npm"
+  chmod +x "$3/node_modules/.bin/npm"
+}
+${both("Install provenance-capable npm")}
+export PATH="$(cat "$GITHUB_PATH"):$PATH"
+verify() { "$BASH" <<'VERIFY'
+${both("Verify npm on PATH")}
+VERIFY
+}
+verify && echo selected
+TEST_NPM_VERSION=11.10.1 verify && exit 2
+cp "$release_npm_bin/npm" "$RUNNER_TEMP/npm"
+PATH="$RUNNER_TEMP:$PATH" verify`,
+      { RUNNER_TEMP: directories.create("release npm ") },
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
+    );
+    expect(result.stdout).toBe(
+      "<install><--prefix><codex-security-provenance-npm><--ignore-scripts><--no-audit><--no-fund><--registry=https://openai.firewall.socket.dev/npm/><npm@11.12.1>selected\n",
+    );
+    expect(result.status, result.stderr).toBe(1);
   });
 
   test("serializes label reconciliation and reads the current PR title", () => {

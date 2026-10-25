@@ -73,6 +73,7 @@
 - remove redundant required check jobs ([#2001](https://github.com/openai/codex-security/pull/2001))
 - skip independent jobs for edits to existing Python tests ([#2002](https://github.com/openai/codex-security/pull/2002))
 - skip SDK shards when PR static checks fail ([#2006](https://github.com/openai/codex-security/pull/2006))
+- share the exact npm setup for release workflows ([#1998](https://github.com/openai/codex-security/pull/1998))
 
 <!-- release-section: highlights:end -->
 
