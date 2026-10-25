@@ -126,8 +126,7 @@ jobs:
           persist-credentials: false
       - name: Check plugin source boundary
         run: node sdk/typescript/scripts/check-plugin-source.mjs
-      - &download-native
-        name: Prepare native runtime
+      - name: Prepare native runtime
         uses: ./.github/actions/download-native
       - *set-up-typescript-tools
       - *install-dependencies
@@ -159,7 +158,6 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
       - *checkout-repository
-      - *download-native
       - *set-up-typescript-tools
       - &set-up-bun
         name: Set up Bun
@@ -173,8 +171,12 @@ jobs:
         with:
           name: package-${{ github.sha }}
           path: dist
-      - name: Restore bundled plugin
-        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - &restore-sdk-test-plugin
+        name: Restore bundled plugin
+        shell: bash
+        run: |
+          tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+          cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -187,7 +189,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
+        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
         continue-on-error: true
@@ -369,6 +371,9 @@ jobs:
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Test the native Python report gate
+        if: matrix.python == '3.12'
+        run: python -m pytest -q .github/scripts/test_require_native_python_report.py
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp
@@ -386,14 +391,7 @@ jobs:
           python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        shell: python
-        run: |
-          from xml.etree import ElementTree
-          report = ElementTree.parse("reports/python.xml")
-          if report.find(".//testcase") is None:
-              raise SystemExit("No native platform tests ran")
-          if report.find(".//testcase/skipped") is not None:
-              raise SystemExit("Native platform tests must run without skips")
+        run: python .github/scripts/require_native_python_report.py
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -512,14 +510,11 @@ jobs:
     steps:
       - *checkout-repository
       - *set-up-python
-      - *download-native
       - *set-up-typescript-tools
       - *set-up-bun
       - *install-dependencies
       - *download-package-for-this-commit
-      - name: Restore bundled plugin
-        shell: bash
-        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - *restore-sdk-test-plugin
       - name: Prepare private Windows test root
         id: windows-temp
         shell: pwsh

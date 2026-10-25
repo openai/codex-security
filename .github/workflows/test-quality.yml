@@ -32,6 +32,8 @@ jobs:
   native:
     if: ${{ !inputs.native-artifacts-ready }}
     uses: ./.github/workflows/native-artifacts.yml
+    with:
+      reuse-verified: ${{ !inputs.compare-layouts }}
 
   runner:
     needs: native

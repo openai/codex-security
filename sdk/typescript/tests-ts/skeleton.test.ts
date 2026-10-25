@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -12,7 +12,7 @@ import {
 } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { capture } from "./cli-fixtures.js";
-import { bashCommand, pythonExecutable, runCommand } from "./support/shell.js";
+import { bashCommand, runCommand } from "./support/shell.js";
 
 const { selectChecks } = (await import(
   new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
@@ -259,6 +259,9 @@ describe("TypeScript package skeleton", () => {
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
+    expect(
+      jobs["test"]?.steps?.find(({ name }) => name === "Test")?.run,
+    ).toContain("--seed=${{ github.run_number }}");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
         run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}",
@@ -309,36 +312,11 @@ describe("TypeScript package skeleton", () => {
     const step = jobs["plugin-source"]!.steps!.find(
       ({ name }) => name === "Require native platform coverage",
     )!;
-    expect(step).toMatchObject({ if: "runner.os != 'Linux'", shell: "python" });
+    expect(step).toMatchObject({
+      if: "runner.os != 'Linux'",
+      run: "python .github/scripts/require_native_python_report.py",
+    });
     expect(step).not.toHaveProperty("continue-on-error");
-    const directory = await mkdtemp(join(tmpdir(), "native-python-report-"));
-    try {
-      const reports = join(directory, "reports");
-      await mkdir(reports);
-      const passing = "<testsuite><testcase/></testsuite>";
-      await writeFile(join(reports, "python-stale.xml"), passing);
-      for (const [report, expected] of [
-        [null, 1],
-        ["", 1],
-        ["<testsuite/>", 1],
-        [
-          "<testsuite><testcase/><testcase><skipped/></testcase></testsuite>",
-          1,
-        ],
-        [passing, 0],
-      ] as const) {
-        if (report !== null)
-          await writeFile(join(reports, "python.xml"), report);
-        const result = await runCommand(
-          pythonExecutable()!,
-          ["-c", step.run!],
-          { cwd: directory },
-        );
-        expect(result.status, result.stderr).toBe(expected);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
   });
 
   test("requires the deterministic eval suites and their cross-project dependency pin", async () => {
