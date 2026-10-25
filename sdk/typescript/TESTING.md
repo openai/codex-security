@@ -179,8 +179,9 @@ Refresh timing hints from successful CI JUnit artifacts when shard runtimes
 become uneven. From the SDK directory, pass reports for one platform to
 `node --experimental-strip-types scripts/update-test-timings.mts win32 <junit.xml> ...`
 (use `linux` or `darwin` for the other platforms). The updater sums testcase
-durations per file and uses their median across reports, preserving the other
-platforms. Review and commit the generated snapshot. The initial hints use runs
+durations for executed cases per file and uses their median across reports. A
+report that skipped every case in a file leaves its timing hint unchanged. Other
+platforms retain their hints. Review and commit the generated snapshot. The initial hints use runs
 `39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
 timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
 changes; compare complete JUnit inventories and outcomes as well as wall time.
