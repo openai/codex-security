@@ -118,6 +118,9 @@ Linux coverage artifacts are review evidence, not a percentage-based merge
 gate. Mutation diagnostics also measure results without enforcing a minimum
 score. Ordinary report upload failures do not replace the test result.
 
+Only the same pull request can reuse caches saved on `refs/pull/<number>/merge`.
+After the PR merges into `main`, a maintenance job deletes those caches.
+
 When measuring CI changes, separate time to required-green from summed job
 execution time, prerequisite waits, runner scheduling, approval waits, and
 manual retry delays. Compare matching revisions and test configurations, and
