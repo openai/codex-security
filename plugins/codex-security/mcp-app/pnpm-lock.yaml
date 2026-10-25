@@ -10,19 +10,22 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.1
-        version: 1.32.1(zod@4.6.5)
+        version: 1.32.1(zod@4.6.7)
       '@openai/codex-sdk':
-        specifier: 0.163.0
-        version: 0.163.0
+        specifier: 0.164.0
+        version: 0.164.0
       ajv:
         specifier: 8.20.0
         version: 8.20.0
       smol-toml:
         specifier: 1.9.1
         version: 1.9.1
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
       zod:
-        specifier: ^4.6.5
-        version: 4.6.5
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/node':
         specifier: ^26.6.5
@@ -211,47 +214,47 @@ packages:
       '@cfworker/json-schema':
         optional: true
 
-  '@openai/codex-sdk@0.163.0':
-    resolution: {integrity: sha512-o10d8dqxFjhzoWp75MUrhaN8C6QrXPQqUJGwVnySj++ztAnrA322UuFRzHZvSa903lFgjjaimuf5rkqVsj0RHg==}
+  '@openai/codex-sdk@0.164.0':
+    resolution: {integrity: sha512-FyhTWM4Xa8hXpWhkr9MOvROVhBqTeD+s/XCzVLzqSQXTSnGSNkdBWjv0IzZdOO29BX4LwtMjul6ogB8tOME5og==}
     engines: {node: '>=18'}
 
-  '@openai/codex@0.163.0':
-    resolution: {integrity: sha512-HNd7vR9oTK6M2ikxFnvNDCdYUgAsyo9VVnd5KnEd2ON0GYI++7MiX9XNPUkhtdgGKFPsWS+CEppQ1UU63uVhUw==}
+  '@openai/codex@0.164.0':
+    resolution: {integrity: sha512-TWj7UGyPRe3Pj/A3ddNAxs1te3a/W/xAd+J0LHrrFTmsSfahGMOLF/vn88D3QCIgAT3B1rm1y/Z3NYE0rx6cZQ==}
     engines: {node: '>=16'}
     hasBin: true
 
-  '@openai/codex@0.163.0-darwin-arm64':
-    resolution: {integrity: sha512-i7Dzk2a5aGmuGM9aNZgaUVTojZ/4bc5lRfosz++Y7X2BGhDkz+cySgbD+NYS1pOxfm0VEbLi9PZ3pAulI4kchw==}
+  '@openai/codex@0.164.0-darwin-arm64':
+    resolution: {integrity: sha512-pDizgOUAtq3/k3AbUFHbaU19WpYKCja+oFpNSTLKrDQj4lTUNSDuTPJip4uQVn2/1EipQdpQrGMOQBVuI1znAA==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [darwin]
 
-  '@openai/codex@0.163.0-darwin-x64':
-    resolution: {integrity: sha512-Ioj7h+B1ME9ZU1PH1ATfvFV5DiototEpFFaSSbg3kfDifB9djhl5fcJ++g5mpcL/+uVbcnReei+RiSXEx8o+kw==}
+  '@openai/codex@0.164.0-darwin-x64':
+    resolution: {integrity: sha512-lIe+udnguPGzBezkgbkj2Eaz0YqOhNXT7jja136Fj0sXfI+UKNS2icmaK14GcoRAgeVEpDTtC1ftamWBPmD1zg==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [darwin]
 
-  '@openai/codex@0.163.0-linux-arm64':
-    resolution: {integrity: sha512-IH2/R+4OarjGvsAf1ll3fdyLwrPgYLl3uzp6u9CyD9sj2Lw+ViDSe3QBZVHdcHJs0eIiZFg6Wprcuy4CRZaUGw==}
+  '@openai/codex@0.164.0-linux-arm64':
+    resolution: {integrity: sha512-LL5iTQjyDL4YRX44EWqhIfEQ5uGnmgxkQBJSxjZSeJ8L1Og83pdlzUJW/PRJ76oaVwOVgh6HXwuPEiBNEHU4lg==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [linux]
 
-  '@openai/codex@0.163.0-linux-x64':
-    resolution: {integrity: sha512-uwRaOsrYogLQhcxAM/GoeWrw0QIWEMRo7c9gM8sKAviVkZQHlu9kRLJ5PkufbV+ABGjyZgIwiFdJ0LCJ0N6e8w==}
+  '@openai/codex@0.164.0-linux-x64':
+    resolution: {integrity: sha512-XLAoaWsGOT2khzl+P4FYDPTkzAr9W0VFXFaVkqlFdkM0soa1gH/4S0wSD57Ek3HHwkirAEGz2/Mwehseh+l5Mg==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [linux]
 
-  '@openai/codex@0.163.0-win32-arm64':
-    resolution: {integrity: sha512-QnLn3gR2dExcdTThE/HAo5BrUq0/C8zDGQ0UZL3hNzfqt9ZklT6jGTyt8JhDyNZX4uSB4HhcJtbcOWucZGC0VQ==}
+  '@openai/codex@0.164.0-win32-arm64':
+    resolution: {integrity: sha512-Zkzt8HNmB/vOnlDo5D7IOlrt5rHaxYQB7iGbNP7bHcXZtrk6gaD7UriwaieGYJpcf8DqAT/0tqzY4xbs8ZwbmQ==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [win32]
 
-  '@openai/codex@0.163.0-win32-x64':
-    resolution: {integrity: sha512-QQGQ/q9dCJ5C5jqhgFrwycpWG3szIyFNThMiKl6hYtu6N/eM3Qd7StesgnCFAfzVED8IkE3N3oH71szzcludqw==}
+  '@openai/codex@0.164.0-win32-x64':
+    resolution: {integrity: sha512-urWPhwh9YavuoAPIkmVYKBTtd5OtGVL4Ki0Fb28dhK/Mz6Pt4LSy+gbRrZFz5+RXrw9ubvXuXDCcd8beYcWhDg==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
@@ -545,8 +548,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.13.10:
-    resolution: {integrity: sha512-dQuLsa5oO+47QVMVMaaD9cIv8ctmVtK1iRvwWngkfloFJMeFeuoUFDswIqZGxmGX3hrRzREgEArjkK9OgsQEhA==}
+  hono@4.13.13:
+    resolution: {integrity: sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA==}
     engines: {node: '>=16.9.0'}
 
   http-errors@2.0.1:
@@ -560,8 +563,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  ip-address@10.7.2:
-    resolution: {integrity: sha512-7H/2gFSIitxc0hG3nOI1glS8QLo/EHBFFLk8vEUjXY/xu0AdL8jZ9U1IzO2PUm0d2D/ofQcAifb0g6OBkt8U7w==}
+  ip-address@10.7.4:
+    resolution: {integrity: sha512-DWBMKyeM25D70nrIiTkgQth59/G+naKOTep6huF9j+GmeK3DMD60Zvxg5d5qQnz+38AHgou6ean2LECX+lrKDg==}
     engines: {node: '>= 12'}
 
   ipaddr.js@1.9.1:
@@ -747,13 +750,18 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
   zod-to-json-schema@3.25.2:
     resolution: {integrity: sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==}
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@4.6.5:
-    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -835,13 +843,13 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@hono/node-server@2.1.1(hono@4.13.10)':
+  '@hono/node-server@2.1.1(hono@4.13.13)':
     dependencies:
-      hono: 4.13.10
+      hono: 4.13.13
 
-  '@modelcontextprotocol/sdk@1.32.1(zod@4.6.5)':
+  '@modelcontextprotocol/sdk@1.32.1(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 2.1.1(hono@4.13.10)
+      '@hono/node-server': 2.1.1(hono@4.13.13)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -851,45 +859,45 @@ snapshots:
       eventsource-parser: 3.1.1
       express: 5.2.1
       express-rate-limit: 8.7.0(express@5.2.1)
-      hono: 4.13.10
+      hono: 4.13.13
       jose: 6.2.11
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.6.5
-      zod-to-json-schema: 3.25.2(zod@4.6.5)
+      zod: 4.6.7
+      zod-to-json-schema: 3.25.2(zod@4.6.7)
     transitivePeerDependencies:
       - supports-color
 
-  '@openai/codex-sdk@0.163.0':
+  '@openai/codex-sdk@0.164.0':
     dependencies:
-      '@openai/codex': 0.163.0
+      '@openai/codex': 0.164.0
 
-  '@openai/codex@0.163.0':
+  '@openai/codex@0.164.0':
     optionalDependencies:
-      '@openai/codex-darwin-arm64': '@openai/codex@0.163.0-darwin-arm64'
-      '@openai/codex-darwin-x64': '@openai/codex@0.163.0-darwin-x64'
-      '@openai/codex-linux-arm64': '@openai/codex@0.163.0-linux-arm64'
-      '@openai/codex-linux-x64': '@openai/codex@0.163.0-linux-x64'
-      '@openai/codex-win32-arm64': '@openai/codex@0.163.0-win32-arm64'
-      '@openai/codex-win32-x64': '@openai/codex@0.163.0-win32-x64'
+      '@openai/codex-darwin-arm64': '@openai/codex@0.164.0-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.164.0-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.164.0-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.164.0-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.164.0-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.164.0-win32-x64'
 
-  '@openai/codex@0.163.0-darwin-arm64':
+  '@openai/codex@0.164.0-darwin-arm64':
     optional: true
 
-  '@openai/codex@0.163.0-darwin-x64':
+  '@openai/codex@0.164.0-darwin-x64':
     optional: true
 
-  '@openai/codex@0.163.0-linux-arm64':
+  '@openai/codex@0.164.0-linux-arm64':
     optional: true
 
-  '@openai/codex@0.163.0-linux-x64':
+  '@openai/codex@0.164.0-linux-x64':
     optional: true
 
-  '@openai/codex@0.163.0-win32-arm64':
+  '@openai/codex@0.164.0-win32-arm64':
     optional: true
 
-  '@openai/codex@0.163.0-win32-x64':
+  '@openai/codex@0.164.0-win32-x64':
     optional: true
 
   '@types/node@26.6.5':
@@ -1086,7 +1094,7 @@ snapshots:
     dependencies:
       debug: 4.4.3
       express: 5.2.1
-      ip-address: 10.7.2
+      ip-address: 10.7.4
     transitivePeerDependencies:
       - supports-color
 
@@ -1170,7 +1178,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.13.10: {}
+  hono@4.13.13: {}
 
   http-errors@2.0.1:
     dependencies:
@@ -1186,7 +1194,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  ip-address@10.7.2: {}
+  ip-address@10.7.4: {}
 
   ipaddr.js@1.9.1: {}
 
@@ -1381,8 +1389,10 @@ snapshots:
 
   wrappy@1.0.2: {}
 
-  zod-to-json-schema@3.25.2(zod@4.6.5):
-    dependencies:
-      zod: 4.6.5
+  yaml@2.9.1: {}
 
-  zod@4.6.5: {}
+  zod-to-json-schema@3.25.2(zod@4.6.7):
+    dependencies:
+      zod: 4.6.7
+
+  zod@4.6.7: {}

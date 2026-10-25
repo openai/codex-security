@@ -434,10 +434,11 @@ def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> No
     assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
 
 
-@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
-@pytest.mark.parametrize("projection_failure_at", [None, "stop", "refresh"])
+@pytest.mark.parametrize(
+    ("termination", "projection_failure_at"), [("fail-scan", "stop"), ("cancel-scan", "refresh")]
+)
 def test_model_only_draft_is_available_before_findings_and_survives_stop(
-    tmp_path: Path, termination: str, projection_failure_at: str | None
+    tmp_path: Path, termination: str, projection_failure_at: str
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -504,25 +505,21 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
     assert stopped["threatModelProvenance"]["provisional"] is True
     assert stopped["findingCount"] == 0
-    if projection_failure_at != "stop":
-        assert document.read_text().startswith(model["content"])
     sealed = (scan_dir / "scan-manifest.json").read_bytes()
     if projection_failure_at == "refresh":
+        assert stopped["warnings"] == []
+        assert document.read_text().startswith(model["content"])
         document.unlink()
         document.mkdir()
         stopped = scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]
-    if projection_failure_at is not None:
-        warnings = stopped["warnings"]
-        assert len(warnings) == 1
-        assert warnings[0].startswith("Automatic threat model save failed:")
-        assert "threatModelPath" not in stopped
-        assert "threatModel" not in stopped["artifacts"]
-        assert get_scan(state_dir, scan_id)["scan"]["warnings"] == warnings
-        assert (
-            scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]["warnings"]
-            == warnings
-        )
-        assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
+    warnings = stopped["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Automatic threat model save failed:")
+    assert "threatModelPath" not in stopped
+    assert "threatModel" not in stopped["artifacts"]
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == warnings
+    assert scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]["warnings"] == warnings
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
 
 
 @pytest.mark.parametrize("changed_file", ["scan-manifest.json", "findings.json"])
@@ -735,18 +732,12 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     assert "sealed artifact changed" in str(tampered_json["stderr"])
 
 
-@pytest.mark.parametrize(
-    ("extensions", "expected_candidate_id"),
-    (
-        ({"candidateId": "DSS-145", "reportId": "DSS-145-rogue"}, "DSS-145"),
-        ({"candidateId": " ", "reportId": "DSS-145"}, "DSS-145"),
-        ({"reportId": "DSS-145", "ledgerRowId": "DSS-145-rogue"}, "DSS-145"),
-        ({"ledgerRowId": "DSS-145"}, "DSS-145"),
-    ),
-    ids=("candidate-id", "blank-candidate-id", "report-id", "ledger-row-id"),
-)
+@pytest.mark.parametrize("replace_after_finalize", (False, True), ids=("saved", "replaced"))
 def test_deep_csv_export_adds_only_candidate_id_column(
-    tmp_path: Path, extensions: dict[str, str], expected_candidate_id: str
+    tmp_path: Path,
+    replace_after_finalize: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api,
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -770,14 +761,58 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     )
     findings_path = scan_dir / "findings.json"
     findings_document = json.loads(findings_path.read_text())
-    finding = findings_document["findings"][0]
-    original_title = "Unsafe archive extraction [DSS-145-rogue]"
-    finding["title"] = original_title
-    finding["extensions"] = extensions
+    template = findings_document["findings"][0]
+    cases = (
+        ("candidate", {"candidateId": "DSS-145", "reportId": "DSS-999"}, "DSS-145"),
+        ("blank", {"candidateId": " ", "reportId": "DSS-146"}, "DSS-146"),
+        ("report", {"reportId": "DSS-147", "ledgerRowId": "DSS-999"}, "DSS-147"),
+        ("ledger", {"ledgerRowId": "DSS-148"}, "DSS-148"),
+    )
+    findings_document["findings"] = [
+        {
+            **template,
+            "identity": {"anchor": name},
+            "title": f"{name} extraction [DSS-999]",
+            "extensions": extensions,
+        }
+        for name, extensions, _ in cases
+    ]
     findings_path.write_text(json.dumps(findings_document))
 
-    scan_command(state_dir, "complete-scan", scan_id)
-    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    closed_occurrence = completed["findings"][0]["occurrenceId"]
+    set_triage(
+        state_dir,
+        closed_occurrence,
+        "closed",
+        "--close-reason",
+        "wont_fix",
+        "--note",
+        "Accepted after review.",
+    )
+    if replace_after_finalize:
+        publication = workbench_api["publication"]
+        finalize = publication.finalize_scan
+
+        def replace_finalized_document(*args, **kwargs):
+            result = finalize(*args, **kwargs)
+            replacement = copy.deepcopy(result[1])
+            for finding in replacement["findings"]:
+                finding["extensions"] = {"candidateId": "DSS-replaced"}
+                finding["title"] = "Replaced title"
+            findings_path.write_text(json.dumps(replacement))
+            return result
+
+        monkeypatch.setattr(publication, "finalize_scan", replace_finalized_document)
+        with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection:
+            connection.row_factory = sqlite3.Row
+            exported = publication.export_findings(
+                workbench_api["_WORKBENCH_PUBLICATION_CONTEXT"],
+                connection,
+                SimpleNamespace(scan_id=scan_id, format="csv"),
+            )["export"]
+    else:
+        exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(exported["path"]).open(newline="") as source:
         reader = csv.DictReader(source)
         rows = list(reader)
@@ -798,11 +833,14 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         "start_line",
         "end_line",
     ]
-    assert len(rows) == 1
-    assert rows[0]["candidate_id"] == expected_candidate_id
-    assert rows[0]["title"] == original_title
-    assert "report_id" not in rows[0]
-    assert "detailed_writeup" not in rows[0]
+    assert len(rows) == len(cases)
+    assert {row["title"]: row["candidate_id"] for row in rows} == {
+        f"{name} extraction [DSS-999]": candidate_id for name, _, candidate_id in cases
+    }
+    closed_rows = {
+        row["occurrence_id"]: row["close_reason"] for row in rows if row["status"] == "closed"
+    }
+    assert closed_rows == {closed_occurrence: "wont_fix"}
 
 
 def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Path) -> None:
@@ -1198,8 +1236,9 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("mode", ["standard", "deep"])
 def test_parent_draft_preserves_reconciled_candidate_identity_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool, mode: str
 ) -> None:
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import workbench_db as db
@@ -1209,8 +1248,14 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
     target = tmp_path / "target"
     target.mkdir()
-    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
-    write_completed_contract(scan_dir, scan_id, target)
+    workspace = create_saved_workspace(state_dir, target, mode=mode)
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        coverage_mode="deep_repository" if mode == "deep" else "repository",
+    )
     documents = {
         key: json.loads((scan_dir / filename).read_text())
         for key, filename in (
@@ -1219,6 +1264,8 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
             ("coverage", "coverage.json"),
         )
     }
+    if mode == "deep":
+        documents["manifest"]["scan"]["complete"] = False
     documents["findings"]["findings"] = []
     documents["coverage"].update(surfaces=[], deferred=[])
     for identity in ("review-a", "review-b"):
@@ -1274,8 +1321,21 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         normalized = json.loads(normalized_bytes)
         assert normalized["coverage"]["deferred"] == documents["coverage"]["deferred"]
         assert normalized["scanId"] == scan_id
+        retained = raw
+        if mode == "deep":
+            retained = {
+                **raw,
+                "publication": {
+                    "previousCheckpoint": None,
+                    "previousInputCheckpoint": None,
+                },
+            }
+            raw_bytes = results._encoded(retained)
         retained_raw = scan_dir / "checkpoints" / f"{hashlib.sha256(raw_bytes).hexdigest()}.json"
         assert retained_raw.read_bytes() == raw_bytes
+        assert json.loads(raw_bytes) == retained
+        if mode == "deep":
+            assert head["inputCheckpoint"] == retained_raw.name
 
         rejected = copy.deepcopy(documents["coverage"]["deferred"][0])
         documents["coverage"]["deferred"] = documents["coverage"]["deferred"][1:]
@@ -1332,3 +1392,114 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         canonical = json.loads((scan_dir / "coverage.json").read_text())
         assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
         assert canonical["resolvedDeferred"] == raw["coverage"]["resolvedDeferred"]
+
+
+@pytest.mark.parametrize("replay_accepted", [False, True])
+@pytest.mark.parametrize("empty_interruption", [False, True])
+def test_deep_draft_admission_survives_interrupted_projection(
+    tmp_path, monkeypatch, replay_accepted, empty_interruption
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import workbench_db as db
+    import workbench_saved_results as results
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    target = tmp_path / "target"
+    target.mkdir()
+    workspace = create_saved_workspace(state_dir, target, mode="deep")
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
+    documents = {
+        key: json.loads((scan_dir / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    documents["manifest"]["scan"]["complete"] = False
+    raw = {
+        "scanId": scan_id,
+        "findings": documents["findings"]["findings"],
+        "coverage": saved_coverage(),
+    }
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    raw_path = drafts / f"{uuid.uuid4()}.checkpoint.json"
+    args = SimpleNamespace(
+        scan_id=scan_id,
+        claim_token=None,
+        draft_path=str(staged),
+        checkpoint_path=str(raw_path),
+        expected_draft_digest=None,
+    )
+    with closing(db.connect()) as connection:
+        staged.write_text(json.dumps(documents))
+        raw_path.write_text(json.dumps(raw))
+        results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
+        previous_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        accepted_documents = copy.deepcopy(documents)
+        accepted_raw = copy.deepcopy(raw)
+        original = results.write_scan_local_bytes
+        writes = 0
+
+        def interrupt_projection(root, relative, contents):
+            nonlocal writes
+            if relative.startswith("checkpoints/"):
+                writes += 1
+                if writes == 2:
+                    raise OSError("Interrupted projected checkpoint")
+            original(root, relative, contents)
+
+        if empty_interruption:
+            raw["findings"].clear()
+        else:
+            raw["findings"][0]["summary"] = "Updated synthetic evidence."
+        staged.write_text(json.dumps(documents))
+        raw_path.write_text(json.dumps(raw))
+        with monkeypatch.context() as context:
+            context.setattr(results, "write_scan_local_bytes", interrupt_projection)
+            with pytest.raises(OSError, match="Interrupted projected checkpoint"):
+                results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
+        assert writes == 2
+        assert json.loads((scan_dir / "checkpoint-head.json").read_text()) == previous_head
+        if replay_accepted:
+            staged.write_text(json.dumps(accepted_documents))
+            raw_path.write_text(json.dumps(accepted_raw))
+            results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
+            replay_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+            assert replay_head["inputCheckpoint"] != previous_head["inputCheckpoint"]
+            assert replay_head["checkpoint"] == previous_head["checkpoint"]
+        expected_findings = accepted_raw["findings"] if replay_accepted else raw["findings"]
+        binding = db.workbench_completion_binding(db.require_scan(connection, scan_id), db.now())
+        warnings = []
+        recovered = results.merge_saved_results(
+            scan_dir,
+            scan_id,
+            binding,
+            [],
+            warnings,
+            stopped=True,
+            reason="interrupted",
+            scan_mode="deep",
+        )
+        assert [row["summary"] for row in recovered[1]["findings"]] == [
+            row["summary"] for row in expected_findings
+        ]
+        assert warnings == []
+        replayed = results.merge_saved_results(
+            scan_dir,
+            scan_id,
+            binding,
+            [],
+            [],
+            stopped=True,
+            reason="interrupted",
+            scan_mode="deep",
+            frozen_source_digests=recovered[0]["scan"]["preservedSources"],
+        )
+        assert replayed[1:] == recovered[1:]
+        for field in ("target", "scope", "preservedSources"):
+            assert replayed[0]["scan"][field] == recovered[0]["scan"][field]

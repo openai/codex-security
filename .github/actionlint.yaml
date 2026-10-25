@@ -1,5 +1,5 @@
 paths:
-  .github/workflows/{node-github-release,node-release-cut,node-release}.yml:
+  .github/workflows/{container-release,node-github-release,node-release-cut,node-release-pr,node-release,release-progress}.yml:
     ignore:
       # actionlint 1.7.12 predates GitHub's queue: max support. Keep release queuing.
       # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency

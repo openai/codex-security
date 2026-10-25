@@ -1,3 +1,4 @@
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -134,53 +135,85 @@ function seedPublicationScan(
   fixture: PublicationFixture,
   publication: PreparedScanPublication,
 ): void {
-  const workspaceId = randomUUID();
-  const seed = runNodePython(fixture.python, [
-    "-c",
-    [
-      "import json, sqlite3, sys",
-      "database, workspace_id, publication = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])",
-      "connection = sqlite3.connect(database)",
-      "connection.execute('PRAGMA foreign_keys = ON')",
-      "timestamp = '2026-08-01T00:00:00Z'",
-      "connection.execute('INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)', (workspace_id, timestamp, timestamp))",
-      "connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (publication['scanId'], workspace_id, publication['scanDirectory'], 'example-revision', '.', 'standard', publication['scanDirectory'], 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
-      "for issue in publication['issues']:",
-      "    connection.execute('INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING', (issue['findingId'], 'fingerprint-' + issue['findingId'], 'example-rule', issue['findingId'], timestamp, timestamp))",
-      "    connection.execute('INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, confidence, remediation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (issue['occurrenceId'], issue['findingId'], publication['scanId'], issue['title'], 'example summary', 'high', 'high', 'example remediation', timestamp))",
-      "connection.commit()",
-      "connection.close()",
-    ].join("\n"),
+  using database = new Database(
     join(fixture.stateDirectory, "workbench.sqlite3"),
-    workspaceId,
-    JSON.stringify(publication),
-  ]);
-  expect(seed.status, seed.stderr).toBe(0);
+  );
+  database.run("PRAGMA foreign_keys = ON");
+  database.transaction(() => {
+    const workspaceId = randomUUID();
+    const timestamp = "2026-08-01T00:00:00Z";
+    database.run(
+      "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?1, ?2, ?2)",
+      [workspaceId, timestamp],
+    );
+    database.run(
+      `INSERT INTO scans
+         (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status,
+          phase, started_at, completed_at, created_at, updated_at)
+       VALUES (?1, ?2, ?3, 'example-revision', '.', 'standard', ?3, 'complete',
+               'reporting', ?4, ?4, ?4, ?4)`,
+      [publication.scanId, workspaceId, publication.scanDirectory, timestamp],
+    );
+    for (const issue of publication.issues) {
+      database.run(
+        `INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+         VALUES (?1, 'fingerprint-' || ?1, 'example-rule', ?1, ?2, ?2)
+         ON CONFLICT(id) DO NOTHING`,
+        [issue.findingId, timestamp],
+      );
+      database.run(
+        `INSERT INTO finding_occurrences
+           (id, finding_id, scan_id, title, summary, severity, confidence, remediation, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'example summary', 'high', 'high', 'example remediation', ?5)`,
+        [
+          issue.occurrenceId,
+          issue.findingId,
+          publication.scanId,
+          issue.title,
+          timestamp,
+        ],
+      );
+    }
+  })();
 }
 
-function databaseRows(
+function databaseRows<Row = Record<string, unknown>>(
   fixture: PublicationFixture,
   query: string,
-  values: readonly unknown[] = [],
-): Record<string, unknown>[] {
-  const result = runNodePython(fixture.python, [
-    "-c",
-    [
-      "import json, sqlite3, sys",
-      "connection = sqlite3.connect(sys.argv[1])",
-      "connection.row_factory = sqlite3.Row",
-      "cursor = connection.execute(sys.argv[2], json.loads(sys.argv[3]))",
-      "rows = [dict(row) for row in cursor.fetchall()] if cursor.description else []",
-      "connection.commit()",
-      "connection.close()",
-      "print(json.dumps(rows))",
-    ].join("\n"),
+  values: SQLQueryBindings[] = [],
+): Row[] {
+  using database = new Database(
     join(fixture.stateDirectory, "workbench.sqlite3"),
-    query,
-    JSON.stringify(values),
-  ]);
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as Record<string, unknown>[];
+  );
+  return database.query<Row, SQLQueryBindings[]>(query).all(...values);
+}
+
+async function mockStoreFixture() {
+  const stateDirectory = await temporaryDirectory();
+  const scanDirectory = join(stateDirectory, "scan");
+  await mkdir(scanDirectory);
+  await writeFile(join(stateDirectory, "workbench.sqlite3"), "");
+  const publication: PreparedScanPublication = {
+    scanId: SCAN_ID,
+    scanDirectory,
+    destination: {
+      type: "linear",
+      teamId: "team-example",
+      projectId: "project-example",
+    },
+    issues: [
+      {
+        findingId: "finding-1",
+        occurrenceId: "occurrence-1",
+        title: "Synthetic finding",
+        description: "Synthetic evidence.",
+      },
+    ],
+  };
+  return {
+    publication,
+    environment: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDirectory },
+  };
 }
 
 function publishedIssue(
@@ -289,14 +322,14 @@ describe("read-only publication history", () => {
   });
 
   test("forwards inspection cancellation through Python discovery and the shared workbench", async () => {
-    const fixture = await publicationFixture();
+    const fixture = await mockStoreFixture();
     const controller = new AbortController();
     const reason = new Error("Synthetic inspection cancellation.");
     const inspecting = Promise.withResolvers<void>();
     const python = spyOn(runtime, "resolvePluginPython").mockImplementation(
       async (options) => {
         expect(options?.signal).toBe(controller.signal);
-        return fixture.python;
+        return "unused";
       },
     );
     const workbench = spyOn(runtime, "runWorkbench").mockImplementation(
@@ -346,7 +379,11 @@ describe("read-only publication history", () => {
   });
 
   test("rejects inspection responses for another destination or occurrence", async () => {
-    const fixture = await publicationFixture({ count: 1 });
+    const fixture = await mockStoreFixture();
+    using _runtime = spyOn(
+      runtime,
+      "resolveWorkbenchRuntime",
+    ).mockResolvedValue(["unused", PLUGIN_ROOT]);
     const receipt = {
       ...publishedIssue(fixture.publication, 0),
       scanId: SCAN_ID,
@@ -382,7 +419,11 @@ describe("read-only publication history", () => {
   });
 
   test("rejects a persisted receipt that differs from the accepted issue", async () => {
-    const fixture = await publicationFixture({ count: 1 });
+    const fixture = await mockStoreFixture();
+    using _runtime = spyOn(
+      runtime,
+      "resolveWorkbenchRuntime",
+    ).mockResolvedValue(["unused", PLUGIN_ROOT]);
     const issue = publishedIssue(fixture.publication, 0, "EXAMPLE-101");
     const workbench = spyOn(runtime, "runWorkbench").mockResolvedValue({
       scanId: SCAN_ID,
@@ -411,11 +452,11 @@ describe("read-only publication history", () => {
     expect(existsSync(missing.stateDirectory)).toBe(false);
 
     const fixture = await publicationFixture();
-    const version = databaseRows(
+    const version = databaseRows<{ version: number }>(
       fixture,
       "SELECT version FROM schema_migrations WHERE name = ?",
       ["share finding issue receipts across trackers"],
-    )[0]!["version"];
+    )[0]!.version;
     databaseRows(fixture, "DROP TABLE finding_issue_receipts");
     databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
       version,
@@ -691,9 +732,9 @@ describe("persisted finding publication associations", () => {
         original.findingId,
         original.occurrenceId,
         fixture.publication.destination.teamId,
-        fixture.publication.destination.projectId,
+        fixture.publication.destination.projectId ?? null,
         original.issueIdentifier,
-        original.url,
+        original.url ?? null,
       ],
     );
     const before = await readFile(database);

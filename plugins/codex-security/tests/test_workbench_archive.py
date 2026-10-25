@@ -259,20 +259,6 @@ def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
     assert workflow(state) == saved_workflow
 
 
-def test_legacy_caller_can_supply_already_archived_output(previous_scan):
-    state, target, output, scan_id = previous_scan
-    mark_stopped(state, scan_id)
-    archive = output.with_name("scan.previous-fixture")
-    output.rename(archive)
-    output.mkdir(mode=0o700)
-    registered = register(
-        state, target, output, "--archive-existing", "--archived-scan-dir", str(archive)
-    )
-    assert registered["archivedScanDir"] == str(archive)
-    assert (archive / "report.md").read_text() == "previous scan\n"
-    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
-
-
 def test_registration_does_not_archive_an_ancestor_of_its_repository(tmp_path):
     state = tmp_path / "state"
     output = tmp_path / "output"

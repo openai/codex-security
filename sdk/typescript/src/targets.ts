@@ -757,6 +757,9 @@ export function gitOutput(
   signal?: AbortSignal,
   environment?: NodeJS.ProcessEnv,
   workingDirectory?: string,
+  encoding?: "utf8",
+  protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
 ): Promise<string>;
 export function gitOutput(
   repository: string,
@@ -765,6 +768,8 @@ export function gitOutput(
   environment: NodeJS.ProcessEnv | undefined,
   workingDirectory: string | undefined,
   encoding: "buffer",
+  protectedRoots?: string | readonly string[],
+  sourceEnvironment?: NodeJS.ProcessEnv,
 ): Promise<Buffer>;
 export async function gitOutput(
   repository: string,
@@ -773,14 +778,27 @@ export async function gitOutput(
   environment: NodeJS.ProcessEnv = {},
   workingDirectory = repository,
   encoding: "utf8" | "buffer" = "utf8",
+  protectedRoots: string | readonly string[] = [],
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
     isolatedGitEnvironment(
-      args[0] === "rev-parse" || args[0] === "config" || args[0] === "ls-files",
+      args[0] === "rev-parse" ||
+        args[0] === "config" ||
+        args[0] === "ls-files" ||
+        (args[0] === "remote" &&
+          (args.length === 1 ||
+            (args[1] === "get-url" && args[2] === "--all"))),
+      sourceEnvironment,
     ),
-    (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");
@@ -906,7 +924,10 @@ export async function abortable<T>(
         settle(value);
       };
     void Promise.resolve()
-      .then(operation)
+      .then(() => {
+        throwIfAborted(signal);
+        return operation();
+      })
       .then(finish(resolvePromise), finish(reject));
   });
 }

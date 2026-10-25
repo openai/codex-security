@@ -1,42 +1,25 @@
-<!-- release-version: 0.4.0 -->
+<!-- release-version: 0.6.0 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.4.0 adds hosted Standard scan execution and improves token
-accounting, bulk-scan recovery, and report formatting. The minor version marks
-the removal of obsolete ranking helpers; direct helper users should follow the
-migration guidance below.
+Codex Security 0.6.0 adds vendor report imports, optional owner suggestions, and hosted remediation commands. Severity classification now uses a built-in rubric and three independent reviews by default; review the model-access and cost changes below before upgrading.
 
-- Hosts can run Standard repository or path scans through the TypeScript
-  `runHostedScan(input, { executor, signal, onEvent })` API or the
-  `codex-security scan --host` JSON-RPC adapter. Hosted execution is opt-in and
-  requires a host-provided executor, frozen checkout, and explicit model and
-  storage settings. Hosts own authorization, cancellation, and durable execution
-  state. See the [hosted scan guide](https://github.com/openai/codex-security/blob/npm-v0.4.0/sdk/typescript/docs/hosted-scans.md).
-  ([#1559](https://github.com/openai/codex-security/pull/1559))
-- Scan token totals include recorded usage from earlier Deep Scan worker
-  attempts and context compaction without counting resumed history twice.
-  The SDK and compatible hosts can finish accounting for the final response
-  after report generation. Missing records remain marked incomplete or
-  unavailable rather than being presented as an exact total.
-  ([#1657](https://github.com/openai/codex-security/pull/1657))
-- Bulk scans preserve successful results and original scan failures when
-  temporary-checkout cleanup fails. Cleanup errors are reported separately, and
-  reusing a completed scan can retry its recorded cleanup without another scan.
-  ([#1433](https://github.com/openai/codex-security/pull/1433))
-- Reports render malformed evidence ranges as a valid single line or just the
-  path. Finding text beginning with tilde fences or parenthesized list markers
-  no longer changes the formatting of surrounding report sections. These fixes
-  preserve the underlying findings.
-  ([#1656](https://github.com/openai/codex-security/pull/1656),
-  [#1604](https://github.com/openai/codex-security/pull/1604))
-- The package includes Codex CLI/SDK 0.163.0 and restores the **Codex Security**
-  display name in plugin listings, prompts, and tool labels. The npm package
-  remains `@openai/codex-security`, with the `cs` and `codex-security` commands.
-  ([#1670](https://github.com/openai/codex-security/pull/1670),
-  [#1681](https://github.com/openai/codex-security/pull/1681))
+- **Import vendor findings.** Import supported Wiz, Snyk Open Source, Semgrep Code, and Endor Labs reports with `publish findings --to local`, or publish them with `--to cloud`. Read local evidence with `findings imported`. Local imports require no Cloud login or model call and remain separate from assessed scan findings. See the [Wiz](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/cli.md#import-wiz-findings), [Snyk](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/snyk.md), [Semgrep](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/semgrep.md), and [Endor](https://github.com/openai/codex-security/blob/npm-v0.6.0/docs/scanner-imports/endor.md) format guides.
+- **Configurable severity reviews.** `classify-severity` uses a bundled rubric when no custom rubric is supplied. `--runs N` selects 1–10 independent reviews, with three by default. The most common severity wins, with the highest severity breaking ties. ([#1765](https://github.com/openai/codex-security/pull/1765))
+- **Optional owner suggestions.** `scan --owner-suggestions` writes a separate owner-suggestion report after supported committed Git scans. Suggestions preserve the completed scan and do not assign users. Owner enrichment is skipped when a scan cost limit is set. ([#1760](https://github.com/openai/codex-security/pull/1760))
+- **Hosted patching and source-only verification.** `patch --host` and `verify-fix --host` expose the hosted remediation protocol through the CLI. Ordinary patch and verification commands accept `--verification-mode static` to assess source evidence; omitting it preserves standard verification. Static mode sets the assessment scope and does not enforce a command-execution boundary. See the [hosted remediation guide](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/hosted-remediation.md). ([#1854](https://github.com/openai/codex-security/pull/1854))
+- **Policy previews without Python.** Policy diffs now run in Node while preserving diff formatting, cancellation, and source freshness checks. ([#1837](https://github.com/openai/codex-security/pull/1837))
+
+<details>
+<summary>Other improvements</summary>
+
+- Patch project-trust overrides are serialized correctly for Codex. ([#1861](https://github.com/openai/codex-security/pull/1861))
+- Update Hono and the Linear SDK dependencies. ([#1831](https://github.com/openai/codex-security/pull/1831), [#1852](https://github.com/openai/codex-security/pull/1852))
+- Release verification runs test shards in parallel and reports publication progress on the release PR. ([#1798](https://github.com/openai/codex-security/pull/1798))
+
+</details>
 
 <!-- release-section: highlights:end -->
 
@@ -44,41 +27,20 @@ migration guidance below.
 
 ## Upgrade notes
 
-### Scripts and custom workflows that invoke ranking helpers
+### Severity classification requires model access
 
-The following plugin helper commands are removed:
+Classification without `--rubric` previously inherited the scanner's severity without model work. It now requires Codex authentication and model access, using three model calls per uncached finding by default. Set `--runs 1` (SDK: `classificationRuns: 1`) for a single review. All requested reviews must succeed; failures do not fall back to the scanner's severity or save a partial vote.
 
-- `make-repo-rank-input` and `select-deep-review-input`
-- `make-rank-shards`, `validate-rank-shard`, and `merge-rank-outputs`
-- `make-rank-pool-plan`, `validate-rank-worker`, and `validate-rank-pool`
+Older classification checkpoints without a recorded review count, and former inherited assessments without a rubric hash, are reclassified on the next classification request. Changing the review count or rubric also invalidates matching checkpoints. Existing results remain readable, and publication does not silently classify findings. Use `--reprocess` when changing only the model or reasoning effort. See the [classification guide](https://github.com/openai/codex-security/blob/npm-v0.6.0/sdk/typescript/docs/cli.md#classify-finding-severity).
 
-Remove the ranking, shard/pool scheduling, and ranked-selection stages from
-custom workflows. Generate the scoped inventory and review every selected file:
+### Policy preview interpreter selection is deprecated
 
-1. For explicit repository scopes, use
-   `scripts/generate_rank_input.py make-repo-scope-input --repo <repo_root> --scopes-file <scopes_json> --out <output_jsonl>`
-   with your Python interpreter and the script from the installed plugin.
-   The scopes file is a JSON array, such as `["src", "tests"]`; use `["."]`
-   for the whole repository instead of the old default `--scope .`.
-   Output rows contain only `path`, for example `{"path":"src/example.ts"}`.
-   Update your consumer to resolve each path against the repository root and
-   read that file directly. If it requires a `path`/`area` review worklist,
-   convert every row to `{"path":"src/example.ts","area":"repository"}`.
-   This inventory contains no `area` or `preview` fields and cannot be passed
-   directly to `copy-deep-review-input`.
-2. For Git diffs, retain `make-diff-rank-input` with its existing revision or
-   local-patch arguments. Copy all candidate rows into the review worklist with
-   `scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <input_jsonl> --out <review_jsonl>`.
-   On Windows, use the `.cmd` launcher.
-3. Review the entire resulting worklist instead of selecting a ranked subset.
-   `bind-repo-scopes` and the retained diff helpers keep their existing
-   arguments and worklist formats.
+`securityPolicyDiff(draft, python, signal)` retains its call shape, but interpreter strings and paths returned by resolver callbacks no longer select or validate an executable. `previewPolicy()` no longer resolves Python, and `pythonPath` and `PYTHON` do not affect previews. Update integrations that relied on an invalid interpreter failing or a custom executable producing the diff. Explicit resolver callbacks still run for changed drafts and propagate their errors. Omit the second argument in new code, or pass `undefined` when supplying a cancellation signal. Python-dependent generation and other operations are unchanged.
 
-See the [scoped review reference](https://github.com/openai/codex-security/blob/npm-v0.4.0/plugins/codex-security/skills/security-scan/references/scan-artifacts-and-ledger.md#scoped-deep-review)
-for commands, scope inputs, and Windows invocation details.
-([#1607](https://github.com/openai/codex-security/pull/1607))
+### Import identity and earlier upgrades
 
-Normal CLI and SDK scans do not need this helper migration. Hosted execution is
-opt-in; existing local scans continue to use their current execution path.
+Keep a stable source key and acquisition format across vendor imports. Switching formats can create separate records or replace richer evidence with less detail; omitted findings remain stored. Review each provider's format guide before changing inputs.
+
+If upgrading from before 0.5.1, also review the [0.5.1 upgrade notes](https://github.com/openai/codex-security/releases/tag/npm-v0.5.1) and their guidance for earlier versions. Use `openai/codex-security@action-v0.6.0` for the matching GitHub Action, or pin the distribution commit in its companion release after publication.
 
 <!-- release-section: upgrades:end -->

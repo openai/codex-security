@@ -18,7 +18,9 @@ import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
+import * as ownerSuggestions from "../src/suggest-owners.js";
 import {
+  ScanExecutionEventSchema,
   ScanExecutionResultSchema,
   type ScanExecutionEvent,
   type ScanExecutionResult,
@@ -42,6 +44,80 @@ import { writeSource } from "./support/shell.js";
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
 
+test("hosted owner artifact is opt-in and included in the completed receipt", async () => {
+  for (const enabled of [false, true]) {
+    const input = await fixture();
+    const executor = draftExecutor();
+    const startThread = mock(() => {
+      throw new Error("No additional owner turn");
+    });
+    const result = await runHostedScan(
+      { ...input, ownerSuggestions: enabled },
+      enabled ? { executor, ownerCodex: { startThread } } : { executor },
+    );
+    expect(result.status).toBe("completed");
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    if (result.status !== "completed") throw new Error(result.status);
+    expect(
+      result.artifacts.some(({ path }) => path === "owner-suggestions.json"),
+    ).toBe(enabled);
+    const manifest = await readJson(
+      join(input.outputDirectory, "scan-manifest.json"),
+    );
+    expect(JSON.stringify(manifest)).not.toContain("owner-suggestions.json");
+    if (enabled) {
+      expect(startThread).not.toHaveBeenCalled();
+      expect(result).not.toHaveProperty("ownerSuggestionsError");
+      expect(
+        await readJson(join(input.outputDirectory, "owner-suggestions.json")),
+      ).toMatchObject({
+        schemaVersion: 2,
+        revision: input.revision,
+        results: [],
+      });
+    }
+  }
+});
+
+test.each([false, true])(
+  "owner failure preserves the completed hosted scan (cancel=%p)",
+  async (cancel) => {
+    const controller = new AbortController();
+    const suggestion = spyOn(
+      ownerSuggestions,
+      "suggestOwnersInternal",
+    ).mockImplementation(async () => {
+      if (cancel) controller.abort();
+      throw new Error("Synthetic owner-stage failure");
+    });
+    try {
+      const input = await fixture();
+      const executor = draftExecutor();
+      const result = await runHostedScan(
+        { ...input, ownerSuggestions: true },
+        {
+          executor,
+          signal: controller.signal,
+        },
+      );
+      expect(result.status).toBe("completed");
+      expect(result).toHaveProperty(
+        "ownerSuggestionsError",
+        "Synthetic owner-stage failure",
+      );
+      expect(executor.run).toHaveBeenCalledTimes(1);
+      expect(
+        result.artifacts.some(({ path }) => path === "owner-suggestions.json"),
+      ).toBe(false);
+      expect(
+        await readJson(join(input.outputDirectory, "scan-manifest.json")),
+      ).toHaveProperty("scan.status", "completed");
+    } finally {
+      suggestion.mockRestore();
+    }
+  },
+);
+
 async function fixture(
   additionalFiles: readonly string[] = [],
 ): Promise<HostedScanInput> {
@@ -55,6 +131,7 @@ async function fixture(
   ])
     writeSource(repository, name, "export const value = 1;\n");
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "fixture");
   return {
@@ -380,6 +457,66 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+test.each(["missing", "file"] as const)(
+  "hosted preparation preserves cancellation for a %s repository",
+  async (kind) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, kind);
+    if (kind === "file") writeSource(root, kind, "owned fixture\n");
+    const input: HostedScanInput = {
+      version: 2,
+      repository,
+      revision: "a".repeat(40),
+      outputDirectory: join(root, "output"),
+      stateDirectory: join(root, "state"),
+      model: "synthetic-model",
+      reasoningEffort: "high",
+      identity: {
+        runId: "run-1",
+        attemptId: "attempt-1",
+        buildId: "fixture-build",
+      },
+    };
+    const executor = noExecution();
+    for (const timing of ["before", "during"] as const) {
+      const controller = new AbortController();
+      const reason = new Error(`Host canceled ${timing} preparation`);
+      if (timing === "before") controller.abort(reason);
+      const pending = runHostedScan(input, {
+        executor,
+        signal: controller.signal,
+      });
+      if (timing === "during") queueMicrotask(() => controller.abort(reason));
+      await expect(pending).rejects.toBe(reason);
+    }
+    for (const options of [{}, { signal: new AbortController().signal }]) {
+      await expect(
+        runHostedScan(input, { executor, ...options }),
+      ).rejects.toMatchObject({
+        name: "InvalidTargetError",
+        message: `Repository is not a directory: ${repository}`,
+      });
+    }
+    const signal = AbortSignal.abort(new Error("Host canceled preparation"));
+    await expect(
+      runHostedScan({ ...input, revision: "invalid" }, { executor, signal }),
+    ).rejects.toMatchObject({ name: "ZodError" });
+    await expect(
+      runHostedScan(
+        { ...input, scope: { paths: ["../outside"] } },
+        { executor, signal },
+      ),
+    ).rejects.toMatchObject({
+      name: "HostedScanPreparationError",
+      reason: "scope_syntax",
+    });
+    expect(executor.run).not.toHaveBeenCalled();
+    for (const directory of [input.outputDirectory, input.stateDirectory]) {
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  },
+);
+
 test("preparation verifies revision and rejects missing or escaping paths before execution", async () => {
   const input = await fixture();
   const executor = noExecution();
@@ -525,7 +662,10 @@ test.each([false, true])(
   "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
-    if (!cancel) input.reasoningEffort = "synthetic-future-effort";
+    if (!cancel) {
+      input.reasoningEffort = "synthetic-future-effort";
+      input.ownerSuggestions = true;
+    }
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -557,7 +697,11 @@ test.each([false, true])(
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
           requestId = message.params.requestId;
-          for (const event of [progressEvent, { invalid: true }])
+          for (const event of [
+            progressEvent,
+            reviewProgressEvent,
+            { invalid: true },
+          ])
             send(child.stdin, {
               method: "execution.progress",
               params: { requestId, event },
@@ -590,18 +734,33 @@ test.each([false, true])(
       expect(
         messages.filter((message) => message.method === "execution.run"),
       ).toHaveLength(1);
-      expect(messages).toContainEqual({
-        jsonrpc: "2.0",
-        method: "scan.progress",
-        params: { id: "run", event: progressEvent },
-      });
-      expect(messages.at(-1)).toMatchObject({
+      for (const event of [progressEvent, reviewProgressEvent])
+        expect(messages).toContainEqual({
+          jsonrpc: "2.0",
+          method: "scan.progress",
+          params: { id: "run", event },
+        });
+      const response = messages.at(-1);
+      expect(response).toMatchObject({
         id: "run",
         result: {
           status: cancel ? "canceled" : "completed",
           execution: { sessionId: "fake-host", usage },
         },
       });
+      if (!cancel) {
+        expect(response.result).not.toHaveProperty("ownerSuggestionsError");
+        expect(response.result.artifacts).toContainEqual(
+          expect.objectContaining({ path: "owner-suggestions.json" }),
+        );
+        expect(
+          await readJson(join(input.outputDirectory, "owner-suggestions.json")),
+        ).toMatchObject({
+          schemaVersion: 2,
+          revision: input.revision,
+          results: [],
+        });
+      }
     } finally {
       child.kill();
     }
@@ -612,6 +771,28 @@ const progressEvent: ScanExecutionEvent = {
   type: "progress",
   progress: { phase: "discovery", filesCompleted: 1, filesTotal: 2 },
 };
+const reviewProgressEvent: ScanExecutionEvent = {
+  type: "progress",
+  progress: {
+    ...progressEvent.progress,
+    phase: "validation",
+    reviewItems: { completed: 3, total: 4 },
+  },
+};
+
+test.each([
+  { completed: -1, total: 4 },
+  { completed: 5, total: 4 },
+  { completed: 1.5, total: 4 },
+])("rejects invalid hosted review counts %j", (reviewItems) => {
+  expect(
+    ScanExecutionEventSchema.safeParse({
+      ...progressEvent,
+      progress: { ...progressEvent.progress, reviewItems },
+    }).success,
+  ).toBe(false);
+});
+
 const activityEvent: ScanExecutionEvent = {
   type: "activity",
   activity: {

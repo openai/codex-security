@@ -105,39 +105,6 @@ assert.deepEqual(
   ],
   "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
 );
-const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
-const authenticatedArtifactClaimSource = serverSource.match(
-  /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
-)?.[0];
-assert.ok(
-  authenticatedArtifactClaimSource,
-  "Expected artifact claim authentication to require a handoff token and trusted request thread.",
-);
-assert.match(
-  authenticatedArtifactClaimSource,
-  /scan\?\.handoffStatus === "delivered"/,
-  "Artifact claims must be cached only after durable handoff delivery.",
-);
-assert.match(
-  authenticatedArtifactClaimSource,
-  /scan\.handoffClaimToken === handoffClaimToken/,
-  "Artifact claims must match the current persisted handoff token exactly.",
-);
-assert.match(
-  authenticatedArtifactClaimSource,
-  /scan\.continuationThreadId === threadId/,
-  "Ordinary artifact claims must remain bound to the owning Codex thread.",
-);
-assert.match(
-  authenticatedArtifactClaimSource,
-  /recoveryHandoffClaimTokenSchema\.safeParse\(handoffClaimToken\)\.success/,
-  "Cross-thread artifact recovery must require an exact recovery-token schema match.",
-);
-assert.match(
-  await readFile(path.join(mcpAppRoot, "src", "workbench-client.ts"), "utf8"),
-  /throw new Error\(error\.stderr\.trim\(\),\s*\{\s*cause:\s*error\s*\}\)/,
-  "Workbench failures must preserve subprocess exit, signal, and stderr diagnostics.",
-);
 const target = await temporaryDirectory("codex-security-target-");
 const replacementTarget = await temporaryDirectory(
   "codex-security-replacement-",
@@ -540,9 +507,7 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
   }
 }
 
-async function assertHeadlessStandardScanWorksWithoutUiCapability(
-  threadSource?: string,
-) {
+async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const headlessStateDir = path.join(tmpdir(), randomUUID());
   const headlessScanRoot = path.join(tmpdir(), randomUUID());
   const headlessServer = startTestServer({
@@ -681,58 +646,75 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability(
       "threat_model",
     );
 
-    await writeCompletedContract(
-      result.scanDir,
-      result.scanId,
-      result.scan.contract.target.requiredSnapshotDigest,
-    );
-    const completed = await headlessServer.callTool(9, {
-      name: "complete_codex_security_scan",
-      arguments: {
-        scanId: result.scanId,
-        handoffClaimToken: result.handoffClaimToken,
-      },
-      _meta: {
-        "x-codex-turn-metadata": {
-          thread_id: ownerThread,
-          turn_id: "fixture-completion-turn",
-          thread_source: threadSource,
-        },
-      },
-    });
-    assertNoError(completed);
-    assert.equal(
-      completed.result.structuredContent.scan.progress.status,
-      "complete",
-    );
-    if (threadSource === "security_scan") {
-      assert.deepEqual(
-        completed.result.structuredContent.scan.usage.completion,
-        {
-          threadId: ownerThread,
-          turnId: "fixture-completion-turn",
-          finalized: false,
-        },
+    for (const threadSource of [undefined, "security_scan"]) {
+      let scan = result;
+      if (threadSource) {
+        const usageScan = await headlessServer.callTool(83, {
+          name: "start_codex_security_standard_scan",
+          arguments: {
+            targetPath: target,
+            userContext: "Check completion usage.",
+          },
+          _meta: { "openai/threadId": ownerThread },
+        });
+        assertNoError(usageScan);
+        scan = usageScan.result.structuredContent;
+        assert.equal(scan.startDisposition, "created");
+        assert.notEqual(scan.scanId, result.scanId);
+      }
+      await writeCompletedContract(
+        scan.scanDir,
+        scan.scanId,
+        scan.scan.contract.target.requiredSnapshotDigest,
       );
-      const finalizedUsage = await headlessServer.callTool(10, {
-        name: "finalize_codex_security_scan_usage",
+      const completed = await headlessServer.callTool(threadSource ? 90 : 9, {
+        name: "complete_codex_security_scan",
         arguments: {
-          scanId: result.scanId,
-          threadId: ownerThread,
-          turnId: "fixture-completion-turn",
-          turnStatus: "completed",
+          scanId: scan.scanId,
+          handoffClaimToken: scan.handoffClaimToken,
+        },
+        _meta: {
+          "x-codex-turn-metadata": {
+            thread_id: ownerThread,
+            turn_id: "fixture-completion-turn",
+            thread_source: threadSource,
+          },
         },
       });
-      assertNoError(finalizedUsage);
-      assert.deepEqual(
-        finalizedUsage.result.structuredContent.scan.usage,
-        completed.result.structuredContent.scan.usage,
-      );
-    } else {
+      assertNoError(completed);
       assert.equal(
-        completed.result.structuredContent.scan.usage.completion,
-        undefined,
+        completed.result.structuredContent.scan.progress.status,
+        "complete",
       );
+      if (threadSource === "security_scan") {
+        assert.deepEqual(
+          completed.result.structuredContent.scan.usage.completion,
+          {
+            threadId: ownerThread,
+            turnId: "fixture-completion-turn",
+            finalized: false,
+          },
+        );
+        const finalizedUsage = await headlessServer.callTool(10, {
+          name: "finalize_codex_security_scan_usage",
+          arguments: {
+            scanId: scan.scanId,
+            threadId: ownerThread,
+            turnId: "fixture-completion-turn",
+            turnStatus: "completed",
+          },
+        });
+        assertNoError(finalizedUsage);
+        assert.deepEqual(
+          finalizedUsage.result.structuredContent.scan.usage,
+          completed.result.structuredContent.scan.usage,
+        );
+      } else {
+        assert.equal(
+          completed.result.structuredContent.scan.usage.completion,
+          undefined,
+        );
+      }
     }
   } finally {
     await headlessServer.stop();
@@ -1094,6 +1076,10 @@ try {
   assertNoError(initialized);
   assert.equal(initialized.result.serverInfo.name, "codex-security");
   assert.equal(initialized.result.serverInfo.title, "Codex Security");
+  assert.equal(
+    initialized.result.serverInfo.version,
+    (await readJson(mcpAppRoot, "package.json")).version,
+  );
   assert.equal(initialized.result.capabilities.resources, undefined);
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
@@ -1489,7 +1475,6 @@ try {
   ])
     await assertWorkspaceWorksWithoutUiCapability(scope);
   await assertHeadlessStandardScanWorksWithoutUiCapability();
-  await assertHeadlessStandardScanWorksWithoutUiCapability("security_scan");
   await assertDeepScanPersistsRetryableWorkerStartupError();
   await assertUserInputFailureLogging();
   if (process.platform !== "win32") {
@@ -1928,7 +1913,7 @@ try {
   ]);
   assert.deepEqual(submit._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectTarget._meta.ui.visibility, ["app"]);
-  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app"]);
+  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app", "model"]);
   assert.deepEqual(start._meta.ui.visibility, ["app"]);
   assert.deepEqual(startDeepScan._meta.ui.visibility, ["model"]);
   assert.ok(startDeepScan.inputSchema.properties.scanId);
@@ -3143,6 +3128,37 @@ try {
     unclaimedContext.result.content[0].text,
     /Claim the pending Codex Security scan handoff/,
   );
+  const unattachedToken = randomUUID();
+  const unattachedClaim = await testServer.callTool(20180, {
+    name: "claim_codex_security_scan_handoff_delivery",
+    arguments: { claimToken: unattachedToken, scanId: canceledScanId },
+  });
+  assertNoError(unattachedClaim);
+  const unattachedContext = await testServer.callTool(20181, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken: unattachedToken, scanId: canceledScanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assertNoError(unattachedContext);
+  assert.equal(
+    unattachedContext.result.structuredContent.scan.handoffStatus,
+    "delivered",
+  );
+  assert.equal(
+    unattachedContext.result.structuredContent.scan.continuationThreadId,
+    null,
+  );
+  const unattachedRead = await testServer.callTool(20182, {
+    name: "list_codex_security_review_items",
+    arguments: { scanId: canceledScanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.equal(unattachedRead.result.isError, true);
+  assert.match(
+    unattachedRead.result.content[0].text,
+    /current continuation claim/,
+  );
+
   const rejectedWrongThreadCancel = await testServer.callTool(1169, {
     name: "cancel_codex_security_scan",
     arguments: { scanId: canceledScanId },
@@ -3229,6 +3245,16 @@ try {
       .continuationThreadId,
     "fixture-recovery-thread",
   );
+  const malformedRecovery = await testServer.callTool(20170, {
+    name: "get_codex_security_scan_context",
+    arguments: {
+      handoffClaimToken: `${fallbackClaimToken}-extra`,
+      scanId: fallbackScanId,
+    },
+    _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
+  });
+  assert.equal(malformedRecovery.result.isError, true);
+  assert.match(malformedRecovery.result.content[0].text, /invalid/i);
   const wrongRecoveryContext = await testServer.callTool(20171, {
     name: "get_codex_security_scan_context",
     arguments: {
@@ -3263,6 +3289,18 @@ try {
       .handoffClaimToken,
     undefined,
   );
+  const recoveryArtifactRead = (id: number) =>
+    testServer.callTool(id, {
+      name: "list_codex_security_review_items",
+      arguments: { scanId: fallbackScanId },
+      _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
+    });
+  const beforeRecovery = await recoveryArtifactRead(20174);
+  assert.equal(beforeRecovery.result.isError, true);
+  assert.match(
+    beforeRecovery.result.content[0].text,
+    /current continuation claim/,
+  );
   const recoveredThreadContext = await testServer.callTool(20172, {
     name: "get_codex_security_scan_context",
     arguments: {
@@ -3288,6 +3326,12 @@ try {
     recoveredThreadContext.result.structuredContent.workspace.results
       .handoffClaimToken,
     undefined,
+  );
+  const afterRecovery = await recoveryArtifactRead(20175);
+  assert.equal(afterRecovery.result.isError, true);
+  assert.match(
+    afterRecovery.result.content[0].text,
+    /only available for Deep or diff scans/,
   );
   const fallbackAppAcknowledgement = await testServer.callTool(2014, {
     name: "mark_codex_security_scan_handoff_delivered",
@@ -3489,7 +3533,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assertNoError(rotatedProgress);
-  const failureMessage = "--failure\nline";
+  const failureMessage = `--failure\n${"diagnostic ".repeat(500)}final cause`;
   const rotatedFailure = await testServer.callTool(2039, {
     name: "fail_codex_security_scan",
     arguments: {

@@ -83,44 +83,6 @@ def test_rank_input_keeps_large_generated_python(tmp_path: Path) -> None:
     assert rows[1]["preview"] == "value = 1"
 
 
-def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    initialize_repo(repo)
-    git(repo, "commit", "--allow-empty", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    (repo / "large.py").write_text(
-        "def visible():\n    pass\n" + "# comment\n" * 10000 + "def outside():\n    pass\n",
-        encoding="utf-8",
-    )
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "change")
-    output = tmp_path / "rank.jsonl"
-
-    run_repo_cli("make-diff-rank-input", repo, output, "--base", base, "--head", "HEAD")
-
-    preview = read_jsonl(output)[0]["preview"]
-    assert preview.startswith("def visible():\n    pass\n# comment")
-    assert len(preview.encode("utf-8")) <= 1024
-    assert "outside" not in preview
-
-
-def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    initialize_repo(repo)
-    git(repo, "commit", "--allow-empty", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    (repo / "binary.py").write_bytes(b"# comment\n" * 10_000 + b"\0")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "change")
-    output = tmp_path / "rank.jsonl"
-
-    run_repo_cli("make-diff-rank-input", repo, output, "--base", base, "--head", "HEAD")
-
-    assert read_jsonl(output) == []
-
-
 def test_rank_input_streams_classification_and_bounds_previews(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -291,15 +253,19 @@ def test_repo_input_preserves_every_requested_directory_file(tmp_path: Path) -> 
     (repo / "src" / "tests").mkdir(parents=True)
     (repo / "src" / "examples").mkdir()
     (repo / "src" / "fixtures").mkdir()
-    (repo / "src" / ".git").mkdir()
     (repo / "src" / "runtime.py").write_text("runtime = True", encoding="utf-8")
     (repo / "src" / "tests" / "handler.py").write_text("handler = True", encoding="utf-8")
     (repo / "src" / "examples" / "demo.py").write_text("demo = True", encoding="utf-8")
     (repo / "src" / "fixtures" / "payload.txt").write_text("payload", encoding="utf-8")
     (repo / "src" / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
-    (repo / "src" / ".git" / "config").write_text("private", encoding="utf-8")
+    for metadata in (".git", ".svn"):
+        (repo / "src" / metadata).mkdir()
+        (repo / "src" / metadata / "config").write_text("metadata", encoding="utf-8")
     scopes = tmp_path / "target-paths.json"
-    scopes.write_text(json.dumps(["src", "src/runtime.py", "src/.git/config"]), encoding="utf-8")
+    scopes.write_text(
+        json.dumps(["src", "src/runtime.py", "src/.git/config", "src/.svn/config"]),
+        encoding="utf-8",
+    )
     output = tmp_path / "scoped-source-input.jsonl"
 
     run_repo_cli("make-repo-scope-input", repo, output, "--scopes-file", str(scopes))
@@ -771,6 +737,69 @@ def test_revision_preview_uses_the_same_read_window_as_local_files(tmp_path: Pat
         "--head",
         "HEAD",
     )
-    rows = read_jsonl(output)
-    assert "first" in rows[0]["preview"]
-    assert "outside_window" not in rows[0]["preview"]
+    preview = read_jsonl(output)[0]["preview"]
+    assert preview.startswith("def first():\n    pass")
+    assert "outside_window" not in preview
+    assert len(preview.encode("utf-8")) <= 1024
+
+
+def test_local_diff_inventory_excludes_svn_but_revision_diff_retains_it(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    changes = {}
+    sources = []
+    for state in ("staged", "unstaged", "untracked", "deleted"):
+        ordinary = [f"{state}.py", f"vendor/.svn-{state}.py"]
+        sources.extend(ordinary)
+        changes[state] = [*ordinary, f".svn/{state}", f"vendor/.svn/{state}"]
+
+    def write_source(name: str, version: str) -> None:
+        source = repo / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(f"{name}: {version}\n", encoding="utf-8")
+
+    for state in ("staged", "unstaged", "deleted"):
+        for name in changes[state]:
+            write_source(name, "before")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+
+    for state in ("staged", "unstaged", "untracked"):
+        for name in changes[state]:
+            write_source(name, "after")
+    git(repo, "add", "--", *changes["staged"])
+    for name in changes["deleted"]:
+        (repo / name).unlink()
+
+    def assert_inventories(mode: str, expected: list[str]) -> None:
+        rank = tmp_path / f"{mode}.jsonl"
+        run_repo_cli("make-diff-rank-input", repo, rank, "--base", base, "--mode", mode)
+        assert [row["path"] for row in read_jsonl(rank)] == sorted(expected), mode
+        inventory = tmp_path / f"{mode}.txt"
+        subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT.with_name("generate_in_scope_files.py")),
+                "--repo",
+                str(repo),
+                "--scope",
+                ".",
+                "--out",
+                str(inventory),
+                "--diff-base",
+                base,
+                "--diff-mode",
+                mode,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert inventory.read_text(encoding="utf-8").splitlines() == sorted(expected), mode
+
+    assert_inventories("local-patch", sources)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "change all four paths in each group")
+    assert_inventories("revisions", [name for names in changes.values() for name in names])

@@ -20,7 +20,13 @@ function pattern(schema: z.ZodString, source: string) {
   });
 }
 
-const nonEmptyText = z.string().min(1).regex(/\S/);
+// Match Python str.strip in both runtimes; \S differs on BOM and C0/NEL whitespace.
+const nonEmptyText = z
+  .string()
+  .min(1)
+  .regex(
+    /[^\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/,
+  );
 
 const scanId = z
   .string()
@@ -29,7 +35,7 @@ const scanId = z
 
 const repositoryPath = pattern(
   z.string().min(1).max(4096),
-  "^(?:\\./)?(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\/$).+$",
+  "^(?:\\./)?(?!/)(?![A-Za-z]:)(?![\\s\\S]*\\\\)(?![\\s\\S]*(?:^|/)\\.\\.?(/|$))(?![\\s\\S]*//)(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?![\\s\\S]*\\/$)[\\s\\S]+$",
 );
 
 const candidateId = z
@@ -381,6 +387,15 @@ const draft_scanDraftInput = z.strictObject({
   coverage: draft_coverage,
 });
 
+const deep_reductionInput = draft_scanDraftInput
+  .omit({ coverage: true })
+  .extend({
+    complete: z
+      .boolean()
+      .describe("Omit or set true when submitting the finished aggregate.")
+      .optional(),
+  });
+
 /** Native tool contracts; JSON resources are generated compatibility exports. */
 export const artifactSchemaDocuments = {
   "definitions/artifact-common": {
@@ -483,7 +498,7 @@ export const artifactSchemaDocuments = {
   },
   "tools/deep-reducer": {
     title: "Codex Security Deep Scan semantic reducer operations",
-    $ref: "#/$defs/reductionInput",
+    $ref: "#/$defs/reductionSubmission",
     $defs: {
       reducerInputs: z.strictObject({
         cursor: z
@@ -501,10 +516,13 @@ export const artifactSchemaDocuments = {
           )
           .optional(),
       }),
-      reductionInput: draft_scanDraftInput.omit({ coverage: true }).extend({
-        complete: z
-          .boolean()
-          .describe("Omit or set true when submitting the finished aggregate.")
+      reductionInput: deep_reductionInput,
+      reductionSubmission: deep_reductionInput.extend({
+        retainedFindingRefs: z
+          .array(z.string().regex(/^previous:(0|[1-9][0-9]*)$/))
+          .describe(
+            "Copy unchanged previous aggregate findings by previous:<zero-based index>. The host preserves their complete bodies, identities, and source references; do not also submit them in findings.",
+          )
           .optional(),
       }),
     },

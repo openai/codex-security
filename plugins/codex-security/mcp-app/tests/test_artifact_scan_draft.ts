@@ -265,10 +265,10 @@ try {
     "checkpoints",
     acceptedHead.checkpoint,
   );
-  assert.notEqual(
+  assert.equal(
     acceptedHeadDraft.complete,
     false,
-    "a rejected incomplete write must not become the authoritative checkpoint head",
+    "new late work must remain incomplete in the authoritative checkpoint",
   );
   assert.deepEqual(acceptedHeadDraft.findings, [finding]);
   const acceptedResult = await readJson(rejectedIncompleteRoot, "result.json");
@@ -276,8 +276,8 @@ try {
     acceptedResult.coverage.deferred.some(
       (item: FixtureFinding) => item.candidateId === "late-incomplete-review",
     ),
-    false,
-    "a rejected incomplete write must not change the completed result",
+    true,
+    "new late work must survive alongside the completed candidate",
   );
 
   const deferredDoesNotRejectContext = await createWorkerContext(
@@ -1893,13 +1893,32 @@ try {
   const partialDeferredFinding = {
     summary: "Partial evidence captured before validation.",
   };
+  const partialDeferredDraft = {
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [],
+      deferred: [
+        {
+          id: "first-gap",
+          candidateId: finding.provenance.candidateId,
+          reason: "Validation is pending.",
+          finding: partialDeferredFinding,
+        },
+        {
+          id: "second-gap",
+          candidateId: finding.provenance.candidateId,
+          reason: "The second boundary also needs validation.",
+        },
+      ],
+    },
+  };
   await recordCodexSecurityWorkerScanDraft(
     partialDeferredContext,
-    partialWorkerInput({
-      candidateId: finding.provenance.candidateId,
-      reason: "Validation is pending.",
-      finding: partialDeferredFinding,
-    }),
+    partialDeferredDraft,
   );
   await recordCodexSecurityWorkerScanDraft(partialDeferredContext, workerInput);
   const resolvedPartialDeferred = await readJson(
@@ -1910,6 +1929,31 @@ try {
     resolvedPartialDeferred.findings[0].provenance.previousFindings,
     [partialDeferredFinding],
   );
+  assert.deepEqual(resolvedPartialDeferred.coverage.deferred, []);
+
+  for (const disposition of ["rejected", "not_applicable"]) {
+    const dispositionRoot = path.join(root, `${disposition}-deferred-worker`);
+    await mkdir(dispositionRoot);
+    const dispositionContext = { ...workerContext, root: dispositionRoot };
+    await recordCodexSecurityWorkerScanDraft(
+      dispositionContext,
+      partialDeferredDraft,
+    );
+    await recordCodexSecurityWorkerScanDraft(dispositionContext, {
+      ...workerInput,
+      findings: [],
+      coverage: {
+        ...coverage,
+        surfaces: [{ ...rejection, disposition }],
+      },
+    });
+    const resolved = JSON.parse(
+      await readFile(path.join(dispositionRoot, "result.json"), "utf8"),
+    );
+    assert.deepEqual(resolved.coverage.deferred, []);
+    assert.equal(resolved.coverage.completeness, undefined);
+    assert.equal(resolved.coverage.surfaces[0].disposition, disposition);
+  }
 
   const recorded = await recordCodexSecurityScanDraft(context, input);
   assert.deepEqual(recorded, {
@@ -2376,13 +2420,13 @@ try {
     ),
     [
       { anchor: "candidate-authored-instance", instance: "dss-147-a" },
-      { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+      { anchor: "candidate-authored-instance", instance: "dss-147-a-2" },
       {
         anchor: "candidate-authored-instance",
         instance: "ledger-row-c",
       },
     ],
-    "duplicate stable instance sources remain collisions for finalization",
+    "generated instances avoid an existing authored identity",
   );
 
   const collisionFindings = [
@@ -2449,10 +2493,17 @@ try {
     assert.deepEqual(
       standardFindings.map((item: FixtureFinding) => item.identity),
       collisionCase.findings.map(
-        (item: FixtureFinding) =>
-          item.identity ?? collisionCase.originalIdentity,
+        (item: FixtureFinding, index) =>
+          item.identity ?? {
+            ...collisionCase.originalIdentity,
+            ...(index === 0
+              ? {}
+              : {
+                  instance: `${(collisionCase.originalIdentity as { instance?: string }).instance}-${index + 1}`,
+                }),
+          },
       ),
-      `${collisionCase.label} identity collisions retain the existing Standard shape`,
+      `${collisionCase.label} identities preserve authored values and split generated collisions`,
     );
     assert.deepEqual(
       standardFindings.map((item: FixtureFinding) => item.provenance),
@@ -2486,7 +2537,7 @@ try {
     assert.deepEqual(
       deepFindings.map((item: FixtureFinding) => item.provenance),
       collisionCase.findings.map((item: FixtureFinding, index) =>
-        index === 1 || index === 2
+        item.identity !== undefined && (index === 1 || index === 2)
           ? {
               ...item.provenance,
               preservedIdentity: collisionCase.originalIdentity,
@@ -2513,6 +2564,41 @@ try {
     ...incompleteCodeEvidence,
     code: "extract_archive_entry(untrusted_entry, output_path)",
   };
+  for (const literalPath of ["\u2028", "\u2029", " ", "\u00A0", "\uFEFF"]) {
+    const literalRoot = path.join(
+      root,
+      `literal-path-${literalPath.codePointAt(0)}`,
+    );
+    await mkdir(literalRoot);
+    const { context: literalContext } = draftFixture(literalRoot, "standard");
+    const literalFinding = {
+      ...finding,
+      locations: [{ ...finding.locations[0], path: literalPath }],
+      codeEvidence: [{ ...completeCodeEvidence, path: literalPath }],
+    };
+    await recordCodexSecurityScanDraft(literalContext, {
+      ...input,
+      findings: [literalFinding],
+    });
+    assert.equal(
+      (await readJson(literalRoot, "findings.json")).findings[0].locations[0]
+        .path,
+      literalPath,
+    );
+    await recordCodexSecurityScanDraft(literalContext, {
+      ...input,
+      findings: [{ ...literalFinding, summary: "Updated finding summary." }],
+    });
+    const reloaded = draftApi.parseCanonicalScanDraft({
+      scanId,
+      manifest: await readJson(literalRoot, "scan-manifest.json"),
+      findings: await readJson(literalRoot, "findings.json"),
+      coverage: await readJson(literalRoot, "coverage.json"),
+    });
+    assert.equal(reloaded.findings[0].summary, "Updated finding summary.");
+    assert.equal(reloaded.findings[0].locations[0].path, literalPath);
+    assert.equal(reloaded.findings[0].codeEvidence[0].path, literalPath);
+  }
   const evidencedFinding = {
     ...finding,
     codeEvidence: [completeCodeEvidence],

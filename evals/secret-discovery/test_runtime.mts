@@ -202,6 +202,7 @@ test("the SDK executable override preserves bundled tools at the child boundary"
   const executable = join(directory, "bin", "codex");
   const tools = join(directory, "codex-path");
   await mkdir(dirname(executable));
+  await writeFile(executable, "synthetic executable; never launched\n");
   await mkdir(tools);
   const inherited = {
     Path: [tools, join(directory, "other tools"), tools].join(delimiter),

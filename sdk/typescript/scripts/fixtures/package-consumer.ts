@@ -1,5 +1,21 @@
 import {
   CodexSecurity,
+  importGitHubCodeScanningAlerts,
+  importGitHubAdvisories,
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
+  prepareExternalPublication,
+  prepareLocalExternalImport,
+  prepareNormalizedLocalImport,
+  listLocalExternalFindings,
+  type NormalizedLocalImportOptions,
+  type StoredExternalFinding,
+  normalizeSnykFindingsExport,
+  prepareNormalizedExternalPublication,
+  type ExternalFindings,
+  type ExternalPublicationOptions,
+  type NormalizedExternalPublicationOptions,
+  type ExternalPublicationResult,
   DiffTarget,
   classifySeverity,
   classifyScanSeverity,
@@ -282,6 +298,62 @@ export async function dedupeRecords(
   return await deduplicateRecords(input, { reviewRunner, signal });
 }
 
+export async function externalPublication(
+  file: string,
+  input: ExternalFindings,
+  options: ExternalPublicationOptions,
+): Promise<ExternalPublicationResult> {
+  const fromFile = await prepareExternalPublication(file, options);
+  fromFile.preview.requests[0]?.source.provider satisfies
+    "wiz" | "endor" | "snyk" | "github" | "semgrep" | undefined;
+  const prepared = await prepareNormalizedExternalPublication(input, options);
+  return prepared.publish();
+}
+
+export async function publishGitHubAlerts(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubCodeScanningAlerts({
+    repository: "example/project",
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubCodeScanningAlerts(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/code-scanning",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
+export async function publishGitHubAdvisories(): Promise<ExternalPublicationResult> {
+  const imported = await importGitHubAdvisories({
+    repository: "example/project",
+    source: "global",
+    advisoryIds: ["GHSA-2345-6789-cfgh"],
+  });
+  const prepared = await prepareNormalizedExternalPublication(
+    normalizeGitHubAdvisories(imported),
+    {
+      provider: "github",
+      sourceKey: "github.com/example/project/security-advisories",
+      repository: "https://github.com/example/project",
+    },
+  );
+  return prepared.publish();
+}
+
+export async function publishNormalizedVendorEvidence(
+  input: ExternalFindings,
+): Promise<ExternalPublicationResult> {
+  const options: NormalizedExternalPublicationOptions = {
+    provider: "endor",
+    sourceKey: "example-namespace/example-project/main",
+    repository: "https://github.com/example/project",
+  };
+  const prepared = await prepareNormalizedExternalPublication(input, options);
+  return prepared.publish();
+}
+
 export const ownerVariants: OwnerSuggestion["owner"][] = [
   { name: "Alex Example", email: "alex@example.test" },
   { kind: "person", provider: "github", handle: "example-user" },
@@ -314,12 +386,25 @@ export async function hostedScan(
 ): Promise<HostedScanResult> {
   const options: HostedScanOptions = {
     executor,
+    ownerCodex: {
+      startThread(options) {
+        options.model satisfies string | undefined;
+        options.modelReasoningEffort satisfies string | undefined;
+        return {
+          async run(input, options) {
+            input satisfies string;
+            options.signal satisfies AbortSignal | undefined;
+            return { finalResponse: "{}" };
+          },
+        };
+      },
+    },
     signal,
     onEvent(event) {
       event.type satisfies "progress" | "activity";
     },
   };
-  return await runHostedScan(input, options);
+  return await runHostedScan({ ...input, ownerSuggestions: true }, options);
 }
 
 const localOptions: ScanOptions = {
@@ -327,3 +412,24 @@ const localOptions: ScanOptions = {
   hosted: {},
 };
 void localOptions;
+
+export async function importLocalEvidence(
+  input: ExternalFindings,
+  options: NormalizedLocalImportOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareNormalizedLocalImport(input, options);
+  await prepared.import();
+  return listLocalExternalFindings({ repository: options.repository });
+}
+
+export async function importLocalFile(
+  file: string,
+  options: ExternalPublicationOptions,
+): Promise<StoredExternalFinding[]> {
+  const prepared = await prepareLocalExternalImport(file, options);
+  return (await prepared.import()).findings;
+}
+
+export function snykPluginFindings(bundle: unknown): ExternalFindings {
+  return normalizeSnykFindingsExport(bundle);
+}

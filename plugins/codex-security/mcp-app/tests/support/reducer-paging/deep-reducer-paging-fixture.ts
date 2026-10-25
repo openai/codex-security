@@ -6,12 +6,21 @@ import { mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { sourceReferences } from "../source-references.ts";
 
-// This is the existing code-mode transport ceiling, used only to size the eval.
+// These are the real ceilings reported by the respective transports.
 const IPC_FRAME_LIMIT_BYTES = 64 * 1024 * 1024;
+const STDIO_LINE_LIMIT_BYTES = 16 * 1024 * 1024;
 const SCAN_ID = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
 /** Generate one reducer assignment; no repository scan or external service runs. */
-export async function createReducerPagingFixture(root: string) {
+export async function createReducerPagingFixture(
+  root: string,
+  transport: "stdio" | "http",
+  mode: "deterministic" | "model",
+) {
+  const responseLimitBytes =
+    transport === "stdio" ? STDIO_LINE_LIMIT_BYTES : IPC_FRAME_LIMIT_BYTES;
+  const fixtureLimitBytes =
+    mode === "model" ? IPC_FRAME_LIMIT_BYTES : responseLimitBytes;
   const fixtureRoot = await realpath(root);
   const scanRoot = path.join(fixtureRoot, "scan");
   const deepRoot = path.join(scanRoot, "artifacts", "deep_discovery");
@@ -26,7 +35,7 @@ export async function createReducerPagingFixture(root: string) {
 
   const freshHtml = finding("reflected-html", {
     title: "Request text reaches an HTML response without encoding",
-    summary: paddedSummary(IPC_FRAME_LIMIT_BYTES / 2),
+    summary: paddedSummary(fixtureLimitBytes / 2),
     remediation: "HTML-encode request text at the response rendering boundary.",
   });
   const freshArchive = finding("archive-path", {
@@ -116,7 +125,7 @@ export async function createReducerPagingFixture(root: string) {
       }),
     ) - Buffer.byteLength("null");
   const legacyResponseBytes = envelopeBytes + bytes * 2 + stringEscapes;
-  assert.ok(legacyResponseBytes > IPC_FRAME_LIMIT_BYTES);
+  assert.ok(legacyResponseBytes > fixtureLimitBytes);
   return {
     context: {
       root: outputRoot,
@@ -140,6 +149,7 @@ export async function createReducerPagingFixture(root: string) {
     },
     measurements: {
       ipcFrameLimitBytes: IPC_FRAME_LIMIT_BYTES,
+      responseLimitBytes,
       largeSemanticFieldBytes: Buffer.byteLength(freshHtml.summary),
       logicalInputBytes: bytes,
       legacyResponseBytes,

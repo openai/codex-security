@@ -32,7 +32,7 @@ jobs:
       security-events: write
       actions: read
     env:
-      CODEX_SECURITY_VERSION: "0.3.0"
+      CODEX_SECURITY_VERSION: "0.6.0"
       BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
       # Report-only by default. Set to "high" to fail on high/critical findings.
       FAIL_ON_SEVERITY: ""
@@ -94,6 +94,7 @@ jobs:
             --model "$BEDROCK_MODEL_ID"
             --mode standard
             --effort high
+            --codex 'responses_api_metadata.codex_security_integration="github_actions_workflow"'
             --output-dir "$RUNNER_TEMP/codex-security-scan"
             --json
           )

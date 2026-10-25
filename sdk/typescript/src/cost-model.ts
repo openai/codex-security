@@ -176,13 +176,18 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockPricing = BEDROCK_MODEL_PRICING[model];
+  const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
+    ? BEDROCK_MODEL_PRICING[model]
+    : undefined;
   const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
   const pricing =
-    bedrockPricing?.short ?? MODEL_PRICING_NANODOLLARS[pricingModel];
+    bedrockPricing?.short ??
+    (Object.hasOwn(MODEL_PRICING_NANODOLLARS, pricingModel)
+      ? MODEL_PRICING_NANODOLLARS[pricingModel]
+      : undefined);
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;

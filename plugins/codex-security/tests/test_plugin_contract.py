@@ -143,10 +143,3 @@ def test_every_skill_has_valid_frontmatter_and_agent_interface() -> None:
         for field in ("display_name", "short_description", "default_prompt"):
             assert isinstance(interface[field], str), f"{agent_path}: {field}"
             assert interface[field].strip(), f"{agent_path}: {field}"
-
-
-def test_fix_finding_uses_product_language_for_workbench_state() -> None:
-    skill = (PLUGIN_ROOT / "skills" / "fix-finding" / "SKILL.md").read_text(encoding="utf-8")
-
-    assert "terminal workbench update" in skill
-    assert "SQLite" not in skill

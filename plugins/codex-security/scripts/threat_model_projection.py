@@ -101,10 +101,12 @@ def _scope_lines(scope: Any, label: str, text: Callable[[Any, str], str]) -> lis
     included = scope.get("includePaths") if isinstance(scope, dict) else None
     if not isinstance(included, list) or not all(isinstance(path, str) for path in included):
         return [f"- {label}: not recorded"]
-    lines = [f"- {label}: {text(', '.join(included), 'none')}"]
+    included_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in included)
+    lines = [f"- {label}: {included_text or 'none'}"]
     excluded = scope.get("excludePaths")
     if isinstance(excluded, list) and excluded and all(isinstance(path, str) for path in excluded):
-        lines.append(f"- {label} exclusions: {text(', '.join(excluded), 'none')}")
+        excluded_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in excluded)
+        lines.append(f"- {label} exclusions: {excluded_text or 'none'}")
     summary = scope.get("summary")
     if isinstance(summary, str) and summary:
         lines.append(f"- {label} description: {text(summary, 'not recorded')}")
@@ -129,9 +131,7 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     ):
         if provenance.get(key):
             footer.append(f"- {label}: {text(str(provenance[key]), 'not recorded')}")
-    footer.append(
-        f"- Model origin: {text(str(model.get('origin', 'not recorded')), 'not recorded')}"
-    )
+    footer.append(f"- Model origin: {text(model.get('origin'), 'not recorded')}")
     footer.extend(_scope_lines(model.get("scope"), "Model scope", text))
     scan_scope = provenance.get("scanScope")
     if isinstance(scan_scope, dict):

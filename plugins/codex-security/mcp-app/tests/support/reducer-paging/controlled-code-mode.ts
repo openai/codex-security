@@ -44,7 +44,7 @@ export async function runControlledCodeMode({
   prompt,
 }: {
   code: string;
-  mcpServer: { command: string; args: string[] };
+  mcpServer: { command: string; args: string[] } | { url: string };
   workingDirectory: string;
   prompt: string;
 }) {
@@ -126,11 +126,18 @@ export async function runControlledCodeMode({
     const config = [
       'model_provider="controlled"',
       `model_providers.controlled={name="controlled",base_url="http://127.0.0.1:${port}/v1",wire_api="responses",requires_openai_auth=false,supports_websockets=false}`,
+      "mcp_servers.cs_artifacts.required=true",
       "features.code_mode.enabled=true",
       "features.code_mode_host.enabled=true",
       "features.code_mode_host.disable_in_process_fallback=true",
-      `mcp_servers.cs_artifacts.command=${JSON.stringify(mcpServer.command)}`,
-      `mcp_servers.cs_artifacts.args=${JSON.stringify(mcpServer.args)}`,
+      ...("url" in mcpServer
+        ? [`mcp_servers.cs_artifacts.url=${JSON.stringify(mcpServer.url)}`]
+        : [
+            // Wait for the bundled fixture's tools before the scripted first call.
+            "mcp_servers.cs_artifacts.startup_timeout_sec=60",
+            `mcp_servers.cs_artifacts.command=${JSON.stringify(mcpServer.command)}`,
+            `mcp_servers.cs_artifacts.args=${JSON.stringify(mcpServer.args)}`,
+          ]),
     ];
     // Pass only process-launch essentials; never inherit the caller's model auth.
     const env: NodeJS.ProcessEnv = {

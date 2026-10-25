@@ -246,6 +246,35 @@ describe("patch risk assessment contract", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  test("rejects critical regression likelihood for every merge workflow", () => {
+    for (const workflowLabel of [
+      "human_review_required",
+      "auto_merge_candidate",
+    ]) {
+      const payload = assessment();
+      payload.workflowLabel = workflowLabel;
+      payload.impact.rating = "low";
+      payload.regressionLikelihood.rating = "critical";
+
+      const result = validate(payload);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "merge cannot retain critical regression likelihood",
+      );
+    }
+  });
+
+  test.each(["low", "moderate", "high"])(
+    "accepts critical-impact human-review merge with %s regression likelihood",
+    (rating) => {
+      const payload = assessment();
+      payload.impact.rating = "critical";
+      payload.regressionLikelihood.rating = rating;
+      const result = validate(payload);
+      expect(result.status, result.stderr).toBe(0);
+    },
+  );
+
   test("compares JSON numeric constants by value", () => {
     const serialized = JSON.stringify(assessment()).replace(
       '"schemaVersion":1',
@@ -381,7 +410,12 @@ describe("patch risk assessment contract", () => {
     expect(validate(payload).status).not.toBe(0);
   });
 
-  test("preserves the ordered auto-merge gates", () => {
+  test("preserves the ordered auto-merge gates", async () => {
+    const helperSource = new URL(
+      "../../../plugins/codex-security/mcp-app/src/helpers/validate-patch-risk-assessment.ts",
+      import.meta.url,
+    );
+    const { validatePatchRiskAssessment } = await import(helperSource.href);
     const cases: Array<[string, (value: Assessment) => void]> = [
       [
         "impact.rating",
@@ -461,18 +495,19 @@ describe("patch risk assessment contract", () => {
     const payload = assessment();
     payload.workflowLabel = "auto_merge_candidate";
     payload.impact.rating = "low";
-    expect(validate(payload).status).toBe(0);
+    expect(validatePatchRiskAssessment(payload)).toEqual([]);
+    const combined = structuredClone(payload);
     for (const [field, mutate] of cases) {
       const changed = structuredClone(payload);
       mutate(changed);
-      const result = validate(changed);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
+      expect(validatePatchRiskAssessment(changed)).toContain(
         `auto_merge_candidate gate failed: ${field}`,
       );
-      mutate(payload);
+      mutate(combined);
     }
-    expect(validate(payload).stderr.trim().split("\n")).toEqual([
+    const result = validate(combined);
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim().split("\n")).toEqual([
       "merge requires confirmed applicability",
       ...cases.map(([field]) => `auto_merge_candidate gate failed: ${field}`),
     ]);
@@ -480,6 +515,7 @@ describe("patch risk assessment contract", () => {
 
   test("keeps all merge errors in their established order", () => {
     const payload = assessment();
+    payload.regressionLikelihood.rating = "critical";
     payload.workflowLabel = "block";
     payload.applicability.status = "wrong_owner";
     payload.unknowns = [
@@ -504,6 +540,7 @@ describe("patch risk assessment contract", () => {
       "merge requires every material boundary to be supported",
       "merge cannot retain a failed validation",
       "merge cannot retain an evidence plan",
+      "merge cannot retain critical regression likelihood",
       "only hold_for_evidence may include an evidence plan",
       "an established non-applicable disposition requires no_op",
     ]);
@@ -794,7 +831,7 @@ describe("patch risk assessment contract", () => {
             if (input === "missing") await rm(file);
             const result = await launcher.run(
               powershell,
-              "skills/assess-patch-risk/SKILL.md",
+              "skills/assess-patch-risk/references/windows-validation.md",
               {
                 "<plugin-root>": argument(launcher.plugin),
                 "<assessment.json>":

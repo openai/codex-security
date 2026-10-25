@@ -21,6 +21,37 @@ test.each([
   ["standard", {}],
   ["daybreak_blue", {}],
   ["daybreak_red", {}],
+  [undefined, { daybreak: true }],
+  [undefined, { daybreak: false }],
+  ["standard", { daybreak: true }],
+  ["daybreak_blue", { daybreak: false }],
+  [undefined, { daybreak: true, features: { cli_daybreak: false } }],
+  [
+    undefined,
+    {
+      daybreak: true,
+      features: { cli_daybreak: true },
+      profile: "selected",
+      profiles: { selected: { features: { cli_daybreak: false } } },
+    },
+  ],
+  [
+    undefined,
+    {
+      daybreak: false,
+      features: { cli_daybreak: false },
+      profile: "selected",
+      profiles: { selected: { features: { cli_daybreak: true } } },
+    },
+  ],
+  [
+    undefined,
+    {
+      daybreak: false,
+      profile: "selected",
+      profiles: { selected: { daybreak: true } },
+    },
+  ],
   ["daybreak_blue", { features: { api_key_cyber_access_programs: false } }],
   [
     "daybreak_blue",
@@ -81,6 +112,24 @@ test.each([
       expect(recipe?.["cyberAccessProgram"]).toBe(program);
       expect(clientOptions?.apiKey).toBe("synthetic-api-key");
       const config = parseToml(await readFile(runtime.configPath, "utf8"));
+      const resolved = resolveCodexProfile(overrides as JsonObject);
+      const daybreak = resolved["daybreak"] as boolean | undefined;
+      expect(config["daybreak"]).toBe(daybreak);
+      expect(clientOptions?.config?.["daybreak"]).toBe(daybreak);
+      expect((recipe?.["config"] as JsonObject | undefined)?.["daybreak"]).toBe(
+        daybreak,
+      );
+      for (const snapshot of [
+        config,
+        clientOptions?.config,
+        recipe?.["config"] as JsonObject,
+      ]) {
+        expect(
+          (snapshot?.["features"] as JsonObject | undefined)?.["cli_daybreak"],
+        ).toBe(
+          (resolved["features"] as JsonObject | undefined)?.["cli_daybreak"],
+        );
+      }
       if (program === undefined) {
         expect(config).not.toHaveProperty("codex_security");
         expect(config["features"]).not.toHaveProperty(

@@ -117,8 +117,46 @@ def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
         "diff_target_kind": "commit",
     }
     assert (
-        load_script("workbench_source_excerpt").scanned_source_text(scan, nested, "app.py")
-        == "package version\n"
+        load_script("workbench_source_excerpt").finding_source_excerpt(
+            scan, nested, [{"path": "app.py", "startLine": 1}], ["."]
+        )
+        == "1  package version"
+    )
+
+
+@pytest.mark.parametrize("captured", [False, True], ids=["legacy-scopes", "saved-scopes"])
+@pytest.mark.parametrize(
+    ("mode", "kind", "expected"),
+    [
+        ("diff", None, None),
+        ("diff", "unknown", None),
+        ("diff", "working_tree", None),
+        ("diff", "commit", "1  fixture"),
+        ("diff", "range", "1  fixture"),
+        ("standard", None, "1  fixture"),
+    ],
+)
+def test_saved_excerpt_requires_a_known_diff_source(
+    tmp_path: Path, mode: str, kind: str | None, expected: str | None, captured: bool
+) -> None:
+    target = tmp_path / "target"
+    revision = initialize_git_repository(target)
+    scan = {
+        "mode": mode,
+        "diff_target_kind": kind,
+        "target_revision": revision,
+        "target_snapshot_digest": None,
+    }
+    if captured:
+        scopes = load_script("workbench_source_scopes").capture_source_scopes(
+            target, (revision, None, 0, 0), ["."]
+        )
+        scan["source_scopes_json"] = json.dumps(scopes)
+    assert (
+        load_script("workbench_source_excerpt").finding_source_excerpt(
+            scan, target, [{"path": "README.md", "startLine": 1}], ["."]
+        )
+        == expected
     )
 
 
@@ -134,7 +172,9 @@ def test_working_tree_excerpt_declines_uncommitted_line_content(tmp_path: Path) 
         "diff_content_digest": load_script("workbench_target").worktree_content_digest(target),
     }
     assert (
-        load_script("workbench_source_excerpt").scanned_source_text(scan, target, "README.md")
+        load_script("workbench_source_excerpt").finding_source_excerpt(
+            scan, target, [{"path": "README.md", "startLine": 1}], ["."]
+        )
         is None
     )
 
@@ -252,21 +292,23 @@ def test_diff_inventories_exclude_non_file_type_changes(
     git(target, "add", ".")
     git(target, "commit", "-qm", "Add source fixture")
     base = git(target, "rev-parse", "HEAD").decode()
+    source.unlink()
     if replacement == "symlink":
-        source.unlink()
         try:
             source.symlink_to("README.md")
         except OSError:
             pytest.skip("symlinks are unavailable")
+        git(target, "add", "--", source.name)
     else:
-        origin = tmp_path / "origin"
-        initialize_git_repository(origin)
-        git(target, "rm", "-f", source.name)
-        git(
-            target, "-c", "protocol.file.allow=always", "submodule", "add", str(origin), source.name
+        # The diff consumes the gitlink's index mode, so it needs no child clone.
+        source.mkdir()
+        git(target, "update-index", "--add", "--cacheinfo", f"160000,{base},{source.name}")
+        (target / ".gitmodules").write_text(
+            f'[submodule "fixture"]\n\tpath = {source.name}\n\turl = ../fixture\n'
         )
+        git(target, "add", ".gitmodules")
     (target / "visible.py").write_text("value = 1\n")
-    git(target, "add", ".")
+    git(target, "add", "visible.py")
     if mode == "revisions":
         git(target, "commit", "-qm", "Replace source type")
     inventory_path = tmp_path / "inventory.txt"

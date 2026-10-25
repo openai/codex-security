@@ -763,83 +763,39 @@ describe("one-shot scan events", () => {
     });
   });
 
-  test("fails the scan for every turn.failed error payload shape", async () => {
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
-    const payloads: Array<[string, unknown]> = [
-      ["object message", { message: "model refused the turn" }],
-      ["null", null],
-      ["undefined", undefined],
-      ["string", "model refused the turn"],
-      ["non-string message", { message: { text: "model refused the turn" } }],
-      ["array", ["model refused the turn"]],
-      ["blank message", { message: "   " }],
+  test("fails the scan for every turn.failed payload, reporting only readable nested messages", async () => {
+    const fallback =
+      "The Codex Security scan turn failed without a readable error message.";
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const payloads: Array<[string, unknown, string]> = [
+      [
+        "object message",
+        { message: "model refused the turn" },
+        "model refused the turn",
+      ],
+      ["null", null, fallback],
+      ["undefined", undefined, fallback],
+      ["raw string", "token sk-proj-EXAMPLE1234567890 rejected", fallback],
+      [
+        "non-string message",
+        { message: { text: "model refused the turn" } },
+        fallback,
+      ],
+      ["array", ["model refused the turn"], fallback],
+      ["blank message", { message: "   " }, fallback],
+      ["missing message", { code: 500 }, fallback],
     ];
-    for (const [label, error] of payloads) {
-      // A complete, valid artifact bundle so the failed turn is the only variable.
-      const scanDir = await copyCompletedScan(await temporaryDirectory());
+    for (const [label, error, message] of payloads) {
       async function* failedEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
-        yield { type: "turn.completed", usage };
+        yield completedTurn();
         yield { type: "turn.failed", error } as unknown as ThreadEvent;
       }
       await expect(
         runEvents(scanDir, failedEvents()),
-        `turn.failed carrying ${label} must fail the scan`,
-      ).rejects.toMatchObject({ name: CodexSecurityError.name });
+        `turn.failed carrying ${label}`,
+      ).rejects.toMatchObject({ name: CodexSecurityError.name, message });
     }
-  });
-
-  test("reuses only a nested turn.failed message and falls back otherwise", async () => {
-    const usage = {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
-    };
-    async function* failedWith(error: unknown): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.completed", usage };
-      yield { type: "turn.failed", error } as unknown as ThreadEvent;
-    }
-
-    await expect(
-      runEvents(
-        await copyCompletedScan(await temporaryDirectory()),
-        failedWith({ message: "retry budget exhausted" }),
-      ),
-    ).rejects.toMatchObject({
-      name: CodexSecurityError.name,
-      message: "retry budget exhausted",
-    });
-
-    await expect(
-      runEvents(
-        await copyCompletedScan(await temporaryDirectory()),
-        failedWith("token sk-proj-EXAMPLE1234567890 rejected"),
-      ),
-    ).rejects.toMatchObject({
-      name: CodexSecurityError.name,
-      message:
-        "The Codex Security scan turn failed without a readable error message.",
-    });
-
-    await expect(
-      runEvents(
-        await copyCompletedScan(await temporaryDirectory()),
-        failedWith({ code: 500 }),
-      ),
-    ).rejects.toMatchObject({
-      name: CodexSecurityError.name,
-      message:
-        "The Codex Security scan turn failed without a readable error message.",
-    });
   });
 
   test("extracts bounded rate-limit context from reconnect notifications", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "codex-security-action",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Run Codex Security in GitHub Actions with explicit scope, budgets, and scan health reporting",
@@ -16,7 +16,8 @@
     "check-metadata": "node --import tsx scripts/check-metadata.ts",
     "docs": "node scripts/generate-input-docs.mjs",
     "check-docs": "node scripts/generate-input-docs.mjs --check",
-    "validate": "npm run typecheck && npm test && npm run check-metadata && npm run check-docs && npm run check-dist"
+    "validate": "npm run typecheck && npm test && npm run check-metadata && npm run check-docs && npm run check-dist",
+    "pretest": "node scripts/apply-patches.mjs"
   },
   "dependencies": {
     "@actions/artifact": "6.3.1",

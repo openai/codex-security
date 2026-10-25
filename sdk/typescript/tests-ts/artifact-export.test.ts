@@ -14,8 +14,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { describe, expect, spyOn, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
 import {
@@ -37,6 +38,175 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
+  test.each([
+    { warnings: undefined },
+    { warnings: [] },
+    { warnings: ["Synthetic run warning."] },
+  ])(
+    "exports persisted run warnings %j without changing sealed documents",
+    async ({ warnings }) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-sarif-warning-"),
+      );
+      const scanDir = join(root, "scan");
+      const output = join(root, "results.sarif");
+      try {
+        await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+          recursive: true,
+        });
+        const manifestPath = join(scanDir, "scan-manifest.json");
+        if (warnings !== undefined) {
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          manifest.scan.warnings = warnings;
+          await writeFile(manifestPath, JSON.stringify(manifest));
+        }
+        const canonicalPaths = [
+          manifestPath,
+          join(scanDir, "findings.json"),
+          join(scanDir, "coverage.json"),
+        ];
+        const before = await Promise.all(
+          canonicalPaths.map((path) => readFile(path)),
+        );
+        const result = await exportArtifact({
+          source: { directory: scanDir },
+          format: "sarif",
+          output,
+          pythonPath: PYTHON,
+        });
+        expect(result.path).toBe(output);
+        const run = JSON.parse(await readFile(output, "utf8")).runs[0];
+        if (warnings?.length) {
+          expect(run.invocations).toEqual([
+            {
+              executionSuccessful: true,
+              toolExecutionNotifications: warnings.map((text) => ({
+                level: "warning",
+                message: { text },
+              })),
+            },
+          ]);
+        } else {
+          expect(run.invocations).toBeUndefined();
+        }
+        expect(
+          await Promise.all(canonicalPaths.map((path) => readFile(path))),
+        ).toEqual(before);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32").each([
+    ["artifact helper", "PATH"],
+    ["artifact helper", "PYTHON"],
+    ["artifact helper", "configured"],
+    ["SDK scan ID", "PYTHON"],
+    ["SDK scan ID", "configured"],
+    ["CLI scan ID", "PYTHON"],
+    ["CLI scan ID", "configured"],
+    ["CLI latest", "PYTHON"],
+    ["CLI latest", "configured"],
+  ] as const)(
+    "%s does not execute Python in input directories when selected via %s",
+    async (entrypoint, selection) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-export-python-"),
+      );
+      const caller = join(root, "caller");
+      const protectCaller =
+        entrypoint === "artifact helper" && selection !== "PATH";
+      const repository = protectCaller
+        ? join(caller, "src")
+        : join(root, "repository");
+      const scanDir = join(root, "scan");
+      const executable = join(
+        protectCaller ? join(caller, "tools") : repository,
+        "python3",
+      );
+      try {
+        await mkdir(caller);
+        await mkdir(repository);
+        await mkdir(dirname(executable), { recursive: true });
+        await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+          recursive: true,
+        });
+        await writeFile(
+          executable,
+          '#!/bin/sh\nprintf probed > "$0.probed"\nprintf "codex-security-python-ok\\n"\n',
+          { mode: 0o700 },
+        );
+        const child = childProcess.spawnSync(
+          process.execPath,
+          [
+            "-e",
+            `
+              const { exportArtifact, runArtifactExport } = await import(process.argv[1]);
+              const options = {
+                scanDir: process.argv[2],
+                sourceRoot: process.argv[3],
+                pythonPath: process.argv[4] || undefined,
+                format: "sarif",
+                output: "-",
+              };
+              const entrypoint = process.argv[5];
+              if (entrypoint === "artifact helper") {
+                process.stdout.write(await runArtifactExport(options));
+              } else if (entrypoint === "SDK scan ID") {
+                await exportArtifact({ ...options, source: { scanId: "synthetic-scan" } });
+              } else {
+                const { main } = await import(process.argv[6]);
+                process.exitCode = await main([
+                  "export",
+                  ...(entrypoint === "CLI scan ID" ? ["--scan", "synthetic-scan"] : []),
+                  "--source-root", options.sourceRoot,
+                  "--output", "-",
+                  ...(options.pythonPath ? ["--python", options.pythonPath] : []),
+                ]);
+              }
+            `,
+            fileURLToPath(
+              new URL("../src/artifact-export.ts", import.meta.url),
+            ),
+            scanDir,
+            repository,
+            selection === "configured" ? executable : "",
+            entrypoint,
+            fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+          ],
+          {
+            cwd: caller,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              PATH: [
+                dirname(executable),
+                dirname(PYTHON),
+                process.env["PATH"],
+              ].join(delimiter),
+              PYTHON: selection === "PYTHON" ? executable : "",
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
+              XDG_CACHE_HOME: join(root, "cache"),
+            },
+          },
+        );
+        expect(await stat(`${executable}.probed`).catch(() => null)).toBeNull();
+        if (selection === "PATH") {
+          expect(child.status, child.stderr).toBe(0);
+          expect(JSON.parse(child.stdout).version).toBe("2.1.0");
+        } else {
+          expect(child.status).not.toBe(0);
+          expect(child.stderr).toContain(
+            "interpreter is unavailable or unusable",
+          );
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("exports with Python from the selected managed-runtime cache", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-export-cache-"));
     const environment = {
@@ -175,6 +345,37 @@ describe("offline artifact export", () => {
     }
   });
 
+  test.each(["external", "scan-local"])(
+    "resolves %s exports outside the current directory",
+    async (destination) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-external-output-"),
+      );
+      const scanDir = join(root, "scan");
+      try {
+        await mkdir(scanDir);
+        const output =
+          destination === "scan-local"
+            ? join(scanDir, "exports", "findings.json")
+            : join(root, "findings.json");
+        expect(
+          (
+            await resolveArtifactExportOutput(
+              { scanDir, output, format: "json" },
+              process.cwd(),
+            )
+          ).output,
+        ).toBe(
+          destination === "scan-local"
+            ? join(await realpath(scanDir), "exports", "findings.json")
+            : join(await realpath(root), "findings.json"),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.skipIf(!caseInsensitiveVolume)(
     "accepts an export parent accessed through a case alias",
     async () => {
@@ -273,6 +474,74 @@ describe("offline artifact export", () => {
       expect(await readFile(outsideOutput, "utf8")).toBe("Unrelated file\n");
     } finally {
       resolving.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["repository", "descendant"])(
+    "checks repository-owned symlinks below an external alias into a %s",
+    async (destination) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-output-alias-"),
+      );
+      const repository = join(root, "repository");
+      const source =
+        destination === "repository" ? repository : join(repository, "src");
+      const alias = join(root, "alias");
+      const outside = join(root, "outside");
+      try {
+        await mkdir(source, { recursive: true });
+        await mkdir(outside);
+        await symlink(source, alias, "junction");
+        const options = {
+          scanDir: join(root, "scan"),
+          format: "sarif" as const,
+          output: join(alias, "results.sarif"),
+        };
+        expect(
+          (await resolveArtifactExportOutput(options, repository)).output,
+        ).toBe(join(await realpath(source), "results.sarif"));
+        for (const linkTarget of [outside, source]) {
+          const reports = join(source, "reports");
+          await symlink(linkTarget, reports, "junction");
+          await expect(
+            resolveArtifactExportOutput(
+              { ...options, output: join(alias, "reports", "results.sarif") },
+              repository,
+            ),
+          ).rejects.toThrow("cannot traverse a repository symlink");
+          await rm(reports, { recursive: true, force: true });
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("preserves trusted output aliases outside the repository", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-trusted-output-"),
+    );
+    const repository = join(root, "repository");
+    const reports = join(root, "reports");
+    const alias = join(root, "alias");
+    try {
+      await mkdir(repository);
+      await mkdir(reports);
+      await symlink(reports, alias, "junction");
+      expect(
+        (
+          await resolveArtifactExportOutput(
+            {
+              scanDir: join(root, "scan"),
+              format: "sarif",
+              output: join(alias, "results.sarif"),
+            },
+            repository,
+          )
+        ).output,
+      ).toBe(join(await realpath(reports), "results.sarif"));
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

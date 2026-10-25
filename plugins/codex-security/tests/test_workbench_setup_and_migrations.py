@@ -91,6 +91,14 @@ EXPECTED_MIGRATIONS = [
     (47, "snapshot deep scan discovery context"),
     (48, "share finding issue receipts across trackers"),
     (49, "index finding issue receipt ownership"),
+    (50, "persist authorized source excerpt scopes"),
+    (51, "preserve deep scan worker thread history"),
+    (52, "record severity classification review counts"),
+    (53, "store external source findings without assessments"),
+    (54, "snapshot deep scan setup configuration"),
+    (55, "retain undelivered headless deep scan results"),
+    (56, "recover unfinished legacy headless deep scans"),
+    (57, "freeze stopped scan checkpoint selections"),
 ]
 
 
@@ -323,6 +331,118 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
         )
     with sqlite3.connect(snapshot) as connection:
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("destination_kind", ["regular", "symlink", "symlink-chain"])
+@pytest.mark.parametrize("umask", [0o022, 0o777])
+@pytest.mark.parametrize("malformed_source", [False, True])
+def test_sqlite_snapshot_new_destination_is_private_during_backup(
+    tmp_path: Path, destination_kind: str, umask: int, malformed_source: bool
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    links = []
+    if destination_kind != "regular":
+        target = tmp_path / "target.sqlite3"
+        if destination_kind == "symlink-chain":
+            intermediate = tmp_path / "intermediate.sqlite3"
+            intermediate.symlink_to(target.name)
+            links.append(intermediate)
+            target = intermediate
+        snapshot.symlink_to(target.name)
+        links.append(snapshot)
+    link_inodes = {link: link.lstat().st_ino for link in links}
+    if malformed_source:
+        source.write_text("not a SQLite database")
+    else:
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO records VALUES ('sealed')")
+    namespace = runpy.run_path(str(SNAPSHOT_SCRIPT))
+    real_connect = sqlite3.connect
+    modes = []
+
+    def observe_connect(database, *args, **kwargs):
+        if database == snapshot:
+            modes.append(snapshot.stat().st_mode & 0o777 if snapshot.exists() else None)
+        return real_connect(database, *args, **kwargs)
+
+    previous_umask = os.umask(umask)
+    try:
+        with (
+            mock.patch.object(sys, "argv", [str(SNAPSHOT_SCRIPT), str(source), str(snapshot)]),
+            mock.patch.object(sqlite3, "connect", side_effect=observe_connect),
+        ):
+            if malformed_source:
+                with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+                    namespace["main"]()
+            else:
+                namespace["main"]()
+    finally:
+        os.umask(previous_umask)
+    assert modes == [0o600]
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+    for link, inode in link_inodes.items():
+        assert link.is_symlink()
+        assert link.lstat().st_ino == inode
+    if not malformed_source:
+        with sqlite3.connect(snapshot) as connection:
+            assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("destination_kind", ["regular", "symlink", "hardlink"])
+@pytest.mark.parametrize("malformed_source", [False, True])
+def test_sqlite_snapshot_preserves_existing_destination(
+    tmp_path: Path, destination_kind: str, malformed_source: bool
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    existing = tmp_path / "existing.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    if malformed_source:
+        source.write_text("not a SQLite database")
+    else:
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO records VALUES ('sealed')")
+    with sqlite3.connect(existing) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('original')")
+    existing.chmod(0o644)
+    if destination_kind == "symlink":
+        snapshot.symlink_to(existing)
+    elif destination_kind == "hardlink":
+        snapshot.hardlink_to(existing)
+    else:
+        snapshot = existing
+    original_inode = existing.stat().st_ino
+    namespace = runpy.run_path(str(SNAPSHOT_SCRIPT))
+    real_connect = sqlite3.connect
+    modes = []
+
+    def observe_connect(database, *args, **kwargs):
+        connection = real_connect(database, *args, **kwargs)
+        if database == snapshot:
+            modes.append(snapshot.stat().st_mode & 0o777)
+        return connection
+
+    with (
+        mock.patch.object(sys, "argv", [str(SNAPSHOT_SCRIPT), str(source), str(snapshot)]),
+        mock.patch.object(sqlite3, "connect", side_effect=observe_connect),
+    ):
+        if malformed_source:
+            with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+                namespace["main"]()
+        else:
+            namespace["main"]()
+    assert modes == [0o644]
+    assert snapshot.stat().st_mode & 0o777 == (0o644 if malformed_source else 0o600)
+    assert snapshot.stat().st_ino == existing.stat().st_ino == original_inode
+    assert snapshot.is_symlink() == (destination_kind == "symlink")
+    with sqlite3.connect(existing) as connection:
+        expected = "original" if malformed_source else "sealed"
+        assert connection.execute("SELECT value FROM records").fetchone() == (expected,)
 
 
 @pytest.mark.native_windows
@@ -2207,7 +2327,8 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = 'current-model' WHERE id = ?", (scan_id,))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     expected_migration_name = {
         11: "deep scan orchestration state",
@@ -2237,7 +2358,113 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
         ).fetchone() == (legacy_model, legacy_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
+
+@pytest.mark.parametrize("installed_history", ["main-scan-names", "source-excerpt-scopes"])
+def test_workbench_preserves_both_installed_migration_42_histories(
+    tmp_path: Path, installed_history: str
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir()
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    timestamp = "2026-08-01T00:00:00Z"
+    installed = [
+        (42 if name == "persist authorized source excerpt scopes" else version, name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if name
+        != (
+            "persist authorized source excerpt scopes"
+            if installed_history == "main-scan-names"
+            else "editable scan names"
+        )
+    ]
+    with sqlite3.connect(database) as connection:
+        create_migration_history(connection)
+        apply_historical_migrations(connection, installed, timestamp)
+        original = dict(connection.execute("SELECT name, applied_at FROM schema_migrations"))
+
+    run_workbench(state_dir, "database-info")
+    with sqlite3.connect(database) as connection:
+        first = connection.execute(
+            "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [(version, name) for version, name, _ in first] == EXPECTED_MIGRATIONS
+        assert all(
+            {name: applied_at for _, name, applied_at in first}[name] == value
+            for name, value in original.items()
+        )
+        assert {"name", "source_scopes_json"} <= {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    run_workbench(state_dir, "database-info")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            == first
+        )
+
+
+@pytest.mark.parametrize("preview_version", [34, 40, 41, 42, 43, 44, 48])
+def test_workbench_upgrades_pre_release_source_scope_migration(
+    tmp_path: Path, preview_version: int
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir()
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    migrations = namespace["MIGRATIONS"]
+    source_scope = next(
+        migration
+        for migration in migrations
+        if migration[1] == "persist authorized source excerpt scopes"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations ("
+            "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        for version, name, sql in migrations:
+            if version > (42 if preview_version == 43 else 32):
+                continue
+            for statement in SCHEMA.sql_statements(sql):
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                (version, name, "2026-08-01T00:00:00Z"),
+            )
+        for statement in SCHEMA.sql_statements(source_scope[2]):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (preview_version, source_scope[1], "2026-08-01T00:00:00Z"),
+        )
+
+    run_workbench(state_dir, "database-info")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = 34"
+        ).fetchone() == ("associate findings with repositories",)
+        assert connection.execute(
+            "SELECT version, applied_at FROM schema_migrations WHERE name = ?",
+            (source_scope[1],),
+        ).fetchone() == (50, "2026-08-01T00:00:00Z")
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_repositories'"
+        ).fetchone() == ("finding_repositories",)
+        assert connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = 43"
+        ).fetchone() == ("preserve severity assessments per scan",)
+        assert connection.execute("SELECT COUNT(*) FROM scan_severity_assessments").fetchone() == (
+            0,
+        )
+        assert "source_scopes_json" in {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
 
 
 def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
@@ -2539,7 +2766,8 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = ? WHERE id = ?", ("gpt-current", scan_id))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
@@ -2575,8 +2803,6 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             (workspace_id,),
         ).fetchone() == (model, reasoning_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
 
 def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_history() -> None:

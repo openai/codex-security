@@ -46,6 +46,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -71,17 +72,27 @@ try {
     target: "node20",
   });
 
-  for (const [bundle, runtimeLabel] of [
+  const shipped = path.join(bundledPluginRoot, "mcp", "server.mjs");
+  for (const [bundle, label] of [
     [runtimeBundle, "source"],
-    [path.join(bundledPluginRoot, "mcp", "server.mjs"), "shipped"],
+    [shipped, "shipped"],
   ]) {
-    await testParentToolList(bundle);
-    await testClaimedParentArtifactOperations(bundle, runtimeLabel);
-    await testSemanticScanDraftCompletion(bundle, runtimeLabel);
-    await testCompactDiffScanCompletion(bundle, runtimeLabel);
-    await testDiscoveryWorkerToolList(bundle);
-    await testReducerWorkerToolList(bundle);
+    await test(`${label}: parent, discovery, and reducer tool registration and worker writes`, async () => {
+      await testParentToolList(bundle);
+      await testDiscoveryWorkerToolList(bundle);
+      await testReducerWorkerToolList(bundle);
+    });
   }
+  await test("shipped: claimed parent operations", () =>
+    testClaimedParentArtifactOperations(shipped, "shipped"));
+  await test("shipped: semantic scan draft completion", () =>
+    testSemanticScanDraftCompletion(shipped, "shipped"));
+  for (const artifactWriter of [false, true]) {
+    await test(`shipped: large ${artifactWriter ? "worker" : "parent"} draft checkpoints`, () =>
+      testLargeScanDraftCheckpoints(shipped, "shipped", artifactWriter));
+  }
+  await test("shipped: compact diff scan completion", () =>
+    testCompactDiffScanCompletion(shipped, "shipped"));
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
@@ -95,6 +106,104 @@ async function createScanFixture(label: string) {
   };
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   return { repoRoot, environment };
+}
+
+async function testLargeScanDraftCheckpoints(
+  bundle: string,
+  runtimeLabel: string,
+  artifactWriter: boolean,
+) {
+  const label = `large-draft-${runtimeLabel}-${artifactWriter ? "worker" : "parent"}`;
+  const { repoRoot, environment } = await createScanFixture(label);
+  await writeFile(path.join(repoRoot, "src", "fixture.py"), "value = 1\n");
+  let scanId: string = randomUUID();
+  let scanDir = path.join(temporaryRoot, label, "output");
+  let handoffClaimToken: string | undefined;
+  if (artifactWriter) await mkdir(scanDir);
+  const client = await startClient(bundle, {
+    ...environment,
+    ...(artifactWriter
+      ? {
+          CODEX_SECURITY_ARTIFACT_ROOT: scanDir,
+          CODEX_SECURITY_REPO_ROOT: repoRoot,
+          CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+          CODEX_SECURITY_SCAN_ID: scanId,
+          CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
+        }
+      : {}),
+  });
+  const ownerThread = `${label}-owner`;
+  const call = toolCaller(client, ownerThread);
+
+  try {
+    if (!artifactWriter) {
+      ({ scanId, scanDir, handoffClaimToken } = await startScan(
+        call,
+        ownerThread,
+        { targetPath: repoRoot, scope: ".", mode: "standard" },
+        {
+          workspace: `${label}: open workspace`,
+          setup: `${label}: submit setup`,
+          scan: `${label}: start scan`,
+          claim: `${label}: claim scan`,
+          owner: `${label}: attach owner`,
+        },
+      ));
+    }
+
+    const mib = 1024 * 1024;
+    // Exercise both one large excerpt and a request with smaller excerpts
+    // that together exceed the SDK's default 10 MiB stdio buffer.
+    for (const [step, sizes] of [
+      [9 * mib],
+      [11 * mib],
+      [6 * mib, 6 * mib],
+      [32],
+    ].entries()) {
+      const findings = sizes.map((size, index) => ({
+        ...finding(`checkpoint-${step}-${index}`, "src/fixture.py"),
+        evidenceExcerpt: `checkpoint-${step}-${index}:`.padEnd(size, "e"),
+      }));
+      const result = requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...workerDraft(findings),
+          scanId,
+          ...(handoffClaimToken === undefined ? {} : { handoffClaimToken }),
+          complete: false,
+        }),
+        `${label}: save checkpoint ${step}`,
+      );
+      assert.equal(result.status, "draft_written");
+      const saved = await readJson(
+        scanDir,
+        artifactWriter ? "result.json" : "findings.json",
+      );
+      assert.equal(result.findingCount, saved.findings.length);
+      const head = await readJson(scanDir, "checkpoint-head.json");
+      const checkpoint = await readJson(
+        scanDir,
+        "checkpoints",
+        head.checkpoint,
+      );
+      assert.equal(checkpoint.complete, false);
+      for (const document of [saved, checkpoint]) {
+        assert.equal(document.scanId, scanId);
+        for (const expected of findings) {
+          const actual = document.findings.find(
+            (entry: { ruleId: string }) => entry.ruleId === expected.ruleId,
+          );
+          assert.equal(
+            actual?.evidenceExcerpt,
+            expected.evidenceExcerpt,
+            `${label}: checkpoint ${step} must retain every evidence byte`,
+          );
+        }
+      }
+      assert.deepEqual(await client.ping(), {});
+    }
+  } finally {
+    await client.close();
+  }
 }
 
 async function testCompactDiffScanCompletion(

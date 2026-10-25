@@ -2,13 +2,15 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
-  aggregateDiscoveryCoverage,
+  aggregateSourceCoverage,
+  deepReductionToScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -27,12 +29,11 @@ import type {
   DiscoveryOutcome,
 } from "./worker-runner.js";
 import {
-  boundedDeepScanErrorPair,
   confirmedOwnershipChange,
   errorNameWithCode,
   abortError,
   errorMessage,
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
@@ -92,6 +93,7 @@ export interface CoordinatorOptions {
     publication: DeepScanPublication,
   ) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
+  onStart?: (coordinator: DeepScanCoordinator) => void;
 }
 
 export { DeepScanNonRetryableError } from "./errors.js";
@@ -130,7 +132,13 @@ export class DeepScanCoordinator {
   constructor(private readonly options: CoordinatorOptions) {
     this.state = cloneState(options.run);
     this.clock = options.clock ?? systemClock;
-    this.log = options.log ?? (() => undefined);
+    this.log = (event) => {
+      try {
+        void Promise.resolve(options.log?.(event)).catch(() => {});
+      } catch {
+        // Optional logging must not interrupt scan control flow.
+      }
+    };
     this.artifacts = createDeepScanArtifacts(this.state.scanDir);
     const workerOptions = {
       run: this.state,
@@ -361,13 +369,7 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
-        ? {
-            ...structuredClone(schedulerResult.result),
-            coverage: aggregateDiscoveryCoverage(
-              this.artifacts,
-              schedulerResult.discoveries,
-            ),
-          }
+        ? deepReductionToScanDraft(schedulerResult.result)
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -428,7 +430,7 @@ export class DeepScanCoordinator {
         error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
-      const persistedMessage = boundedDeepScanErrorMessage(error);
+      const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete) {
         this.log({
           event: "setup_failed",
@@ -513,16 +515,10 @@ export class DeepScanCoordinator {
           try {
             await this.options.onStopped(current);
           } catch (error) {
-            const publicationFailure = boundedDeepScanErrorMessage(
-              `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
-            );
+            const publicationFailure = `Saved result publication failed: ${deepScanErrorMessage(error)}`;
             const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
-              ? boundedDeepScanErrorPair(
-                  publicationFailure,
-                  "\nOriginal Deep Scan failure:\n",
-                  originalFailure,
-                )
+              ? `${publicationFailure}\nOriginal Deep Scan failure:\n${originalFailure}`
               : publicationFailure;
             const localState = {
               ...this.state,
@@ -947,6 +943,7 @@ export class DeepScanCoordinator {
               label: `dedup-${String(reducerSequence).padStart(4, "0")}`,
               consumed,
               previousReducerResultPath,
+              previousSourceCoverage: latestResult?.sourceCoverage,
             }),
           );
           observe(reducer);
@@ -1096,12 +1093,14 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
+        this.state,
       );
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
         result,
         completionSequence: worker.completionSequence,
+        attempt: worker.attempt,
       });
     }
     return recovered.sort(compareCompletionSequence);
@@ -1156,6 +1155,34 @@ export class DeepScanCoordinator {
           previousReducerResultPath: resultPath,
         },
         this.state.scanId,
+      );
+      const accepted = discoveries.filter((source) =>
+        inputs.some(
+          (input) =>
+            input.dedupWorkerId === worker.id &&
+            input.discoveryWorkerId === source.id,
+        ),
+      );
+      const sources = await readDeepReductionSources({
+        root: worker.artifactDir,
+        repoRoot: this.state.targetPath,
+        scanId: this.state.scanId,
+        layout: "reducer",
+        scope: this.state.scope,
+        includePaths: this.state.includePaths,
+        filePaths: this.state.filePaths,
+        deepReducer: {
+          scanRoot: this.artifacts.scanDir,
+          claimedWorkers: accepted.map((source) => ({
+            id: source.id,
+            resultPath: source.resultPath,
+            attempt: source.attempt,
+          })),
+        },
+      });
+      result.sourceCoverage = aggregateSourceCoverage(
+        sources.discoveries,
+        latestResult ?? null,
       );
       latestResult = result;
       resultPath = worker.resultManifestPath;

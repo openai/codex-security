@@ -48,13 +48,20 @@ const stoppedScanProbe = [
   "    checkpoint = {**payload, 'complete': False}",
   "    checkpoint_dir = artifact_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",
-  "    if source == 'refined-checkpoint':",
+  "    if source.startswith('refined-checkpoint'):",
   "        earlier = json.loads(json.dumps(checkpoint))",
   "        earlier['findings'][0]['locations'][0].update({'startLine': 21, 'endLine': 26})",
   "        later = json.loads(json.dumps(checkpoint))",
   "        later['findings'][0]['locations'][0].update({'startLine': 24, 'endLine': 26})",
   "        for document in (earlier, later):",
   "            encoded = json.dumps(document).encode()",
+  "            if document is earlier:",
+  "                earlier_digest = hashlib.sha256(encoded).hexdigest()",
+  "            else:",
+  "                # JSON whitespace controls hash order without changing either checkpoint.",
+  "                earlier_first = source.endswith('earlier-first')",
+  "                while (earlier_digest < hashlib.sha256(encoded).hexdigest()) != earlier_first:",
+  "                    encoded += b'\\n'",
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text(json.dumps(later), encoding='utf-8')",
   "    else:",
@@ -113,14 +120,15 @@ const stoppedScanProbe = [
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
   "    connection.close()",
-  "    frozen_sources = json.loads(frozen_after_success)",
+  "    frozen_state = json.loads(frozen_after_success)",
+  "    frozen_sources = frozen_state['sources'] if isinstance(frozen_state.get('sources'), dict) else frozen_state",
   "    head_relative = next(path for path in frozen_sources if path.startswith('checkpoint-heads/'))",
   "    head_path = scan_dir / head_relative",
   "    head = json.loads(head_path.read_text(encoding='utf-8'))",
   "    snapshot_bytes = (scan_dir / 'checkpoints' / head['checkpoint']).read_bytes()",
   "    snapshot = json.loads(snapshot_bytes)",
   "    head_evidence = head_path.read_bytes()",
-  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_evidence).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
+  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': frozen_state, 'frozenSources': frozen_sources, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_evidence).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
   "    raise SystemExit(0)",
   "if source == 'late-checkpoint':",
   "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
@@ -140,7 +148,7 @@ const stoppedScanProbe = [
   "findings = json.loads(findings_path.read_text(encoding='utf-8'))['findings'] if findings_path.exists() else []",
   "if source == 'late-checkpoint':",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'artifactFindingCount': len(findings), 'manifestUnchanged': manifest_before == (scan_dir / 'scan-manifest.json').read_bytes(), 'findingsUnchanged': findings_before == (scan_dir / 'findings.json').read_bytes()}))",
-  "elif source == 'refined-checkpoint':",
+  "elif source.startswith('refined-checkpoint'):",
   "    histories = [item for finding in findings for item in finding.get('provenance', {}).get('previousFindings', [])]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'historyCount': len(histories), 'representedStartLines': sorted([finding['locations'][0]['startLine'] for finding in findings] + [finding['locations'][0]['startLine'] for finding in histories])}))",
   "elif source == 'distinct-instances':",
@@ -185,19 +193,23 @@ test.each(["accepted", "checkpoint"] as const)(
   30_000,
 );
 
-test("keeps refined checkpoints as one finding with retained history", () => {
-  const recovered = runStoppedScanProbe(
-    "refined-checkpoint",
-    "codex-security-refined-checkpoint-",
-  );
-  expect(recovered).toEqual({
-    findingCount: 1,
-    progressStatus: "failed",
-    artifactFindingCount: 1,
-    historyCount: 1,
-    representedStartLines: [21, 24],
-  });
-}, 30_000);
+test.each(["earlier-first", "later-first"] as const)(
+  "keeps refined checkpoints as one finding with retained history (%s)",
+  (order) => {
+    const recovered = runStoppedScanProbe(
+      `refined-checkpoint-${order}`,
+      "codex-security-refined-checkpoint-",
+    );
+    expect(recovered).toEqual({
+      findingCount: 1,
+      progressStatus: "failed",
+      artifactFindingCount: 1,
+      historyCount: 1,
+      representedStartLines: [21, 24],
+    });
+  },
+  30_000,
+);
 
 test.each(["failed", "interrupted"] as const)(
   "keeps the first %s seal immutable when a worker writes late",
@@ -233,7 +245,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(recovered.headPath).toBe(
     `checkpoint-heads/${recovered.headDigest}.json`,
   );
-  expect(recovered.frozenAfterSuccess).toMatchObject({
+  expect(recovered.frozenSources).toMatchObject({
     [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
     [recovered.headPath]: recovered.headDigest,
   });

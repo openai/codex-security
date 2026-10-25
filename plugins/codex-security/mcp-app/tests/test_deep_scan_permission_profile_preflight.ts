@@ -36,6 +36,7 @@ const {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanRuntimeConfig,
+  readDeepScanParentCyberAccessProgram,
   prepareCliDeepScanSession,
 } = await importSource(
   path.join(
@@ -87,6 +88,105 @@ await testMissingWorkerDirectoryRemainsRetryable();
 await testAbortKillsPreflightChild();
 await testAbortPreservesCallerReason();
 await testDirectScanSession();
+await testParentTurnCyberAccessProgram();
+
+async function testParentTurnCyberAccessProgram() {
+  const parentTurn = {
+    threadId: "fixture-parent-thread",
+    turnId: "fixture-current-turn",
+  };
+  const context = (turnId: string, program: unknown) => ({
+    type: "turn_context",
+    payload: {
+      turn_id: turnId,
+      ...(program === undefined ? {} : { cyber_access_program: program }),
+    },
+  });
+  const read = (fixture: PreflightFixture) =>
+    readDeepScanParentCyberAccessProgram({
+      codexPath: fixture.codexPath,
+      cwd: fixture.cwd,
+      configOverrides: rawOverrides,
+      parentTurn,
+      signal: new AbortController().signal,
+    });
+  for (const program of [
+    "standard",
+    "daybreak_blue",
+    "daybreak_red",
+    "future_program",
+    null,
+    undefined,
+  ]) {
+    await withFakeCodex(
+      {
+        parentRollout: [
+          context("fixture-older-turn", "daybreak_blue"),
+          context(parentTurn.turnId, program),
+          context("fixture-newer-turn", "daybreak_red"),
+        ],
+      },
+      async (fixture) => {
+        assert.equal(await read(fixture), program ?? undefined);
+        const calls = await readJsonLines(fixture.callsPath);
+        assert.deepEqual(
+          calls.map((call) => call.method),
+          ["initialize", "initialized", "thread/read"],
+        );
+        assert.deepEqual(calls[2].params, {
+          threadId: parentTurn.threadId,
+          includeTurns: false,
+        });
+      },
+    );
+  }
+  for (const scenario of [
+    { parentRollout: [context("fixture-other-turn", "daybreak_blue")] },
+    { parentPathUnavailable: true },
+    {
+      returnedParentThreadId: "fixture-other-thread",
+      parentRollout: [context(parentTurn.turnId, "daybreak_blue")],
+    },
+  ]) {
+    await withFakeCodex(scenario, async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    });
+  }
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32600,
+          message: `thread not loaded: ${parentTurn.threadId}`,
+        },
+      },
+    },
+    async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    },
+  );
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32000,
+          message: "Synthetic native read failure",
+        },
+      },
+      stderr: "Synthetic native stderr detail",
+    },
+    async (fixture) => {
+      await assert.rejects(read(fixture), (error: Error) => {
+        assert.match(error.message, /Synthetic native read failure/);
+        assert.match(error.message, /Synthetic native stderr detail/);
+        return true;
+      });
+    },
+  );
+  await withFakeCodex({}, async (fixture) => {
+    await assert.rejects(read(fixture), { code: "ENOENT" });
+  });
+}
 
 async function testDirectScanSession() {
   const permissionProfile = {
@@ -1169,6 +1269,17 @@ function handle(message) {
       thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
       model: 'synthetic-model', reasoningEffort: 'high',
     });
+    return;
+  }
+  if (message.method === "thread/read") {
+    const path = scenario.callsPath + '.parent.jsonl';
+    if (scenario.parentRollout !== undefined) {
+      writeFileSync(path, scenario.parentRollout.map((item) => JSON.stringify(item)).join("\\n") + "\\n");
+    }
+    send(message.id, { thread: {
+      id: scenario.returnedParentThreadId ?? message.params.threadId,
+      path: scenario.parentPathUnavailable ? null : path,
+    } });
     return;
   }
   if (message.method === "thread/inject_items") {

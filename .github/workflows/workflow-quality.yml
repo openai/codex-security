@@ -18,7 +18,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install ShellCheck and zizmor
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: shellcheck@0.11.0,zizmor@1.30.1
       - name: Install actionlint
@@ -38,6 +38,8 @@ jobs:
           SHELLCHECK_OPTS: --severity=warning
         run: |
           actionlint -color
-          shellcheck docker/verify-container-compose.sh
+          shellcheck .github/scripts/install-ripgrep.sh docker/verify-container-compose.sh github-action/scripts/setup-ubuntu-sandbox.sh
+      - name: Test release progress reporting
+        run: node --test .github/scripts/test_release_progress.mjs
       - name: Check workflow security
         run: zizmor --offline --strict-collection --min-severity medium --format github --config .github/zizmor.yml .github

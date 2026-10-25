@@ -31,7 +31,12 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_samples, git_command, git_directory_snapshot_paths
+from workbench_target import (
+    SOURCE_METADATA_DIRECTORIES,
+    git_blob_samples,
+    git_command,
+    git_directory_snapshot_paths,
+)
 
 JsonRow = dict[str, object]
 
@@ -155,11 +160,11 @@ def scope_candidates(repo: Path, scope_path: Path) -> Iterable[Path]:
         "--hidden",
         "--no-require-git",
         "--null",
-        # Also exclude descendants when the scope starts inside .git.
+        # Also exclude descendants when the scope starts inside metadata.
         "--glob",
-        "!**/.git",
+        "!**/{.git,.svn}",
         "--glob",
-        "!**/.git/**",
+        "!**/{.git,.svn}/**",
         "--",
         str(scope_path.relative_to(repo)),
     ]
@@ -207,7 +212,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                 relative = path.resolve(strict=True).relative_to(repo)
             except (OSError, ValueError):
                 continue
-            if ".git" in relative.parts:
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(relative.parts):
                 continue
             rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
 
@@ -276,7 +281,8 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         return sorted(
             (path, status)
             for path, status in combined.items()
-            if status == "D" or (not path.is_symlink() and path.is_file())
+            if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
+            and (status == "D" or (not path.is_symlink() and path.is_file()))
         )
     raise SystemExit(f"Unknown diff mode: {mode}")
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -73,6 +74,8 @@ def test_archived_output_preserves_old_scan_and_allows_fresh_registration(
 
     assert current["scanId"] != previous["scanId"]
     assert current["scanDir"] == str(scan_dir)
+    assert current["archivedScanDir"] == str(archived_scan_dir)
+    assert (archived_scan_dir / "report.md").read_text() == "# Previous scan\n"
     assert (archived_scan_dir / "previous.txt").read_text() == "keep the previous scan\n"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
@@ -258,6 +261,7 @@ def test_archive_cannot_move_the_active_workbench_database(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1
 
 
+@pytest.mark.cross_platform
 def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -307,11 +311,19 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
             except SystemExit as error:
                 outcomes.append(error)
 
-    mkdir = Path.mkdir
+    creation_owner, creation_method = Path, "mkdir"
+    if os.name == "nt":
+        import windows_scan_local_files
+
+        creation_owner, creation_method = (
+            windows_scan_local_files,
+            "create_directory_with_same_dacl",
+        )
+    create_directory = getattr(creation_owner, creation_method)
     competitor = threading.Thread(target=compete)
 
     def replacement(path, *args, **kwargs):
-        result = mkdir(path, *args, **kwargs)
+        result = create_directory(path, *args, **kwargs)
         if path == scan_dir:
             competitor.start()
             assert waiting.wait(5)
@@ -321,7 +333,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         workbench_schema.backup(first)
         first.row_factory = sqlite3.Row
         with monkeypatch.context() as patch:
-            patch.setattr(Path, "mkdir", replacement)
+            patch.setattr(creation_owner, creation_method, replacement)
             with pytest.raises(SystemExit, match="not found"):
                 register(first, arguments)
         competitor.join(10)

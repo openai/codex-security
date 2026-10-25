@@ -12,7 +12,11 @@ import {
 import { isAbsolute, join, posix, resolve } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { regexes } from "zod";
-import { ContractValidationError, abortReason } from "./errors.js";
+import {
+  ContractValidationError,
+  abortReason,
+  errorMessage,
+} from "./errors.js";
 import { isRecord } from "./record.js";
 import type {
   CoverageDocument,
@@ -36,13 +40,13 @@ const DOCUMENTS = {
 const PRODUCER_NAME = "codex-security-plugin";
 interface CheckedScanFile {
   path: string;
-  metadata: Stats;
-  parents: Array<{ path: string; metadata: Stats }>;
+  metadata: BigIntStats;
+  parents: Array<{ path: string; metadata: BigIntStats }>;
 }
 
 interface ScanRoot {
   path: string;
-  metadata: Stats;
+  metadata: BigIntStats;
 }
 
 export interface ScanExpectation {
@@ -58,6 +62,8 @@ export interface LoadedContract {
   findings: FindingsDocument;
   coverage: CoverageDocument;
 }
+
+export class ContractSchemaError extends ContractValidationError {}
 
 type LoadContractOptions = {
   pluginRoot: string;
@@ -78,6 +84,10 @@ export async function loadContractWithScanDirectory(
   scanDirectory: string,
   options: LoadContractOptions,
 ): Promise<{ contract: LoadedContract; scanDirectory: string }> {
+  const validators = await loadContractValidators(
+    options.pluginRoot,
+    options.signal,
+  );
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
@@ -93,23 +103,10 @@ export async function loadContractWithScanDirectory(
   }
   throwIfAborted(options.signal);
 
-  // The plugin schemas are the immutable v0 contract. They are valid Draft
-  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
-  // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false }).addFormat(
-    "date-time",
-    { type: "string", validate: validRfc3339DateTime },
-  );
-  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
-    const schema = await readJson(
-      join(options.pluginRoot, "schemas", schemaName),
-      options.signal,
-    );
-    let validate: ReturnType<typeof ajv.compile>;
+  for (const { filename, schemaName, validate } of validators) {
     let payload: unknown;
     let valid: boolean;
     try {
-      validate = ajv.compile(schema);
       payload = payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
@@ -124,7 +121,7 @@ export async function loadContractWithScanDirectory(
         valid = validatePayload(payload);
       }
     } catch {
-      throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
@@ -201,17 +198,55 @@ function normalizePersistedFindings(payload: unknown): unknown {
   return compatible;
 }
 
+/** Match the producer's Python str.strip without changing saved text. */
+export function hasRequiredFindingText(value: string): boolean {
+  return !/^[\p{White_Space}\u001c-\u001f]*$/u.test(value);
+}
+
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
   coverage: CoverageDocument,
 ): void {
+  const requireText = (values: Record<string, string | undefined>) => {
+    for (const [context, value] of Object.entries(values)) {
+      if (value !== undefined && !hasRequiredFindingText(value))
+        throw new ContractValidationError(
+          `${context}: expected a non-empty string.`,
+        );
+    }
+  };
+  requireText({
+    "manifest.scan.id": manifest.scan.id,
+    "scan.target.targetId": manifest.scan.target.targetId,
+    "scan.target.displayName": manifest.scan.target.displayName,
+    "scan.target.revision":
+      manifest.scan.target.kind === "git_revision"
+        ? manifest.scan.target.revision
+        : undefined,
+    "scan.target.snapshotDigest":
+      manifest.scan.target.kind !== "git_revision"
+        ? manifest.scan.target.snapshotDigest
+        : undefined,
+    "manifest.scan.producer.name": manifest.scan.producer.name,
+    "manifest.scan.producer.version": manifest.scan.producer.version,
+    "coverage.inventoryStrategy": coverage.inventoryStrategy,
+  });
+  for (const [index, surface] of coverage.surfaces.entries())
+    requireText({
+      [`coverage.surfaces[${index}].id`]: surface.id,
+      [`coverage.surfaces[${index}].label`]: surface.label,
+    });
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
       remote,
     )?.[1];
-    if (remote.includes("\\") || authority === undefined) {
+    if (
+      remote.includes("\\") ||
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(remote) ||
+      authority === undefined
+    ) {
       throw new ContractValidationError(
         "scan.target.remote: expected a sanitized canonical absolute URL.",
       );
@@ -274,31 +309,26 @@ function validateCanonicalContract(
     }
   }
 
-  const findingIds = new Set<string>();
+  const occurrenceIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
-    if (findingIds.has(finding.findingId)) {
-      throw new ContractValidationError(`${context}: duplicate finding id.`);
-    }
-    findingIds.add(finding.findingId);
-    for (const [field, value] of [
-      ["title", finding.title],
-      ["summary", finding.summary],
-      ["remediation", finding.remediation],
-      ["confidence.rationale", finding.confidence.rationale],
-      ["taxonomy.category", finding.taxonomy.category],
-      ["provenance.source", finding.provenance.source],
-      ...(finding.severity.score === undefined
-        ? []
-        : [["severity.scoringSystem", finding.severity.scoringSystem]]),
-    ]) {
-      // Match the producer's Python str.strip without changing saved text.
-      if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(value ?? "")) {
-        throw new ContractValidationError(
-          `${context}.${field}: expected a non-empty string.`,
-        );
-      }
-    }
+    requireText({
+      [`${context}.title`]: finding.title,
+      [`${context}.summary`]: finding.summary,
+      [`${context}.remediation`]: finding.remediation,
+      [`${context}.confidence.rationale`]: finding.confidence.rationale,
+      [`${context}.severity.scoringSystem`]:
+        finding.severity.score === undefined
+          ? undefined
+          : (finding.severity.scoringSystem ?? ""),
+      [`${context}.taxonomy.category`]: finding.taxonomy.category,
+      [`${context}.provenance.source`]: finding.provenance.source,
+    });
+    if (occurrenceIds.has(finding.occurrenceId))
+      throw new ContractValidationError(
+        `${context}: duplicate finding occurrence identity; use identity.instance to split siblings.`,
+      );
+    occurrenceIds.add(finding.occurrenceId);
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
       try {
@@ -410,7 +440,7 @@ async function requireCheckedScanFile(
     throwIfAborted(signal);
     for (const part of parts.slice(0, -1)) {
       current = join(current, part);
-      const metadata = await lstat(current);
+      const metadata = await lstat(current, { bigint: true });
       throwIfAborted(signal);
       if (!metadata.isDirectory()) {
         throw new Error("unsafe parent");
@@ -418,7 +448,7 @@ async function requireCheckedScanFile(
       parents.push({ path: current, metadata });
     }
     const path = join(scanDir, ...parts);
-    const metadata = await lstat(path);
+    const metadata = await lstat(path, { bigint: true });
     throwIfAborted(signal);
     if (!metadata.isFile()) {
       throw new ContractValidationError(
@@ -636,13 +666,13 @@ async function requireScanRoot(
   throwIfAborted(signal);
   const absolute = resolve(scanDirectory);
   try {
-    const metadata = await lstat(absolute);
+    const metadata = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
     const canonical = await realpath(absolute);
     throwIfAborted(signal);
-    const current = await lstat(absolute);
+    const current = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
-    const returned = await lstat(canonical);
+    const returned = await lstat(canonical, { bigint: true });
     throwIfAborted(signal);
     if (
       !metadata.isDirectory() ||
@@ -656,7 +686,10 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(returned, canonical);
+      requirePrivateOutputDirectory(
+        { mode: Number(returned.mode), uid: Number(returned.uid) },
+        canonical,
+      );
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
@@ -682,7 +715,7 @@ async function verifyScanRoot(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    const current = await lstat(root.path);
+    const current = await lstat(root.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isDirectory() ||
@@ -691,7 +724,10 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(current, root.path);
+    requirePrivateOutputDirectory(
+      { mode: Number(current.mode), uid: Number(current.uid) },
+      root.path,
+    );
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
@@ -869,6 +905,41 @@ function validateParsedJson(value: unknown, context: string): void {
   }
 }
 
+async function loadContractValidators(
+  pluginRoot: string,
+  signal?: AbortSignal,
+) {
+  // The plugin schemas are the immutable v0 contract. They are valid Draft
+  // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
+  // optional strict-schema linter requires.
+  const ajv = new Ajv2020({ allErrors: false, strict: false });
+  ajv.addFormat("date-time", {
+    type: "string",
+    validate: validRfc3339DateTime,
+  });
+  const validators = [];
+  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
+    const schema = await readJson(
+      join(pluginRoot, "schemas", schemaName),
+      signal,
+    ).catch((error: unknown) => {
+      throwIfAborted(signal);
+      throw new ContractSchemaError(errorMessage(error), { cause: error });
+    });
+    try {
+      const validate = ajv.compile(schema);
+      if ("$async" in validate && validate.$async === true) {
+        throw new Error("asynchronous JSON Schema validation is unsupported");
+      }
+      validators.push({ filename, schemaName, validate });
+    } catch {
+      throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
+    }
+    throwIfAborted(signal);
+  }
+  return validators;
+}
+
 async function sha256ScanFile(
   scanDir: string,
   relativePath: string,
@@ -920,7 +991,7 @@ async function openCheckedScanFile(
       checked.path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
@@ -932,7 +1003,7 @@ async function openCheckedScanFile(
       );
     }
     for (const parent of checked.parents) {
-      const current = await lstat(parent.path);
+      const current = await lstat(parent.path, { bigint: true });
       throwIfAborted(signal);
       if (
         !current.isDirectory() ||
@@ -944,7 +1015,7 @@ async function openCheckedScanFile(
         );
       }
     }
-    const current = await lstat(checked.path);
+    const current = await lstat(checked.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isFile() ||

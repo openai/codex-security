@@ -86,12 +86,10 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(
     )
 
 
-@pytest.mark.parametrize("length", [2_000, 20_000])
 @pytest.mark.parametrize("extra_metadata", [False, True])
-def test_multiple_verbose_metadata_sections_each_retain_a_preview(
-    length: int, extra_metadata: bool
-) -> None:
+def test_multiple_verbose_metadata_sections_each_retain_a_preview(extra_metadata: bool) -> None:
     preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    length = 20_000
     finding = {
         "severity": {"level": "high", "rationale": "s" * length},
         "confidence": {"level": "high", "rationale": "c" * length},
@@ -401,3 +399,76 @@ def test_bounded_finding_details_filters_malformed_evidence_before_limiting() ->
     )
 
     assert bounded["code_evidence"] == [{"id": "valid", "code": "valid_source()"}]
+
+
+def test_large_code_preview_bounds_sizing_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    project = preview["bounded_finding_details"]
+    original_size = project.__globals__["json_size"]
+    probe_lengths: list[int] = []
+
+    def observed_size(value: object) -> int:
+        if isinstance(value, str):
+            probe_lengths.append(len(value))
+        return original_size(value)
+
+    monkeypatch.setitem(project.__globals__, "json_size", observed_size)
+    finding = {
+        "preventiveControls": ["Keep the authorization check centralized."],
+        "codeEvidence": [
+            {
+                "id": "source",
+                "label": "Missing check",
+                "path": "example.py",
+                "startLine": 1,
+                "code": "x" * (64 * 1024),
+                "explanation": "The resource is returned without authorization.",
+            }
+        ],
+        "attackPath": {"narrative": "The request reaches the protected resource."},
+        "validation": {"summary": "An unauthorized request succeeds."},
+        "rootCause": {"summary": "The authorization check is missing."},
+        "remediationTests": ["Reject an unauthorized request."],
+    }
+    original = deepcopy(finding)
+    expected = {
+        "rootCause": original["rootCause"],
+        "validation": original["validation"],
+        "attackPath": original["attackPath"],
+        "codeEvidence": [{**original["codeEvidence"][0], "code": "x" * 1_498}],
+        "remediationTests": original["remediationTests"],
+        "preventiveControls": original["preventiveControls"],
+    }
+
+    bounded = project(finding)
+
+    assert bounded == expected
+    encoded = json.dumps(bounded, separators=(",", ":")).encode("ascii")
+    assert encoded == json.dumps(expected, separators=(",", ":")).encode("ascii")
+    assert len(encoded) <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    assert finding == original
+    assert 1_498 in probe_lengths
+    assert max(probe_lengths) <= 1_500
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "plain", '"\\\n\t\x00', "é", "😀", "a😀é\n", "\ud800"],
+    ids=["empty", "ascii", "escapes", "bmp", "supplementary", "mixed", "lone-surrogate"],
+)
+def test_bounded_json_text_matches_exhaustive_prefix_oracle(value: str) -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    prefixes = [
+        (value[:end], len(json.dumps(value[:end]).encode("ascii"))) for end in range(len(value) + 1)
+    ]
+    budgets = {-3, 0, 1, 2}
+    for _, size in prefixes:
+        budgets.update((size - 1, size, size + 1))
+
+    for budget in sorted(budgets):
+        expected = next((item for item in reversed(prefixes) if item[1] <= budget), ("", 2))
+        assert preview["bounded_json_text"](value, budget) == expected, (repr(value), budget)
+        if budget <= 0:
+            remaining = [budget]
+            assert preview["bounded_json_value"](value, remaining) is None
+            assert remaining == [budget]

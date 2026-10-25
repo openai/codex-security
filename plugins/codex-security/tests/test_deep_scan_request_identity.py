@@ -59,12 +59,10 @@ def test_target_request_does_not_reuse_different_user_context(
         (None, "Review SQL injection only."),
     ),
 )
-@pytest.mark.parametrize("request_original", (False, True))
 def test_terminal_reuse_matches_discovery_context_after_edit(
     tmp_path: Path,
     original_context: str | None,
     edited_context: str | None,
-    request_original: bool,
 ) -> None:
     state_dir, codex_home = tmp_path / "state", tmp_path / "codex-home"
     target, scan_root = tmp_path / "target", tmp_path / "scans"
@@ -87,19 +85,18 @@ def test_terminal_reuse_matches_discovery_context_after_edit(
     )
     assert edited["scan"]["userContext"] == edited_context
 
-    requested = begin_target_scan(
-        state_dir,
-        codex_home,
-        target,
-        scan_root,
-        thread_id="thread-new-request",
-        user_context=original_context if request_original else edited_context,
-    )
-    assert requested["startDisposition"] == ("joined" if request_original else "created")
-    assert (requested["deepScan"]["scanId"] == scan_id) is request_original
-    assert requested["deepScan"]["userContext"] == (
-        original_context if request_original else edited_context
-    )
+    for context, disposition in ((original_context, "joined"), (edited_context, "created")):
+        requested = begin_target_scan(
+            state_dir,
+            codex_home,
+            target,
+            scan_root,
+            thread_id="thread-new-request",
+            user_context=context,
+        )
+        assert requested["startDisposition"] == disposition
+        assert (requested["deepScan"]["scanId"] == scan_id) == (disposition == "joined")
+        assert requested["deepScan"]["userContext"] == context
     assert (
         run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["userContext"]
         == edited_context

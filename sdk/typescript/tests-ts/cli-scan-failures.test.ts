@@ -37,6 +37,9 @@ function failingScan(message: string, onRun?: () => void) {
       onRun?.();
       throw new CodexSecurityError(message);
     },
+    validate: async () => {
+      throw new CodexSecurityError(message);
+    },
     preflight: async () => fakePreflight(),
     close: async () => {},
   });
@@ -52,8 +55,10 @@ function expectFailure(
 ) {
   const result = JSON.parse(text);
   if (fullOutput) {
-    expect(result).toMatchObject({ ok: false, error: { code, message } });
-    expect(result.data).toEqual(data);
+    expect(result.ok).toBe(false);
+    expect(result.error).toEqual({ code, message });
+    if (data === undefined) expect(result).not.toHaveProperty("data");
+    else expect(result.data).toEqual(data);
   } else {
     expect(result).toEqual({ status: "failed", code, message });
   }
@@ -73,7 +78,8 @@ for (const formatArgs of [
         async (_name, command) => {
           const stdout = capture();
           const stderr = capture();
-          const message = "The scan could not save its results.";
+          const message =
+            "network failure ECONNRESET Bearer SYNTHETIC_TOKEN_123";
           expect(
             await main(
               [...command, ...flags],
@@ -164,26 +170,6 @@ for (const formatArgs of [
             message,
           );
           expect(stderr.text()).toBe(`codex-security: ${message}\n`);
-        },
-      );
-
-      test.each(commands)(
-        "preserves diagnostic text for %s failures",
-        async (_name, command) => {
-          const stdout = capture();
-          const stderr = capture();
-          const message =
-            "network failure ECONNRESET Bearer SYNTHETIC_TOKEN_123";
-          expect(
-            await main(
-              [...command, ...flags],
-              stdout.stream,
-              stderr.stream,
-              failingScan(message),
-            ),
-          ).toBe(2);
-          expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
-          expect(stderr.text()).toContain(message);
         },
       );
     });
@@ -445,3 +431,42 @@ test.each(commands.slice(1))(
     expectFailure(failure.text(), true, "SCAN_FAILED", message);
   },
 );
+
+for (const command of ["rerun", "resume"]) {
+  test.each([true, false, undefined])(
+    `${command} restores owner suggestions from its saved recipe (%p)`,
+    async (ownerSuggestions) => {
+      let observed: boolean | undefined;
+      let called = false;
+      const deps = dependencies({
+        onWorkbench: () => ({
+          scanId: "saved-scan",
+          scanDir: "/tmp/saved-scan",
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "deep",
+            config: {},
+            ...(ownerSuggestions === undefined ? {} : { ownerSuggestions }),
+          },
+        }),
+        onTurn: (_repository, options) => {
+          called = true;
+          observed = options.ownerSuggestions;
+        },
+      });
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", command, "saved-scan", "--json"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(called).toBe(true);
+      expect(observed).toBe(ownerSuggestions);
+    },
+  );
+}

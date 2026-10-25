@@ -21,6 +21,7 @@
         "status": {
           "enum": ["completed", "failed", "canceled", "interrupted"]
         },
+        "warnings": { "$ref": "#/$defs/stringList" },
         "startedAt": { "type": "string", "format": "date-time" },
         "completedAt": { "type": "string", "format": "date-time" },
         "sealedAt": { "type": "string", "format": "date-time" },

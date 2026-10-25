@@ -76,6 +76,7 @@ export const runSchema = z
       includePaths: z.array(z.string()).optional(),
       filePaths: z.array(z.string()).optional(),
       scanId: requiredString,
+      sdkOwnsCompletion: z.boolean().optional(),
       coordinatorGeneration: optionalValue(positiveInteger),
       createdAt: optionalString,
       updatedAt: optionalString,

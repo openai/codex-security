@@ -37,7 +37,9 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
+      "owner-suggestions",
       "max-cost",
+      "max-time",
       "show-cost",
       "fail-on-severity",
       "headless",
@@ -84,6 +86,7 @@ const VALUE_LABELS: Record<string, string> = {
   python: "path",
   codex: "key=value",
   "max-cost": "usd",
+  "max-time": "minutes",
   "max-time-hours": "hours",
   "fail-on-severity": "level",
   "patch-severity": "level",

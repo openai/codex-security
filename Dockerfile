@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
-FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS package
+FROM node:26.12.1-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS package
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes python3 \
+    && apt-get install --no-install-recommends --yes git python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build/sdk/typescript
@@ -25,7 +25,7 @@ RUN pnpm run types \
     && pnpm pack --pack-destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
-FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS scanner
+FROM node:26.12.1-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS scanner
 
 LABEL org.opencontainers.image.title="Codex Security" \
       org.opencontainers.image.description="Codex Security scanner" \
@@ -43,6 +43,7 @@ COPY --from=package /build/package/ /tmp/codex-security-package/
 
 RUN npm install --global --include=optional --no-audit --no-fund \
         /tmp/codex-security-package/*.tgz \
+    && node /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js --version \
     && codex-security --version \
     && codex-security bulk-scan --help \
     && rm -rf /tmp/codex-security-package \

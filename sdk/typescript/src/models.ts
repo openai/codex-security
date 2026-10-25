@@ -11,6 +11,7 @@ export interface ScanManifest {
       [k: string]: unknown;
     };
     status: "completed" | "failed" | "canceled" | "interrupted";
+    warnings?: string[];
     startedAt: string;
     completedAt: string;
     sealedAt: string;
