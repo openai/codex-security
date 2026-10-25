@@ -232,10 +232,6 @@ function apiError(status: number) {
   return Object.assign(new Error(`HTTP ${status}`), { status });
 }
 
-// The release writer runs on Ubuntu. Maintainers can preview a release on every host.
-const releaseHostTest = test.skipIf(process.platform !== "linux");
-const releaseHostSuite = describe.skipIf(process.platform !== "linux");
-
 class Fixture {
   private static initialPull?: ReturnType<typeof Fixture.createInitialPull>;
 
@@ -317,10 +313,15 @@ class Fixture {
   }
 
   tree(base: string | null, files: Record<string, string | null>) {
+    const entries = Object.entries(files);
+    if (base !== null && entries.length === 0)
+      return this.git("rev-parse", `${base}^{tree}`).trim();
+
     this.git("read-tree", base ?? "--empty");
-    for (const [path, content] of Object.entries(files)) {
+    const edits: string[] = [];
+    for (const [path, content] of entries) {
       if (content === null) {
-        this.git("update-index", "--force-remove", "--", path);
+        edits.push(`./${path}`);
       } else {
         const blob = gitText(["hash-object", "-w", "--stdin"], {
           cwd: this.directory,
@@ -328,8 +329,12 @@ class Fixture {
           input: content,
           stdio: ["pipe", "pipe", "pipe"],
         }).trim();
-        this.git("update-index", "--add", "--cacheinfo", "100644", blob, path);
+        edits.push("--cacheinfo", "100644", blob, path);
       }
+    }
+    if (edits.length > 0) {
+      // --cacheinfo stages blobs; --force-remove applies to plain path arguments.
+      this.git("update-index", "--add", "--force-remove", ...edits);
     }
     return this.git("write-tree").trim();
   }
@@ -765,90 +770,87 @@ describe("GitHub request transport", () => {
     },
   );
 
-  releaseHostTest(
-    "publishes through a concurrent commit conflict",
-    async () => {
-      const fixture = new Fixture();
-      fixture.merge("feat: initial feature");
-      let conflicts = 0;
-      const github = createGitHubClient(
-        fixture.github.repository,
-        "synthetic-release-token",
-        async (url, options) => {
-          const endpoint = new URL(url);
-          expect(endpoint.origin).toBe("https://api.github.com");
-          expect(new Headers(options.headers).get("Authorization")).toBe(
-            "Bearer synthetic-release-token",
-          );
-          const path =
-            endpoint.pathname.slice(
-              `/repos/${fixture.github.repository}/`.length,
-            ) + endpoint.search;
-          const method = options.method!;
-          try {
-            const value =
-              method === "GET" &&
-              (path.startsWith("commits/") ||
-                path.startsWith("pulls?") ||
-                path.startsWith("issues/"))
-                ? await fixture.github.list(path)
-                : await fixture.github.request(
-                    method,
-                    path,
-                    options.body ? JSON.parse(String(options.body)) : undefined,
-                  );
-            return Response.json(value, {
-              status: method === "POST" ? 201 : 200,
-            });
-          } catch (error) {
-            const status = (error as { status?: number }).status;
-            if (status === undefined) throw error;
-            if (status === 422) conflicts++;
-            return Response.json(
-              { message: "Synthetic GitHub failure" },
-              { status },
-            );
-          }
-        },
-      );
-      const run = (dryRun = false) =>
-        reconcileReleasePullRequest({ repo: fixture.repo, github, dryRun });
-      expect((await run(true)).action).toBe("would-create");
-      expect(fixture.github.writes).toHaveLength(0);
-      const first = await run();
-      fixture.merge("fix: later fix");
-      fixture.github.beforeRefWrite = () => {
-        const notes = fixture.repo.readFile(
-          fixture.head(first.plan.branch)!,
-          notesPath,
-        )!;
-        fixture.commit(
-          first.plan.branch,
-          {
-            [notesPath]: notes.replace(
-              "initial feature",
-              "Human-reviewed release note",
-            ),
-          },
-          "docs: review release notes",
+  test("publishes through a concurrent commit conflict", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    let conflicts = 0;
+    const github = createGitHubClient(
+      fixture.github.repository,
+      "synthetic-release-token",
+      async (url, options) => {
+        const endpoint = new URL(url);
+        expect(endpoint.origin).toBe("https://api.github.com");
+        expect(new Headers(options.headers).get("Authorization")).toBe(
+          "Bearer synthetic-release-token",
         );
-      };
-      const updated = await run();
-      expect(conflicts).toBe(1);
-      expect(updated.pull).toBe(first.pull);
-      expect(updated.plan.humanOwned).toEqual(["highlights"]);
-      expect(updated.plan.files[notesPath]).toContain(
-        "Human-reviewed release note",
+        const path =
+          endpoint.pathname.slice(
+            `/repos/${fixture.github.repository}/`.length,
+          ) + endpoint.search;
+        const method = options.method!;
+        try {
+          const value =
+            method === "GET" &&
+            (path.startsWith("commits/") ||
+              path.startsWith("pulls?") ||
+              path.startsWith("issues/"))
+              ? await fixture.github.list(path)
+              : await fixture.github.request(
+                  method,
+                  path,
+                  options.body ? JSON.parse(String(options.body)) : undefined,
+                );
+          return Response.json(value, {
+            status: method === "POST" ? 201 : 200,
+          });
+        } catch (error) {
+          const status = (error as { status?: number }).status;
+          if (status === undefined) throw error;
+          if (status === 422) conflicts++;
+          return Response.json(
+            { message: "Synthetic GitHub failure" },
+            { status },
+          );
+        }
+      },
+    );
+    const run = (dryRun = false) =>
+      reconcileReleasePullRequest({ repo: fixture.repo, github, dryRun });
+    expect((await run(true)).action).toBe("would-create");
+    expect(fixture.github.writes).toHaveLength(0);
+    const first = await run();
+    fixture.merge("fix: later fix");
+    fixture.github.beforeRefWrite = () => {
+      const notes = fixture.repo.readFile(
+        fixture.head(first.plan.branch)!,
+        notesPath,
+      )!;
+      fixture.commit(
+        first.plan.branch,
+        {
+          [notesPath]: notes.replace(
+            "initial feature",
+            "Human-reviewed release note",
+          ),
+        },
+        "docs: review release notes",
       );
-      expect(updated.reviewRequested).toBe(true);
-      fixture.git(
-        "merge-base",
-        "--is-ancestor",
-        first.headSha!,
-        updated.headSha!,
-      );
-    },
-  );
+    };
+    const updated = await run();
+    expect(conflicts).toBe(1);
+    expect(updated.pull).toBe(first.pull);
+    expect(updated.plan.humanOwned).toEqual(["highlights"]);
+    expect(updated.plan.files[notesPath]).toContain(
+      "Human-reviewed release note",
+    );
+    expect(updated.reviewRequested).toBe(true);
+    fixture.git(
+      "merge-base",
+      "--is-ancestor",
+      first.headSha!,
+      updated.headSha!,
+    );
+  });
 
   test.each([30, 100])(
     "follows %i-item pages without losing the original query",
@@ -1355,7 +1357,7 @@ test("previews a pending release from the maintainer CLI without writing to Git 
   expect(fixture.git("show-ref")).toBe(refs);
 });
 
-releaseHostSuite("rolling release reconciliation", () => {
+describe("rolling release reconciliation", () => {
   test("adds and refreshes the example pin from current main without introducing it into earlier history", async () => {
     const fixture = new Fixture();
     fixture.merge("fix: initial fix");
@@ -1922,7 +1924,7 @@ describe("read-only release previews and Git history", () => {
   });
 });
 
-releaseHostSuite("release proposal pauses", () => {
+describe("release proposal pauses", () => {
   test.each(["comment", "formatting", "deletion"] as const)(
     "preserves example workflow %s edits on the release branch",
     async (change) => {

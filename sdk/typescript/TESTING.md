@@ -150,9 +150,9 @@ a strict NodeNext TypeScript consumer, the actual CLI, credential locking, and a
 nested Codex worker. The installed Deep Scan smoke exercises a real retry on
 one runtime per OS for PRs and main pushes, and on every scheduled or manual
 qualification lane. All selected runtimes still complete direct and detached scans.
-Native plugin-build tests remain in the shared Bun suite. The release PR writer
-and its Git ref races run on Linux, where the release workflow executes;
-maintainer dry runs use a real Git repository on each OS.
+Native plugin-build tests remain in the shared Bun suite. Each supported OS
+exercises the maintainer release preview, Git branch and commit updates,
+concurrent ref conflicts, and preservation of maintainer edits.
 Typechecking and formatting run once in an independent required job, so package
 consumers do not wait for those checks. Package compilation and archive
 validation still finish before the test jobs start.
