@@ -1082,14 +1082,23 @@ describe("canonical scan contract", () => {
       const coveragePath = join(scanDir, "coverage.json");
       const coverage = await readJson(coveragePath);
       coverage["deferred"] = [
-        { id: "review", reason: "Review is incomplete.", paths: [path] },
+        { id: "earlier", reason: "Follow up.", paths: ["src/earlier.ts"] },
+        {
+          id: "review",
+          reason: "Review is incomplete.",
+          paths: ["src/valid.ts", path],
+        },
       ];
       await writeJson(coveragePath, coverage);
       await reseal(scanDir);
 
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow(/coverage.*deferred/);
+      ).rejects.toThrow(
+        path === ""
+          ? /coverage.*\/deferred\/1\/paths\/1/
+          : "coverage.deferred[1].paths[1]: expected a safe repository-relative POSIX path.",
+      );
     }
   });
 

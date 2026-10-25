@@ -2279,7 +2279,7 @@ export async function main(
       );
       return presentHistory(
         await history(
-          ["list-repositories"],
+          ["list-repositories", "--status", "scanned"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
             let target = repositories.find(

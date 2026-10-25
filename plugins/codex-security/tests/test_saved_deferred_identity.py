@@ -575,6 +575,26 @@ def test_accepted_generic_update_keeps_its_id_in_frozen_recovery(tmp_path: Path,
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+def test_unsafe_deferred_update_keeps_the_earlier_valid_path(tmp_path: Path) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    original = {"id": "review", "reason": "Review remains.", "paths": ["app.py"]}
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints", saved_draft(scan_id, deferred=[original])
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    update = {**original, "paths": ["../outside.py"]}
+    result.write_text(json.dumps(saved_draft(scan_id, deferred=[update])))
+    os.utime(result, ns=(200, 200))
+
+    fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
+
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert [row["paths"] for row in coverage["deferred"] if "paths" in row] == [["app.py"]]
+    warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
+    assert any("expected a safe repository-relative POSIX path" in warning for warning in warnings)
+
+
 def test_unnamed_changed_observation_stays_pending(tmp_path: Path, saved_results):
     generic = {"reason": "Review remains.", "paths": ["api.py"], "notes": "Initial review."}
     identity = "source-review"

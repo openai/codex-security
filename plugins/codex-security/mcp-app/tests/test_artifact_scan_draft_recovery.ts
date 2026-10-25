@@ -508,6 +508,15 @@ test("worker checkpoints retain typed surface IDs", async (t) => {
   );
 });
 
+test("parent: resume provisional deferred paths until the task is closed", async (t) => {
+  const f = await fixture(t, "standard");
+  const pending = { id: "review", ...generic, paths: ["../outside"] };
+  await f.write(f.draft({ deferred: [pending] }));
+  assert.deepEqual((await f.write(f.draft())).coverage.deferred, [pending]);
+  await f.write(f.draft({ resolvedDeferred: [close(pending.id)] }, true));
+  assert.deepEqual((await f.read()).deferred, []);
+});
+
 for (const observation of ["checkpoint head", "worker result"]) {
   test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
     const f = await fixture(t, "worker");

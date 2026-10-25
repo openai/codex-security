@@ -74,6 +74,8 @@
 - skip independent jobs for edits to existing Python tests ([#2002](https://github.com/openai/codex-security/pull/2002))
 - skip SDK shards when PR static checks fail ([#2006](https://github.com/openai/codex-security/pull/2006))
 - share the exact npm setup for release workflows ([#1998](https://github.com/openai/codex-security/pull/1998))
+- include unscanned repository targets ([#547](https://github.com/openai/codex-security/pull/547))
+- constrain deferred coverage paths ([#558](https://github.com/openai/codex-security/pull/558))
 
 <!-- release-section: highlights:end -->
 

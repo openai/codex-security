@@ -5,6 +5,7 @@ import sqlite3
 from argparse import Namespace
 from contextlib import closing
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from workbench_test_support import stable_target_id
@@ -379,6 +380,32 @@ def test_scan_list_probes_requested_repository_once(
     ]
 
 
+def test_unscanned_repositories_follow_scanned_rows_and_paginate(
+    workbench_api, indexed_collections, tmp_path, monkeypatch
+):
+    connection, _ = indexed_collections
+    indexes = workbench_api["native_indexes"]
+    query = indexes.list_repositories
+    scanned = query(connection)["repositories"]
+    unscanned = sorted(
+        workbench_api["ensure_security_target"](connection, str(tmp_path / name))
+        for name in ("needle-cedar", "needle-oak")
+    )
+    repositories = query(connection)["repositories"]
+    assert repositories[: len(scanned)] == scanned
+    assert [row["targetId"] for row in repositories[len(scanned) :]] == unscanned
+    probe = Mock(wraps=indexes.os.path.isdir)
+    monkeypatch.setattr(indexes.os.path, "isdir", probe)
+    for offset, target_id in enumerate(unscanned):
+        page = query(
+            connection, query_args(status="not_scanned", query="NeEdLe", limit=1, offset=offset)
+        )
+        assert [row["targetId"] for row in page["repositories"]] == [target_id]
+        assert page["nextOffset"] == (1 if offset == 0 else None)
+        probe.assert_called_once_with(page["repositories"][0]["targetPath"])
+        probe.reset_mock()
+
+
 @pytest.mark.parametrize(
     ("timestamps", "order"),
     [
@@ -493,6 +520,20 @@ def test_repository_index_keeps_one_scan_cohort(
     indexes = workbench_api["native_indexes"]
     database = tmp_path / "history.sqlite"
     new_id = "00000000-0000-4000-8000-999999999999"
+    # Hold one target's first completed scan and finding for the concurrent publication.
+    with source:
+        pending = [
+            (
+                table,
+                source.execute(f"SELECT * FROM {table} WHERE {key} = ?", (SCAN_IDS[1],)).fetchone(),
+            )
+            for table, key in (
+                ("scans", "id"),
+                ("scan_progress", "scan_id"),
+                ("finding_occurrences", "scan_id"),
+            )
+        ]
+        source.execute("DELETE FROM scans WHERE id = ?", (SCAN_IDS[1],))
     with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as writer:
         source.backup(reader)
         reader.row_factory = sqlite3.Row
@@ -503,10 +544,14 @@ def test_repository_index_keeps_one_scan_cohort(
 
         def execute(sql, parameters=()):
             cursor = reader.execute(sql, parameters)
-            if "JOIN scan_progress AS progress" not in sql:
+            if "FROM security_targets AS targets" not in sql:
                 return cursor
-            rows = cursor.fetchall()
             with writer:
+                writer.execute(
+                    "UPDATE security_targets SET display_name = 'renamed' "
+                    "WHERE id = (SELECT target_id FROM scans WHERE id = ?)",
+                    (SCAN_IDS[0],),
+                )
                 writer.execute(
                     "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
                     "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
@@ -520,7 +565,11 @@ def test_repository_index_keeps_one_scan_cohort(
                     "SELECT ?, updated_at FROM scan_progress WHERE scan_id = ?",
                     (new_id, SCAN_IDS[0]),
                 )
-            return SimpleNamespace(fetchall=lambda: rows)
+                for table, row in pending:
+                    writer.execute(
+                        f"INSERT INTO {table} VALUES ({','.join('?' for _ in row)})", row
+                    )
+            return cursor
 
         proxy = SimpleNamespace(execute=execute, create_function=reader.create_function)
         assert indexes.list_repositories(proxy) == before
@@ -528,7 +577,10 @@ def test_repository_index_keeps_one_scan_cohort(
         reader.commit()
         after = indexes.list_repositories(reader)["repositories"]
         assert after[0]["latestScan"]["scanId"] == new_id
+        assert after[0]["displayName"] == "renamed"
         assert after[0]["scanCount"] == 2
+        first = next(row for row in after if row["latestScan"]["scanId"] == SCAN_IDS[1])
+        assert (first["scanCount"], first["openFindingsCount"]) == (1, 1)
 
 
 def test_repository_latest_keeps_sqlite_millisecond_ties(workbench_api, indexed_collections):
@@ -554,9 +606,15 @@ def test_repository_summary_excludes_scans_without_progress(workbench_api, index
     target_id = stable_target_id(targets[0])
     connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (target_id, SCAN_IDS[1]))
     connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[1],))
-    repositories = workbench_api["native_indexes"].list_repositories(
-        connection, query_args(target_id=target_id)
-    )["repositories"]
+    query = workbench_api["native_indexes"].list_repositories
+    repositories = query(connection, query_args(target_id=target_id))["repositories"]
     assert len(repositories) == 1
     assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]
     assert repositories[0]["scanCount"] == 1
+    connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[0],))
+    (unscanned,) = query(connection, query_args(target_id=target_id, status="not_scanned"))[
+        "repositories"
+    ]
+    assert unscanned["targetId"] == target_id
+    assert unscanned["scanCount"] == unscanned["openFindingsCount"] == 0
+    assert unscanned["latestScan"] is None

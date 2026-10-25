@@ -242,6 +242,19 @@ const scanManifest = z.looseObject({
     }),
 });
 
+// The empty branch always matches. A forbidden sequence matches both branches,
+// so oneOf rejects it. This also works in Zod's JSON Schema importer.
+const sealedDeferredPath = text.meta({
+  oneOf: [
+    {},
+    {
+      type: "string",
+      $comment: "invalidSealedDeferredPath",
+      pattern: String.raw`^(?:/|[A-Za-z]:)|(?:^|/)\.\.(?:/|$)|[\\\x00-\x1f]|[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]`,
+    },
+  ],
+});
+
 const coverageDocument = z.looseObject({
   documentType: z.literal("codex-security.coverage"),
   schemaVersion: z.literal("1.0"),
@@ -281,7 +294,7 @@ const coverageDocument = z.looseObject({
     z.looseObject({
       id: text,
       reason: text,
-      paths: textList.optional(),
+      paths: z.array(sealedDeferredPath).optional(),
       surfaceIds: textList.optional(),
     }),
   ),
