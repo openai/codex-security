@@ -1,7 +1,9 @@
 import { testArtifactStartupTimeoutClassification } from "./deep_scan_startup_cases.ts";
 import {
   workerGitEnvironment,
+  workerRuntimeEnvironment,
   workerScanEnvironment,
+  externalImports,
   expectedGitEnvironment,
   restoreEnv,
 } from "./support/fake-codex-source.ts";
@@ -1196,29 +1198,10 @@ async function testOpenAiCredentialsReachWorker() {
       true,
       entry.accountResult ?? noAccount,
     );
-    const runtimeEnvironment = {
-      PATH: [
-        virtualenv === undefined
-          ? path.join(fixture.root, "runner-tools")
-          : path.join(virtualenv, "bin"),
-        path.dirname(process.execPath),
-      ].join(path.delimiter),
-      HOME: path.join(fixture.root, "home"),
-      PYTHON:
-        virtualenv === undefined
-          ? path.join(fixture.root, "tools", "python3")
-          : "python3",
-      PYTHONUTF8: "1",
-      LD_LIBRARY_PATH:
-        (process.env.LD_LIBRARY_PATH === undefined
-          ? ""
-          : process.env.LD_LIBRARY_PATH + path.delimiter) +
-        path.join(fixture.root, "libraries"),
-      DYLD_LIBRARY_PATH: path.join(fixture.root, "dylibs"),
-      DYLD_FALLBACK_LIBRARY_PATH: path.join(fixture.root, "fallback-libraries"),
-      CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
-      RUNNER_TRACKING_ID: "synthetic-worker-job",
-    };
+    const runtimeEnvironment = workerRuntimeEnvironment(
+      fixture.root,
+      virtualenv,
+    );
     const previousEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
@@ -1463,6 +1446,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
@@ -1980,6 +1964,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           await Promise.all(
             executors.map((executor, index) => {
               // Snapshot each scan environment independently.
+              restoreEnv(
+                "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
+                externalImports[index].inherited,
+              );
               process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
               Object.assign(process.env, temporaryEnvironments[index]);
               process.env.CODEX_SECURITY_STATE_DIR = path.join(
@@ -2101,6 +2089,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            assert.equal(
+              invocation.runtimeEnvironment
+                .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
+              externalImports[index].override ??
+                externalImports[index].inherited,
+            );
+            assert.equal(
+              process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
+              externalImports.at(-1)!.inherited,
+            );
             if (
               process.platform === "win32" &&
               configuration === "" &&

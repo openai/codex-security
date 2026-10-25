@@ -70,6 +70,133 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
+  test("requires opt-in before resolving repositories or accessing the workbench", async () => {
+    const { root, stateDirectory, environment } = await fixture();
+    const disabledEnvironment: NodeJS.ProcessEnv = { ...environment };
+    delete disabledEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"];
+    const repository = join(root, "missing-repository");
+    let workbenchCalls = 0;
+    const dependencies = {
+      environment: disabledEnvironment,
+      runWorkbench: async () => {
+        workbenchCalls++;
+        throw new Error("Disabled imports must not access the workbench");
+      },
+    };
+    await expect(
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        dependencies,
+      ),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    await expect(
+      listLocalExternalFindings({ repository }, dependencies),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(workbenchCalls).toBe(0);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test("requires opt-in from the workbench selected during normalization", async () => {
+    const { root, repository, stateDirectory, environment } = await fixture();
+    const disabledState = join(root, "disabled-state");
+    const dependencies = { environment };
+    const data = input();
+    const finding = data.findings[0]!;
+    const evidence = finding.evidence;
+    Object.defineProperty(finding, "evidence", {
+      enumerable: true,
+      get() {
+        dependencies.environment = {
+          ...environment,
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+          CODEX_SECURITY_STATE_DIR: disabledState,
+        };
+        return evidence;
+      },
+    });
+    await expect(
+      prepareNormalizedLocalImport(
+        data,
+        { repository, ...source },
+        dependencies,
+      ).then((prepared) => prepared.import()),
+    ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
+    expect(existsSync(disabledState)).toBe(false);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test("forwards an inherited opt-in to store and read helpers while an overlapping import stays disabled", async () => {
+    const { root, repository, stateDirectory, environment } = await fixture();
+    const { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS, ...settings } = environment;
+    const enabledEnvironment = Object.assign(
+      Object.create({
+        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
+        get CODEX_SECURITY_CLOUD_WEB_URL() {
+          throw new Error("A local import does not use the Cloud endpoint");
+        },
+      }),
+      settings,
+    );
+    const disabledState = join(root, "disabled-state");
+    const disabledEnvironment = {
+      ...environment,
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0",
+      CODEX_SECURITY_STATE_DIR: disabledState,
+    };
+    const [enabled, disabled] = await Promise.allSettled([
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        { environment: enabledEnvironment },
+      ).then((prepared) => prepared.import()),
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source },
+        {
+          environment: disabledEnvironment,
+        },
+      ).then((prepared) => prepared.import()),
+    ]);
+    if (enabled.status !== "fulfilled") throw enabled.reason;
+    expect(enabled.value.counts).toEqual({
+      created: 2,
+      updated: 0,
+      unchanged: 0,
+    });
+    expect(disabled.status).toBe("rejected");
+    if (disabled.status !== "rejected")
+      throw new Error("Disabled import succeeded");
+    expect(disabled.reason.message).toContain(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+    const [readback, blockedRead] = await Promise.allSettled([
+      listLocalExternalFindings(
+        { repository },
+        { environment: enabledEnvironment },
+      ),
+      listLocalExternalFindings(
+        { repository },
+        { environment: disabledEnvironment },
+      ),
+    ]);
+    expect(readback.status).toBe("fulfilled");
+    if (readback.status !== "fulfilled") throw readback.reason;
+    expect(
+      new Map(readback.value.map((finding) => [finding.id, finding])),
+    ).toEqual(
+      new Map(enabled.value.findings.map((finding) => [finding.id, finding])),
+    );
+    expect(blockedRead.status).toBe("rejected");
+    if (blockedRead.status !== "rejected")
+      throw new Error("Disabled read succeeded");
+    expect(blockedRead.reason.message).toContain(
+      "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1",
+    );
+    expect(existsSync(join(stateDirectory, "workbench.sqlite3"))).toBe(true);
+    expect(existsSync(disabledState)).toBe(false);
+  });
+
   test("persists sparse evidence through the native helper and reads it in a separate process", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const normalized = input();

@@ -385,15 +385,14 @@ See [Container releases](docker/README.md) for publication and verification.
 
 ## Publish to GitHub Marketplace
 
-Publishing the companion `action-vX.Y.Z` GitHub Release does not publish its
-Marketplace listing. Complete this step separately for each Action version
-that should appear in Marketplace:
+Before announcing a new release that includes the GitHub Action, a maintainer
+must publish the companion `action-vX.Y.Z` release to GitHub Marketplace.
 
-1. Wait for `node-github-release` to succeed for the version.
-2. Open the existing `action-vX.Y.Z` release and choose **Edit**. Select
-   **Publish this Action to the GitHub Marketplace**. Use the Action release,
-   whose tag contains the tested distribution, rather than the `npm-vX.Y.Z`
-   source release or a new tag on `main`.
+1. After `node-github-release` succeeds, follow **edit the Action release** in
+   the **release status** job summary, or open `action-vX.Y.Z` and choose **Edit**.
+   That tag contains the tested Action distribution. `npm-vX.Y.Z` points to the
+   CLI source.
+2. Under **Release Action**, select **Publish this Action to the GitHub Marketplace**.
 3. Confirm the metadata checks pass. The Marketplace display name comes from
    `name` in the tagged `action.yml`, currently **OpenAI Codex Security**.
    GitHub requires a globally unique Action name. If a released version's name
@@ -427,6 +426,8 @@ Check the published state before announcing the release:
   Its companion GitHub Release contains the manifest and SBOM, links to the
   npm changelog, and lists that full distribution commit SHA. The manifest and
   runtime lock identify the same CLI version and npm integrity.
+- For new releases with the Action, the public Marketplace listing offers the
+  matching `action-vX.Y.Z` version.
 - The newest npm release is marked Latest. Action releases and historical
   backfills are not.
 - For releases created under this process, the reviewed highlights, category

@@ -305,6 +305,7 @@ test("real GitHub readers and mappings preserve explicit ports in repository evi
       },
     });
     const dependency = {
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
       createGitHub: async (selectedHost: string) => {
         expect(selectedHost).toBe(host);
         return github;

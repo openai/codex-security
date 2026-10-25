@@ -156,6 +156,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import {
   knowledgeBaseProtectedRoots,
   prepareKnowledgeBase,
@@ -6287,11 +6288,13 @@ function standaloneFindingForPrompt(finding: string | object): string {
 function definedEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
-  return Object.fromEntries(
+  const child = Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 function withoutCodexHome(

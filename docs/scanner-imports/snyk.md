@@ -1,5 +1,8 @@
 # Snyk Open Source imports
 
+Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+
 Use the [official Snyk Codex plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
 to collect a fresh workspace scan. The existing
 [`publish findings` command](../../sdk/typescript/docs/cli.md#import-snyk-open-source-findings)

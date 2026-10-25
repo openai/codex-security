@@ -2973,6 +2973,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
       PATH: "",
+      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       ...(process.env["SystemRoot"] === undefined
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
@@ -2991,6 +2992,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
+    expect(workerEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]).toBe(
+      "1",
+    );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
       process.execPath,
@@ -3008,6 +3012,25 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     expect(nestedCodex.status).toBe(0);
     expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
+  });
+
+  test("forwards the external import setting to the plugin helper", () => {
+    const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
+    const node = Bun.which("node")!;
+    const environment: NodeJS.ProcessEnv = Object.assign(
+      Object.create({ [flag]: "1" }),
+      { CODEX_CLI_PATH: node, SystemRoot: process.env["SystemRoot"] },
+    );
+    const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
+    const run = () =>
+      spawnSync(node, [helper, "list-external-findings", "--help"], {
+        env: pluginExecutionEnvironment(node, environment),
+      }).status;
+
+    expect(run()).toBe(0);
+    environment[flag] = undefined;
+    environment["Codex_Security_Enable_External_Imports"] = "1";
+    expect(run()).toBe(2);
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
