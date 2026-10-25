@@ -44,6 +44,13 @@ test.each([
     runtimeNode: null,
     route: "direct",
   },
+  {
+    name: "invalid code mode supplied by the caller",
+    dependencyNode: null,
+    runtimeNode: "selected runtime",
+    route: "parent",
+    codeMode: "mistyped",
+  },
 ])("Deep Scan respects $name", async (scenario) => {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
@@ -59,6 +66,9 @@ test.each([
   const runtimeEnvironment: Record<string, string> =
     selectedNode === undefined ? {} : { CODEX_MCP_NODE_PATH: selectedNode };
   const originalRuntimeEnvironment = { ...runtimeEnvironment };
+  const codeMode = scenario.codeMode ?? {
+    direct_only_tool_namespaces: ["existing_tools"],
+  };
   const parentTurn = mock(async () => {
     throw new Error("parent route reached");
   });
@@ -77,12 +87,16 @@ test.each([
       model_reasoning_effort: "high",
       features: {
         shell_tool: false,
-        code_mode: {
-          direct_only_tool_namespaces:
-            scenario.route === "parent"
-              ? ["existing_tools", "mcp__codex_security", "codex_security"]
-              : ["existing_tools"],
-        },
+        code_mode:
+          typeof codeMode === "string" || scenario.route === "direct"
+            ? codeMode
+            : {
+                direct_only_tool_namespaces: [
+                  "existing_tools",
+                  "mcp__codex_security",
+                  "codex_security",
+                ],
+              },
       },
     });
     return {
@@ -96,7 +110,7 @@ test.each([
         model_reasoning_effort: "high",
         features: {
           shell_tool: false,
-          code_mode: { direct_only_tool_namespaces: ["existing_tools"] },
+          code_mode: codeMode,
         },
       },
     },

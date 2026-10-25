@@ -5814,13 +5814,12 @@ export function classifyConnectionFailure(
 
 function deepScanParentConfig(config: JsonObject): JsonObject {
   const resolved = resolveCodexProfile(config);
-  const features = isRecord(resolved["features"]) ? resolved["features"] : {};
+  const features = resolved["features"] ?? {};
+  if (!isRecord(features)) return resolved;
   const mode = features["code_mode"];
-  const settings = isRecord(mode)
-    ? mode
-    : typeof mode === "boolean"
-      ? { enabled: mode }
-      : {};
+  const settings = typeof mode === "boolean" ? { enabled: mode } : (mode ?? {});
+  // Leave malformed user settings for the native config parser to reject.
+  if (!isRecord(settings)) return resolved;
   const direct = settings["direct_only_tool_namespaces"] ?? [];
   if (!Array.isArray(direct)) return resolved;
   // The native parent waits for direct tool calls before it can end its turn.
