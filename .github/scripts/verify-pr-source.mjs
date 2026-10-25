@@ -97,7 +97,10 @@ function sourceCandidate(runs, { pr, sha }) {
     return "full";
   if (runs.some((r) => r.status !== "completed")) return "pending";
   if (runs.every(successful)) return first;
-  if (runs.every((r) => r.conclusion === "failure")) return "failed";
+  if (runs.every((r) => r.conclusion === "failure")) {
+    console.log(`Failed source CI: ${first.html_url}/attempts/1`);
+    return "failed";
+  }
   return "full";
 }
 
