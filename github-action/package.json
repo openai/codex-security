@@ -1,6 +1,6 @@
 {
   "name": "codex-security-action",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Run Codex Security in GitHub Actions with explicit scope, budgets, and scan health reporting",

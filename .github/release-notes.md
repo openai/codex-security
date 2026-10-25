@@ -1,4 +1,4 @@
-<!-- release-version: 0.6.1 -->
+<!-- release-version: 0.7.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -68,6 +68,7 @@
 - select the mutation test runtime in one setup step ([#1985](https://github.com/openai/codex-security/pull/1985))
 - keep selected results stable during retries ([#915](https://github.com/openai/codex-security/pull/915))
 - request review when the updated PR head becomes visible ([#1989](https://github.com/openai/codex-security/pull/1989))
+- use the CLI verdict contract for hosted verification ([#1951](https://github.com/openai/codex-security/pull/1951))
 
 <!-- release-section: highlights:end -->
 
@@ -75,6 +76,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+Review migration steps for these breaking changes:
+
+- use the CLI verdict contract for hosted verification ([#1951](https://github.com/openai/codex-security/pull/1951))
 
 <!-- release-section: upgrades:end -->
