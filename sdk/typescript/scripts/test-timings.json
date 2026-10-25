@@ -739,10 +739,20 @@
     "darwin": 14.9,
     "win32": 30.3
   },
+  "multiscan-checkout.test.ts": {
+    "linux": 14.0,
+    "darwin": 21.5,
+    "win32": 54.4
+  },
+  "multiscan-recovery.test.ts": {
+    "linux": 19.5,
+    "darwin": 34.3,
+    "win32": 91.9
+  },
   "multiscan.test.ts": {
-    "linux": 42.1,
-    "darwin": 94.1,
-    "win32": 200.7
+    "linux": 13.7,
+    "darwin": 21.5,
+    "win32": 56.6
   },
   "native-artifact-cache.test.ts": {
     "linux": 0.1,
