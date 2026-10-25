@@ -5,26 +5,30 @@ export function failedChecks(needs) {
     return ["classify-changes"];
   const selected = needs["classify-changes"].outputs;
   const required = ["static-checks"];
-  if (selected["source-required"] === "true") {
-    required.push(
-      "native",
-      "package",
+  const groups = {
+    "package-required": ["native", "package", "compatibility"],
+    "source-required": [
       "test",
-      "compatibility",
       "mcp",
       "plugin-host",
       "plugin-source",
       "windows-test",
       "windows-verify",
-    );
-  } else if (selected["source-required"] !== "false") {
-    return ["source-required classification"];
+    ],
+    "workflow-quality": ["workflow-quality"],
+    "container-validate": ["container-validate"],
+    "action-ci": ["action-ci"],
+    "eval-contracts": ["eval-contracts"],
+  };
+  for (const [name, checks] of Object.entries(groups)) {
+    if (selected[name] === "true") required.push(...checks);
+    else if (selected[name] !== "false") return [`${name} classification`];
   }
-  for (const check of ["workflow-quality", "container-validate"]) {
-    if (selected[check] === "true") required.push(check);
-    else if (selected[check] !== "false") return [`${check} classification`];
-  }
-  return required.filter((name) => needs[name]?.result !== "success");
+  return required.filter(
+    (name) =>
+      needs[name]?.result !== "success" ||
+      (name === "action-ci" && needs[name].outputs?.passed !== "true"),
+  );
 }
 
 if (

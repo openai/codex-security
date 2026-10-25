@@ -467,27 +467,35 @@ elapsed-time messages only.
 
 ## Development
 
-From the repository root:
+From the repository root, use Node.js 24 to check the committed files and audit
+both dependency locks.
 
 ```bash
 npm --prefix github-action ci --ignore-scripts --no-audit --no-fund
-npm --prefix github-action run docs
-npm --prefix github-action run build
 npm --prefix github-action run validate
-# Test the published CLI with synthetic scans and a local request fixture:
+npm --prefix github-action audit --audit-level=high
+npm --prefix github-action/runtime audit --omit=dev --audit-level=high
+```
+
+After changing Action inputs or outputs, run `npm --prefix github-action run docs`
+to regenerate the README reference. After changing bundled source or the runtime
+lock, run `npm --prefix github-action run build`. Review the generated README and
+`dist/*.cjs` changes, rerun validation, and commit them with their source changes.
+
+On Linux x64 with a working sandbox, run the published CLI integration and
+packaged smoke tests.
+
+```bash
 npm --prefix github-action/runtime ci --ignore-scripts --no-audit --no-fund
 npm --prefix github-action run test:cli
-# Linux x64 with Node 24; no model calls:
 node github-action/scripts/linux-smoke.mjs
 ```
 
-Commit source changes and the generated `dist/*.cjs` bundles together.
 Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
 SARIF exporter using synthetic scans. A local inference fixture checks request
-attribution and the analytics opt-out with synthetic credentials; it makes no
-external model calls. CI also runs the packaged Linux smoke test and audits the
-Action and CLI dependency locks. The `@openai/codex-security` dependency in
+attribution and the analytics opt-out with synthetic credentials. These tests run
+without external model calls. The `@openai/codex-security` dependency in
 `runtime/package.json` is the installed CLI version source. Main keeps an already
 published CLI baseline so its checks remain runnable while a release PR prepares
 the next product version. This development pin does not necessarily track the

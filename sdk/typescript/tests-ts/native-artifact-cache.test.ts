@@ -86,13 +86,32 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     const initial = key();
     expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
     writeSource(repository, "README.md", "updated documentation\n");
+    writeSource(
+      repository,
+      ".github/scripts/invoice-desk-target.mjs",
+      "invoice\n",
+    );
+    writeSource(
+      repository,
+      "plugins/codex-security/mcp-app/tests/support/new.ts",
+      "fixture\n",
+    );
     commit();
     expect(key()).toBe(initial);
+
+    writeSource(
+      repository,
+      ".github/scripts/new-proof-input.mts",
+      "compile me\n",
+    );
+    commit();
+    const changedCompilerInput = key();
+    expect(changedCompilerInput).not.toBe(initial);
 
     writeSource(repository, source, "updated native source\n");
     commit();
     const changedNative = key();
-    expect(changedNative).not.toBe(initial);
+    expect(changedNative).not.toBe(changedCompilerInput);
 
     writeSource(repository, helper, "updated helper source\n");
     commit();
@@ -201,19 +220,17 @@ test.each([
   expect(checked.status === 0, checked.stderr).toBe(result.passes);
 });
 
-test("source CI opts in while release and standalone qualification remain fresh", () => {
+test("source CI and rotating properties opt in to native artifact reuse", () => {
   expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
     false,
   );
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );
-  for (const caller of [
-    "node-release",
-    "container-release",
-    "container-ci",
-    "test-quality",
-  ]) {
+  expect(
+    workflow("test-quality").jobs["native"]?.with?.["reuse-verified"],
+  ).toBe("${{ !inputs.compare-layouts }}");
+  for (const caller of ["node-release", "container-release", "container-ci"]) {
     expect(
       workflow(caller).jobs["native"]?.with?.["reuse-verified"],
     ).toBeUndefined();

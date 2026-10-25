@@ -19,7 +19,7 @@ const ci = Bun.YAML.parse(
       name: string;
       needs?: string | string[];
       if?: string;
-      strategy?: { matrix: Record<string, string[]> };
+      strategy?: { matrix: Record<string, string[]>; "fail-fast"?: boolean };
       steps: { name: string; if?: string; run: string }[];
     }
   >;
@@ -64,14 +64,6 @@ const aggregates = [
   ...ci.jobs["required-test"]!.strategy!.matrix["os"]!.map(
     (os) => ["required-test", { os }, `${os} / node-22`] as const,
   ),
-  ...ci.jobs["windows"]!.strategy!.matrix["node"]!.map(
-    (node) =>
-      [
-        "windows",
-        { node },
-        `windows-latest / node-${node === "22.13.0" ? "22" : node}`,
-      ] as const,
-  ),
 ];
 
 test.each([
@@ -114,7 +106,6 @@ test("all source jobs depend on classification and titles cannot block source ch
     "ubuntu-latest / node-22",
     "macos-latest / node-22",
     "windows-latest / node-22",
-    "windows-latest / node-24",
   ]);
   expect(ci.on.pull_request.types).toEqual([
     "opened",
@@ -195,7 +186,7 @@ bashTest(
   },
 );
 
-test("classification reads the PR merge diff rather than unrelated base changes", async () => {
+test("classification uses the PR merge diff and validates retargeted merge parents", async () => {
   const scope = ci.jobs["classify-changes"]!.steps.find(
     (step) => step.name === "Select required checks",
   )!;
@@ -235,20 +226,23 @@ test("classification reads the PR merge diff rather than unrelated base changes"
     git("add", ".");
     git("commit", "-m", "Independent base change");
     git("merge", "--no-ff", "docs", "-m", "Merge fixture");
-    const result = spawnSync(
-      command!,
-      [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
-      {
-        cwd: repository,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          EVENT_NAME: "pull_request",
-          BASE_CHANGED: "false",
-          GITHUB_OUTPUT: output,
+    const classify = (env: Record<string, string> = {}) =>
+      spawnSync(
+        command!,
+        [fileURLToPath(new URL(`../../../${script}`, import.meta.url))],
+        {
+          cwd: repository,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            EVENT_NAME: "pull_request",
+            BASE_CHANGED: "false",
+            GITHUB_OUTPUT: output,
+            ...env,
+          },
         },
-      },
-    );
+      );
+    const result = classify();
     expect(result.status, result.stderr).toBe(0);
     const outputs = Object.fromEntries(
       (await readFile(output, "utf8"))
@@ -259,6 +253,39 @@ test("classification reads the PR merge diff rather than unrelated base changes"
     expect(outputs["source-required"]).toBe("false");
     expect(outputs["container-validate"]).toBe("false");
     expect(outputs["workflow-quality"]).toBe("false");
+
+    const base = git("rev-parse", "HEAD^1").trim();
+    const head = git("rev-parse", "docs").trim();
+    const old = git("rev-parse", "HEAD^1^1").trim();
+    const eventPath = join(directory, "event.json");
+    for (const [expectedBase, expectedHead, valid] of [
+      [base, head, true],
+      [old, head, false],
+      [base, old, false],
+    ] as const) {
+      await writeFile(
+        eventPath,
+        JSON.stringify({
+          pull_request: {
+            base: { ref: "main", sha: expectedBase },
+            head: { sha: expectedHead },
+          },
+        }),
+      );
+      await writeFile(output, "");
+      const retarget = classify({
+        BASE_CHANGED: "true",
+        GITHUB_EVENT_PATH: eventPath,
+      });
+      expect(retarget.status, retarget.stderr).toBe(valid ? 0 : 1);
+      const selection = await readFile(output, "utf8");
+      if (valid) expect(selection).toContain("workflow-quality=true");
+      else {
+        expect(retarget.stdout).toContain(`${base} ${head}`);
+        expect(retarget.stderr).toContain("stale test merge");
+        expect(selection).toBe("");
+      }
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -363,18 +390,17 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
 }
 
 test("legacy required check names propagate the final CI gate result", () => {
-  for (const id of ["required-test", "windows"]) {
-    const aggregate = ci.jobs[id]!;
-    expect(aggregate.needs).toContain("ci");
-    expect(aggregate.if).toContain("always()");
-    const gate = aggregate.steps.find(
-      (step) => step.name === "Require CI gate",
-    )!;
-    expect(gate.run).toBe("exit 1");
-    for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
-        result !== "success",
-      );
-    }
+  const forwarder = ci.jobs["required-test"]!;
+  expect(forwarder.strategy?.["fail-fast"]).toBe(false);
+  expect(new Set([forwarder.needs].flat())).toEqual(
+    new Set(["classify-changes", "ci"]),
+  );
+  expect(forwarder.if).toContain("always()");
+  const gate = forwarder.steps.find((step) => step.name === "Require CI gate")!;
+  expect(gate.run).toBe("exit 1");
+  for (const result of ["success", "failure", "cancelled", "skipped"]) {
+    expect(expression(gate.if!, { needs: { ci: { result } } })).toBe(
+      result !== "success",
+    );
   }
 });

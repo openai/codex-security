@@ -25,6 +25,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       source-required: ${{ steps.scope.outputs.source-required }}
+      package-required: ${{ steps.scope.outputs.package-required }}
+      action-ci: ${{ steps.scope.outputs.action-ci }}
+      eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
       container-validate: ${{ steps.scope.outputs.container-validate }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
       compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
@@ -47,6 +50,13 @@ jobs:
     needs: classify-changes
     if: needs.classify-changes.outputs.workflow-quality == 'true'
     uses: ./.github/workflows/workflow-quality.yml
+
+  action-ci:
+    needs: classify-changes
+    if: needs.classify-changes.outputs.action-ci == 'true'
+    uses: ./.github/workflows/action-ci.yml
+    with:
+      sdk-contracts: ${{ needs.classify-changes.outputs.source-required == 'false' }}
 
   static-checks:
     name: typecheck and formatting
@@ -71,6 +81,7 @@ jobs:
             plugins/codex-security/mcp-app/pnpm-lock.yaml
       - &install-dependencies
         name: Install dependencies
+        shell: bash
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
@@ -90,19 +101,19 @@ jobs:
         run: pnpm --dir sdk/typescript run audit:prod
 
   native:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.package-required == 'true'
     needs: classify-changes
     uses: ./.github/workflows/native-artifacts.yml
     with:
       reuse-verified: true
 
   container-validate:
-    needs: [classify-changes, native]
+    needs: [classify-changes, native, static-checks]
     if: needs.classify-changes.outputs.container-validate == 'true'
     uses: ./.github/workflows/container-validate.yml
 
   package:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.package-required == 'true'
     name: build and check package
     needs: [classify-changes, native]
     runs-on: ubuntu-latest
@@ -115,8 +126,7 @@ jobs:
           persist-credentials: false
       - name: Check plugin source boundary
         run: node sdk/typescript/scripts/check-plugin-source.mjs
-      - &download-native
-        name: Prepare native runtime
+      - name: Prepare native runtime
         uses: ./.github/actions/download-native
       - *set-up-typescript-tools
       - *install-dependencies
@@ -148,7 +158,6 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
       - *checkout-repository
-      - *download-native
       - *set-up-typescript-tools
       - &set-up-bun
         name: Set up Bun
@@ -162,8 +171,12 @@ jobs:
         with:
           name: package-${{ github.sha }}
           path: dist
-      - name: Restore bundled plugin
-        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - &restore-sdk-test-plugin
+        name: Restore bundled plugin
+        shell: bash
+        run: |
+          tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+          cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -176,7 +189,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
+        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
         continue-on-error: true
@@ -192,7 +205,7 @@ jobs:
           retention-days: 14
 
   compatibility:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: needs.classify-changes.outputs.package-required == 'true'
     name: installed package / ${{ matrix.os }} / node-${{ matrix.node }}
     needs: [classify-changes, package]
     runs-on: ${{ matrix.os }}
@@ -231,6 +244,9 @@ jobs:
       - *download-package-for-this-commit
       - name: Inspect installed package
         working-directory: sdk/typescript
+        env: &package-deep-retry
+          # On PRs, exercise the real retry delay on each OS's floor or only runtime.
+          PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
       - name: Check Action against the release candidate
@@ -246,7 +262,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     steps:
       - *checkout-repository
       - &set-up-mcp-tools
@@ -355,6 +371,9 @@ jobs:
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
+      - name: Test the native Python report gate
+        if: matrix.python == '3.12'
+        run: python -m pytest -q .github/scripts/test_require_native_python_report.py
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp
@@ -372,7 +391,7 @@ jobs:
           python -m pytest plugins/codex-security/tests -m "$PYTEST_MARKERS" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        run: python -c "import pathlib, xml.etree.ElementTree as ET; assert not any(ET.parse(report).findall('.//testcase/skipped') for report in pathlib.Path('reports').glob('python*.xml')), 'Native platform tests must run without skips'"
+        run: python .github/scripts/require_native_python_report.py
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -383,31 +402,55 @@ jobs:
           path: reports/python*.xml
           if-no-files-found: warn
           retention-days: 14
-      - name: Set up Node.js for triage evals
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+
+  eval-contracts:
+    name: deterministic eval contracts
+    needs: classify-changes
+    if: needs.classify-changes.outputs.eval-contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - *checkout-repository
+      - *set-up-bun
+      - name: Check the Codex version across the SDK, MCP app and evals
+        run: bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: package.json
+      - name: Set up eval Node.js and pnpm cache
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.15.0"
-      - name: Set up triage eval dependencies and host runtime
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: pnpm --dir evals/triage-finding run setup
+          cache: pnpm
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+            evals/triage-finding/pnpm-lock.yaml
+      - &set-up-python
+        name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - name: Set up eval dependencies and host runtime
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir evals/triage-finding run setup
       - name: Test deterministic triage eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         working-directory: evals/triage-finding
         run: node --run test:deterministic
       - name: Test secret discovery eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
       - name: Build host plugin for Standard eval integration
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: |
           node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
           ln -s ../../plugins/codex-security sdk/typescript/_bundled_plugin
       - name: Test Standard time-budget eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
   ci:
@@ -416,6 +459,8 @@ jobs:
       [
         classify-changes,
         static-checks,
+        action-ci,
+        eval-contracts,
         native,
         package,
         test,
@@ -444,8 +489,9 @@ jobs:
     if: *source-aggregate
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Require CI gate
         if: needs.ci.result != 'success'
@@ -463,30 +509,28 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     steps:
       - *checkout-repository
-      - &set-up-python
-        name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - *download-native
+      - *set-up-python
       - *set-up-typescript-tools
       - *set-up-bun
       - *install-dependencies
       - *download-package-for-this-commit
-      - name: Restore bundled plugin
-        shell: bash
-        run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - *restore-sdk-test-plugin
       - name: Prepare private Windows test root
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
       - name: Test shard ${{ matrix.shard }}
-        env:
+        env: &windows-shard-env
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
         run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/14 --seed=${{ github.run_number }}
+      - name: Test MCP helper paths on Windows
+        if: matrix.shard == 1
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
@@ -527,17 +571,5 @@ jobs:
       - name: Inspect installed package
         working-directory: sdk/typescript
         shell: bash
+        env: *package-deep-retry
         run: node scripts/check-package.mjs ../../dist/*.tgz
-
-  windows:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
-    runs-on: ubuntu-latest
-    if: *source-aggregate
-    needs: [classify-changes, ci]
-    strategy:
-      matrix:
-        node: ["22.13.0", "24"]
-    steps:
-      - name: Require CI gate
-        if: needs.ci.result != 'success'
-        run: exit 1

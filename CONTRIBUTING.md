@@ -108,6 +108,20 @@ Use `platform:windows` only when Windows-specific behavior is material to the
 change. Dependabot uses `dependencies` across all package ecosystems. Labels
 are not required to open, test, review, or merge a pull request.
 
+## Investigate a CI failure
+
+Open the `node-ci` run for the PR revision that failed. The `ci` job reports
+the overall result. Open the failing build, test shard, or validation job to
+find the original error. If a later attempt passed, use the run's attempt
+selector to inspect the first failure. From the command line,
+`gh run view RUN_ID --attempt 1 --log-failed` shows that attempt's failed steps.
+
+For a transient infrastructure failure, rerun the failed jobs after checking
+the original logs. For a failed assertion, reproduce it on the reported
+platform with the logged seed when available. See the [CI guide](docs/ci.md)
+for check selection and the [SDK testing guide](sdk/typescript/TESTING.md)
+for local reproduction.
+
 ## Dependency and release maintenance
 
 Maintainers update package dependencies and committed lockfiles with the
@@ -115,8 +129,8 @@ affected source. The public release workflow installs those locked graphs,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
 
-Workflow and composite-action changes run `workflow-quality` through the existing
-required Unix CI checks. actionlint validates workflow syntax, and ShellCheck
+Workflow and composite-action changes run `workflow-quality` through
+`node-ci`. actionlint validates workflow syntax, and ShellCheck
 checks shell scripts in workflow `run` steps for warnings and errors. zizmor's
 offline checks at medium severity and above cover workflows and composite
 actions. The pinned tool versions are in `.github/workflows/workflow-quality.yml`;

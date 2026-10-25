@@ -532,10 +532,7 @@ jobs:
           firewall-version: "1.15.0"
 
       - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+        run: bash automation/github-action/scripts/setup-ubuntu-sandbox.sh
 
       - &action-reuse-distribution
         name: Reuse an existing immutable Action distribution
