@@ -489,6 +489,7 @@ async function cloudFixture(payload: unknown) {
   const f = await fixture(payload);
   const environment = {
     ...process.env,
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(f.root, "login"),
     CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
   };
@@ -1740,6 +1741,7 @@ test("Node resumes the same uncertain publication across locales and Unicode key
     const prepared = await prepareExternalPublication(
       ${JSON.stringify(f.file)}, ${JSON.stringify(f.options)}, {
         environment: ${JSON.stringify({
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
           CODEX_HOME: f.environment.CODEX_HOME,
           CODEX_SECURITY_STATE_DIR: f.environment.CODEX_SECURITY_STATE_DIR,
         })},
