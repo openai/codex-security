@@ -2,7 +2,7 @@ import { isRecord } from "./record.js";
 import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
 import {
@@ -167,41 +167,71 @@ export async function savedScanWorkbench(
   });
 }
 
+export interface RegisteredScanAuthority {
+  id: string;
+  target_path: string;
+  target_revision: string;
+  scan_dir: string;
+  status: string;
+  seal_manifest_digest: string | null;
+  recipe: Record<string, unknown>;
+}
+
+/** Read registered authority without requiring the report's Python interpreter. */
+export async function readRegisteredScanAuthority(
+  scanDirectory: string,
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<RegisteredScanAuthority | undefined> {
+  signal?.throwIfAborted();
+  const path = join(
+    codexSecurityStateDirectory(environment),
+    "workbench.sqlite3",
+  );
+  const exists = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw error;
+  });
+  if (!exists) return undefined;
+  return await withHistoryDatabase(environment, signal, (database) => {
+    const fields = [
+      "id",
+      "target_path",
+      "target_revision",
+      "scan_dir",
+      "status",
+      "seal_manifest_digest",
+      "recipe_json",
+    ];
+    const columns = new Set(
+      readRows<{ name: string }>(database, "PRAGMA table_info(scans)").map(
+        (column) => column.name,
+      ),
+    );
+    if (fields.some((field) => !columns.has(field))) return undefined;
+    const row = readRows<
+      Omit<RegisteredScanAuthority, "recipe"> & { recipe_json: string | null }
+    >(
+      database,
+      `SELECT ${fields.join(", ")} FROM scans WHERE scan_dir = ?`,
+      scanDirectory,
+    )[0];
+    if (!row?.recipe_json) return undefined;
+    const { recipe_json, ...scan } = row;
+    const recipe: unknown = JSON.parse(recipe_json);
+    if (recipe === null || typeof recipe !== "object" || Array.isArray(recipe))
+      return undefined;
+    return { ...scan, recipe: recipe as Record<string, unknown> };
+  });
+}
+
 async function readTargets(
   requestedId: string | { workflowId: string },
   environment: ProcessEnvironment,
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
-  const require = createRequire(import.meta.url);
-  const bun = process.versions["bun"] !== undefined;
-  const Database = (
-    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
-  ) as new (
-    path: string,
-    options: {
-      readonly?: boolean;
-      readOnly?: boolean;
-      readwrite?: boolean;
-      create?: boolean;
-    },
-  ) => BootstrapDatabase;
-  let database: BootstrapDatabase | undefined;
-  try {
-    database = new Database(
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
-      // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
-      // Open only an existing file there; query_only still prevents SQL data/schema writes.
-      bun
-        ? {
-            readonly: process.platform !== "darwin",
-            readwrite: process.platform === "darwin",
-            create: false,
-          }
-        : { readOnly: true },
-    );
-    database.exec("PRAGMA busy_timeout = 5000");
-    database.exec("PRAGMA query_only = ON");
+  return await withHistoryDatabase(environment, signal, async (database) => {
     if (typeof requestedId !== "string") {
       const columns = readRows<{ name: string }>(
         database,
@@ -250,6 +280,44 @@ async function readTargets(
       requestedId.length,
       requestedId.toLowerCase(),
     );
+  });
+}
+
+async function withHistoryDatabase<T>(
+  environment: ProcessEnvironment,
+  signal: AbortSignal | undefined,
+  read: (database: BootstrapDatabase) => T | Promise<T>,
+): Promise<T> {
+  const require = createRequire(import.meta.url);
+  const bun = process.versions["bun"] !== undefined;
+  const Database = (
+    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
+  ) as new (
+    path: string,
+    options: {
+      readonly?: boolean;
+      readOnly?: boolean;
+      readwrite?: boolean;
+      create?: boolean;
+    },
+  ) => BootstrapDatabase;
+  let database: BootstrapDatabase | undefined;
+  try {
+    database = new Database(
+      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+      // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
+      // Open only an existing file there; query_only still prevents SQL data/schema writes.
+      bun
+        ? {
+            readonly: process.platform !== "darwin",
+            readwrite: process.platform === "darwin",
+            create: false,
+          }
+        : { readOnly: true },
+    );
+    database.exec("PRAGMA busy_timeout = 5000");
+    database.exec("PRAGMA query_only = ON");
+    return await read(database);
   } catch (error) {
     signal?.throwIfAborted();
     if (error instanceof CodexSecurityError) throw error;

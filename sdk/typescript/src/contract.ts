@@ -5,6 +5,7 @@ import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
   open,
+  readdir,
   readFile,
   realpath,
   type FileHandle,
@@ -38,6 +39,7 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
+const REPORT_NAME = /^[rR][eE][pP][oO][rR][tT]\.[mM][dD]$/u;
 interface CheckedScanFile {
   path: string;
   metadata: BigIntStats;
@@ -83,7 +85,11 @@ export async function loadContract(
 export async function loadContractWithScanDirectory(
   scanDirectory: string,
   options: LoadContractOptions,
-): Promise<{ contract: LoadedContract; scanDirectory: string }> {
+): Promise<{
+  contract: LoadedContract;
+  scanDirectory: string;
+  manifestDigest: string;
+}> {
   const validators = await loadContractValidators(
     options.pluginRoot,
     options.signal,
@@ -182,6 +188,7 @@ export async function loadContractWithScanDirectory(
   return {
     contract: { manifest, findings, coverage },
     scanDirectory: scanRoot.path,
+    manifestDigest: `sha256:${documentDigests.get("scan-manifest.json")!}`,
   };
 }
 
@@ -232,11 +239,18 @@ function validateCanonicalContract(
     "manifest.scan.producer.version": manifest.scan.producer.version,
     "coverage.inventoryStrategy": coverage.inventoryStrategy,
   });
-  for (const [index, surface] of coverage.surfaces.entries())
+  const surfaceIds = new Set<string>();
+  for (const [index, surface] of coverage.surfaces.entries()) {
     requireText({
       [`coverage.surfaces[${index}].id`]: surface.id,
       [`coverage.surfaces[${index}].label`]: surface.label,
     });
+    if (surfaceIds.has(surface.id))
+      throw new ContractValidationError(
+        "coverage.surfaces: duplicate surface id.",
+      );
+    surfaceIds.add(surface.id);
+  }
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
@@ -293,6 +307,31 @@ function validateCanonicalContract(
         );
       }
     }
+  }
+
+  const active = new Set(
+    coverage.deferred.flatMap((row) =>
+      [row.id, row["candidateId"]].filter(
+        (value): value is string => typeof value === "string",
+      ),
+    ),
+  );
+  const resolved = new Set<string>();
+  for (const [index, closure] of (coverage.resolvedDeferred ?? []).entries()) {
+    const context = `coverage.resolvedDeferred[${index}]`;
+    requireText({
+      [`${context}.id`]: closure.id,
+      [`${context}.reason`]: closure.reason,
+    });
+    if (resolved.has(closure.id))
+      throw new ContractValidationError(
+        `${context}.id: duplicate resolved deferred id.`,
+      );
+    if (active.has(closure.id))
+      throw new ContractValidationError(
+        `${context}.id: deferred work is still active.`,
+      );
+    resolved.add(closure.id);
   }
 
   for (const [index, deferred] of coverage.deferred.entries()) {
@@ -392,6 +431,64 @@ export async function requireScanFile(
   return (
     await requireCheckedScanFile(scanDirectory, relativePath, context, signal)
   ).path;
+}
+
+// The manifest must already have passed loadContract's seal validation.
+export async function hasSealedReport(
+  scanDirectory: string,
+  manifest: ScanManifest,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    throwIfAborted(signal);
+    const artifactPaths = manifest.scan.artifacts
+      .map((artifact, index) =>
+        safeRelativePath(
+          artifact.path,
+          `manifest.scan.artifacts[${index}].path`,
+        ),
+      )
+      .filter((path) => REPORT_NAME.test(path));
+    if (artifactPaths.includes("report.md")) return true;
+    if (artifactPaths.length === 0) return false;
+
+    const scanRoot = await requireScanRoot(scanDirectory, signal);
+    const reportEntries = (await readdir(scanRoot.path)).filter((name) =>
+      REPORT_NAME.test(name),
+    );
+    throwIfAborted(signal);
+    if (reportEntries.length !== 1) return false;
+    const report = await requireCheckedScanFile(
+      scanRoot.path,
+      "report.md",
+      "report.md",
+      signal,
+      scanRoot,
+    );
+    for (const artifactPath of artifactPaths) {
+      const file = await openCheckedScanFile(
+        scanRoot.path,
+        artifactPath,
+        `sealed artifact ${artifactPath}`,
+        signal,
+        scanRoot,
+      );
+      try {
+        const sameFile = await sameCheckedFileDevice(
+          file,
+          report,
+          await file.stat({ bigint: true }),
+        );
+        throwIfAborted(signal);
+        if (sameFile) return true;
+      } finally {
+        await file.close();
+      }
+    }
+  } catch {
+    throwIfAborted(signal);
+  }
+  return false;
 }
 
 export async function readScanFile(

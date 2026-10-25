@@ -1180,6 +1180,11 @@ require a new output directory. Version 1 manifests also require a new directory
 because their original knowledge inputs and direct overrides cannot be verified.
 Worker and retry counts can change when resuming.
 
+Reusing a sealed result also requires its original private scan registration,
+complete request identity, and recorded manifest seal. Older artifacts remain
+readable, but campaigns without that authority start a fresh attempt. An editable
+campaign receipt alone cannot establish that a result used the requested settings.
+
 ### Recovering failed or interrupted bulk scans
 
 Use the original CSV, output directory, and options:
