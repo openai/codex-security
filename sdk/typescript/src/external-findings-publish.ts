@@ -19,6 +19,7 @@ import {
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
 import { CodexSecurityError } from "./errors.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
   createWindowsOutputDirectory,
@@ -350,6 +351,7 @@ export async function prepareExternalPublication(
   options: ExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  requireExternalImports(dependencies.environment);
   const parsed = await readExternalFindings(path, options);
   const normalizedOptions = {
     ...options,
@@ -374,6 +376,7 @@ export async function prepareNormalizedExternalPublication(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  requireExternalImports(dependencies.environment);
   // Validation adds Cloud defaults; leave the caller's objects unchanged.
   const current = structuredClone(input);
   // structuredClone preserves aliases. Detach every raw record before adding
@@ -444,6 +447,7 @@ async function preparePublicationInput(
   }
   progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
+  requireExternalImports(environment);
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
   // Validate the configured return destination before authentication or uploads.

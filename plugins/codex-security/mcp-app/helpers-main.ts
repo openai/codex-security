@@ -66,10 +66,14 @@ function runHelper(): void {
       "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
     "list-stored-findings":
       "Usage: list-stored-findings\nReads a JSON object from stdin with an absolute stateDirectory, positive payload.limit and non-negative payload.offset.",
-    "store-external-findings":
-      "Usage: store-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload containing repository, provider, sourceKey and findings with source_finding_id and evidence.",
-    "list-external-findings":
-      "Usage: list-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository; payload.id optionally selects one external finding.",
+    ...(process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS === "1"
+      ? {
+          "store-external-findings":
+            "Usage: store-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload containing repository, provider, sourceKey and findings with source_finding_id and evidence.",
+          "list-external-findings":
+            "Usage: list-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository; payload.id optionally selects one external finding.",
+        }
+      : {}),
     "find-potential-duplicates":
       "Usage: find-potential-duplicates\nReads a JSON object from stdin with an absolute stateDirectory, payload.findingId and payload.scope containing either repositoryId or allRepositories: true.",
     "store-dedupe-groups":

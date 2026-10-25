@@ -1,5 +1,6 @@
 import type { Octokit } from "@octokit/core";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 import { createAuthenticatedGitHub } from "./github.js";
 
 export const GITHUB_ADVISORY_STATES = [
@@ -51,6 +52,8 @@ export async function importGitHubAdvisories(
   dependencies: GitHubAdvisoryImportDependencies = {},
 ): Promise<ImportedGitHubAdvisory[]> {
   options.signal?.throwIfAborted();
+  const environment = dependencies.environment ?? process.env;
+  requireExternalImports(environment);
   const repository = options.repository.trim();
   const parts = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/iu.exec(repository);
   if (!parts || parts.slice(1).some((part) => /^\.{1,2}$/u.test(part)))
@@ -87,7 +90,6 @@ export async function importGitHubAdvisories(
     throw new CodexSecurityError(
       "--github-state only filters repository lists; omit it when selecting exact GHSA IDs.",
     );
-  const environment = dependencies.environment ?? process.env;
   const host =
     options.githubHost?.trim() ??
     (environment["GH_HOST"]?.trim() || "github.com");

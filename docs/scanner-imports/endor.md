@@ -1,5 +1,8 @@
 # Import Endor Labs findings
 
+Vendor finding import and readback require `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`.
+See the [opt-in instructions](../../sdk/typescript/docs/cli.md#import-vendor-findings-locally).
+
 Use authenticated `endorctl` to export complete native Finding JSON through the
 [official CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api).
 Scope the export to one project and context, omit `--field-mask`, and use
