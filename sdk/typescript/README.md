@@ -197,6 +197,9 @@ Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
+The TypeScript SDK exposes `ScanResult.repositoryFindings` as an optional
+post-scan summary. It does not have a saved-history browsing API; scripts can
+use the CLI's paginated `--json` output.
 Saved-history excerpts use scanned Git objects without fetching missing data.
 Working-tree diff scans omit excerpts, as do historical scans whose source or
 scope cannot be established. Unambiguous older scans remain readable. An omitted
@@ -283,6 +286,9 @@ The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 For a custom `pluginPath`, check [custom plugin compatibility](#custom-plugins).
 
+The SDK refreshes its `sdk-marketplace` directory before installing. Custom
+sources inside it are rejected to avoid deleting the source, except for the
+staged `plugins/codex-security` directory itself.
 To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
 The toggle defaults off; an explicit `false` keeps it off. The setting reaches
 Deep Scan discovery and reducer workers, including resumed workers. Scans use

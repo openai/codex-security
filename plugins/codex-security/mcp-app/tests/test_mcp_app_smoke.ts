@@ -1897,7 +1897,6 @@ try {
   assert.equal(listGlobalFindings.annotations.readOnlyHint, true);
   assert.deepEqual(listGlobalFindings._meta.ui.visibility, ["app"]);
   assert.deepEqual(listGlobalFindings.inputSchema.required ?? [], []);
-  assert.equal(listGlobalFindings.inputSchema.properties.limit.maximum, 20);
   assert.ok(listGlobalFindings.inputSchema.properties.offset);
   assert.equal(listRepositories.annotations.readOnlyHint, true);
   assert.deepEqual(listRepositories._meta.ui.visibility, ["app"]);
@@ -3087,10 +3086,14 @@ try {
       query: "SRC/A.PY",
       severity: "high",
       status: "open",
-      limit: 1,
+      limit: 50,
     },
   });
   assertNoError(filteredFindingsPage);
+  assert.equal(
+    filteredFindingsPage.result.structuredContent.findingsPage.limit,
+    50,
+  );
   assert.deepEqual(
     filteredFindingsPage.result.structuredContent.findingsPage.findings.map(
       (finding: { occurrenceId: string }) => finding.occurrenceId,

@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
+import workbench_finding_results as finding_results
 import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_publication as publication
@@ -55,7 +56,6 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
-from finding_preview import bounded_finding_details
 from workbench import handoff
 from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
@@ -66,17 +66,7 @@ from workbench_constants import (
     DIFF_TARGET_KINDS,
     EMPTY_GIT_TREE,
     EMPTY_GIT_TREES,
-    FINDING_ABSOLUTE_PATH_BYTES,
-    FINDING_LEVEL_BYTES,
-    FINDING_LOCATION_PATH_BYTES,
-    FINDING_LOCATION_ROLE_BYTES,
-    FINDING_LOCATIONS_LIMIT,
-    FINDING_REMEDIATION_BYTES,
-    FINDING_SUMMARY_BYTES,
-    FINDING_TITLE_BYTES,
-    FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
-    PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
@@ -97,13 +87,11 @@ from workbench_schema import (
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
 )
-from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
     expected_target_kinds,
     public_scan_recipe,
     requested_scan_paths,
-    safe_source_path,
 )
 from workbench_target import (
     clean_worktree_content_digest,
@@ -131,7 +119,6 @@ from workbench_target import (
 )
 from workbench_target_state import backfill_security_targets, ensure_security_target
 from workbench_validation import (
-    bounded_output_text,
     optional_text,
     parse_scan_cost,
     path_within_scope,
@@ -142,10 +129,6 @@ from workbench_validation import (
     sqlite_busy,
     user_context_argument,
 )
-
-FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
-FINDING_ARTIFACTS_LIMIT = 40
-FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 
 
 def now() -> str:
@@ -2006,83 +1989,142 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     with connection:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
-        if args.status == "closed":
-            remediation = connection.execute(
+        scan = require_scan(connection, occurrence["scan_id"])
+        _require_finding_checkout_owner(connection, scan)
+        indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
+        triaged_occurrences = [occurrence]
+        verification_ids = {occurrence["id"]}
+        verification_loaded = False
+        if indexed_finding is not None:
+            triaged_occurrences = connection.execute(
                 """
-                SELECT *
-                FROM finding_remediation_attempts
-                WHERE occurrence_id = ?
-                ORDER BY created_at DESC, rowid DESC
-                LIMIT 1
+                SELECT occurrences.*
+                FROM finding_occurrences AS occurrences
+                JOIN scans ON scans.id = occurrences.scan_id
+                WHERE occurrences.id IN (SELECT value FROM json_each(?))
+                ORDER BY scans.rowid, occurrences.id
                 """,
-                (occurrence["id"],),
+                (json.dumps(sorted(indexed_finding["occurrence_ids"])),),
+            ).fetchall()
+        if args.status == "closed":
+            for checked_occurrence in triaged_occurrences:
+                remediation = connection.execute(
+                    """
+                    SELECT *
+                    FROM finding_remediation_attempts
+                    WHERE occurrence_id = ?
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (checked_occurrence["id"],),
+                ).fetchone()
+                if (
+                    remediation is not None
+                    and remediation["pending_action"] is not None
+                    and not (
+                        remediation["state"] == "failed"
+                        and not remediation_state.remediation_claim_is_active(remediation)
+                    )
+                ):
+                    raise SystemExit(
+                        "Wait for the pending remediation operation to finish before closing this finding."
+                    )
+                if (
+                    close_reason == "already_fixed"
+                    and remediation is not None
+                    and remediation["state"] == "verified"
+                ):
+                    if checked_occurrence["id"] not in verification_ids and not verification_loaded:
+                        active_finding = _indexed_scan_findings(
+                            connection,
+                            scan,
+                            include_resolved=False,
+                            verification_occurrence_id=occurrence["id"],
+                        ).get(occurrence["id"])
+                        if active_finding is not None:
+                            verification_ids.update(active_finding["active_occurrence_ids"])
+                        verification_loaded = True
+                    if checked_occurrence["id"] in verification_ids:
+                        checked_scan = require_scan(connection, checked_occurrence["scan_id"])
+                        require_remediation_checkout_unchanged(
+                            checked_scan,
+                            remediation,
+                            require_applied_content=True,
+                        )
+        admission_sequence = connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM scan_admissions"
+        ).fetchone()[0]
+        for triaged_occurrence in triaged_occurrences:
+            previous_triage = connection.execute(
+                "SELECT status, close_reason, note, "
+                "(SELECT admission_sequence FROM finding_decisions "
+                "WHERE occurrence_id = finding_triage.occurrence_id "
+                "ORDER BY decision_sequence DESC LIMIT 1) AS admission_sequence "
+                "FROM finding_triage WHERE occurrence_id = ?",
+                (triaged_occurrence["id"],),
             ).fetchone()
-            if (
-                remediation is not None
-                and remediation["pending_action"] is not None
-                and not (
-                    remediation["state"] == "failed"
-                    and not remediation_state.remediation_claim_is_active(remediation)
+            changed = (
+                previous_triage is None
+                or (indexed_finding is not None and indexed_finding["status"] != args.status)
+                or previous_triage["admission_sequence"] != admission_sequence
+                or (
+                    previous_triage["status"],
+                    previous_triage["close_reason"],
+                    previous_triage["note"],
                 )
-            ):
-                raise SystemExit(
-                    "Wait for the pending remediation operation to finish before closing this finding."
+                != (args.status, close_reason, note)
+            )
+            if changed:
+                connection.execute(
+                    """
+                    INSERT INTO finding_decisions (
+                        id, occurrence_id, status, close_reason, note, created_at,
+                        decision_sequence, scan_sequence, admission_sequence
+                    ) VALUES (?, ?, ?, ?, ?, ?,
+                        (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions),
+                        (SELECT COALESCE(MAX(rowid), 0) FROM scans), ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        triaged_occurrence["id"],
+                        args.status,
+                        close_reason,
+                        note,
+                        timestamp,
+                        admission_sequence,
+                    ),
                 )
-            if (
-                close_reason == "already_fixed"
-                and remediation is not None
-                and remediation["state"] == "verified"
-            ):
-                scan = require_scan(connection, occurrence["scan_id"])
-                require_remediation_checkout_unchanged(
-                    scan,
-                    remediation,
-                    require_applied_content=True,
-                )
-        previous_triage = connection.execute(
-            "SELECT status, close_reason, note FROM finding_triage WHERE occurrence_id = ?",
-            (occurrence["id"],),
-        ).fetchone()
-        if previous_triage is None or (
-            previous_triage["status"],
-            previous_triage["close_reason"],
-            previous_triage["note"],
-        ) != (args.status, close_reason, note):
             connection.execute(
                 """
-                INSERT INTO finding_decisions (
-                    id, occurrence_id, status, close_reason, note, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(occurrence_id) DO UPDATE SET
+                    status = excluded.status,
+                    close_reason = excluded.close_reason,
+                    note = excluded.note,
+                    updated_at = excluded.updated_at
                 """,
                 (
-                    str(uuid.uuid4()),
-                    occurrence["id"],
+                    triaged_occurrence["id"],
                     args.status,
                     close_reason,
                     note,
                     timestamp,
                 ),
             )
-        connection.execute(
-            """
-            INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(occurrence_id) DO UPDATE SET
-                status = excluded.status,
-                close_reason = excluded.close_reason,
-                note = excluded.note,
-                updated_at = excluded.updated_at
-            """,
-            (occurrence["id"], args.status, close_reason, note, timestamp),
-        )
     return scan_context(connection, occurrence["scan_id"])
 
 
 def require_finding_open(connection: sqlite3.Connection, occurrence_id: str) -> None:
-    triage = connection.execute(
-        "SELECT status FROM finding_triage WHERE occurrence_id = ?",
-        (occurrence_id,),
-    ).fetchone()
+    occurrence = require_occurrence(connection, occurrence_id)
+    scan = require_scan(connection, occurrence["scan_id"])
+    _require_finding_checkout_owner(connection, scan)
+    triage = _indexed_scan_findings(connection, scan).get(occurrence_id)
+    if triage is None:
+        triage = connection.execute(
+            "SELECT status FROM finding_triage WHERE occurrence_id = ?",
+            (occurrence_id,),
+        ).fetchone()
     if triage is not None and triage["status"] == "closed":
         raise SystemExit("Reopen this finding before requesting remediation.")
 
@@ -2375,8 +2417,8 @@ def set_finding_remediation(
     summary = optional_text(args.summary, maximum=2400)
     verification_summary = optional_text(args.verification_summary, maximum=2400)
     with connection:
+        # An owned attempt may finish after a saved match inherits a triage closure.
         occurrence = require_occurrence(connection, args.occurrence_id)
-        require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
         current = remediation_state.require_request(connection, request_id, occurrence)
         if current["version"] != args.expected_version:
@@ -2435,7 +2477,6 @@ def set_finding_remediation(
         connection.execute("BEGIN IMMEDIATE")
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
-        require_finding_open(connection, occurrence["id"])
         replace_failure_summary = current["state"] == "failed" and args.state != "failed"
         updated = connection.execute(
             """
@@ -2751,10 +2792,92 @@ def scan_context(
     return context
 
 
+def _require_finding_checkout_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row | None:
+    target = connection.execute(
+        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    ).fetchone()
+    if scan["target_id"] is None:
+        scan_path = Path(scan["target_path"]).expanduser().resolve()
+        for candidate in (scan_path, *scan_path.parents):
+            target = connection.execute(
+                "SELECT current_path FROM security_targets WHERE current_path = ?",
+                (str(candidate),),
+            ).fetchone()
+            if target is not None:
+                break
+        if target is None:
+            return None
+    elif target is not None and not Path(target["current_path"]).exists():
+        ownership = scan_history._recorded_target_ownership(connection, scan["target_id"])
+        if ownership is None:
+            return target
+        recorded, epoch_start = ownership
+        sequence = connection.execute(
+            "SELECT rowid AS ownership_sequence FROM scans WHERE id = ?", (scan["id"],)
+        ).fetchone()
+        same_owner = (
+            scan["target_device"] == recorded["target_device"]
+            and scan["target_inode"] == recorded["target_inode"]
+        ) or (
+            epoch_start is None and scan["target_device"] is None and scan["target_inode"] is None
+        )
+        if same_owner and (
+            epoch_start is None
+            or (sequence is not None and sequence["ownership_sequence"] > epoch_start)
+        ):
+            return target
+        raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
+    if target is not None and scan["target_id"] is not None:
+        if scan_history._same_registered_repository(connection, scan, scan):
+            return target
+    elif target is not None:
+        clauses, values, _, _ = scan_history.repository_scan_scope(
+            connection, target["current_path"]
+        )
+        allowed = connection.execute(
+            f"SELECT 1 FROM scans WHERE scans.id = ? AND {' AND '.join(clauses)}",
+            (scan["id"], *values),
+        ).fetchone()
+        if allowed is not None:
+            return target
+    raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
+
+
+def _indexed_scan_findings(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    through_scan: sqlite3.Row | None = None,
+    include_resolved: bool = True,
+    verification_occurrence_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    return native_indexes.indexed_scan_findings(
+        connection,
+        scan,
+        read_coverage=coverage_for_comparison,
+        through_scan=through_scan,
+        include_resolved=include_resolved,
+        verification_occurrence_id=verification_occurrence_id,
+    )
+
+
+def scan_finding_triage(
+    connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: sqlite3.Row | None = None
+) -> dict[str, dict[str, Any]]:
+    return finding_results.scan_finding_triage(
+        connection, scan, _indexed_scan_findings(connection, scan, through_scan=through_scan)
+    )
+
+
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan = require_scan(connection, args.scan_id)
+    if args.check_target:
+        require_scan_target_unchanged(scan)
+    _require_finding_checkout_owner(connection, scan)
     result = scan_context(connection, args.scan_id, args.occurrence_id)
     if result["scan"]["progress"]["status"] != "running":
-        scan = require_scan(connection, args.scan_id)
         try:
             result["scan"] = dict(result["scan"], coverage=coverage_summary_for_history(scan))
         except (OSError, RuntimeError, SystemExit):
@@ -2764,8 +2887,16 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
 
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
+    _require_finding_checkout_owner(connection, scan)
     backfill_legacy_finding_details(connection, scan)
-    limit = min(args.limit, FINDINGS_PAGE_MAX)
+    indexed = _indexed_scan_findings(connection, scan)
+    connection.create_function(
+        "codex_security_aggregate_status",
+        2,
+        lambda occurrence_id, status: indexed.get(occurrence_id, {}).get("status", status),
+        deterministic=True,
+    )
+    limit = args.limit
     rows = scan_history.finding_occurrence_rows(
         connection,
         scan["id"],
@@ -2774,9 +2905,14 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         query=args.query,
         severity=args.severity,
         status=args.status,
+        aggregate_status=True,
     )
     conditions, values = scan_history.finding_occurrence_conditions(
-        scan["id"], query=args.query, severity=args.severity, status=args.status
+        scan["id"],
+        query=args.query,
+        severity=args.severity,
+        status=args.status,
+        aggregate_status=True,
     )
     total = connection.execute(
         f"""
@@ -2792,7 +2928,13 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     return {
         "findingsPage": {
             "findings": [
-                finding_result(connection, scan, row, related=relations.get(row["id"], []))
+                finding_result(
+                    connection,
+                    scan,
+                    row,
+                    indexed_finding=indexed.get(row["id"]),
+                    related=relations.get(row["id"], []),
+                )
                 for row in rows
             ],
             "limit": limit,
@@ -2840,6 +2982,15 @@ def scan_result(
         if occurrence["scan_id"] != scan["id"]:
             raise SystemExit("This finding does not belong to the selected scan.")
         occurrence_rows.append(occurrence)
+    indexed_findings = (
+        _indexed_scan_findings(connection, scan)
+        if occurrence_rows
+        and (
+            scan["status"] == "complete"
+            or (scan["status"] == "failed" and scan["seal_manifest_digest"] is not None)
+        )
+        else {}
+    )
     finding_count = connection.execute(
         "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
     ).fetchone()[0]
@@ -2887,6 +3038,9 @@ def scan_result(
     if independent_reviews is not None:
         review_updated_at = str(independent_reviews.pop("updatedAt"))
         progress_result["independentReviews"] = independent_reviews
+    current_target = connection.execute(
+        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    ).fetchone()
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
@@ -2901,7 +3055,13 @@ def scan_result(
         "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
         "findings": [
-            finding_result(connection, scan, row, related=relations.get(row["id"], []))
+            finding_result(
+                connection,
+                scan,
+                row,
+                indexed_finding=indexed_findings.get(row["id"]),
+                related=relations.get(row["id"], []),
+            )
             for row in occurrence_rows
         ],
         "findingCount": finding_count,
@@ -2926,13 +3086,18 @@ def scan_result(
         "scanId": scan["id"],
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
+        **(
+            {"currentTargetPath": current_target["current_path"]}
+            if current_target is not None and current_target["current_path"] != scan["target_path"]
+            else {}
+        ),
         "targetRevision": scan["target_revision"],
         "targetSummary": scan["target_summary"],
         "updatedAt": max(
             scan["updated_at"],
             progress["updated_at"],
             review_updated_at,
-            finding_management_updated_at(connection, scan["id"]) or "",
+            finding_results.finding_management_updated_at(connection, scan["id"]) or "",
         ),
         "userContext": scan["user_context"],
         "warnings": json.loads(scan["completion_warnings_json"]),
@@ -2989,7 +3154,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     updates = []
     for row in legacy_rows:
         finding = by_occurrence.get(row["id"])
-        if not legacy_finding_matches(row, finding):
+        if not finding_results.legacy_finding_matches(row, finding):
             continue
         updates.append(
             (
@@ -3030,216 +3195,32 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
             )
 
 
-def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
-    if not isinstance(finding, dict):
-        return False
-    return (
-        finding.get("findingId") == row["finding_id"]
-        and finding.get("title") == row["title"]
-        and finding.get("summary") == row["summary"]
-        and finding.get("remediation") == row["remediation"]
-        and finding["severity"]["level"] == row["severity"]
-        and finding["confidence"]["level"] == row["confidence"]
-    )
-
-
 def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
     *,
-    related: list[dict[str, Any]],
+    full_details: bool = False,
+    indexed_finding: dict[str, Any] | None = None,
+    related: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
-    confidence = details.get("confidence")
-    confidence = confidence if isinstance(confidence, dict) else {}
-    severity = details.get("severity")
-    severity = severity if isinstance(severity, dict) else {}
-    locations = []
-    excerpt_locations = []
-    try:
-        target = require_scan_target_identity(scan)
-    except SystemExit:
-        target = None
-    for row in connection.execute(
-        """
-        SELECT relative_path, start_line, end_line, role
-        FROM finding_locations
-        WHERE occurrence_id = ?
-        ORDER BY CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order
-        LIMIT ?
-        """,
-        (occurrence["id"], FINDING_LOCATIONS_LIMIT),
-    ):
-        display_path = bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES)
-        if display_path == row["relative_path"]:
-            excerpt_locations.append(
-                {
-                    "endLine": row["end_line"],
-                    "path": row["relative_path"],
-                    "role": row["role"],
-                    "startLine": row["start_line"],
-                }
+    if full_details:
+        indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
+    return finding_results.finding_result(
+        connection,
+        scan,
+        occurrence,
+        full_details=full_details,
+        indexed_finding=indexed_finding,
+        remediation_state=finding_remediation_result(connection, occurrence["id"]),
+        related=(
+            related
+            if related is not None
+            else scan_history.finding_relations(connection, scan["id"], (occurrence["id"],)).get(
+                occurrence["id"], []
             )
-        absolute_path = safe_source_path(target, row["relative_path"]) if target else None
-        location = {
-            "endLine": row["end_line"],
-            "path": display_path,
-            "role": (
-                bounded_output_text(row["role"], FINDING_LOCATION_ROLE_BYTES)
-                if row["role"] is not None
-                else None
-            ),
-            "startLine": row["start_line"],
-        }
-        if absolute_path is not None:
-            location["absolutePath"] = bounded_output_text(
-                absolute_path, FINDING_ABSOLUTE_PATH_BYTES
-            )
-        locations.append(location)
-    result = {
-        **details,
-        "confidence": {
-            **confidence,
-            "level": bounded_output_text(occurrence["confidence"], FINDING_LEVEL_BYTES),
-        },
-        "createdAt": occurrence["created_at"],
-        "findingId": occurrence["finding_id"],
-        "locations": locations,
-        "occurrenceId": occurrence["id"],
-        "remediationState": finding_remediation_result(connection, occurrence["id"]),
-        "remediation": bounded_output_text(occurrence["remediation"], FINDING_REMEDIATION_BYTES),
-        "severity": {
-            **severity,
-            "level": bounded_output_text(occurrence["severity"], FINDING_LEVEL_BYTES),
-        },
-        "summary": bounded_output_text(occurrence["summary"], FINDING_SUMMARY_BYTES),
-        "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
-        "triage": finding_triage_result(connection, occurrence["id"]),
-    }
-    matches, known_since, known_scan_ids = scan_history.finding_matches(
-        connection, occurrence["id"], scan["id"], scan["started_at"]
+        ),
     )
-    if matches:
-        result["matches"] = matches
-        result["knownSince"] = known_since
-        result["knownScanIds"] = known_scan_ids
-    if related:
-        result["related"] = related
-    source_excerpt = finding_source_excerpt(
-        scan, target, excerpt_locations, requested_scan_paths(scan)
-    )
-    if source_excerpt:
-        result["sourceExcerpt"] = source_excerpt
-    artifact_paths = finding_artifact_paths(Path(scan["scan_dir"]), details)
-    result["artifactPaths"] = artifact_paths
-    return result
-
-
-def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]:
-    writeup = details.get("writeup")
-    if not isinstance(writeup, dict):
-        return []
-    report_path = writeup.get("reportPath")
-    if (
-        not isinstance(report_path, str)
-        or FINDING_WRITEUP_REPORT_PATH.fullmatch(report_path) is None
-    ):
-        return []
-    report_relative = PurePosixPath(report_path)
-    artifacts = []
-    if scan_local_regular_file(scan_dir, report_path):
-        artifacts.append(report_path)
-
-    poc_relative = report_relative.parent / "poc"
-    poc_root = scan_dir.joinpath(*poc_relative.parts)
-    try:
-        if not stat.S_ISDIR(poc_root.stat(follow_symlinks=False).st_mode):
-            return artifacts
-    except OSError:
-        return artifacts
-
-    for directories_seen, (current_directory, directory_names, file_names) in enumerate(
-        os.walk(poc_root, topdown=True, followlinks=False), start=1
-    ):
-        if directories_seen > FINDING_ARTIFACT_DIRECTORIES_LIMIT:
-            break
-        current_path = Path(current_directory)
-        directory_names[:] = [
-            name for name in sorted(directory_names) if not (current_path / name).is_symlink()
-        ]
-        for file_name in sorted(file_names):
-            candidate = current_path / file_name
-            try:
-                relative_path = candidate.relative_to(scan_dir).as_posix()
-            except ValueError:
-                continue
-            if not scan_local_regular_file(scan_dir, relative_path):
-                continue
-            artifacts.append(relative_path)
-            if len(artifacts) >= FINDING_ARTIFACTS_LIMIT:
-                return artifacts
-    return artifacts
-
-
-def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
-    try:
-        if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
-            return False
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            relative_path,
-            f"finding artifact {relative_path}",
-        )
-    except (ContractError, OSError, UnicodeEncodeError):
-        return False
-    try:
-        return stat.S_ISREG(os.fstat(descriptor).st_mode)
-    finally:
-        os.close(descriptor)
-
-
-def read_finding_details(value: str) -> dict[str, Any]:
-    try:
-        details = json.loads(value, parse_constant=reject_non_finite_json)
-    except (TypeError, ValueError):
-        return {}
-    return details if isinstance(details, dict) else {}
-
-
-def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) -> str | None:
-    return connection.execute(
-        """
-        SELECT MAX(updated_at)
-        FROM (
-            SELECT triage.updated_at
-            FROM finding_triage AS triage
-            JOIN finding_occurrences AS occurrences ON occurrences.id = triage.occurrence_id
-            WHERE occurrences.scan_id = ?
-            UNION ALL
-            SELECT remediation.updated_at
-            FROM finding_remediation_attempts AS remediation
-            JOIN finding_occurrences AS occurrences ON occurrences.id = remediation.occurrence_id
-            WHERE occurrences.scan_id = ?
-        )
-        """,
-        (scan_id, scan_id),
-    ).fetchone()[0]
-
-
-def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
-    row = connection.execute(
-        "SELECT status, close_reason, note, updated_at FROM finding_triage WHERE occurrence_id = ?",
-        (occurrence_id,),
-    ).fetchone()
-    if row is None:
-        return {"status": "open"}
-    return {
-        "closeReason": row["close_reason"],
-        "note": row["note"],
-        "status": row["status"],
-        "updatedAt": row["updated_at"],
-    }
 
 
 def finding_remediation_result(
@@ -3289,48 +3270,9 @@ def finding_remediation_result(
 def patch_artifact_preview(
     scan_dir: Path, relative_path: str | None, expected_digest: str | None
 ) -> tuple[str | None, dict[str, int | bool] | None]:
-    if relative_path is None or expected_digest is None:
-        return None, None
-    digest = hashlib.sha256()
-    preview = bytearray()
-    additions = 0
-    deletions = 0
-    file_count = 0
-    old_headers = 0
-    new_headers = 0
-    at_line_start = True
-    try:
-        with open_scan_local_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
-                digest.update(chunk)
-                if len(preview) <= PATCH_PREVIEW_BYTES:
-                    preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
-                at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
-        return None, None
-    if f"sha256:{digest.hexdigest()}" != expected_digest:
-        return None, None
-    preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
-    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
-    if preview_truncated:
-        preview_text = f"{preview_text}\n... patch preview truncated ..."
-    return preview_text, {
-        "additions": additions,
-        "deletions": deletions,
-        "fileCount": file_count or min(old_headers, new_headers),
-        "previewTruncated": preview_truncated,
-    }
+    return remediation_state.patch_artifact_preview(
+        scan_dir, relative_path, expected_digest, open_scan_local_file
+    )
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
@@ -3418,7 +3360,10 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-_WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
+_WORKBENCH_PUBLICATION_CONTEXT = SimpleNamespace(**globals(), finding_triage=scan_finding_triage)
+
+
+_WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
 def main(*, before_archive: Callable[[], None] | None = None) -> None:
@@ -3457,7 +3402,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
-        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+        connect(deferred=args.command in {"get-scan", "get-finding", "list-scans", "database-info"})
     ) as connection:
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
@@ -3478,8 +3423,12 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
             "finalize-scan-usage": finalize_scan_usage,
-            "list-global-findings": native_indexes.list_global_findings,
-            "list-repositories": native_indexes.list_repositories,
+            "list-global-findings": partial(
+                native_indexes.list_global_findings, read_coverage=coverage_for_comparison
+            ),
+            "list-repositories": partial(
+                native_indexes.list_repositories, read_coverage=coverage_for_comparison
+            ),
             "list-findings": list_findings,
             "complete-budget-exhausted-scan": complete_budget_exhausted_scan,
             "set-finding-triage": set_finding_triage,
@@ -3522,9 +3471,27 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         elif args.command == "start-headless-standard-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "get-scan":
-            if args.check_target:
-                require_scan_target_unchanged(require_scan(connection, args.scan_id))
             result = get_scan(connection, args)
+        elif args.command == "get-finding":
+            occurrence = require_occurrence(connection, args.occurrence_id)
+            scan = require_scan(connection, occurrence["scan_id"])
+            current_target = _require_finding_checkout_owner(connection, scan)
+            backfill_legacy_finding_details(connection, scan)
+            occurrence = require_occurrence(connection, occurrence["id"])
+            result = {
+                "scan": {
+                    "findings": [finding_result(connection, scan, occurrence, full_details=True)],
+                    "scanDir": scan["scan_dir"],
+                    "scanId": scan["id"],
+                    "targetPath": scan["target_path"],
+                    **(
+                        {"currentTargetPath": current_target["current_path"]}
+                        if current_target is not None
+                        and current_target["current_path"] != scan["target_path"]
+                        else {}
+                    ),
+                }
+            }
         elif args.command == "rename-scan":
             result = scan_history.rename_scan(
                 connection, require_scan(connection, args.scan_id), args.name
@@ -3559,6 +3526,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 args,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+                finding_triage=lambda connection, scan, through_scan: scan_finding_triage(
+                    connection, scan, through_scan=through_scan
+                ),
                 backfill_finding_details=backfill_legacy_finding_details,
                 include_matching_inputs=args.include_matching_inputs,
                 require_matches=args.require_matches,
@@ -3570,6 +3540,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+                finding_triage=lambda connection, scan, through_scan: scan_finding_triage(
+                    connection, scan, through_scan=through_scan
+                ),
             )
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
