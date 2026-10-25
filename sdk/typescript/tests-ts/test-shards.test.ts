@@ -349,6 +349,23 @@ test("isolated timeout", async () => {
   }
 });
 
+function runMcpShard(root: string, shard: number, count: number) {
+  return readSubprocess(
+    Bun.spawn({
+      cmd: [
+        Bun.which("node")!,
+        "--experimental-strip-types",
+        join(import.meta.dir, "../scripts/run-mcp-test-shard.mts"),
+        String(shard),
+        String(count),
+      ],
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    }),
+  );
+}
+
 test("MCP shards run each literal test filename once and propagate failures", async () => {
   const root = await temporaryDirectory("mcp-shard-");
   const tests = join(root, "tests");
@@ -371,20 +388,8 @@ test("MCP shards run each literal test filename once and propagate failures", as
       );
     }
     const statuses = [];
-    for (const shard of ["1", "2"]) {
-      const child = Bun.spawn({
-        cmd: [
-          Bun.which("node")!,
-          "--experimental-strip-types",
-          join(import.meta.dir, "../scripts/run-mcp-test-shard.mts"),
-          shard,
-          "2",
-        ],
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const { status } = await readSubprocess(child);
+    for (const shard of [1, 2]) {
+      const { status } = await runMcpShard(root, shard, 2);
       statuses.push(status);
     }
     expect(statuses.sort()).toEqual([0, 1]);
@@ -398,3 +403,44 @@ test("MCP shards run each literal test filename once and propagate failures", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.skipIf(process.platform !== "linux")(
+  "terminating an MCP shard stops its active file worker",
+  async () => {
+    const root = await temporaryDirectory("mcp-shard-cancel-");
+    const pid = Bun.file(join(root, "worker.pid"));
+    const stopped = Bun.file(join(root, "stopped"));
+    try {
+      await mkdir(join(root, "tests"));
+      await writeFile(
+        join(root, "tests/test_cancel.ts"),
+        `
+        import { writeFileSync } from "node:fs";
+        import { test } from "node:test";
+        import { setTimeout } from "node:timers/promises";
+        test("cancel the runner once this worker is ready", async () => {
+          process.once("SIGTERM", () => {
+            writeFileSync("stopped", "SIGTERM");
+            process.exit(0);
+          });
+          writeFileSync("worker.pid", String(process.pid));
+          process.kill(process.ppid, "SIGTERM");
+          await setTimeout(20_000);
+        });
+      `,
+      );
+      const { status } = await runMcpShard(root, 1, 1);
+      expect(await stopped.text()).toBe("SIGTERM");
+      expect(status).not.toBe(0);
+    } finally {
+      if (!(await stopped.exists()) && (await pid.exists())) {
+        try {
+          process.kill(Number(await pid.text()), "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

@@ -18,7 +18,8 @@ Platform-specific filesystem, credential, process, cancellation, and resumed
 worker cases remain enabled.
 
 The two Linux MCP jobs discover the same test files as local MCP testing. CI
-assigns files by observed runtimes, with two Node workers per job. Refresh the
+assigns files by observed runtimes and starts the longest files first on each
+job's two Node workers. Refresh the
 slow-file estimates in `run-mcp-test-shard.mts` when the jobs drift apart.
 
 Pull requests limited to `.ts` files under `sdk/typescript/src/`,

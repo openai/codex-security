@@ -50,9 +50,23 @@ const timings = Object.fromEntries(
 );
 const selected = partitionTests(files, count, timings, "linux")[shard - 1]!;
 if (!selected.length) throw new Error(`Empty MCP test shard ${shard}/${count}`);
-console.log(`MCP test shard ${shard}/${count}: ${selected.join(" ")}`);
+// Start long files while both workers are available. Equal estimates keep
+// the lexical order returned by the partitioner.
+selected.sort((left, right) => timings[right]!.linux - timings[left]!.linux);
+console.error(`MCP test shard ${shard}/${count}: ${selected.join(" ")}`);
 // Pass literal files: the Node CLI interprets explicit arguments as globs again.
-const events = run({ files: selected, concurrency: 2 });
+const controller = new AbortController();
+const cancel = () => {
+  process.exitCode = 1;
+  controller.abort();
+};
+process.once("SIGINT", cancel);
+process.once("SIGTERM", cancel);
+const events = run({
+  files: selected,
+  concurrency: 2,
+  signal: controller.signal,
+});
 events.on("test:summary", ({ success }) => {
   if (!success) process.exitCode = 1;
 });

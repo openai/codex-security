@@ -156,8 +156,9 @@ Source qualification runs the full Bun suite once per OS under Node 22: six
 file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
 as separate jobs; each job uses Bun's default serial runner. The other selected
 Node versions run the installed-package checks instead of repeating the same
-Bun suite. MCP CI assigns files by measured duration, using two isolated Node
-test processes per job. From `plugins/codex-security/mcp-app`, replay shard 1
+Bun suite. MCP CI assigns files by measured duration and starts the longest
+files first, using two isolated Node test processes per job. From
+`plugins/codex-security/mcp-app`, replay shard 1
 with `node --experimental-strip-types ../../../sdk/typescript/scripts/run-mcp-test-shard.mts 1 2`.
 Local and release `test:mcp` commands run the full suite. Python tests run
 separately and use four
