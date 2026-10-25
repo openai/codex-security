@@ -151,7 +151,7 @@ Source qualification runs the full Bun suite once per OS under Node 22: six
 file shards on Linux and macOS, and fourteen on Windows. GitHub runs the shards
 as separate jobs; each job uses Bun's default serial runner. The other selected
 Node versions run the installed-package checks instead of repeating the same
-Bun suite. MCP tests run in three required jobs using Node's native file sharding,
+Bun suite. MCP tests run in two required jobs using Node's native file sharding,
 with two isolated test file processes per job. Local and release `test:mcp`
 commands still run the full suite. Python tests run separately and use four
 isolated pytest-xdist workers with work stealing; worker crashes fail the run

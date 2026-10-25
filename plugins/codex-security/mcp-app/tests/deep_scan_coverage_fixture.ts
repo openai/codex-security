@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -10,6 +10,7 @@ import { build } from "esbuild";
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { readJson } from "./support/json.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
   typeof import("../src/deep-scan/coordinator.js") &
@@ -101,6 +102,15 @@ const bundled = await build({
   loader: { ".md": "text" },
   write: false,
 });
+export async function publishReceiptFixture(options: CoverageFixtureOptions) {
+  const root = await temporaryDirectory("retry-coverage-receipts-");
+  try {
+    await publishCoverageFixture(root, "complete", options);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 export async function publishCoverageFixture(
   root: string,
   completeness: string,

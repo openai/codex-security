@@ -242,6 +242,9 @@ jobs:
       - *download-package-for-this-commit
       - name: Inspect installed package
         working-directory: sdk/typescript
+        env: &package-deep-retry
+          # On PRs, exercise the real retry delay on each OS's floor or only runtime.
+          PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
       - name: Check Action against the release candidate
@@ -257,7 +260,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     steps:
       - *checkout-repository
       - &set-up-mcp-tools
@@ -573,4 +576,5 @@ jobs:
       - name: Inspect installed package
         working-directory: sdk/typescript
         shell: bash
+        env: *package-deep-retry
         run: node scripts/check-package.mjs ../../dist/*.tgz
