@@ -3815,24 +3815,43 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
     expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
-    expect(githubReleaseWorkflow).toContain(
-      'if [[ "$(npm --version)" != "11.12.1" ]]; then',
-    );
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
   });
 
-  test("installs the exact attestation-capable npm through the Socket Firewall", () => {
-    for (const workflow of [githubReleaseWorkflow, protectedReleaseWorkflow]) {
-      expect(workflow).toContain("Install provenance-capable npm");
-      expect(workflow).toContain("npm@11.12.1");
-      expect(workflow).toContain(
-        "--registry=https://openai.firewall.socket.dev/npm/",
-      );
-      expect(workflow).toContain('>> "$GITHUB_PATH"');
-      expect(workflow).not.toContain("npm install --global");
-    }
+  test("both release jobs require the npm installed through the Socket Firewall", async () => {
+    const both = (name: string) => {
+      const script = workflowStepShell(protectedReleaseWorkflow, name);
+      expect(workflowStepShell(githubReleaseWorkflow, name)).toBe(script);
+      return script;
+    };
+    const result = await runShell(
+      `RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
+GITHUB_PATH="$RUNNER_TEMP/path"
+npm() {
+  printf '<%s>' "$1" "$2" "\${3#"$RUNNER_TEMP/"}" "\${@:4}"
+  mkdir -p "$3/node_modules/.bin"
+  printf '#!/bin/sh\\necho "\${TEST_NPM_VERSION:-11.12.1}"\\n' > "$3/node_modules/.bin/npm"
+  chmod +x "$3/node_modules/.bin/npm"
+}
+${both("Install provenance-capable npm")}
+export PATH="$(cat "$GITHUB_PATH"):$PATH"
+verify() { "$BASH" <<'VERIFY'
+${both("Verify npm on PATH")}
+VERIFY
+}
+verify && echo selected
+TEST_NPM_VERSION=11.10.1 verify && exit 2
+cp "$release_npm_bin/npm" "$RUNNER_TEMP/npm"
+PATH="$RUNNER_TEMP:$PATH" verify`,
+      { RUNNER_TEMP: directories.create("release npm ") },
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
+    );
+    expect(result.stdout).toBe(
+      "<install><--prefix><codex-security-provenance-npm><--ignore-scripts><--no-audit><--no-fund><--registry=https://openai.firewall.socket.dev/npm/><npm@11.12.1>selected\n",
+    );
+    expect(result.status, result.stderr).toBe(1);
   });
 
   test("serializes label reconciliation and reads the current PR title", () => {
@@ -3870,7 +3889,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(nodeCiWorkflow).toContain("needs: classify-changes");
   });
 
-  test("preserves source validation dependencies and forwards the centralized gate result", async () => {
+  test("requires every selected source validation in the centralized gate", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3919,16 +3938,14 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(workflow.jobs["static-checks"]?.if).toBe(
       "needs.classify-changes.outputs.source-run == ''",
     );
-    const aggregates = ["ci", "required-test"];
+    const gate = workflow.jobs["ci"]!;
     const checks = Object.entries(workflow.jobs).filter(
-      ([name]) => name !== "classify-changes" && !aggregates.includes(name),
+      ([name]) => name !== "classify-changes" && name !== "ci",
     );
-    expect(new Set([workflow.jobs["ci"]!.needs].flat())).toEqual(
+    expect(new Set([gate.needs].flat())).toEqual(
       new Set(["classify-changes", ...checks.map(([name]) => name)]),
     );
-    for (const job of aggregates) {
-      expect(workflow.jobs[job]?.if).toContain("always()");
-    }
+    expect(gate.if).toContain("always()");
     expect(workflow.jobs["action-ci"]).toMatchObject({
       uses: "./.github/workflows/action-ci.yml",
       with: {
@@ -3936,8 +3953,14 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
           "${{ needs.classify-changes.outputs.source-required == 'false' }}",
       },
     });
+    const sdkShards = ["test", "windows-test"];
     for (const [name, job] of checks) {
-      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+      if (sdkShards.includes(name))
+        expect(job.needs).toContain("static-checks");
+      else
+        expect(job.if ?? "", name).not.toMatch(
+          /\b(always|failure|cancelled)\(/u,
+        );
     }
 
     // With no job results, the gate must report exactly the jobs enabled in YAML.
@@ -3965,6 +3988,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
         ([name, job]) =>
           name === "static-checks" ||
           !job.if ||
+          (sdkShards.includes(name) && enabled === "source-required") ||
           job.if === `needs.classify-changes.outputs.${enabled} == 'true'`,
       );
       expect(
@@ -3975,9 +3999,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
       ).toEqual(new Set(scheduled.map(([name]) => name)));
     }
     expect(
-      workflow.jobs["ci"]?.steps.find(
-        ({ name }) => name === "Require selected checks",
-      ),
+      gate.steps.find(({ name }) => name === "Require selected checks"),
     ).toMatchObject({
       run: "node .github/scripts/check-ci-results.mjs",
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },

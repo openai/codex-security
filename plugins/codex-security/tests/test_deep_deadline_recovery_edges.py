@@ -161,8 +161,9 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
                 partial[field] = value
                 partial["severity"]["level"] = "critical"
             partials.append(partial)
-    # Reject the old spelling even when the canonical rootCause is present.
+    # Reject the old spellings even when the canonical fields are present.
     partials.append({**scan.finding, "root_cause": None})
+    partials.append({**scan.finding, "code_evidence": []})
     source_bytes = {path: path.read_bytes() for path in append_worker_findings(scan, partials)}
 
     terminal = finish(scan, canonical=canonical)["deepScan"]
@@ -177,6 +178,7 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
         assert len(field_warnings) == 2, (field, warnings)
         assert pending.issuperset(field_warnings)
     assert any("root_cause" in warning and warning in pending for warning in warnings)
+    assert any("code_evidence" in warning and warning in pending for warning in warnings)
     assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
     run_workbench(
         scan.state,

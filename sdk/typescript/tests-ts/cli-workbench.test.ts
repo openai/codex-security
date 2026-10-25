@@ -80,7 +80,7 @@ describe("CLI workbench", () => {
             ),
           ).toBe(0);
           expect(calls).toEqual([
-            ["list-repositories"],
+            ["list-repositories", "--status", "scanned"],
             ...(includeMatchingAlias
               ? [
                   [
@@ -190,7 +190,7 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("findings list prefers an exact saved repository before directory aliases", async () => {
+  test("findings list prefers an exact scanned repository before directory aliases", async () => {
     const root = await temporaryDirectory("finding-exact-repository-");
     try {
       const repository = join(root, "repository");
@@ -211,7 +211,7 @@ describe("CLI workbench", () => {
         [repository, alias, repository],
         [alias, repository, alias],
         [unsavedAlias, alias, repository],
-      ]) {
+      ] as const) {
         for (const args of [[], [requested!]]) {
           const calls: Array<readonly string[]> = [];
           const stdout = captureCli(main, "stdout");
@@ -225,8 +225,16 @@ describe("CLI workbench", () => {
                   return args[0] === "list-repositories"
                     ? {
                         repositories: [
-                          { targetId: "alias-target", targetPath: first! },
-                          { targetId: "exact-target", targetPath: exact! },
+                          { targetId: "alias-target", targetPath: first },
+                          { targetId: "exact-target", targetPath: exact },
+                          ...(args.includes("scanned")
+                            ? []
+                            : [
+                                {
+                                  targetId: "unscanned",
+                                  targetPath: unsavedAlias,
+                                },
+                              ]),
                         ],
                       }
                     : {
@@ -361,7 +369,7 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
+    expect(calls[0]).toEqual(["list-repositories", "--status", "scanned"]);
     expect(calls[1]).toEqual([
       "list-global-findings",
       "--target-id",

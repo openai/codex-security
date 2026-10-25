@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { selectChecks } from "./select-ci-checks.mjs";
 import { failedChecks } from "./check-ci-results.mjs";
@@ -84,6 +87,58 @@ const docs = {
   "eval-contracts": "false",
   "container-validate": "false",
 };
+
+test("only edits to existing direct pytest modules skip independent jobs", (t) => {
+  const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const files = join(cwd, "plugins/codex-security/tests");
+  const output = join(cwd, "output");
+  const script = join(import.meta.dirname, "select-ci-checks.mjs");
+  const env = {
+    ...process.env,
+    EVENT_NAME: "pull_request",
+    BASE_CHANGED: "false",
+    GITHUB_OUTPUT: output,
+  };
+  // A Git hook may export its own repository and index into this process.
+  for (const name of Object.keys(env))
+    if (/^GIT_/iu.test(name)) delete env[name];
+  env.GIT_CONFIG_GLOBAL = join(cwd, "empty.gitconfig");
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  const git = (...args) => execFileSync("git", args, { cwd, env });
+  git("init", "-q");
+  git("config", "user.name", "CI Fixture");
+  git("config", "user.email", "fixture@example.com");
+  fs.mkdirSync(files, { recursive: true });
+  let revision = 0;
+  function commit(...names) {
+    for (const name of names)
+      fs.writeFileSync(join(files, name), String(revision++));
+    git("add", "--force", "plugins");
+    git("commit", "-qm", "fixture");
+  }
+  commit("test_2fa.py", "conftest.py");
+  const reduced = {
+    ...fullQualification,
+    "source-required": "false",
+    "action-ci": "false",
+    "eval-contracts": "false",
+  };
+  for (const [names, expected] of [
+    [["test_2fa.py"], reduced],
+    [["test_2fa.py", "test_added.py"], fullQualification],
+    [["test_2fa.py", "conftest.py"], fullQualification],
+  ]) {
+    commit(...names);
+    fs.writeFileSync(output, "");
+    execFileSync(process.execPath, [script], { cwd, env });
+    const lines = fs.readFileSync(output, "utf8").trim().split("\n");
+    assert.deepEqual(
+      Object.fromEntries(lines.map((line) => line.split("="))),
+      expected,
+    );
+  }
+});
 
 test("ordinary documentation selects static checks", () => {
   assert.deepEqual(select(["README.md", "docs/bedrock.md"]), docs);
@@ -244,6 +299,7 @@ test("release helper changes select their release-progress regression checks", (
 test("ordinary TypeScript source and tests retain the reduced version matrices", () => {
   for (const path of [
     "sdk/typescript/src/cost.ts",
+    "sdk/typescript/src/index.ts",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
     "plugins/codex-security/mcp-app/src/stdio-transport.ts",
     "plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
@@ -254,15 +310,17 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
   }
 });
 
-test("SDK test-only PRs keep the SDK jobs and skip independent plugin suites", () => {
+test("SDK test-only PRs skip independent suites and retain any changed eval input", () => {
   const paths = [
     "sdk/typescript/tests-ts/skeleton.test.ts",
     "sdk/typescript/tests-ts/windows-machine-policy.test.ts",
   ];
-  assert.deepEqual(select(paths), {
-    ...regularSource,
-    "plugin-tests-required": "false",
-  });
+  const sdk = { ...regularSource, "plugin-tests-required": "false" };
+  assert.deepEqual(select(paths), { ...sdk, "eval-contracts": "false" });
+  assert.deepEqual(
+    select([...paths, "sdk/typescript/tests-ts/codex-dependency-pins.test.ts"]),
+    sdk,
+  );
   for (const other of [
     "README.md",
     "sdk/typescript/tests-ts/support/test-subprocess.ts",
@@ -323,6 +381,13 @@ test("unknown paths and dependency configuration receive full qualification", ()
 
 test("tooling and non-TypeScript product inputs receive full qualification", () => {
   for (const path of [
+    "Dockerfile",
+    ".github/workflows/container-ci.yml",
+    ".github/workflows/container-validate.yml",
+    ".github/workflows/container-release.yml",
+    ".github/workflows/native-windows.yml",
+    "sdk/typescript/scripts/run-ci-tests.mts",
+    "plugins/codex-security/skills/example/SKILL.md",
     "package.json",
     "sdk/typescript/pnpm-lock.yaml",
     "sdk/typescript/bunfig.toml",
@@ -401,9 +466,29 @@ test("the final gate distinguishes a failed check from a skipped dependent job",
       encoding: "utf8",
     });
   const needs = successfulFullRun();
-  const passed = run(needs);
-  assert.equal(passed.status, 0, passed.stderr);
-  assert.equal(passed.stdout.trim(), "All selected required CI checks passed.");
+  for (const selected of [true, false]) {
+    const outputs = select([selected ? "Dockerfile" : "README.md"]);
+    for (const result of ["success", "failure", "cancelled", "skipped"]) {
+      const verdict = run({
+        ...needs,
+        "classify-changes": { result: "success", outputs },
+        "container-validate": { result },
+      });
+      const failed = selected && result !== "success";
+      assert.equal(verdict.status, failed ? 1 : 0, verdict.stderr);
+      if (failed) {
+        assert.ok(
+          verdict.stderr.includes(`container-validate (${result})`),
+          verdict.stderr,
+        );
+      } else {
+        assert.equal(
+          verdict.stdout.trim(),
+          "All selected required CI checks passed.",
+        );
+      }
+    }
+  }
 
   needs["static-checks"].result = "failure";
   needs["container-validate"].result = "skipped";

@@ -38,7 +38,7 @@ jobs:
           SHELLCHECK_OPTS: --severity=warning
         run: |
           actionlint -color
-          shellcheck .github/scripts/install-ripgrep.sh docker/verify-container-compose.sh github-action/scripts/setup-ubuntu-sandbox.sh
+          shellcheck .github/scripts/*.sh docker/verify-container-compose.sh github-action/scripts/setup-ubuntu-sandbox.sh
       - name: Test release progress reporting
         run: node --test .github/scripts/test_release_progress.mjs
       - name: Check workflow security

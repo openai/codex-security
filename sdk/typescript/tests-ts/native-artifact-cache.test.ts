@@ -46,9 +46,17 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
   const output = join(root, "output");
   const source = "plugins/codex-security/native/src/lib.rs";
   const helper = "plugins/codex-security/mcp-app/src/native.ts";
-  writeSource(repository, source, "native source\n");
-  writeSource(repository, helper, "helper source\n");
-  writeSource(repository, "README.md", "documentation\n");
+  const proof = "plugins/codex-security/native/proof.mjs";
+  const proofHelper = ".github/scripts/native-proof-helper.mjs";
+  const write = (path: string, contents: string) =>
+    writeSource(repository, path, contents);
+  const runProof = () =>
+    spawnSync(process.execPath, [proof], { cwd: repository }).status;
+  write(source, "native source\n");
+  write(helper, "helper source\n");
+  write(proof, `import "../../../${proofHelper}";\n`);
+  write(proofHelper, "process.exitCode = 0;\n");
+  write("README.md", "documentation\n");
   git(repository, "init", "-q");
   const commit = () => {
     git(repository, "add", ".");
@@ -85,46 +93,45 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     commit();
     const initial = key();
     expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
-    writeSource(repository, "README.md", "updated documentation\n");
-    writeSource(
-      repository,
-      ".github/scripts/verify-pr-source.mjs",
-      "ci selection\n",
-    );
-    writeSource(
-      repository,
-      "plugins/codex-security/mcp-app/tests/support/new.ts",
-      "fixture\n",
-    );
+    expect(runProof()).toBe(0);
+
+    write("README.md", "updated documentation\n");
+    for (const script of [
+      "invoice-desk-target",
+      "check-ci-results",
+      "select-ci-checks",
+      "test-ci-selection",
+      "test-release-guide",
+      "verify-pr-source",
+    ]) {
+      write(`.github/scripts/${script}.mjs`, "// CI only\n");
+    }
+    write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
     expect(key()).toBe(initial);
 
-    writeSource(
-      repository,
-      ".github/scripts/new-proof-input.mts",
-      "compile me\n",
-    );
-    commit();
-    const changedCompilerInput = key();
-    expect(changedCompilerInput).not.toBe(initial);
-
-    writeSource(repository, source, "updated native source\n");
-    commit();
-    const changedNative = key();
-    expect(changedNative).not.toBe(changedCompilerInput);
-
-    writeSource(repository, helper, "updated helper source\n");
-    commit();
-    const changedHelper = key();
-    expect(changedHelper).not.toBe(changedNative);
-
+    let previous = initial;
+    const expectNewKey = () => {
+      commit();
+      const next = key();
+      expect(next).not.toBe(previous);
+      previous = next;
+    };
+    write(proofHelper, "process.exitCode = 1;\n");
+    expect(runProof()).toBe(1);
+    expectNewKey();
+    write(".github/scripts/new-proof-input.mts", "compile me\n");
+    expectNewKey();
+    write(source, "updated native source\n");
+    expectNewKey();
+    write(helper, "updated helper source\n");
+    expectNewKey();
     renameSync(
       join(repository, source),
       join(repository, "plugins/codex-security/native/src/renamed.rs"),
     );
-    commit();
-    expect(key()).not.toBe(changedHelper);
-    expect(key("2026-44")).not.toBe(key());
+    expectNewKey();
+    expect(key("2026-44")).not.toBe(previous);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

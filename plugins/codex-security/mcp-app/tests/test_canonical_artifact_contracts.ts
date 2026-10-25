@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import Ajv2020 from "ajv/dist/2020.js";
+import * as z from "zod/v4";
 import { readJson } from "./support/json.ts";
 
 const ajv = new Ajv2020({ strict: false, validateFormats: false });
@@ -140,6 +141,8 @@ for (const path of ["findings.json", "coverage.json"]) {
   assert.equal(manifest.validate(document), false);
 }
 const coverage = canonical.coverage;
+const validateCoverage = new Ajv2020().compile(coverage.schema);
+const coverageInZod = z.fromJSONSchema(coverage.schema);
 for (const fields of [
   { deferred: [{ id: "task", reason: "Review remains." }] },
   {
@@ -154,6 +157,37 @@ for (const fields of [
   },
 ])
   assert.equal(coverage.validate({ ...coverage.example, ...fields }), true);
+
+for (const [path, valid] of [
+  [".", true],
+  ["./src//./name:part/", true],
+  [" ", true],
+  ["\u0085", true],
+  ["\ufeff", true],
+  ["src/\u007f", true],
+  ["src/..\u2028", true],
+  ["src/\u2029emoji-😀", true],
+  ["", false],
+  ["..", false],
+  ["src/../outside", false],
+  ["src/\u2028/..", false],
+  ["/absolute", false],
+  ["C:relative", false],
+  ["src\\file", false],
+  ["name\n", false],
+  ["src/\u0000file", false],
+  ["\ud800", false],
+  ["\udfff", false],
+] as const) {
+  const deferred = [{ id: "task", reason: "Review remains.", paths: [path] }];
+  const document = { ...coverage.example, deferred };
+  assert.equal(validateCoverage(document), valid, JSON.stringify(path));
+  assert.equal(
+    coverageInZod.safeParse(document).success,
+    valid,
+    JSON.stringify(path),
+  );
+}
 
 // Shared named definitions remain available to consumers that extract fragments.
 assert.deepEqual(Object.keys(findingSchema.$defs).sort(), [

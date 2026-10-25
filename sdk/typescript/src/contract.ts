@@ -65,6 +65,9 @@ export interface LoadedContract {
 
 export class ContractSchemaError extends ContractValidationError {}
 
+export const SEALED_DEFERRED_PATH_RULE = "invalidSealedDeferredPath";
+export const DEFERRED_PATH_LOCATION = /^\/deferred\/(\d+)\/paths\/(\d+)$/u;
+
 type LoadContractOptions = {
   pluginRoot: string;
   expectedScanId?: string;
@@ -912,7 +915,7 @@ async function loadContractValidators(
   // The plugin schemas are the immutable v0 contract. They are valid Draft
   // 2020-12 but intentionally omit redundant local `type` keywords that Ajv's
   // optional strict-schema linter requires.
-  const ajv = new Ajv2020({ allErrors: false, strict: false });
+  const ajv = new Ajv2020({ allErrors: false, strict: false, verbose: true });
   ajv.addFormat("date-time", {
     type: "string",
     validate: validRfc3339DateTime,
@@ -1096,6 +1099,23 @@ function schemaError(
   errors: readonly ErrorObject[],
 ): ContractValidationError {
   const first = errors[0];
+  if (
+    filename === "coverage.json" &&
+    first?.keyword === "oneOf" &&
+    Array.isArray(first.schema) &&
+    first.schema.some(
+      (rule, index) =>
+        isRecord(rule) &&
+        rule["$comment"] === SEALED_DEFERRED_PATH_RULE &&
+        first.params["passingSchemas"]?.includes(index),
+    )
+  ) {
+    const match = DEFERRED_PATH_LOCATION.exec(first.instancePath);
+    if (match)
+      return new ContractValidationError(
+        `coverage.deferred[${match[1]}].paths[${match[2]}]: expected a safe repository-relative POSIX path.`,
+      );
+  }
   const location = first?.instancePath
     ? JSON.stringify(first.instancePath)
     : "<root>";

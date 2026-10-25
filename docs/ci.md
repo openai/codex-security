@@ -20,6 +20,11 @@ are discovered from the source tree, including new files without timing data.
 Platform-specific filesystem, credential, process, cancellation, and resumed
 worker cases remain enabled.
 
+SDK shards wait for static checks and a successful package build. A failing
+static check skips the shards when a PR opens, reopens, or receives new commits.
+Pushes to `main`, nightly and manual runs, and PR edits that need full
+qualification still run the shards.
+
 The two Linux MCP jobs discover the same test files as local MCP testing. CI
 assigns files by observed runtimes and starts the longest files first on each
 job's two Node workers. Refresh the
@@ -34,12 +39,10 @@ installation. When selected, Python runs the full suite on 3.12 and the native
 subsets on macOS and Windows. All source changes still select container
 validation.
 
-A PR that changes only top-level `sdk/typescript/tests-ts/*.test.ts` files runs
-the same SDK shards on all three platforms and the same static, native, package,
-container, and eval checks as an ordinary source PR. It skips the independent
-MCP, standalone-plugin, and Python suites. Changes to a test helper, nested
-fixture, or any other path alongside an SDK test use the usual source or full
-route.
+PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK
+shards, static checks, native builds, packages, and containers. They skip the
+plugin suites and run evals only when their `codex-dependency-pins.test.ts`
+input changes. Mixed changes follow the usual source or full route.
 
 PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
 locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
@@ -56,8 +59,13 @@ README, or to the triage eval's scripts, assertions, README, manifest or lock,
 run the deterministic eval job and static checks. The eval job builds the SDK
 and host plugin, checks the Codex version across the SDK, MCP and triage
 lockfiles, and runs the triage, secret-discovery, Standard time-budget and
-workflow-routing suites. This job also runs on source changes, independently
-of the Python matrix.
+workflow-routing suites.
+
+Edits limited to existing top-level `plugins/codex-security/tests/test_*.py`
+modules keep all five Python jobs, MCP, host, native, package, compatibility,
+and container checks. They skip the SDK shards, Windows install checks, Action
+and eval jobs. Adding, removing, or renaming modules, editing shared helpers,
+or including any other path selects full qualification.
 
 Inputs outside these routes select full qualification, including workflow checks,
 containers, current Node 26, Windows Node 24 installation, and Python 3.10 and
@@ -86,19 +94,9 @@ job can be skipped. Static checks are always required. The separate `test-qualit
 workflow runs weekly property and mutation tests. Dispatch it to compare full SDK
 shard layouts.
 
-One compatibility matrix forwards the `ci` result to the three OS-named Node 22
-checks required by the current `main` ruleset. Migrate the required checks in
-this order.
-
-1. Merge the workflow change and verify that `ci` is reported for source and
-   documentation pull requests, including a failing selected-check example.
-2. Change the repository's required status checks to `ci` and `Validate PR Title`,
-   preserving their GitHub Actions integration and all unrelated protection rules.
-3. Remove the compatibility matrix `required-test` and its three OS check
-   names from source verification in a follow-up.
-
-Do not remove the old contexts before changing the rules. The workflow change
-itself does not change repository protection settings.
+The required GitHub Actions checks on `main` are `ci` and `Validate PR Title`.
+The title check runs on pull request edits. To diagnose a failed `ci`, open
+the selected job named in the gate output.
 
 ## Diagnostics and local checks
 
@@ -118,6 +116,9 @@ Linux coverage artifacts are review evidence, not a percentage-based merge
 gate. Mutation diagnostics also measure results without enforcing a minimum
 score. Ordinary report upload failures do not replace the test result.
 
+Only the same pull request can reuse caches saved on `refs/pull/<number>/merge`.
+After the PR merges into `main`, a maintenance job deletes those caches.
+
 When measuring CI changes, separate time to required-green from summed job
 execution time, prerequisite waits, runner scheduling, approval waits, and
 manual retry delays. Compare matching revisions and test configurations, and
@@ -131,8 +132,8 @@ a PR that leaves those inputs unchanged, look for the exact key in
 matter which `main` run saved it. Different inputs can build in parallel.
 
 The key uses the UTC week and the paths listed in **Identify native build and
-proof inputs**. For repository CI scripts, the native jobs compile
-`.github/scripts/*.mts` through `build:ci`; changing unrelated workflow scripts
-does not require rebuilding native artifacts. Compare the next change against
-current `main`: its PR run may have tested an older base or skipped native
-preparation entirely. PR runs cannot populate this cache for `main`.
+proof inputs**. Repository scripts are included by default: a native proof can
+load a helper at runtime. The workflow excludes known CI entrypoints that run
+elsewhere. Compare the next change against current `main`: its PR run may have
+tested an older base or skipped native preparation. PRs cannot populate this
+cache for `main`.

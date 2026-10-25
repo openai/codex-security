@@ -162,9 +162,13 @@ jobs:
           retention-days: 7
 
   test:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: &run-sdk-shards >-
+      ${{ !cancelled() && needs.package.result == 'success' &&
+      needs['classify-changes'].outputs['source-required'] == 'true' &&
+      (github.event_name != 'pull_request' || github.event.action == 'edited' ||
+      needs['static-checks'].result == 'success') }}
     name: tests / ${{ matrix.os }} / shard-${{ matrix.shard }}
-    needs: [classify-changes, package]
+    needs: &sdk-shard-needs [classify-changes, package, static-checks]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -203,8 +207,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-          # The separate MCP job covers Linux worker tests only when it is scheduled.
-          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required || needs.classify-changes.outputs.source-required }}
+          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: ${{ needs.classify-changes.outputs.plugin-tests-required }}
         run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.shard }}/6 --seed=${{ github.run_number }} ${{ matrix.os == 'ubuntu-latest' && '--coverage --coverage-reporter=text --coverage-reporter=lcov' || '' }}
       - name: Upload test reports
         if: always()
@@ -261,8 +264,8 @@ jobs:
       - name: Inspect installed package
         working-directory: sdk/typescript
         env: &package-deep-retry
-          # Qualify retries on each OS's floor or only runtime, and on every scheduled/manual lane.
-          PACKAGE_DEEP_RETRY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
+          # A successful main push can be tagged for release. Only PRs sample retries by runtime.
+          PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
       - name: Check Action against the release candidate
@@ -418,14 +421,10 @@ jobs:
       - *set-up-bun
       - name: Check the Codex version across the SDK, MCP app and evals
         run: bun test sdk/typescript/tests-ts/codex-dependency-pins.test.ts
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          package_json_file: package.json
-      - name: Set up eval Node.js and pnpm cache
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Set up eval tools
+        uses: ./.github/actions/setup-tools
         with:
           node-version: "24.15.0"
-          cache: pnpm
           cache-dependency-path: |
             sdk/typescript/pnpm-lock.yaml
             plugins/codex-security/mcp-app/pnpm-lock.yaml
@@ -475,7 +474,7 @@ jobs:
         windows-test,
         windows-verify,
       ]
-    if: &source-aggregate always()
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -495,33 +494,10 @@ jobs:
           CLASSIFIER_ATTEMPT: ${{ needs.classify-changes.outputs.edit-attempt }}
         run: node .github/scripts/verify-pr-source.mjs confirm-target
 
-  # Retain required names until the repository ruleset has migrated to `ci`.
-  required-test:
-    name: ${{ matrix.os }} / node-22
-    needs: [classify-changes, ci]
-    if: *source-aggregate
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - name: Require CI gate
-        if: needs.ci.result != 'success'
-        run: exit 1
-      - name: Require the edit classifier from this attempt
-        if: >-
-          github.event_name == 'pull_request' && github.event.action == 'edited' &&
-          github.event.changes.base == null &&
-          needs['classify-changes'].outputs['edit-attempt'] != github.run_attempt
-        run: |
-          echo 'Re-run all jobs to qualify this pull request edit.'
-          exit 1
-
   windows-test:
-    if: needs.classify-changes.outputs.source-required == 'true'
+    if: *run-sdk-shards
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
-    needs: [classify-changes, package]
+    needs: *sdk-shard-needs
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:
