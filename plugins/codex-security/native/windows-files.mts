@@ -115,6 +115,7 @@ export function windowsFileSystem(native: WindowsBinding) {
           isSymbolicLink: () => link,
           isReparsePoint: () =>
             (info.attributes & flags.FILE_ATTRIBUTE_REPARSE_POINT) !== 0,
+          isNameSurrogate: () => (info.reparseTag & 0x20000000) !== 0,
         };
       },
       flags.OPEN_EXISTING,
