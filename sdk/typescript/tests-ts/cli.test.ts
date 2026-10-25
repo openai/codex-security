@@ -2511,6 +2511,7 @@ describe("CLI", () => {
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
       expect(stderr.text()).toContain("Preparing scan");
       expect(stderr.text()).toContain("Running scan");
+      expect(stderr.text()).not.toContain("File inventory:");
       expect(stderr.text()).not.toContain("\u001B");
       expect(stderr.text()).not.toContain("\r");
       expect(setIntervalMock).toHaveBeenCalledTimes(0);
@@ -2561,7 +2562,7 @@ describe("CLI", () => {
           phase: "validation",
           filesCompleted: 0,
           filesTotal: 8,
-          reviewItems: { completed: 11, total: 13 },
+          reviewItems: { completed: 0, total: 13 },
         },
         {
           phase: "validation",
@@ -2572,15 +2573,20 @@ describe("CLI", () => {
       ],
     });
     deps.setInterval = mock(fakeInterval);
-    expect(await runCli(["scan", ".", "--headless"], deps)).toBe(0);
+    expect(
+      await runCli(["scan", ".", "--headless", "--diff", "HEAD^"], deps),
+    ).toBe(0);
     expect(stderr.text()).toContain(
-      "Scan phase: validating findings (11/13 reviews).",
+      "Running scan: preflight (committed changes) | File inventory: 8",
+    );
+    expect(stderr.text()).toContain(
+      "Scan phase: validating findings (0/13 reviews).",
     );
     expect(stderr.text()).toContain(
       "Scan phase: validating findings (13/13 reviews).",
     );
     expect(stderr.text()).toContain(
-      "Running scan: validating findings | Reviews: 13/13",
+      "Running scan: validating findings (committed changes) | Reviews: 13/13",
     );
     expect(stderr.text()).not.toContain("Files: 13/13");
   });
@@ -5227,7 +5233,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488–$0.01156 (standard, context unknown, cache writes unknown).",
     );
-    expect(stderr.text()).toContain("Scan phase: reviewing files (0/8 files).");
+    expect(stderr.text()).toContain(
+      "Scan phase: reviewing files (8 files inventoried).",
+    );
+    expect(stderr.text()).toContain(
+      "Running scan: reviewing files | File inventory: 8",
+    );
     expect(stderr.text()).toContain("Scan phase: reviewing files (3/8 files).");
     expect(stderr.text()).toContain(
       "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488–$0.01156",
