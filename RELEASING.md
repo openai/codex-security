@@ -110,7 +110,8 @@ the latest `main` and appends a commit; the updater never force-pushes.
 A concurrent commit causes it to reread and
 retry. It requests Codex review when the proposal files change. Updates that
 only incorporate `main` keep CI current without repeating the same proposal
-review. New suggestions for human-owned notes still appear in a comment.
+review, even when the earlier request names an older commit. New suggestions
+for human-owned notes still appear in a comment.
 Before merging the proposal, check CI and request a final Codex review
 if the last review targets an older head.
 
@@ -129,7 +130,10 @@ changes; other workflow content comes from the latest `main`. After the release
 PR merges, this example can reference the new version before npm publication
 finishes. Wait for publication before using that pin.
 
-If a run reports that GitHub has not exposed the updated PR head, manually
+After updating an existing release branch and its title, the updater waits briefly
+if GitHub still shows the exact commit it just replaced. A different head or a
+newer `main` stops that review handoff; the next updater can use the current branches.
+If GitHub still has not exposed the updated PR head, manually
 rerun the updater with **dry_run** disabled after the PR catches up. This
 allows any deferred review request or note suggestions to be posted. Verify
 review on the current head before merging the proposal.
@@ -227,8 +231,11 @@ job with read-only permissions for both scopes.
 
 Review the resulting PR and select **Approve workflows to run** in its merge
 box to start hosted CI. GitHub requires this approval for PRs created or updated
-with `GITHUB_TOKEN`. Check the Codex review on the current head as well, and
-request it manually if the automated request has not started a review.
+with `GITHUB_TOKEN`. Check that a Codex code review completed on the current
+commit; a passing security check alone does not confirm this. If the automated
+request does not start a review or the integration asks the automated account
+to connect, a maintainer with a connected account should request the code
+review manually and verify it completed on that commit.
 
 For CI to start without this approval, optionally configure a GitHub App
 installed on this repository with **Contents: write** and **Pull requests: write**.

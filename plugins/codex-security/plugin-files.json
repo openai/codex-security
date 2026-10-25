@@ -82,6 +82,7 @@
     "scripts/workbench/__init__.py",
     "scripts/workbench/handoff.py",
     "scripts/workbench/retained_coverage.py",
+    "scripts/workbench/retained_records.py",
     "scripts/workbench/runtime_toml.py",
     "scripts/workbench/saved_coverage.py",
     "scripts/workbench/saved_outputs.py",

@@ -458,18 +458,26 @@ async function branchHead(github, branch) {
   }
 }
 
-function pullHoldReason(pull, branch) {
+const closedPullReason =
+  "The release PR was closed or retargeted during the update. Review it before continuing.";
+const pendingHeadReason =
+  "GitHub has not exposed the updated PR head yet. Rerun the updater before final review.";
+const changedHeadReason =
+  "The release head changed. Rerun before final review.";
+
+function pullHoldReason(pull, branch, repository) {
   if (
     pull?.state !== "open" ||
     pull.head.ref !== branch ||
+    pull.head.repo?.full_name?.toLowerCase() !== repository.toLowerCase() ||
     pull.base.ref !== "main"
   ) {
-    return "The release PR was closed or retargeted during the update. Review it before continuing.";
+    return closedPullReason;
   }
   return null;
 }
 
-function releaseHoldReason(openPulls, pullNumber, branch, repository) {
+function conflictingReleaseReason(openPulls, pullNumber, branch, repository) {
   const retargeted = openPulls.find(
     (candidate) =>
       candidate.head.ref === branch &&
@@ -486,10 +494,112 @@ function releaseHoldReason(openPulls, pullNumber, branch, repository) {
   );
   if (other)
     return `Another release PR is open: #${other.number}. It has not been changed.`;
+  return null;
+}
+
+function releaseHoldReason(openPulls, pullNumber, branch, repository) {
+  const conflict = conflictingReleaseReason(
+    openPulls,
+    pullNumber,
+    branch,
+    repository,
+  );
+  if (conflict) return conflict;
   const current = openPulls.find(
     (candidate) => candidate.number === pullNumber,
   );
-  return pullNumber === undefined ? null : pullHoldReason(current, branch);
+  return pullNumber === undefined
+    ? null
+    : pullHoldReason(current, branch, repository);
+}
+
+function nextCursor({ hasNextPage, endCursor }) {
+  if (!hasNextPage) return null;
+  if (!endCursor)
+    throw new Error("GitHub did not return the next page cursor.");
+  return endCursor;
+}
+
+// Only wait for a commit this run actually replaced. Read the PR, refs,
+// competing proposals and review markers together on the final page.
+async function reviewComments(github, plan, current, head, previous, wait) {
+  const { number } = current;
+  if (current.head.sha === head)
+    return {
+      comments: await github.list(`issues/${number}/comments?per_page=100`),
+    };
+  if (!previous) return { reason: pendingHeadReason };
+  const held = (reason) => ({ action: "held", reason });
+  const foreign = (sha) => sha !== head && sha !== previous;
+  if (foreign(current.head.sha)) return held(changedHeadReason);
+  for (const ms of [0, 1000, 2000, 4000]) {
+    if (ms) await wait(ms);
+    const comments = [];
+    let after = null;
+    let openAfter = null;
+    for (;;) {
+      const page = await github.releaseReviewPage(
+        number,
+        plan.branch,
+        after,
+        openAfter,
+      );
+      const pr = page?.pullRequest;
+      if (
+        pr?.state !== "OPEN" ||
+        pr.baseRefName !== "main" ||
+        pr.headRefName !== plan.branch ||
+        pr.headRepository?.nameWithOwner.toLowerCase() !==
+          github.repository.toLowerCase()
+      )
+        return held(closedPullReason);
+      if (page.main?.target?.oid !== plan.mainSha)
+        return held(
+          "main advanced after the release branch was updated. Let the next updater run, or rerun it manually before final review.",
+        );
+      if (page.branch?.target?.oid !== head || foreign(pr.headRefOid))
+        return held(changedHeadReason);
+      const open = page.open.nodes.map((p) => ({
+        number: p.number,
+        title: p.title,
+        head: {
+          ref: p.headRefName,
+          sha: p.headRefOid,
+          repo: { full_name: p.headRepository?.nameWithOwner },
+        },
+        base: { ref: p.baseRefName },
+      }));
+      const hold = conflictingReleaseReason(
+        open,
+        number,
+        plan.branch,
+        github.repository,
+      );
+      if (hold) return held(hold);
+      if (open.some((p) => p.number === number && foreign(p.head.sha)))
+        return held(changedHeadReason);
+      if (pr.headRefOid === previous) break;
+      const nextComments = nextCursor(pr.comments.pageInfo);
+      const nextOpen = nextCursor(page.open.pageInfo);
+      // Keep reading each connection's last page until both are complete.
+      // Newly opened or updated PRs are at the end of the open connection.
+      if (!nextComments && !nextOpen) {
+        comments.push(...pr.comments.nodes);
+        // Match the REST issue-comment order used for proposal marker selection.
+        return {
+          comments: comments.sort((a, b) =>
+            Number(BigInt(a.id) - BigInt(b.id)),
+          ),
+        };
+      }
+      if (nextComments) {
+        comments.push(...pr.comments.nodes);
+        after = nextComments;
+      }
+      if (nextOpen) openAfter = nextOpen;
+    }
+  }
+  return { reason: pendingHeadReason };
 }
 
 async function ensurePullRequest(
@@ -499,6 +609,8 @@ async function ensurePullRequest(
   template,
   headSha,
   currentPulls,
+  previousSha,
+  waitForHead,
 ) {
   const holdReason = releaseHoldReason(
     currentPulls ?? (await github.list("pulls?state=open&per_page=100")),
@@ -510,7 +622,7 @@ async function ensurePullRequest(
     return { action: "held", reason: holdReason, reviewRequested: false };
   if (pull) {
     pull = await github.request("GET", `pulls/${pull.number}`);
-    const reason = pullHoldReason(pull, plan.branch);
+    const reason = pullHoldReason(pull, plan.branch, github.repository);
     if (reason)
       return {
         action: "held",
@@ -533,7 +645,7 @@ async function ensurePullRequest(
     });
   }
   const current = await github.request("GET", `pulls/${pull.number}`);
-  const reason = pullHoldReason(current, plan.branch);
+  const reason = pullHoldReason(current, plan.branch, github.repository);
   if (reason)
     return {
       action: "held",
@@ -541,20 +653,19 @@ async function ensurePullRequest(
       pull: current.number,
       reviewRequested: false,
     };
-  if (current.head.sha !== headSha) {
-    return {
-      pull: current.number,
-      reviewRequested: false,
-      reason:
-        "GitHub has not exposed the updated PR head yet. Rerun the updater before final review.",
-    };
-  }
+  const { comments, ...stopped } = await reviewComments(
+    github,
+    plan,
+    current,
+    headSha,
+    previousSha,
+    waitForHead,
+  );
+  if (!comments)
+    return { pull: current.number, reviewRequested: false, ...stopped };
   const marker = `<!-- release-pr-head: ${headSha} -->`;
   const proposalMarker = `<!-- release-pr-proposal: ${hash("sha256", JSON.stringify(plan.files))} -->`;
   const suggestionsMarker = `<!-- release-pr-suggestions: ${hash("sha256", JSON.stringify(plan.generated))} -->`;
-  const comments = await github.list(
-    `issues/${current.number}/comments?per_page=100`,
-  );
   const previous = comments.findLast((comment) =>
     comment.body?.startsWith("<!-- release-pr-head: "),
   );
@@ -585,6 +696,7 @@ export async function reconcileReleasePullRequest({
   repo,
   github,
   dryRun = true,
+  waitForHead = delay,
 }) {
   // Rebuild the plan only when main or the proposal actually moves.
   for (;;) {
@@ -698,6 +810,8 @@ export async function reconcileReleasePullRequest({
       repo.readFile(mainSha, templatePath),
       commitSha,
       pull ? currentPulls : undefined,
+      pull && branchChanged ? headSha : null,
+      waitForHead,
     );
     return {
       action: !pull ? "created" : changed ? "updated" : "unchanged",
@@ -709,6 +823,24 @@ export async function reconcileReleasePullRequest({
   }
 }
 
+const releaseReviewQuery = `query ReleaseReviewPage($owner: String!, $name: String!, $number: Int!, $ref: String!, $after: String, $openAfter: String) {
+  repository(owner: $owner, name: $name) {
+    branch: ref(qualifiedName: $ref) { target { oid } }
+    main: ref(qualifiedName: "refs/heads/main") { target { oid } }
+    open: pullRequests(states: OPEN, first: 100, after: $openAfter, orderBy: { field: UPDATED_AT, direction: ASC }) {
+      nodes { number title baseRefName headRefName headRefOid headRepository { nameWithOwner } }
+      pageInfo { hasNextPage endCursor }
+    }
+    pullRequest(number: $number) {
+      state baseRefName headRefName headRefOid headRepository { nameWithOwner }
+      comments(first: 100, after: $after) {
+        nodes { body id: fullDatabaseId }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`;
+
 export function createGitHubClient(
   repository,
   token,
@@ -716,11 +848,15 @@ export function createGitHubClient(
   sleep = delay,
 ) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
-  async function responseFor(method, path, body) {
+  async function responseFor(method, path, body, reviewQuery = false) {
+    const read = method === "GET" || reviewQuery;
+    const url = reviewQuery
+      ? "https://api.github.com/graphql"
+      : `${apiRoot}${path}`;
     for (let retry = 0; ; retry += 1) {
       let response;
       try {
-        response = await fetcher(`${apiRoot}${path}`, {
+        response = await fetcher(url, {
           method,
           headers: {
             Accept: "application/vnd.github+json",
@@ -734,16 +870,11 @@ export function createGitHubClient(
           return { data: await response.json(), headers: response.headers };
         }
       } catch (error) {
-        if (method !== "GET" || retry >= 2 || error instanceof SyntaxError)
-          throw error;
+        if (!read || retry >= 2 || error instanceof SyntaxError) throw error;
         await sleep(1000 * 2 ** retry);
         continue;
       }
-      if (
-        method === "GET" &&
-        retry < 2 &&
-        [500, 502, 503, 504].includes(response.status)
-      ) {
+      if (read && retry < 2 && [500, 502, 503, 504].includes(response.status)) {
         await response.body?.cancel().catch(() => undefined);
         await sleep(1000 * 2 ** retry);
         continue;
@@ -761,6 +892,30 @@ export function createGitHubClient(
     repositoryUrl: `https://github.com/${repository}`,
     async request(method, path, body) {
       return (await responseFor(method, path, body)).data;
+    },
+    async releaseReviewPage(number, branch, after, openAfter) {
+      const [owner, name] = repository.split("/");
+      const { data: result } = await responseFor(
+        "POST",
+        "graphql",
+        {
+          query: releaseReviewQuery,
+          variables: {
+            owner,
+            name,
+            number,
+            ref: `refs/heads/${branch}`,
+            after,
+            openAfter,
+          },
+        },
+        true,
+      );
+      if (result.errors?.length)
+        throw new Error(
+          `GitHub release review query failed: ${result.errors.map((e) => e.message).join("; ")}`,
+        );
+      return result.data.repository;
     },
     async list(path) {
       const items = [];
