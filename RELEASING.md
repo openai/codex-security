@@ -92,6 +92,8 @@ Review this policy before enabling automation for `1.x`.
 ## Rolling release PRs
 
 `node-release-pr` runs after pushes to `main` and can be dispatched manually.
+Newer pushes can replace pending pushes. Manual runs keep their own place.
+Previews and writes share one queue so a preview sees a consistent proposal.
 It defaults to a read-only preview. It does not merge, tag, publish, or change
 the existing publication gates.
 
@@ -320,8 +322,9 @@ do not prepare a release by editing or committing files there.
 The merged release PR receives one progress comment covering post-merge CI,
 release verification, protected npm approval, public-package provenance,
 installation checks, Action publication, and container approval and publication.
-It links to the relevant workflow
-runs and updates at workflow boundaries. Each automatic release dispatch starts
+The main CI completion handler requests the first update for a merged release
+PR, including when CI fails. Subsequent updates link to the relevant workflows
+and track each publication stage. Each automatic release dispatch starts
 a separate observer using the returned run ID; this does not depend on chained
 `workflow_run` events from the built-in token. The observer checks release jobs
 every 30 seconds, including while protected approval is pending, and requests a refresh
@@ -336,7 +339,7 @@ and `watch` enabled. GitHub publication starts its own observer after npm succee
 
 The observer and comment writer execute only helpers from protected `main`.
 Only the comment writer can update PR comments, and only the observer can request
-a refresh. Both run outside the publication workflows. Verification and
+a refresh. Reporting runs independently of the tag-cut job. Verification and
 publication jobs retain their existing permissions. The dispatch jobs use their
 existing Actions permission for a best-effort notification bounded to 15 seconds,
 within the downstream resolver's 60-second completion wait. Progress-reporting

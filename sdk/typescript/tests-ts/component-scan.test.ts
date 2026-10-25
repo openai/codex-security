@@ -619,6 +619,13 @@ test.each([
                 .text()
                 .includes("apps/api | ChatGPT allowance not reported"),
             ).toBe(presentation === "headless");
+          for (const filesTotal of [0, 2]) {
+            options.onProgress?.({
+              phase: "preflight",
+              filesCompleted: 0,
+              filesTotal,
+            });
+          }
           options.onProgress?.({
             phase: "validation",
             filesCompleted: 2,
@@ -667,6 +674,8 @@ test.each([
       );
     } else expect(stderr.text()).toContain("apps/api completed");
     if (presentation !== "dashboard") {
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 0");
+      expect(stderr.text()).toContain("apps/api preflight | File inventory: 2");
       expect(stderr.text()).toContain(
         "apps/api validating findings | Files: 2/2",
       );
