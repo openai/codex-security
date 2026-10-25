@@ -709,7 +709,12 @@ export async function reconcileReleasePullRequest({
   }
 }
 
-export function createGitHubClient(repository, token, fetcher = fetch) {
+export function createGitHubClient(
+  repository,
+  token,
+  fetcher = fetch,
+  sleep = delay,
+) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
   async function responseFor(method, path, body) {
     for (let retry = 0; ; retry += 1) {
@@ -731,7 +736,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
       } catch (error) {
         if (method !== "GET" || retry >= 2 || error instanceof SyntaxError)
           throw error;
-        await delay(1000 * 2 ** retry);
+        await sleep(1000 * 2 ** retry);
         continue;
       }
       if (
@@ -740,7 +745,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
         [500, 502, 503, 504].includes(response.status)
       ) {
         await response.body?.cancel().catch(() => undefined);
-        await delay(1000 * 2 ** retry);
+        await sleep(1000 * 2 ** retry);
         continue;
       }
       const error = new Error(
