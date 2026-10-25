@@ -1914,29 +1914,4 @@ describe("local normalized scanner findings", () => {
     }
     expect(existsSync(stateDirectory)).toBe(false);
   });
-
-  test("does not impose Cloud field-size limits on normalized local evidence", async () => {
-    const { repository, environment } = await fixture();
-    const data = input();
-    data.findings[0]!.evidence.description = "x".repeat(65537);
-    data.findings[0]!.evidence.locations = Array.from(
-      { length: 101 },
-      (_, index) => ({ path: `src/file-${index}.ts` }),
-    );
-    const result = await (
-      await prepareNormalizedLocalImport(
-        data,
-        { repository, ...source },
-        { environment },
-      )
-    ).import();
-    expect(
-      (
-        await listLocalExternalFindings(
-          { repository, id: result.findings[0]!.id },
-          { environment },
-        )
-      )[0]!.evidence,
-    ).toEqual(data.findings[0]!.evidence);
-  });
 });

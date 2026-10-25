@@ -26,6 +26,7 @@ import {
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
 import { FindingsClient, type FindingsRequest } from "../findings-client.js";
+import type { waitForRetry } from "./retry.js";
 import type {
   FindingSearchScope,
   FindingSourceSnapshot,
@@ -104,6 +105,7 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   reviewRunner?: Pick<CodexReviewRunner, "run">;
   resolveReviewEnvironment?: typeof comparisonEnvironment;
   fetch?: FindingsRequest;
+  waitForRetry?: typeof waitForRetry;
 };
 
 /** @internal */
@@ -212,6 +214,7 @@ async function deduplicateResolvedScan(
       options.findingsUrl!,
       options.signal,
       dependencies.fetch,
+      { wait: dependencies.waitForRetry },
     );
   const workflow =
     options.workflowId === undefined

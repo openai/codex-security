@@ -70,6 +70,12 @@ describe("error messages", () => {
     expect(errorMessage(message)).toBe(message);
   });
 
+  test("preserves whitespace and Unicode in diagnostics", () => {
+    const message = "  first line\nsecond line: café 雪  ";
+    expect(errorMessage(new Error(message))).toBe(message);
+    expect(errorMessage(message)).toBe(message);
+  });
+
   test("formats non-error values without parsing them", () => {
     expect(errorMessage(42)).toBe("42");
     expect(errorMessage(null)).toBe("null");
