@@ -15,6 +15,10 @@ process.once("exit", () =>
 
 export async function importModule(options: BuildOptions) {
   const result = await build({
+    // Bundled CommonJS dependencies such as yaml load Node builtins.
+    banner: {
+      js: 'const require = process.getBuiltinModule("node:module").createRequire(import.meta.url);',
+    },
     bundle: true,
     format: "esm",
     platform: "node",

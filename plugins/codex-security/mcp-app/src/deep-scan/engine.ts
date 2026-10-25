@@ -10,6 +10,7 @@ import {
 } from "./registry.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { DeepScanLogger, DeepScanRunState } from "./types.js";
+import type { CoordinatorOptions } from "./coordinator.js";
 
 /** Shared execution behind the SDK engine and the plugin's MCP adapter. */
 export function startDeepScanEngine(options: {
@@ -26,6 +27,7 @@ export function startDeepScanEngine(options: {
   model?: string;
   reasoningEffort?: string;
   log?: DeepScanLogger;
+  onStart?: CoordinatorOptions["onStart"];
 }) {
   const { run, runWorkbench, pluginRoot, threadId, handoffClaimToken } =
     options;
@@ -37,6 +39,7 @@ export function startDeepScanEngine(options: {
       executor: new CodexSdkWorkerExecutor({
         model: options.model,
         reasoningEffort: options.reasoningEffort,
+        deepScanConfig: run.config,
         parentSandbox: options.parentSandbox,
         parentTurn: options.parentTurn,
         artifactContext: {
@@ -51,6 +54,7 @@ export function startDeepScanEngine(options: {
       }),
       pluginRoot,
       log: options.log,
+      onStart: options.onStart,
       handoffClaimToken,
       threadId,
       onComplete: async (draft, signal, publication) => {

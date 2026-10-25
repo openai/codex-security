@@ -1951,6 +1951,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         (modelSettings, index) =>
           new CodexSdkWorkerExecutor({
             ...modelSettings,
+            deepScanConfig: {
+              workers: index + 1,
+              subagents: index,
+              stopAfterNoNew: 2,
+              stopAfterConsecutiveErrors: 3,
+              maxDiscoveryRuns: 9,
+              maxTimeHours: index + 0.5,
+            },
             parentSandbox: workerConfigurations[index].parentSandbox,
             artifactContext: {
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
@@ -2062,8 +2070,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
               workerConfigurations[index].path,
             );
-            assert.equal(
-              workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            const deepConfigPath =
+              workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH!;
+            assert.ok(path.isAbsolute(deepConfigPath));
+            assert.notEqual(
+              deepConfigPath,
               workerConfigurations[index].workerConfigPath,
             );
             assert.deepEqual(
@@ -2133,10 +2144,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 temporaryEnvironments.at(-1)![name],
               );
             }
-            assert.equal(
-              invocation.deepConfigPath,
-              workerConfigurations[index].workerConfigPath,
+            assert.equal(invocation.deepConfigPath, deepConfigPath);
+            assert.deepEqual(
+              { ...(parseToml(invocation.deepConfig).deep_scan as object) },
+              {
+                workers: index + 1,
+                subagents: index,
+                stop_after_no_new: 2,
+                stop_after_consecutive_errors: 3,
+                max_discovery_runs: 9,
+                max_time_hours: index + 0.5,
+              },
             );
+            await assert.rejects(readFile(deepConfigPath), { code: "ENOENT" });
             assert.equal(
               invocation.runtimeEnvironment.CODEX_SECURITY_STATE_DIR,
               path.join(fixture.root, `state-${index}`),
@@ -2353,10 +2373,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               await assert.rejects(readFile(scopeFile), { code: "ENOENT" });
             } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
-            assert.equal(
-              invocation.deepConfigPath,
-              workerConfigurations[index].workerConfigPath,
-            );
+            assert.equal(invocation.deepConfigPath, deepConfigPath);
             assert.deepEqual(
               JSON.parse(
                 JSON.stringify(

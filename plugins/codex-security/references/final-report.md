@@ -8,7 +8,7 @@ The canonical inputs are `scan-manifest.json`, `findings.json`, and `coverage.js
 | --- | --- | --- |
 | Workbench Standard or diff | `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage, complete? })` | Parent calls `complete_codex_security_scan` after an accepted final draft |
 | Bound Deep Standard worker | Its bound semantic draft tool | Deep coordinator |
-| Deep parent | Coordinator's accepted aggregate; do not submit another draft | Parent calls completion after the coordinator returns its canonical manifest |
+| Workbench Deep parent | Coordinator's accepted aggregate | Coordinator finalizes the scan and returns `completion` with the sealed manifest |
 | SDK-owned scan | Unsealed canonical files with the SDK-provided identity and metadata, using a bound draft tool when supplied | SDK; do not call completion or a finalizer |
 
 Other scans need authoritative managed context; do not substitute shell-authored canonical files. Checkpoint findings, pending candidates, and the threat model with `complete: false`. An accepted `complete: true` draft (or the backwards-compatible omitted flag) ends submission; a checkpoint does not claim completed review.

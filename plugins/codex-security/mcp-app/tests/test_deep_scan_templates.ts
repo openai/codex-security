@@ -60,7 +60,7 @@ const dedupContext = firstJsonBlock(dedup);
 assert.doesNotMatch(dedup, /\bcoverage\b/i);
 assert.match(
   dedup,
-  /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+  /record_codex_security_deep_reduction\(\{ scanId, findings, retainedFindingRefs\?, threatModel\?, scope\? \}\)/,
 );
 assert.deepEqual(dedupContext, {
   reducerLabel: "dedup-0001",

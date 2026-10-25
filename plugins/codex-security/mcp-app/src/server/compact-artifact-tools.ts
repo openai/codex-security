@@ -309,7 +309,7 @@ export function registerCompactWorkerArtifactTools(
     name: "record_codex_security_deep_reduction",
     title: "Record Codex Security Deep Reduction",
     description:
-      "Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies." +
+      'Record the merged findings and context for this Deep scan. Preserve every assigned provenance.sourceFindingIds reference; omit retained provenance.sourceFindings bodies. Use retainedFindingRefs:["previous:N"] to copy unchanged previous findings without resubmitting their bodies.' +
       semanticFindingGuidance,
     inputSchema: deepReductionInputSchema,
     readOnly: false,

@@ -43,6 +43,7 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -741,10 +742,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     return workspace_state(connection, workspace_id)
 
 
-def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    workspace = require_workspace(connection, args.workspace_id)
-    if workspace["active_scan_id"]:
-        raise SystemExit("This workspace already has a scan. Open a new workspace to change setup.")
+def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
     inspected = inspect_setup_values(
         args.target_path,
         args.scope,
@@ -754,6 +752,20 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
         args.diff_head_revision,
         args.diff_content_digest,
     )
+    if args.mode == "deep":
+        inspected["deepScanConfig"] = resolve_deep_scan_setup(
+            os.cpu_count() or 1, args.deep_scan_project_json
+        )
+    elif args.deep_scan_project_json is not None:
+        raise SystemExit("Project Deep Scan settings require Deep Scan mode.")
+    return inspected
+
+
+def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    workspace = require_workspace(connection, args.workspace_id)
+    if workspace["active_scan_id"]:
+        raise SystemExit("This workspace already has a scan. Open a new workspace to change setup.")
+    inspected = inspect_selected_setup(args)
     target = Path(inspected["target"]["targetPath"])
     scope = inspected["scope"]
     target_path = str(target)
@@ -778,7 +790,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
-                submitted = 1, updated_at = ?
+                deep_scan_config_json = ?, submitted = 1, updated_at = ?
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
@@ -790,6 +802,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 args.mode,
                 user_context_argument(args),
                 *scan_diff_identity(diff_target or None),
+                json.dumps(inspected["deepScanConfig"]) if "deepScanConfig" in inspected else None,
                 timestamp,
                 workspace["id"],
             ),
@@ -2676,6 +2689,11 @@ def workspace_state(
         "mode": workspace["default_mode"],
         "scope": workspace["default_scope"],
         "setup": {"submitted": bool(workspace["submitted"])},
+        **(
+            {"deepScanConfig": json.loads(workspace["deep_scan_config_json"])}
+            if workspace["deep_scan_config_json"] is not None
+            else {}
+        ),
         "setupValidation": {"error": None, "valid": bool(workspace["submitted"])},
         "targetPath": workspace["target_path"],
         "targetSummary": workspace["target_summary"],
@@ -3438,16 +3456,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     if args.command == "inspect-setup":
-        result = inspect_setup_values(
-            args.target_path,
-            args.scope,
-            args.mode,
-            args.diff_target_kind,
-            args.diff_base_revision,
-            args.diff_head_revision,
-            args.diff_content_digest,
-        )
-        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        print(json.dumps(inspect_selected_setup(args), allow_nan=False, sort_keys=True))
         return
     if args.command in {"save-artifact", "read-artifact"}:
         print(json.dumps(saved_results.read_or_save_artifact(args)))
@@ -3465,6 +3474,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "save-workspace": save_workspace,
             "start-scan": start_scan,
             "begin-deep-scan": deep_scan.begin_deep_scan,
+            "acknowledge-deep-scan-result": deep_scan.acknowledge_deep_scan_result,
             "get-deep-scan": deep_scan.get_deep_scan,
             "claim-deep-scan-coordinator": deep_scan.claim_deep_scan_coordinator,
             "upsert-deep-scan-worker": deep_scan.upsert_deep_scan_worker,
