@@ -3952,6 +3952,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     const flags = Object.keys(classifierOutputs).filter(
       (key) =>
         !["source-run", "edit-attempt"].includes(key) &&
+        !key.startsWith("native-cache-") &&
         !key.endsWith("-matrix"),
     );
     for (const enabled of flags) {

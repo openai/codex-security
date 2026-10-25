@@ -38,12 +38,14 @@ function workflow(name: string) {
 
 const native = workflow("native-artifacts");
 const prepare = native.jobs["prepare"]!;
-const keyScript = prepare.steps!.find((step) => step.id === "key")!.run!;
+const keyScript = readFileSync(
+  new URL("../../../.github/actions/native-cache-key/key.sh", import.meta.url),
+  "utf8",
+);
 
 test("native reuse hashes committed inputs with Git alone across platforms", () => {
   const root = mkdtempSync(join(tmpdir(), "native-cache-"));
   const repository = join(root, "repository");
-  const output = join(root, "output");
   const source = "plugins/codex-security/native/src/lib.rs";
   const helper = "plugins/codex-security/mcp-app/src/native.ts";
   const proof = "plugins/codex-security/native/proof.mjs";
@@ -62,15 +64,21 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "fixture");
   };
-  const key = (week = "2026-43") => {
-    writeSource(root, "output", "");
+  const key = (
+    week = "2026-43",
+    run?: number,
+    cached = "",
+    admittedWeek = "0",
+  ) => {
     const result = spawnSync(
       Bun.which(bashCommand())!,
       [
         "--noprofile",
         "--norc",
         "-c",
-        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\n${keyScript}`,
+        `git() { "$TEST_GIT" "$@"; }\ndate() { printf '%s\\n' "$TEST_WEEK"; }\ntimeout() { printf '%s\\n' "$TEST_CACHED"; }\n${keyScript}`,
+        "native-cache-key",
+        ...(run === undefined ? [] : ["cold-group"]),
       ],
       {
         cwd: repository,
@@ -81,18 +89,21 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
           // available here; the workflow's date command is fixed for this test.
           PATH: root,
           TEST_GIT: Bun.which("git")!,
-          GITHUB_OUTPUT: output,
-          TEST_WEEK: week,
+          TEST_WEEK: week.replace("-", ""),
+          NATIVE_CACHE_WEEK: admittedWeek,
+          TEST_CACHED: cached,
+          GITHUB_RUN_NUMBER: String(run),
         },
       },
     );
     expect(result.status, result.stderr).toBe(0);
-    return readFileSync(output, "utf8").trim();
+    return result.stdout.trim();
   };
   try {
     commit();
     const initial = key();
     expect(initial).toMatch(/^key=native-universal-v1-2026-43-[a-f0-9]{40}$/);
+    const fingerprint = initial.slice("key=".length);
     expect(runProof()).toBe(0);
 
     write("README.md", "updated documentation\n");
@@ -108,7 +119,7 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
     }
     write("plugins/codex-security/mcp-app/tests/support/new.ts", "fixture\n");
     commit();
-    expect(key()).toBe(initial);
+    expect(key("2026-43", 4, fingerprint)).toBe("week=202643");
 
     let previous = initial;
     const expectNewKey = () => {
@@ -131,7 +142,16 @@ test("native reuse hashes committed inputs with Git alone across platforms", () 
       join(repository, "plugins/codex-security/native/src/renamed.rs"),
     );
     expectNewKey();
-    expect(key("2026-44")).not.toBe(previous);
+    const nextWeek = previous
+      .slice("key=".length)
+      .replace("2026-43", "2026-44");
+    const cold = key("2026-44", 4, fingerprint);
+    expect(cold).toBe(`week=202644\ncold-group=${nextWeek}-0-1`);
+    const admittedWeek = cold.split("\n")[0]!.slice("week=".length);
+    expect(key("2026-45", undefined, "", admittedWeek)).toBe(`key=${nextWeek}`);
+    expect(key("2026-44", 304, fingerprint)).toBe(
+      `week=202644\ncold-group=${nextWeek}-1-1`,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
